@@ -2154,14 +2154,15 @@ fn emit_static_lib(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m
 }
 
 fn strip_virtual_main(lmod: teko::lir::LModule): teko::lir::LModule {
-    var kept: []teko::lir::LFunc = []
+    var kept: [lmod.funcs.len]teko::lir::LFunc = []
+    var count: u64 = 0
     var i: u64 = 0
     loop {
         if i >= lmod.funcs.len { break }
-        if lmod.funcs[i].symbol != "main" { kept = [..kept, lmod.funcs[i]] }
+        if lmod.funcs[i].symbol != "main" { kept[count] = lmod.funcs[i]; count = count + 1 }
         i++
     }
-    teko::lir::LModule { funcs = kept; rodata = lmod.rodata; globals = lmod.globals; layouts = lmod.layouts }
+    teko::lir::LModule { funcs = teko::collections::arr_slice(kept, 0, count); rodata = lmod.rodata; globals = lmod.globals; layouts = lmod.layouts }
 }
 
 fn emit_static_lib_x86(dir: str, od: str, stem: str, lmod: teko::lir::LModule): i32 {
@@ -2343,7 +2344,8 @@ fn report_phase_rss(label: str) {
 }
 
 fn strip_tests(prog: checker::TProgram): checker::TProgram {
-    var kept: []@TItem() = []
+    var kept: [prog.items.len]@TItem() = []
+    var count: u64 = 0
     var i = 0
     loop {
         if i >= prog.items.len { break }
@@ -2352,10 +2354,13 @@ fn strip_tests(prog: checker::TProgram): checker::TProgram {
             checker::TFunction as f => { if f.is_test { drop = true } }
             _ => { }
         }
-        if !drop { kept = [..kept, prog.items[i]] }
+        if !drop { kept[count] = prog.items[i]; count = count + 1 }
         i++
     }
-    checker::TProgram { items = kept }
+    var trimmed: [count]@TItem() = []
+    var k: u64 = 0
+    loop { if k >= count { break }; trimmed[k] = kept[k]; k++ }
+    checker::TProgram { items = trimmed }
 }
 
 fn artifact_path_for(out_dir: str, m: Manifest, t: NativeTarget): str {
@@ -3229,7 +3234,8 @@ fn per_test_cov_report_str(rows: []PerTestCoverage): str {
 }
 
 fn keep_single_test(prog: checker::TProgram, keep_idx: u64): checker::TProgram {
-    var kept: []@TItem() = []
+    var kept: [prog.items.len]@TItem() = []
+    var count: u64 = 0
     var i: u64 = 0
     loop {
         if i >= prog.items.len { break }
@@ -3238,10 +3244,13 @@ fn keep_single_test(prog: checker::TProgram, keep_idx: u64): checker::TProgram {
             checker::TFunction as f => { if f.is_test && i != keep_idx { drop = true } }
             _ => { }
         }
-        if !drop { kept = [..kept, prog.items[i]] }
+        if !drop { kept[count] = prog.items[i]; count = count + 1 }
         i = i + 1
     }
-    checker::TProgram { items = kept }
+    var trimmed: [count]@TItem() = []
+    var k: u64 = 0
+    loop { if k >= count { break }; trimmed[k] = kept[k]; k++ }
+    checker::TProgram { items = trimmed }
 }
 
 fn run_one_test_cov(dir: str, out_dir: str, filtered: checker::TProgram, m: Manifest, stem: str): i32 {

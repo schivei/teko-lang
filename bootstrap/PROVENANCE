@@ -1,167 +1,23 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (forward-only) — RUNTIME-PRELUDE `teko::sys` PATH FIX. `rt_prelude_paths_for`
-# (src/build/project.tks) computed `parent` (the shipped-runtime dir with its last path segment
-# stripped, e.g. src/runtime -> src) for the `teko::sys` branch, but the `return` still built its
-# path from `rt` unchanged — resolving `<rt>/sys/sys.tks` (src/runtime/sys/sys.tks, which does not
-# exist) instead of `<parent>/sys/sys.tks` (src/sys/sys.tks, the real shipped location). Every
-# fresh external `binary`/`tool` project without its own `teko::sys` source file failed the
-# runtime-prelude injection outright with "cannot read shipped source". Fixed by returning
-# `parent` (already computed, previously unused) instead of `rt`. One-line diff.
-#
-# GATE: SELF-REPRODUCE — CLEAN FIXPOINT (gen2 == gen3, C AND binary byte-identical), backend C,
-# under `ulimit -v 6815744` (6.5 GiB), TEKO_BACKEND=c TEKO_CC=clang.
-#   - gen2.c == gen3.c byte-identical (20 337 601 bytes); gen2 == gen3 binaries also
-#     byte-identical (7 304 160 bytes each).
-#   - Peaks: gen1 3848.7 MB, gen2 3816.6 MB, gen3 3816.0 MB.
-#   - `cc -std=c2x -w` over gen2.c + teko_rt.c + assert.c: clean, exit 0, no output.
-#   - REPRODUCE (new seed): bootstrap/teko.c replaced with the harvested gen2.c above; gen0-NEW
-#     relinked from the NEW bootstrap/teko.c builds gen1-NEW, and gen1-NEW.c is byte-identical to
-#     the harvested C already at gen1. Peak of that confirmation run: 3848.7 MB.
-#   - EXTRA: build TEKO_MEM_PARANOID=1 (backend C, gen1 rebuilding the source) exits 0, peak
-#     3816.6 MB.
-#   - Regression proof (the point of the fix, not just the reseed): a fresh minimal external
-#     `binary` project with no `teko::sys` source of its own, built with the PRE-fix gen0, failed
-#     `cannot read shipped source '.../src/runtime/sys/sys.tks' for namespace teko::sys`; the same
-#     project, built with the POST-fix gen1 (backend C), compiles and links to exit 0.
-#   - Native backend is out of scope for this gate — deferred per standing project convention.
+# RESEED (hand-harvest, isolated worktree, forward-only) — S16-EMIT (expurgo do runtime C, onda 4,
+# feat/expurgo-runtime-c). FASE1 do §16: o codegen emite seus PROPRIOS typedefs de largura fixa
+# (typedef __UINT8_TYPE__ uint8_t; ...) e grafa NaN/Inf via __builtin_nan/__builtin_inf, e o `floor`
+# builtin passa a lowerar como __builtin_floor. Com isso o teko.c EMITIDO larga os includes
+# <stdint.h>/<stdbool.h>/<math.h>/<string.h> (memset/memcpy resolvem de libc sem <string.h>). Nada de
+# novo em teko_rt.c. Um unico arquivo tocado: src/codegen/codegen.tks.
+#   - gen0 linkado do bootstrap/teko.c ANTERIOR (sha256 44b06a61..., 24 976 589 bytes) constroi gen1
+#     contra a source pos-S16-EMIT; gen1->gen2->gen3, gen2.c == gen3.c byte-identico (21 805 426 bytes,
+#     os bytes deste arquivo). Reharvest: bootstrap/teko.c = gen2.c convergido (reflete as linhas da
+#     source committada). VALIDADO: cc(bootstrap) -> gen0' e gen0' reconstroi a arvore -> gen1'.c ==
+#     bootstrap/teko.c byte-identico (o DEGRAU se auto-reproduz pela rota C).
+#   - Picos RSS C-route (TEKO_BACKEND=c, TEKO_CC=clang): gen1->gen2 4356.9 MB, gen2->gen3 3891.6 MB
+#     (baseline pre-S16-EMIT: 3889.2 MB — sem crescimento significativo; o piso ~3,9 GB e pre-existente,
+#     alvo da campanha de memoria, fora do escopo do expurgo).
+#   - Emitted teko.c preamble: SEM <stdint.h>/<stdbool.h>/<math.h>/<string.h>; typedefs proprios no lugar.
+#   - O DEGRAU (bootstrap/DEGRAU) permanece declarado; o seed forcado agora = este compilador.
 #
 # ----------------------------------------------------------------------------------------------------
-# PROVENANCE ANTERIOR (mantida abaixo, nao apagada):
-#
-# RESEED (forward-only) — .tkh CONTRACT-HEADER WRITER CONVERTED TO FileStream + EMITTED IN ALL
-# ARTIFACT KINDS. src/emit/tkh.tks's writer no longer accumulates the whole header body into one
-# []byte (the `write_header`/`write_tyexports`/`write_fnsigs`/... family and `emit_tkh` itself);
-# it streams straight through a `teko::io::FileStream`, threading the running FNV-1a content hash
-# as a `ref hash: u64` accumulator alongside the stream (the individual per-declaration type/param
-# fragments still go through the small, bounded, unchanged `write_type`/`write_types` encoders
-# shared with the unrelated module-cache serializer). The upfront content-hash field is written as
-# a zero placeholder, then patched in place via `stream_seek` + `stream_write` once the real hash
-# is known — a write-only handle still allows a seek-then-write at an earlier offset. `.tkh` is now
-# also emitted for the binary/tool and static-lib (native-only) kinds as a best-effort sidecar next
-# to the built artifact (mirroring the existing `.tsym` sidecar's silently-ignored-on-error
-# convention), not just for the Package kind's `.tkl` zip entry; the Package path now streams to a
-# temporary file and reads it back for the zip entry, so there is exactly one `.tkh` writer
-# implementation. Round-trip verified independently: a built `.tkl`'s embedded `pkgproj.tkh` hash
-# recomputed from its own bytes matches the stored hash exactly.
-#
-# GATE: SELF-REPRODUCE — CLEAN FIXPOINT (gen2 == gen3, C AND binary byte-identical), backend C,
-# under `ulimit -v 6815744` (6.5 GiB), TEKO_BACKEND=c TEKO_CC=clang.
-#   - gen2.c == gen3.c byte-identical (20 337 597 bytes); gen2 == gen3 binaries also
-#     byte-identical (7 126 128 bytes each).
-#   - Peaks: gen1 3848.1 MB, gen2 3849.3 MB, gen3 3849.3 MB — at the pre-existing baseline.
-#   - `cc -std=c2x -w` over gen2.c + teko_rt.c + assert.c: clean, exit 0, no warnings.
-#   - REPRODUCE (new seed): bootstrap/teko.c replaced with the harvested gen2.c above; gen0-NEW
-#     relinked from the NEW bootstrap/teko.c builds gen1-NEW, and gen1-NEW.c is byte-identical to
-#     the harvested C already at gen1. Peak of that confirmation run: 3849.5 MB.
-#   - EXTRA: build TEKO_MEM_PARANOID=1 (backend C, gen1 rebuilding the source) exits 0, peak
-#     3848.9 MB.
-#   - Native backend (static-lib `.tkh` sidecar; `emit_native`'s own binary path is untouched by
-#     this change) is out of scope for this gate — deferred per standing project convention.
-#
-# ----------------------------------------------------------------------------------------------------
-# PROVENANCE ANTERIOR (mantida abaixo, nao apagada):
-#
-# RESEED (hand-harvest, isolated worktree, forward-only) — FILESTREAM CODEGEN WRITER + TSYM
-# EMISSION DISABLED. codegen.tks's C emitter now writes through teko::io::FileStream end to end
-# (the `cb` string-accumulator entry point is gone). Two genuine bugs the conversion surfaced are
-# fixed: (1) cg_class_cleanup_text unconditionally emitted `TK_ARENA_region_drop(x->__region)` for
-# any local bound to a class name, including the synthetic zero-field vtable-wrapper local
-# (`tk_base_NS__Class`) that codegen injects at the top of every method implementing a polymorphic
-# interface — that wrapper is a stack VALUE with no `__region` field, so the drop failed to
-# compile; the fix skips the whole cleanup block when the bound class is a polymorphic base
-# (`cg_is_polymorphic_base`). (2) emit_call_inner unconditionally panicked on an empty
-# `call_ns`, which a resolved builtin (e.g. `tk_peak_rss`) legitimately carries; the panic and the
-# `cg_find_function` lookup are now gated on `!has_builtin`. Separately, `tk_emit_tsym` — the
-# `.tsym` debug symbol map (native-backend stack traces only, not consumed by the C route or the
-# self-build) — is disabled down to its header line: its old body did
-# `out = teko::str::concat(out, tk_tsym_line(f))` in a loop over ~9200 functions, an O(n²)
-# copy-grow on the never-freed root arena that alone pushed the reseeded compiler's peak RSS from
-# ~3845 MB to ~9.2 GB; `tk_tsym_line` is removed as dead code with it.
-#
-# BOOTSTRAP CAPABILITY GAP, hand-harvested across it. The committed seed at this reseed's start
-# (sha256 8cd98f6d0a5471e56d5e07bdf9a008b5111cc1b8d619f48b72bac5e623322bb6, 21 022 072 bytes) predates
-# fix (1) in its OWN compiled class-cleanup logic, so gen0 built from it emits the same broken
-# `base->__region` dereference for FileStream's own Stream-interface methods when compiling THIS
-# tree's source — a chicken-and-egg gap fix (1) cannot close by itself, since gen0 executes its own
-# prior (unfixed) codegen regardless of what the fixed source text says. gen0's emitted gen1.c had
-# exactly 7 such malformed statements (one per FileStream method implementing Stream: write, flush,
-# close, write_bytes, write_byte, gensym, reset_gensym); each was hand-stripped (removing only the
-# `TK_ARENA_region_drop(base->__region); ` text — precisely what a compiler already carrying fix (1)
-# would have omitted for that binding) and the patched C linked with `cc` to produce a working
-# intermediate gen1. From gen1 onward the fixes are load-bearing in the running compiler and no
-# further hand edits are needed: gen1 built gen2 with zero occurrences of the broken pattern.
-#
-# GATE: SELF-REPRODUCE — CLEAN FIXPOINT (gen2 == gen3, C AND binary byte-identical), backend C,
-# under `ulimit -v 6815744` (6.5 GiB), TEKO_BACKEND=c TEKO_CC=clang.
-#   - gen2.c == gen3.c byte-identical (20 328 171 bytes, the bytes of this file); gen2 == gen3
-#     binaries also byte-identical (7 295 464 bytes each).
-#   - Peaks: gen2 3845.1 MB (after-bodies), gen3 3811.6 MB (after-bodies) — back at the pre-tsym
-#     baseline, not the ~9.2 GB the O(n²) tsym loop produced.
-#   - Phase RSS (gen2, representative): after checker 2799.9 MB, after monomorph 3075.4 MB, after
-#     consteval 3418.0 MB, codegen after-lift 3555.0 MB, codegen after-decls 3773.9 MB, codegen
-#     after-bodies (peak) 3845.1 MB.
-#   - REPRODUCE (new seed): bootstrap/teko.c replaced with the harvested gen2.c above; gen0-NEW
-#     relinked from the NEW bootstrap/teko.c builds gen1-NEW, and gen1-NEW.c is byte-identical to
-#     the harvested C already at gen1 (the new seed IS the fixed algorithm — no capability gap
-#     remains). Peak of that confirmation run: 3845.6 MB.
-#   - EXTRA: build TEKO_MEM_PARANOID=1 (backend C, gen2 rebuilding the source) exits 0, peak
-#     3811.6 MB.
-#   - The DEGRAU (bootstrap/DEGRAU) remains declared — the published release still does not
-#     recognize this tree.
-#
-# ----------------------------------------------------------------------------------------------------
-# PROVENANCE ANTERIOR (mantida abaixo, nao apagada):
-#
-# RESEED (hand-harvest, isolated worktree, forward-only) — SLICE-PUSH-ZERO HARVEST. The spread
-# array-literal lowering (codegen.tks::emit_array_lit) no longer builds via tk_slice_push into a
-# growing accumulator: it binds each operand once, sums the exact total, allocates one
-# tk_region_alloc buffer and fills it by index. The emitted C therefore drops from 1362 tk_slice_push
-# calls to ZERO, and the runtime slice-grow machinery (tk_slice_push{,_r,_fo}/tk_slice_with_cap{,_r}/
-# tk_slice_grow_inplace) is removed from teko_rt.{c,h}. Emitted C shrinks 21 759 974 -> 20 901 962
-# bytes; peak RSS of the reseeded compiler falls ~4088 -> ~3684 MB. The native backend
-# (lir/lower.tks) grows the mirror lowering — spread array-literals allocate one region buffer and
-# fill by index (tk_mem_copy per spread, index store per plain), and str::concat over a spread folds
-# the sub-slice at runtime — replacing the earlier "not yet lowered" stops. Fixpoint gen2.c==gen3.c
-# and MEM_PARANOID=1 build exit 0 both hold on this seed.
-#
-# RESEED (hand-harvest, isolated worktree, forward-only) — MEMORY-CAMPAIGN, CODEGEN-LEAN HARVEST
-# (perf/expurgo-total-mecanico tip). The codegen no longer round-trips its emission through a temp
-# file and folds per-function/per-declaration scratch into dropped regions (d6090b2a e antecessores),
-# cutting the emitted C from 24 976 589 to 21 759 974 bytes (-3.2 MB, -12.9%). Isso muda o C emitido
-# pelo corpus que o self-build exercita, entao o seed e re-colhido.
-#
-# ESCAPE APOSENTADO (guard baixado do ESCAPE de 10 GB para 6,5 GiB, ordem do dono "aumenta pra 6.5GB
-# so pra termos o reseed"). A cadeia inteira agora cabe sob `ulimit -v 6815744` (6,5 GiB); o pico RSS
-# residente do compilador reseedado e ~4074 MB, dominado pelo codegen — o consteval fica em ~3771 MB
-# RSS. O piso remanescente (VSZ acima de 4 GiB no consteval por causa das recopias do inline_consts,
-# e os SETs copy-grow do codegen/parsers) segue sendo o alvo das ondas seguintes; este reseed NAO o
-# resolve, apenas cabe sob 6,5 GiB.
-#
-# GATE: SELF-REPRODUCE — CLEAN FIXPOINT (gen2 == gen3), backend C, sob `ulimit -v 6815744` (6,5 GiB),
-# TEKO_BACKEND=c TEKO_CC=clang.
-#   - LADDER (seed ANTERIOR): gen0 linkado do bootstrap/teko.c ANTERIOR (sha256
-#     92b2bea4a190d3684ae229eeac0c5bf9ae27ec63e86e1d01511544db790f2327, 24 976 589 bytes) constroi
-#     gen1 contra a source deste tip; gen1 constroi gen2, gen2 constroi gen3. gen2.c == gen3.c
-#     byte-identico (21 759 974 bytes, os bytes deste arquivo). gen1.c (24 885 382 bytes, algoritmo
-#     do seed velho) difere de gen2.c, como esperado (cc-do-seed-velho vs algoritmo enxuto novo).
-#     Picos C-route: gen1 5799.0 MB, gen2 4538.7 MB, gen3 4074.0 MB.
-#   - RESEED: bootstrap/teko.c substituido pelo gen2.c colhido acima.
-#   - REPRODUZ (seed NOVO, escape aposentado): gen0-NOVO relinkado do NOVO bootstrap/teko.c constroi
-#     gen1-NOVO — e gen1-NOVO.c == bootstrap byte-identico JA na gen1 (o seed novo e o algoritmo
-#     enxuto, nao ha lacuna de capacidade a escalar). gen1-NOVO constroi gen2-NOVO, gen2-NOVO constroi
-#     gen3-NOVO; gen2-NOVO.c == gen3-NOVO.c == este arquivo, byte-identico. Picos: gen1-NOVO 4100.6 MB,
-#     gen2-NOVO 4073.4 MB, gen3-NOVO 4073.6 MB.
-#   - RSS por fase (gen3, representativo): checker 3131.8 MB, monomorph 3396.0 MB, consteval 3771.3 MB,
-#     pico geral (codegen) 4074.0 MB.
-#   - EXTRA: build TEKO_MEM_PARANOID=1 (backend C, gen2 reconstruindo a source) sai 0, pico 4074.4 MB.
-#   - Todas as builds cabem sob o guard `ulimit -v 6815744` (6,5 GiB).
-#   - O DEGRAU (bootstrap/DEGRAU) permanece declarado — o release publicado ainda nao reconhece esta
-#     arvore; e o seed forcado, agora = este compilador enxuto.
-#
-# ----------------------------------------------------------------------------------------------------
-# PROVENANCE ANTERIOR (mantida abaixo, nao apagada):
-#
 # RESEED (hand-harvest, isolated worktree, forward-only) — MEMORY-CAMPAIGN CHECKPOINT (expurgo de
 # arrays dinamicos, perf/expurgo-total-mecanico). The self-compile accumulators that grew via
 # `[..l,x]`-em-loop (copy-grow O(n^2), vazando cada copia na arena append-only) foram convertidos:
@@ -193,6 +49,9 @@
 #   - RESEED: bootstrap/teko.c substituido pelo gen2.c colhido acima.
 #   - O DEGRAU (bootstrap/DEGRAU) permanece declarado — o release publicado ainda nao reconhece esta
 #     arvore; e o seed forcado, agora = este compilador. A onda mremap/chunk-chain reseedara sob 4 GiB.
+#
+# ----------------------------------------------------------------------------------------------------
+# PROVENANCE ANTERIOR (mantida abaixo, nao apagada):
 #
 # RESEED (hand-harvest, isolated worktree, forward-only): the native lowering of the grouped-bind
 # match pattern `(A | B) as v` (src/lir/lower.tks — lower_pattern_test/lower_pattern_binds gain a
@@ -260,11 +119,9 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  9afa5dfb712ec1498203b4c2331108e01931acd57651881d012c27e0ccb499ba
+sha256:  92b2bea4a190d3684ae229eeac0c5bf9ae27ec63e86e1d01511544db790f2327
 since:   0.3.1.0
-legacy:  92b2bea4a190d3684ae229eeac0c5bf9ae27ec63e86e1d01511544db790f2327 — the memory-campaign
-         checkpoint harvest (24 976 589 bytes) this codegen-lean reseed supersedes; and
-         91d8593421ae9bd77f8c15872f190c76be184794415399e6f2caab010dfb8520 — the let/mut retirement +
+legacy:  91d8593421ae9bd77f8c15872f190c76be184794415399e6f2caab010dfb8520 — the let/mut retirement +
          §7 DI-completion combined harvest this reseed supersedes (self-reproducible on rebuild of
          its own tip at the time; superseded by the grouped-bind native lowering above, not
          cherry-picked); and 694a1b2d7cf8c40df1e3ae959f2cfbeffabe350b698a53666d7d5bcd88795aaf /
