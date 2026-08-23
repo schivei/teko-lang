@@ -5134,24 +5134,6 @@ double   tk_f64_from_bits(uint64_t bits) { double x; memcpy(&x, &bits, sizeof x)
 
 // --- helpers ---
 
-// POSIX-only: return nanoseconds since Unix epoch as a signed i64 (fits: +-292 years,
-// comfortably spanning any real wall-clock read). Windows branch uses FILETIME (100-ns
-// ticks since 1601-01-01).
-static int64_t tk_wall_now_ns(void) {
-#if defined(_WIN32)
-    FILETIME ft;
-    GetSystemTimePreciseAsFileTime(&ft);
-    uint64_t w = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
-    // Subtract Windows epoch offset (1601-01-01 → 1970-01-01 = 116444736000000000 × 100ns ticks).
-    w -= (uint64_t)116444736000000000ULL;
-    return (int64_t)(w * 100);  // 100-ns ticks → nanoseconds
-#else
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
-#endif
-}
-
 // Gregorian calendar from a days-since-epoch value (Julian Day Number algorithm).
 // Based on the Richards (2013) algorithm; handles negative days (pre-1970 dates). Mirrored
 // (by design, not shared — see teko_rt.h) by src/time/time.tks::civil_from_days.
@@ -5188,51 +5170,6 @@ int32_t tk_rt_date_day_of_month(tk_date d) {
     int32_t y, m, dd;
     tk_jdn_to_ymd(d.days, &y, &m, &dd);
     return dd;
-}
-
-// --- host clock reads (SCALAR-only) ---
-
-int32_t tk_rt_wall_days(void) {
-    int64_t secs = tk_wall_now_ns() / 1000000000LL;
-    // Floor division (towards -inf) so a pre-1970 read maps to the correct earlier day.
-    if (secs >= 0) { return (int32_t)(secs / 86400LL); }
-    return (int32_t)((secs - 86399LL) / 86400LL);
-}
-
-uint64_t tk_rt_wall_ns_of_day(void) {
-    int64_t ns = tk_wall_now_ns();
-    int64_t day_ns = (int64_t)86400LL * 1000000000LL;
-    int64_t rem = ns % day_ns;
-    if (rem < 0) { rem += day_ns; }   // C `%` truncates; adjust a pre-1970 negative remainder up
-    return (uint64_t)rem;
-}
-
-int16_t tk_rt_wall_offset_minutes(void) {
-#if defined(_WIN32)
-    TIME_ZONE_INFORMATION tzi;
-    GetTimeZoneInformation(&tzi);
-    // Windows Bias is minutes WEST of UTC; negate to get east (positive = ahead of UTC).
-    return -(int16_t)tzi.Bias;
-#else
-    time_t now = (time_t)(tk_wall_now_ns() / 1000000000LL);
-    struct tm loc;
-    localtime_r(&now, &loc);
-    return (int16_t)(loc.tm_gmtoff / 60);
-#endif
-}
-
-int64_t tk_rt_monotonic_ns(void) {
-#if defined(_WIN32)
-    LARGE_INTEGER freq, counter;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&counter);
-    double secs = (double)counter.QuadPart / (double)freq.QuadPart;
-    return (int64_t)(secs * 1000000000.0);
-#else
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
-#endif
 }
 
 // tk_nproc — logical CPUs the OS grants this process. Floor 1: an OS that answers 0 or fails is

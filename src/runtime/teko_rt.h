@@ -1316,11 +1316,10 @@ tk_slice_byte tk_rt_secure_bytes(uint64_t n);
 // An extern fn's struct param/return uses THIS header's typedef, never the mangled typedef
 // codegen generates for the SAME-shaped Teko type — the two are layout-identical but nominally
 // distinct C types, so a Teko `let`/field can never hold a value fresh off an extern call (a
-// compile error, not a runtime corruption). So EVERY host-dependent read below returns a bare
-// SCALAR (never one of the carrier structs) — teko::time's pure Teko constructors then compose
-// the scalar into the ergonomic struct, entirely on the Teko side, fully storable/composable
-// from that point on (src/time/time.tks). `tk_rt_date_from_days`/`tk_rt_date_year`/
-// `tk_rt_date_month`/`tk_rt_date_day_of_month` are the ONE exception, kept ONLY for the
+// compile error, not a runtime corruption). The host clock reads (wall days/ns-of-day/UTC
+// offset, monotonic ns) live entirely in Teko now (src/time/time.tks, raw syscall on Linux,
+// extern-from-System/kernel32 elsewhere). `tk_rt_date_from_days`/`tk_rt_date_year`/
+// `tk_rt_date_month`/`tk_rt_date_day_of_month` are the ONE exception kept here, ONLY for the
 // pre-existing `examples/regressions/time_types` fixture's own direct extern re-declaration
 // (its ORIGINAL extern-chained calling shape, unchanged) — teko::time's own module no longer
 // calls them (civil_from_days, already pure Teko, does the same calendar math).
@@ -1332,12 +1331,6 @@ tk_date  tk_rt_date_from_days(int32_t days);
 int32_t  tk_rt_date_year(tk_date d);
 int32_t  tk_rt_date_month(tk_date d);
 int32_t  tk_rt_date_day_of_month(tk_date d);
-
-// --- host clock reads (SCALAR-only, see above) ---
-int32_t  tk_rt_wall_days(void);            // days since 1970-01-01, UTC, host wall clock
-uint64_t tk_rt_wall_ns_of_day(void);       // ns since midnight, UTC, host wall clock
-int16_t  tk_rt_wall_offset_minutes(void);  // host local UTC offset, in minutes
-int64_t  tk_rt_monotonic_ns(void);         // ns from an unspecified monotonic origin
 
 // tk_nproc — logical processors the OS grants this process now. POSIX: sysconf(_SC_NPROCESSORS_ONLN).
 // Windows: GetActiveProcessorCount(ALL_PROCESSOR_GROUPS). Floor 1 (never 0). No allocation. The

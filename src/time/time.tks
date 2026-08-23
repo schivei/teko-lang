@@ -46,13 +46,138 @@ const DATE_DAYS_MAX: i64 = 2147483647
 
 const DATE_DAYS_MIN: i64 = -2147483648
 
-extern fn wall_days(): i32 = "tk_rt_wall_days" from "teko_rt"
+const TM_GMTOFF_OFFSET: u64 = 40
 
-extern fn wall_ns_of_day(): u64 = "tk_rt_wall_ns_of_day" from "teko_rt"
+const WIN_FILETIME_EPOCH_DELTA: u64 = 116444736000000000
 
-extern fn wall_offset_minutes(): i16 = "tk_rt_wall_offset_minutes" from "teko_rt"
+const WIN_TZI_BYTES: u64 = 172
 
-extern fn monotonic_ns(): i64 = "tk_rt_monotonic_ns" from "teko_rt"
+#os("linux")
+fn clock_ts_addr(clk: i32): u64 {
+    var addr = teko::sys::ptr_word(teko::mem::buf_ptr(16)) to u64
+    _ = teko::sys::syscall2(teko::sys::SYS_CLOCK_GETTIME, clk to i64, addr to i64)
+    addr
+}
+
+#os("macos")
+extern fn os_clock_gettime(clk: i32, ts_addr: u64): i32 = "clock_gettime" from "System"
+
+#os("macos")
+fn clock_ts_addr(clk: i32): u64 {
+    var addr = teko::sys::ptr_word(teko::mem::buf_ptr(16)) to u64
+    _ = os_clock_gettime(clk, addr)
+    addr
+}
+
+fn clock_ns_from_addr(addr: u64): i64 {
+    var sec = teko::mem::load_u64(addr) to i64
+    var nsec = teko::mem::load_u64(addr + 8) to i64
+    sec * 1000000000 + nsec
+}
+
+#os("windows")
+extern fn win_system_time_precise(ft_addr: u64) = "GetSystemTimePreciseAsFileTime" from "kernel32"
+
+#os("linux")
+fn wall_now_ns(): i64 {
+    clock_ns_from_addr(clock_ts_addr(teko::sys::CLOCK_REALTIME))
+}
+
+#os("macos")
+fn wall_now_ns(): i64 {
+    clock_ns_from_addr(clock_ts_addr(teko::sys::CLOCK_REALTIME))
+}
+
+#os("windows")
+fn wall_now_ns(): i64 {
+    var addr = teko::sys::ptr_word(teko::mem::buf_ptr(8)) to u64
+    win_system_time_precise(addr)
+    ((teko::mem::load_u64(addr) - WIN_FILETIME_EPOCH_DELTA) * 100) to i64
+}
+
+fn wall_days(): i32 {
+    var secs = wall_now_ns() / 1000000000
+    if secs >= 0 { return (secs / 86400) to i32 }
+    ((secs - 86399) / 86400) to i32
+}
+
+fn wall_ns_of_day(): u64 {
+    var rem = wall_now_ns() % NS_PER_DAY
+    if rem < 0 { rem = rem + NS_PER_DAY }
+    rem to u64
+}
+
+#os("linux")
+extern fn os_localtime_r(t_addr: u64, tm_addr: u64): u64 = "localtime_r" from "System"
+
+#os("macos")
+extern fn os_localtime_r(t_addr: u64, tm_addr: u64): u64 = "localtime_r" from "System"
+
+fn gmtoff_minutes(tm_addr: u64): i16 {
+    ((teko::mem::load_u64(tm_addr + TM_GMTOFF_OFFSET) to i64) / 60) to i16
+}
+
+fn wall_offset_minutes_posix(): i16 {
+    var t_addr = teko::sys::ptr_word(teko::mem::buf_ptr(8)) to u64
+    teko::mem::store_u64(t_addr, (wall_now_ns() / 1000000000) to u64)
+    var tm_addr = teko::sys::ptr_word(teko::mem::buf_ptr(56)) to u64
+    _ = os_localtime_r(t_addr, tm_addr)
+    gmtoff_minutes(tm_addr)
+}
+
+#os("linux")
+fn wall_offset_minutes(): i16 { wall_offset_minutes_posix() }
+
+#os("macos")
+fn wall_offset_minutes(): i16 { wall_offset_minutes_posix() }
+
+#os("windows")
+extern fn win_get_tz(tzi_addr: u64): u32 = "GetTimeZoneInformation" from "kernel32"
+
+fn i32_from_low_word(word: u64): i32 {
+    var low = word & 0xFFFFFFFF
+    if low >= 2147483648 { return ((low to i64) - 4294967296) to i32 }
+    low to i32
+}
+
+#os("windows")
+fn wall_offset_minutes(): i16 {
+    var addr = teko::sys::ptr_word(teko::mem::buf_ptr(WIN_TZI_BYTES)) to u64
+    _ = win_get_tz(addr)
+    (0 - i32_from_low_word(teko::mem::load_u64(addr))) to i16
+}
+
+/** teko::time::monotonic_ns — a monotonic-clock reading in nanoseconds from an unspecified
+ * origin, comparable only against another reading from the same process run. */
+#os("linux")
+exp fn monotonic_ns(): i64 {
+    clock_ns_from_addr(clock_ts_addr(teko::sys::CLOCK_MONOTONIC))
+}
+
+/** teko::time::monotonic_ns — a monotonic-clock reading in nanoseconds from an unspecified
+ * origin, comparable only against another reading from the same process run. */
+#os("macos")
+exp fn monotonic_ns(): i64 {
+    clock_ns_from_addr(clock_ts_addr(teko::sys::CLOCK_MONOTONIC))
+}
+
+#os("windows")
+extern fn win_qpc(counter_addr: u64): i32 = "QueryPerformanceCounter" from "kernel32"
+
+#os("windows")
+extern fn win_qpf(freq_addr: u64): i32 = "QueryPerformanceFrequency" from "kernel32"
+
+/** teko::time::monotonic_ns — a monotonic-clock reading in nanoseconds from an unspecified
+ * origin, comparable only against another reading from the same process run. */
+#os("windows")
+exp fn monotonic_ns(): i64 {
+    var freq_addr = teko::sys::ptr_word(teko::mem::buf_ptr(8)) to u64
+    _ = win_qpf(freq_addr)
+    var counter_addr = teko::sys::ptr_word(teko::mem::buf_ptr(8)) to u64
+    _ = win_qpc(counter_addr)
+    var secs = (teko::mem::load_u64(counter_addr) to f64) / (teko::mem::load_u64(freq_addr) to f64)
+    (secs * 1000000000.0) to i64
+}
 
 /** teko::time::date_from_days — a `date` from an explicit days-since-epoch value. */
 exp fn date_from_days(days: i32): date {
