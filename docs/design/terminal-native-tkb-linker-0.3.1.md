@@ -465,63 +465,415 @@ terminal native:
 
 ## 13. Pontos de decisão do dono
 
-### [DECISÃO DO DONO] 1 — Duas tabelas ortogonais (R8 já ratificado)
+> **Ruling do dono sobre a apresentação (registrar):** cada `[DECISÃO DO DONO]` traz **≥3
+> propostas concretas**, cada uma com **exemplo** (código Teko / forma de artefato / mecanismo)
+> e **prós/contras** medidos em quatro eixos — **memória**, **complexidade**, **conformidade
+> com as leis/R8** e **risco de reprodutibilidade** (fixpoint). O dono decide **comparando o
+> leque**; a recomendação vem SÓ no fim, com o "por que as outras perdem". Nenhum ponto HALTa
+> (não há tensão de lei não resolvida) — são escolhas de engenharia sobre um piso law-first.
 
-A compilação separada cross-namespace DENTRO do programa confia na **FFI interna =
-`exp`+`pub`** (transitória, do link — materializada como `.tkhl`, §3.1), **não** no `.tkh` (só
-`exp`, interface do usuário). São tabelas ortogonais.
+### [DECISÃO DO DONO] 1 — Duas tabelas (FFI interna × `.tkh`)
 
-**Recomendação do coordenador (CONFIRMAR):** **manter separadas.** Cross-namespace *interno*
-→ FFI interna (`.tkhl`, `exp`+`pub`, transitória). Dependência *externa* (outro package) →
-`.tkh` (só `exp`, embarcado). É a ratificação de R8 já vigente; o terminal native só a
-concretiza em DOIS artefatos de header distintos (§3). Sem tensão de lei — `.tkh`-só-`exp`
-preserva a lei de visibilidade `tast.tks` M.4; a FFI interna resolve o furo do
-link-só-por-interface sem inchar o header.
+**Problema.** A compilação separada cross-namespace DENTRO do programa precisa ver `exp`+`pub`
+(o compilador chama MUITO símbolo `pub` interno). Mas o `.tkh` publicado é só `exp` (lei de
+visibilidade `tast.tks` M.4). Como carregar `pub` para o link sem vazá-lo para o header (R8)?
 
-### [DECISÃO DO DONO] 2 — Monomorfização mora na PONTA (target) — 4 destinos, 2 políticas
+#### Opção 1A — Duas tabelas totalmente separadas (`.tkhl` exp+pub transitório × `.tkh` exp)
 
-O `.tkbl` intermediário é **PRÉ-monomorph** (genéricos crus + pedidos de monomorfização).
-Política por destino: **package** fica poli (mono no consumidor); **tool** fica poli (mono no
-INSTALL → executável standalone, não linka em outro binário); **lib** e **binary**
-monomorfizam **no build**.
+O LINK monta uma tabela `.tkhl` (`exp`+`pub`, transitória, some após o streaming); o
+`emit_tkh` monta uma tabela `.tkh` (só `exp`, embarcada) num passe independente.
 
-**Recomendação do coordenador (CONFIRMAR):** o **`.tkbl` NUNCA carrega o monomorfizado**. A
-mono é **adiada** — roda no **linker interno (estágio 4)** só para lib/binary; para **tool**,
-roda no **INSTALL** (o `.tkb` distribuído é pré-mono, igual package); para **package**, roda no
-**consumidor** (§4, §5.1–5.2). Isto **inverte o comportamento de hoje** (`project.tks:1145`
-serializa post-mono) — é uma mudança de sabor de artefato, gated em `RM-C15`, **com reseed** e
-byte de versão de sabor (T-mono, §12). Recomendado por três razões law-first: fecho global
-(mono precisa do conjunto fechado, só conhecido na ponta), portabilidade do package/tool
-(pré-mono é reinstanciável/instalável), e bounded memory (pré-mono é menor). **Correção
-registrada:** o `tool` NÃO é monomorfizado no build (mono no install) — `Tool` e `Binary` já
-são enums separados (`project.tks`), só a semântica de mono/distribuição muda. Sem tensão de
-lei.
+```teko
+/**
+ * InternalFfi — tabela de link TRANSITÓRIA (exp+pub); NUNCA embarcada. Vive o link, some após.
+ * @since 0.3.1
+ */
+type InternalFfi = struct { entries: []FfiEntry }
 
-### [DECISÃO DO DONO] 3 — Dois sabores de `.tkh`
+/**
+ * Header — a superfície publicada, montada SEPARADAMENTE, SÓ exp.
+ * @since 0.3.1
+ */
+type Header = struct { exports: []ExpDecl }
+```
 
-O `.tkh` por-namespace de **LINK** (interface de símbolos, tempo de link) vs. o `.tkh` final
-**MONOMÓRFICO** (FFI externa).
+- **Prós.** Vazamento R8 **impossível por construção** (o `.tkh` nunca vê uma entrada `pub` —
+  são tipos diferentes). Header enxuto (só `exp`). O `.tkhl` é derrubado antes do emit final →
+  memória do header publicado é mínima. Clareza máxima: dois artefatos, dois papéis.
+- **Contras.** Duas projeções da mesma decl (a assinatura `exp` aparece em ambas) → um pouco de
+  duplicação de código de serialização. Pico transitório: `.tkhl` (exp+pub) coexiste com a
+  fase de link (mas é compacto — assinaturas, não corpos).
+- **Eixos.** Memória: **ótima** (transitório compacto, derrubado). Complexidade: média (duas
+  projeções). Leis/R8: **máxima** (separação física). Reprodutibilidade: alta (duas tabelas
+  determinísticas independentes).
 
-**Recomendação do coordenador (nomear e distinguir):** adotar **`.tkhl`** (`tkh`-link,
-por-namespace, `exp`+`pub`, PRÉ-mono, transitório) para o tempo de link (§3.1), e **`.tkh`**
-(publicado, agregado, só `exp`, monomórfico para lib/binary e pré-mono para package/tool,
-embarcado) para a FFI externa/IDE (§3.2). O par intermediário (`.tkbl`+`.tkhl`) espelha o par
-publicado (`.tkb`+`.tkh`) — sufixo `l` = link/intermediário. São ortogonais (R8):
-`.tkhl`/`.tkbl` carregam `pub`; `.tkh`/`.tkb` nunca. Alternativa aceitável: NÃO materializar o
-`.tkhl` em disco quando o estágio 3→4 funde em memória — só serializá-lo na fronteira do LINK
-que não funde ou no cache incremental (análogo a `RM-C13`/`RM-C14`). CONFIRMAR os nomes
-`.tkbl`/`.tkhl` (ou os preferidos do dono) e a política disco-vs-memória.
+#### Opção 1B — Uma tabela única com flag de visibilidade; o emissor filtra `exp` no `.tkh`
 
-### [DECISÃO DO DONO] 4 — RM-C10 (gensym determinístico) é PRÉ-REQUISITO de C11
+Uma só `LinkTable` com `exp`+`pub`, cada entrada com um campo `vis`. O link usa tudo; o
+`emit_tkh` **filtra** `vis == Exp` ao escrever o header.
 
-Gensym derivado de `buf.len` global quebra a reprodutibilidade sob emissão por-namespace (o
-buffer passa a ser por-unidade → o mesmo corpo gera nome diferente → fixpoint quebra; R4).
+```teko
+/**
+ * LinkTable — tabela ÚNICA; cada entrada carrega a visibilidade. O link consome tudo; o
+ * emissor de .tkh filtra exp. O RISCO R8 vira uma responsabilidade de UM filtro.
+ * @since 0.3.1
+ */
+type LinkEntry = struct { symbol: str; sig: @Type(); vis: Visibility }
 
-**Recomendação do coordenador (CONFIRMAR):** **marcar `RM-C10` como bloqueador do per-unit
-native.** Já está assim nos crumbs (`RM-C10` "BLOCKS C11"; `RM-C11 deps: [RM-C10]`), e o
-terminal native (`RM-C15`) é transitivamente gated em C10 via C11/C12. Sem C10, tanto a rota C
-por-unidade quanto o `.o` native por-unidade divergem. É a pré-condição mecânica de todo o
-Eixo C. Sem tensão de lei — é sequenciamento factual.
+/**
+ * emit_tkh_filtered — escreve o .tkh SÓ com as entradas exp (o filtro que segura o R8).
+ * @param t a tabela única (exp+pub)
+ * @return os bytes do .tkh (só exp)
+ * @since 0.3.1
+ */
+fn emit_tkh_filtered(t: LinkTable): []byte | error {
+    var exps = filter_exp(t.entries)
+    write_header(exps)
+}
+```
+
+- **Prós.** Uma projeção só (sem duplicação). Menos código. A tabela já existe (é a
+  `InternalFfi` de `RM-C11`) — o header vira uma **vista filtrada** dela.
+- **Contras.** **R8 depende de um filtro correr certo em runtime** — um bug no `filter_exp` (ou
+  um caminho de emit que esquece de filtrar) vaza `pub` para o `.tkh`. É a exata falha que R8
+  nomeia. Precisa de fixture-guarda dedicada (`tkhl_excludes_from_tkh`, §14) + revisão. A
+  tabela única `exp`+`pub` fica viva mais tempo (não pode ser derrubada antes do emit do header,
+  pois o header lê dela).
+- **Eixos.** Memória: **pior** (tabela grande viva até o emit do header). Complexidade: baixa
+  (uma projeção). Leis/R8: **frágil** (garantia procedural, não estrutural). Reprodutibilidade:
+  alta (uma tabela determinística).
+
+#### Opção 1C — `.tkh` "gordo" = exp+pub com `pub` marcado interno (consumidor ignora)
+
+Um único `.tkh` embarcado que INCLUI `pub`, cada `pub` marcado `internal`; o consumidor
+**ignora** as entradas `internal` ao resolver a API.
+
+```teko
+/**
+ * FatHeader — .tkh "gordo": exp visível + pub marcado internal. O consumidor lê só o que NÃO
+ * é internal. UM artefato serve link E publicação.
+ * @since 0.3.1
+ */
+type FatEntry = struct { symbol: str; sig: @Type(); internal: bool }
+```
+
+- **Prós.** Um único artefato (nem `.tkhl` nem passe separado). O link e a publicação leem o
+  mesmo arquivo. Cache incremental trivial (um blob por unidade).
+- **Contras.** **VIOLA R8 diretamente** — `pub` FICA no header embarcado (mesmo "marcado
+  interno"): incha o header, expõe a superfície interna do compilador ao mundo, e viola a lei
+  de visibilidade `tast.tks` M.4 ("só `exp` alcança o `.tkh`"). Qualquer consumidor
+  malicioso/curioso lê os `pub`. Muda a semântica do `.tkl` publicado. **Isto é a mudança que
+  R8 proíbe.**
+- **Eixos.** Memória: ruim (header embarcado inflado). Complexidade: baixa. Leis/R8:
+  **reprovado** (viola R8 e M.4). Reprodutibilidade: alta, mas irrelevante — reprova na lei.
+
+#### Recomendação — **Opção 1A (duas tabelas totalmente separadas)**
+
+1A é a única que torna o vazamento R8 **estruturalmente impossível** (tipos distintos, o `.tkh`
+nunca segura um `pub`) e derruba o `.tkhl` cedo (melhor memória). **1C está fora** — viola R8/M.4
+frontalmente (é exatamente o erro proibido). **1B perde** por transformar uma garantia
+estrutural (R8) numa garantia procedural (um filtro que pode falhar) e por manter a tabela
+grande viva mais tempo; a economia de uma projeção não paga o risco de vazamento de superfície.
+A duplicação de projeção de 1A é mitigável reusando a projeção de decl do `.tkb` (`RM-C11`)
+como base comum, filtrando `exp`+`pub` para `.tkhl` e `exp` para `.tkh` na saída.
+
+### [DECISÃO DO DONO] 2 — Onde a monomorfização mora
+
+**Problema.** Hoje `checker::monomorphize` (`monomorph.tks:946`) roda no frontend e o `.tkb`
+sai post-mono. Sob emissão por-namespace, onde a mono deve rodar?
+
+#### Opção 2A — 100% no linker (todo `.tkbl` pré-mono; mono só na ponta para lib/binary)
+
+Nenhuma unidade monomorfiza; o `.tkbl` é sempre pré-mono. O linker interno (estágio 4)
+monomorfiza no fecho global, só para lib/binary; package/tool ficam poli.
+
+```teko
+/**
+ * emit_unit_object — emite o .tkbl PRÉ-mono da unidade (genéricos crus + pedidos de mono).
+ * A monomorfização é adiada para link_and_monomorphize (estágio 4).
+ * @since 0.3.1
+ */
+fn emit_unit_object(unit: LUnit, target: NativeTarget, out_dir: str): str | error
+
+/**
+ * link_and_monomorphize — no fecho global (todas as unidades vistas), instancia os genéricos
+ * alcançáveis e encoda. Só para lib/binary; package/tool NÃO chamam.
+ * @since 0.3.1
+ */
+fn link_and_monomorphize(units: []LUnit, ffi: InternalFfi, dest: Artifact): []byte | error
+```
+
+- **Prós.** **Fecho global correto** (o conjunto fechado de instanciações só é conhecido na
+  ponta). `.tkbl` menor (uma cópia do genérico, não N) → melhor pico (Eixo C). Package/tool
+  portáteis (pré-mono reinstanciável/instalável). Um único ponto de mono → fácil auditar.
+- **Contras.** O linker faz MAIS trabalho (mono + isel + encode na ponta) → o estágio 4 é mais
+  pesado por unidade (mitigado pelo streaming por SCC do §2bis). Inverte o comportamento de
+  hoje → **exige reseed** + byte de versão de sabor (T-mono).
+- **Eixos.** Memória: **ótima** (`.tkbl` compacto). Complexidade: média (mono migra de sítio).
+  Leis: neutra. Reprodutibilidade: alta se o fecho for iterado em ordem canônica (R6).
+
+#### Opção 2B — Split por destino (binary/lib mono no build; package/tool pré-mono)
+
+O que 2A faz, MAS a mono de binary/lib roda **durante** o stream por-unidade (não num passe de
+linker separado): cada unidade de binary/lig já sai monomorfizada.
+
+```teko
+/**
+ * emit_unit — se o destino monomorfiza no build (binary/lib), instancia JÁ os genéricos desta
+ * unidade; senão (package/tool) emite pré-mono. A decisão é por-destino, dentro do laço.
+ * @since 0.3.1
+ */
+fn emit_unit(unit: Unit, ffi: InternalFfi, dest: Artifact): UnitOutput | error
+```
+
+- **Prós.** Sem passe de linker-mono separado. Para binary/lib, a unidade já sai pronta.
+- **Contras.** **Fecho global quebrado para instanciações cross-unit.** Uma instanciação
+  `List<Foo>` pedida na unidade A mas cujo genérico mora em B: quando A é processada, B pode não
+  ter sido — a mono por-unidade não conhece o fecho. Precisa de um pré-passe que colete os
+  pedidos cross-unit ANTES (que é... o linker de 2A). Ou seja, 2B **colapsa em 2A** para
+  qualquer genérico cross-namespace — e o compilador é cheio deles. Duplicação de N instâncias
+  do mesmo genérico entre unidades (cada unidade monomorfiza o seu) → mais memória e `.o`
+  maiores. Risco de reprodutibilidade: mesma instância emitida em duas unidades → símbolo
+  duplicado no link.
+- **Eixos.** Memória: **pior** (instâncias duplicadas). Complexidade: alta (coleta cross-unit
+  vira um pré-passe = 2A disfarçado). Leis: neutra. Reprodutibilidade: **frágil** (duplicação
+  de símbolo).
+
+#### Opção 2C — Mono lazy/on-demand por instanciação (cache incremental)
+
+Cada instanciação `(genérico, args)` é materializada **sob demanda** e cacheada num mapa
+global; a segunda vez reusa. Ao emitir uma chamada, força a instância.
+
+```teko
+/**
+ * request_mono — materializa (ou reusa do cache) a instância (fn genérica, args de tipo).
+ * On-demand: a primeira chamada instancia; as seguintes reusam a instância cacheada.
+ * @param key  (símbolo genérico, substituição de tipos)
+ * @return o símbolo mangled da instância monomorfizada
+ * @since 0.3.1
+ */
+fn request_mono(key: MonoKey, cache: ref MonoCache): str | error
+```
+
+- **Prós.** Instancia SÓ o alcançável de fato (nada especulativo). Casa com o incremental
+  (`RM-C14`): o cache de instâncias persiste entre builds. Potencialmente o menor volume de
+  código emitido.
+- **Contras.** **Cache global mutável = risco de reprodutibilidade #1.** A ordem de
+  materialização (quem pede primeiro) tem que ser canônica ou o `.o` diverge (`gen2.o!=gen3.o`).
+  Complexidade alta (gerir cache, invalidação, ordem determinística de flush). Estado global
+  compartilhado colide com a paralelização (§6) — dois workers pedindo a mesma instância. É o
+  oposto do "despejo por unidade" (o cache VIVE entre unidades, não é derrubado).
+- **Eixos.** Memória: boa em volume, mas o cache é estado vivo cross-unit (não despejável).
+  Complexidade: **alta**. Leis: neutra. Reprodutibilidade: **a pior** (cache global mutável +
+  ordem de flush + tensão com paralela).
+
+#### Recomendação — **Opção 2A (100% no linker, `.tkbl` sempre pré-mono)**, com as 2 políticas de destino do §5
+
+2A dá o fecho global correto (a razão técnica dura: instanciações cruzam namespaces), o menor
+`.tkbl` (melhor pico) e a portabilidade de package/tool — tudo law-first. **2B perde** porque
+colapsa em 2A assim que há genérico cross-namespace (e há muitos), duplicando instâncias e
+símbolos no meio do caminho. **2C perde** pelo cache global mutável, que é o maior risco de
+`gen2.o!=gen3.o` e briga com a paralelização — o ganho de volume não paga o risco de
+reprodutibilidade. Sobre 2A, a política por-destino do §5 se aplica na PONTA: **binary/lib**
+monomorfizam no build (linker), **tool** monomorfiza no INSTALL, **package** no consumidor — o
+`.tkbl` distribuído é sempre pré-mono. Gated em `RM-C15`, com reseed + byte de versão de sabor
+(T-mono, §12). `Tool` e `Binary` já são enums separados (`project.tks`); só a semântica muda.
+
+### [DECISÃO DO DONO] 3 — Dois `.tkh`: nome + política disco-vs-memória
+
+**Problema.** O header de LINK (`exp`+`pub`, tempo de link) vs. o header PUBLICADO (só `exp`).
+Como nomear e onde materializar o de link?
+
+#### Opção 3A — `.tkhl` em disco + `.tkh`
+
+O header de link é um arquivo `.tkhl` no disco (par do `.tkbl`), ao lado do publicado `.tkh`.
+
+```
+build/obj/teko__str.tkbl     # objeto de link (pré-mono)
+build/obj/teko__str.tkhl     # header de link (exp+pub) — em disco
+dist/teko.tkh                # header publicado (só exp)
+```
+
+- **Prós.** O cache incremental (`RM-C14`) reusa o `.tkhl` do disco direto (grafo de link
+  persistido). Simetria total com `.tkbl`. Auditável (dá pra inspecionar o arquivo). A fronteira
+  do LINK que não funde (`RM-C13`) já escreve em disco — o `.tkhl` acompanha.
+- **Contras.** IO por unidade mesmo quando o estágio 3→4 funde em memória (desnecessário no
+  build limpo). Mais arquivos temporários a limpar.
+- **Eixos.** Memória: ótima (nada retido; está no disco). Complexidade: baixa. Leis/R8: ok
+  (transitório, não embarcado). Reprodutibilidade: alta (frame determinístico R6). IO: **alto**.
+
+#### Opção 3B — `.tkhl` só em memória (materializa em disco só na fronteira que não funde)
+
+O header de link vive na arena (parte da `InternalFfi`); só é serializado para `.tkhl` quando o
+estágio não funde (a barreira do LINK global) ou quando o incremental quer cachear.
+
+```teko
+/**
+ * link_header_of — projeta o header de link (exp+pub) da unidade EM MEMÓRIA. Só
+ * serialize_link_header materializa em disco, e só na fronteira que não funde / no cache.
+ * @since 0.3.1
+ */
+fn link_header_of(unit: IncompleteUnit): InternalFfiSlice
+fn serialize_link_header(s: InternalFfiSlice): []byte | error
+```
+
+- **Prós.** **Zero IO no build limpo fundido** (o caso comum). O `.tkhl` só toca disco onde é
+  inevitável (LINK global / cache). Melhor tempo de build limpo.
+- **Contras.** Duas rotas (memória × disco) → mais código condicional. O incremental precisa da
+  rota de serialização de qualquer forma (então 3B ainda constrói o `.tkhl` de 3A — é 3A + um
+  fast-path em memória). Menos auditável no build fundido (não há arquivo para inspecionar).
+- **Eixos.** Memória: boa (slice na arena, derrubada por unidade). Complexidade: **média-alta**
+  (duas rotas). Leis/R8: ok. Reprodutibilidade: alta. IO: **mínimo**.
+
+#### Opção 3C — Formato único de `.tkh` com seção/flag link-vs-publicado
+
+Um só arquivo `.tkh` com DUAS seções: uma seção `[link]` (exp+pub) e uma `[public]` (só exp); o
+consumidor lê `[public]`, o linker lê `[link]`.
+
+```
+# teko.tkh
+[public]   exp fn parse(...): ...
+[link]     pub fn parse_inner(...): ...   # NÃO embarcado no dist
+```
+
+- **Prós.** Um artefato só (menos arquivos). Simetria simples.
+- **Contras.** **Risco R8 de novo** — se o `.tkh` distribuído carrega a seção `[link]`, `pub`
+  vaza (é 1C sob outro nome). Para não vazar, é preciso STRIP da seção `[link]` ao empacotar →
+  que é ter dois artefatos de novo, com um passo extra de strip (mais frágil que separá-los na
+  origem). Cache incremental confuso (a unidade de cache mistura dois sabores).
+- **Eixos.** Memória: neutra. Complexidade: média (strip no empacotamento). Leis/R8: **frágil**
+  (depende do strip; se falhar, vaza). Reprodutibilidade: alta. IO: médio.
+
+**Alternativas de NOME.** `.tkhl` (`tkh`-link, sufixo `l`, espelha `.tkbl`) × `.tkhi`
+(`tkh`-internal, deixa "interno" explícito) × `.tkh.link`/`.linktkh` (composto). Prós de
+`.tkhl`: simetria direta com `.tkbl` (o par intermediário todo usa sufixo `l`), curto, ordena
+junto do `.tkh` no diretório. Contra: `.tkhl` × `.tkh` diferem por uma letra (erro de digitação
+fácil). `.tkhi` deixa "interno" mais óbvio mas quebra a simetria com `.tkbl`.
+
+#### Recomendação — **Opção 3B (memória-primeiro, disco na fronteira), nome `.tkhl`**
+
+3B é 3A com um fast-path: zero IO no build limpo fundido (o caso quente), materializando `.tkhl`
+só onde é inevitável (LINK global não-fundido + cache incremental). **3C perde** — reintroduz o
+risco R8 (é 1C com seções) e troca a separação estrutural por um strip frágil no empacotamento.
+Entre 3A e 3B, 3B ganha no tempo de build limpo sem perder nada (ainda constrói o `.tkhl`
+serializável que o incremental precisa); o custo é uma rota condicional a mais, que o
+implementer isola em `serialize_link_header`. **Nome: `.tkhl`** pela simetria com `.tkbl` (o par
+intermediário inteiro fica com sufixo `l`); se o dono preferir o "interno" explícito, `.tkhi` é
+o fallback aceitável. CONFIRMAR nome + a política 3B.
+
+### [DECISÃO DO DONO] 4 — RM-C10: COMO determinizar o gensym
+
+**Problema (R4).** Hoje nomes temporários derivam de `buf.len` (ex.: `$"_oln{buf.len}"`). Sob
+emissão por-namespace o buffer é por-unidade → o MESMO corpo gera nome DIFERENTE conforme a
+ordem/fronteira das unidades → `teko.c`/`.o` divergem → fixpoint quebra. `RM-C10` é
+pré-requisito de C11. COMO gerar o nome de forma estável?
+
+Cenário-exemplo comum aos três: a 2ª variável temporária de `parse()` no namespace `teko::str`.
+
+#### Opção 4A — Contador global monotônico (substitui `buf.len`)
+
+Um contador de processo, resetado no início do codegen, incrementado a cada draw.
+
+```teko
+/**
+ * next_temp — próximo ordinal temporário do contador global do run de codegen. Substitui a
+ * derivação por buf.len. Reproduz a MESMA sequência de nomes de hoje SE a ordem de emissão for
+ * determinística (é — namespaces + itens iteram em ordem fixa).
+ * @return o próximo ordinal, monotônico no run
+ * @since 0.3.1
+ */
+fn next_temp(): i64
+```
+
+Nome gerado no exemplo: **`_t41`** (o 41º temporário do run inteiro).
+
+- **Prós.** Simplíssimo (um inteiro). Reproduz byte-a-byte a sequência de HOJE (requisito de
+  `RM-C10`: `teko.c` byte-idêntico após o rename). C emitido curto e legível.
+- **Contras.** **Depende da ORDEM GLOBAL de emissão.** Reordenar unidades (ou paralelizar, §6)
+  muda todos os números a partir do ponto de divergência → `.o` diverge. É determinístico HOJE
+  (ordem fixa), mas é a opção **mais frágil sob paralelização futura**. O número não diz de qual
+  fn/namespace veio (debug mais difícil).
+- **Eixos.** Reprodutibilidade por-unidade: **frágil** (acopla à ordem global). Colisão: nenhuma
+  (monotônico). Legibilidade do C: **ótima** (`_t41`). Estabilidade sob paralela: **ruim**.
+
+#### Opção 4B — Tupla `(namespace, índice-de-fn, seq)`
+
+O nome deriva de coordenadas ESTÁVEIS: o namespace, o índice da fn dentro do namespace, e um
+contador local resetado por-fn.
+
+```teko
+/**
+ * next_temp_scoped — ordinal temporário derivado de (namespace, fn_idx, seq-local-da-fn). O
+ * nome NÃO depende da ordem global de emissão — só das coordenadas da própria fn — logo é
+ * estável sob reordenação de unidades E sob paralelização (§6).
+ * @param ns namespace da fn corrente
+ * @param fn_idx índice da fn no namespace
+ * @return o ordinal local, monotônico DENTRO da fn
+ * @since 0.3.1
+ */
+fn next_temp_scoped(ns: str, fn_idx: u32): i64
+```
+
+Nome gerado no exemplo: **`_str_parse_1`** (ou mangled: `_t_str__parse__1`) — namespace `str`,
+fn `parse`, 2º temporário (seq 1).
+
+- **Prós.** **Estável por-unidade por construção** — o nome de um temporário depende só da SUA
+  fn, não do que veio antes globalmente. Sobrevive a reordenação de unidades E a paralelização
+  (§6) sem divergir. C legível e auto-descritivo (dá pra ver de onde veio). Casa com o
+  incremental (a unidade recompila igual, mesmos nomes).
+- **Contras.** Nomes mais longos (mais bytes no `.o`/`.c`). Precisa carregar (ns, fn_idx) até o
+  ponto de gensym (um pouco de plumbing). **NÃO reproduz a sequência de HOJE byte-a-byte** — os
+  nomes MUDAM (de `_oln{n}` para `_str_parse_1`) → o `teko.c` muda → é um reseed real, não um
+  rename byte-preservante. (Contraste com `RM-C10` que hoje pede byte-idêntico — 4B trocaria isso
+  por "byte-idêntico dali em diante".)
+- **Eixos.** Reprodutibilidade por-unidade: **máxima** (coordenadas locais). Colisão: nenhuma
+  (a tripla é única). Legibilidade do C: boa (verboso mas informativo). Estabilidade sob
+  paralela: **ótima**.
+
+#### Opção 4C — Nome por hash-de-conteúdo do nó da AST
+
+O nome deriva de um hash do subárvore/nó (tipo + posição estrutural + conteúdo).
+
+```teko
+/**
+ * temp_of_node — nome temporário derivado de um hash estável do nó da AST (estrutura+tipo). NÃO
+ * depende de contador nem de ordem — o MESMO nó gera o MESMO nome sempre, em qualquer ordem.
+ * @param node o nó que precisa do temporário
+ * @return o nome (prefixo + hash truncado)
+ * @since 0.3.1
+ */
+fn temp_of_node(node: @TExpr()): str
+```
+
+Nome gerado no exemplo: **`_t_9f3a1c`** (hash truncado do nó).
+
+- **Prós.** Independente de ordem E de coordenadas — content-addressed puro. Estável sob
+  qualquer reordenação/paralela. Dois nós idênticos... (ver contra).
+- **Contras.** **Colisão real.** Dois temporários com o MESMO hash (nós estruturalmente iguais
+  na mesma fn — ex.: dois `x+1` idênticos) colidem → precisa de desambiguação (sufixo de
+  ocorrência), o que **reintroduz um contador** (volta a 4A/4B). Hash truncado agrava a colisão;
+  hash cheio incha o nome. C ilegível (`_t_9f3a1c` não diz nada). Custo de hashing por nó. **Não
+  reproduz a sequência de hoje** (reseed). O hash tem que ser 100% determinístico (sem endereço
+  de ponteiro, sem ordem de `map`) — mais uma superfície de não-determinismo a auditar.
+- **Eixos.** Reprodutibilidade por-unidade: alta SE o hash for puro, mas a **colisão** força um
+  desambiguador ordinal (regride). Colisão: **problema real**. Legibilidade do C: **ruim**.
+  Estabilidade sob paralela: ótima (se resolver colisão de forma determinística).
+
+#### Recomendação — **Opção 4A para `RM-C10` AGORA; migrar para 4B quando a paralelização (§6) entrar**
+
+`RM-C10` (o crumb `0065`) exige explicitamente **`teko.c` byte-idêntico após o rename** (rename
+mecânico, validado byte-a-byte) — SÓ **4A** satisfaz isso (reproduz a sequência de `buf.len` de
+hoje). É o passo mínimo, seguro e byte-preservante que desbloqueia C11 sem um reseed de
+conteúdo. **4C está fora** — a colisão força um desambiguador ordinal (regredindo a um
+contador) e produz C ilegível, com uma nova superfície de não-determinismo (o hash) a auditar; o
+custo não paga. **4B é tecnicamente superior a 4A** para o futuro (estável sob reordenação E
+paralelização, §6) e é a evolução natural — MAS trocar os nomes AGORA quebra o byte-idêntico que
+`RM-C10` pede, virando um reseed de conteúdo prematuro. Portanto: **4A no `RM-C10`** (byte-
+preservante, desbloqueia o Eixo C), e registrar **4B como a migração** a fazer JUNTO com a
+paralelização (§6), onde a estabilidade por-coordenada deixa de ser luxo e vira requisito (o
+contador global de 4A não sobrevive a workers). Até lá, 4A + ordem de emissão determinística
+(garantida por `RM-C11`/`C12`) mantém `gen2==gen3`. **Marcar `RM-C10` como bloqueador do
+per-unit native** segue valendo (já nos crumbs: `RM-C10` "BLOCKS C11").
 
 ---
 
