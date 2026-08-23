@@ -9301,10 +9301,22 @@ fn cg_emit_fn_def_scoped(buf: teko::io::FileStream, prog: CgProg, f: checker::TF
     cg_scope_end(scratch)
 }
 
+fn perunit_trace_enabled(): bool {
+    match teko::env::var("TEKO_PERUNIT_TRACE") { str as v => v == "1"; error => false }
+}
+
+fn cg_trace_perunit(f: checker::TFunction, emitted: PerUnitEmit) {
+    if !perunit_trace_enabled() { return }
+    if !emitted.picked { return }
+    var tag = if emitted.retyped { "retyped" } else { "passthrough" }
+    teko::io::eprintln($"teko: perunit {tag} {f.namespace}::{f.name}")
+}
+
 fn cg_emit_fn_def_perunit(buf: teko::io::FileStream, prog: CgProg, f: checker::TFunction, mode: CgMode, perunit: bool, raw: parser::Program, bnd: checker::Boundary) {
     if !perunit { cg_emit_fn_def_guarded(buf, prog, f, mode); return }
     var guard = cg_scope_begin()
     var emitted = perunit_item_for(true, bnd, raw, f)
+    cg_trace_perunit(f, emitted)
     if emitted.retyped {
         match emitted.node {
             checker::TFunction as ef => cg_emit_fn_def_guarded(buf, prog, ef, mode)
@@ -9421,7 +9433,7 @@ pub fn cg_empty_raw_program(): parser::Program {
 }
 
 pub fn cg_empty_boundary(): checker::Boundary {
-    checker::Boundary { table = checker::tt_empty(); env = checker::env_empty(); worklist = []; lift_seed = 0 }
+    checker::boundary_empty()
 }
 
 type PerUnitPick = struct { retype: bool; widx: u64 }
@@ -9459,9 +9471,11 @@ fn perunit_item_faithful(retyped: @TItem(), resident: @TItem()): bool {
     checker::titem_eq(retyped, resident)
 }
 
-pub type PerUnitEmit = struct { node: @TItem(); retyped: bool }
+pub type PerUnitEmit = struct { node: @TItem(); retyped: bool; picked: bool }
 
-fn perunit_passthrough(resident: @TItem()): PerUnitEmit { PerUnitEmit { node = resident; retyped = false } }
+fn perunit_passthrough(resident: @TItem()): PerUnitEmit { PerUnitEmit { node = resident; retyped = false; picked = false } }
+
+fn perunit_picked_passthrough(resident: @TItem()): PerUnitEmit { PerUnitEmit { node = resident; retyped = false; picked = true } }
 
 pub fn perunit_item_for(enabled: bool, bnd: checker::Boundary, raw: parser::Program, resident: @TItem()): PerUnitEmit {
     if !enabled { return perunit_passthrough(resident) }
@@ -9470,8 +9484,8 @@ pub fn perunit_item_for(enabled: bool, bnd: checker::Boundary, raw: parser::Prog
             var pick = perunit_pick(bnd, raw, f)
             if !pick.retype { return perunit_passthrough(resident) }
             match checker::retype_unit(raw, bnd.worklist[pick.widx], bnd) {
-                (@TItem()) as retyped => if perunit_item_faithful(retyped, resident) { PerUnitEmit { node = retyped; retyped = true } } else { perunit_passthrough(resident) }
-                error => perunit_passthrough(resident)
+                (@TItem()) as retyped => if perunit_item_faithful(retyped, resident) { PerUnitEmit { node = retyped; retyped = true; picked = true } } else { perunit_picked_passthrough(resident) }
+                error => perunit_picked_passthrough(resident)
             }
         }
         _ => perunit_passthrough(resident)
@@ -9567,7 +9581,15 @@ fn tk_emit_c_body(prog0: checker::TProgram, mode: CgMode, buf: teko::io::FileStr
 
     emit_mode_main(buf, prog, mode)
     cg_report_phase_rss("after-bodies")
+    cg_report_region_peak()
     null
+}
+
+fn cg_report_region_peak() {
+    if !perunit_trace_enabled() { return }
+    var peak = teko::runtime::region_stack_peak()
+    var slots = teko::runtime::region_stack_slots()
+    teko::io::eprintln($"teko: perunit region-stack peak {peak} / {slots}")
 }
 
 fn cg_emit_forward_typedef(buf: teko::io::FileStream, d: parser::TypeDecl) {

@@ -84,6 +84,8 @@ const CTRL_CUR_STACK: u64 = 33928
 
 const CUR_STACK_SLOTS: u64 = 2048
 
+const CTRL_CUR_SP_MAX: u64 = 50312
+
 const CTRL_WRAP_LOCK: u64 = 50320
 
 const CTRL_WRAP_TABLE: u64 = 50328
@@ -375,17 +377,23 @@ fn ar_cur_slot(control: u64, depth: u64): u64 {
 
 fn ar_cur_current(control: u64): u64 {
     var sp = ar_ctrl_get(control, CTRL_CUR_SP)
-    if sp > 0 && sp <= CUR_STACK_SLOTS {
+    if sp > CUR_STACK_SLOTS { panic("arena region stack overflow") }
+    if sp > 0 {
         var region = ar_load(ar_cur_slot(control, sp - 1))
         if region != 0 { return region }
     }
     ar_region_root_w(control)
 }
 
+fn ar_cur_record_peak(control: u64, sp: u64) {
+    if sp > ar_ctrl_get(control, CTRL_CUR_SP_MAX) { ar_ctrl_set(control, CTRL_CUR_SP_MAX, sp) }
+}
+
 fn ar_cur_enter(control: u64, child: u64) {
     var sp = ar_ctrl_get(control, CTRL_CUR_SP)
     if sp < CUR_STACK_SLOTS { ar_store(ar_cur_slot(control, sp), child) }
     ar_ctrl_set(control, CTRL_CUR_SP, sp + 1)
+    ar_cur_record_peak(control, sp + 1)
 }
 
 fn ar_cur_leave(control: u64) {
@@ -743,6 +751,14 @@ pub fn region_enter(child: ptr) {
 
 pub fn region_leave() {
     ar_cur_leave(ar_control())
+}
+
+pub fn region_stack_peak(): u64 {
+    ar_ctrl_get(ar_control(), CTRL_CUR_SP_MAX)
+}
+
+pub fn region_stack_slots(): u64 {
+    CUR_STACK_SLOTS
 }
 
 pub fn alloc(n: u64): ptr {

@@ -5698,6 +5698,16 @@ pub type Boundary = struct {
     env: Env
     worklist: []WorkUnit
     lift_seed: u64
+    const_scalar: ScalarConstMap
+    const_agg: ScalarConstMap
+}
+
+fn boundary_empty_const_map(): ScalarConstMap {
+    ScalarConstMap { names = []; nss = []; inits = [] }
+}
+
+pub fn boundary_empty(): Boundary {
+    Boundary { table = tt_empty(); env = env_empty(); worklist = []; lift_seed = 0; const_scalar = boundary_empty_const_map(); const_agg = boundary_empty_const_map() }
 }
 
 pub type WorkUnit = struct {
@@ -5749,6 +5759,70 @@ fn boundary_worklist(program: parser::Program): []WorkUnit {
     out
 }
 
+type BoundaryConstMaps = struct {
+    scalar: ScalarConstMap
+    agg: ScalarConstMap
+}
+
+fn tconstdecls_as_items(cds: []TConstDecl): []@TItem() {
+    var out: [cds.len]@TItem() = []
+    var i: u64 = 0
+    loop { if i >= cds.len { break }; out[i] = cds[i]; i++ }
+    out
+}
+
+fn boundary_type_module_consts(program: parser::Program, cenv: Env, types: TypeTable): []@TItem() | error {
+    var contribs: [program.items.len][]@TItem() = []
+    var i: u64 = 0
+    loop {
+        if i >= program.items.len { break }
+        var it = program.items[i]
+        var ienv = with_ns(cenv, it.namespace)
+        match it.content {
+            parser::ConstDecl => {
+                var ti = match type_item(it, ienv, types) { (@TItem()) as x => x; error as e => return e }
+                contribs[i] = [ti]
+            }
+            parser::TypeDecl as td => {
+                var citems = match type_type_member_consts(td, it.namespace, it.file, ienv, types) { []@TItem() as x => x; error as e => return e }
+                contribs[i] = citems
+            }
+            _ => { contribs[i] = [] }
+        }
+        i++
+    }
+    var total: u64 = 0
+    var si: u64 = 0
+    loop { if si >= contribs.len { break }; total = total + contribs[si].len; si++ }
+    var out: [total]@TItem() = []
+    var k: u64 = 0
+    var ci: u64 = 0
+    loop {
+        if ci >= contribs.len { break }
+        var chunk = contribs[ci]
+        var cj: u64 = 0
+        loop { if cj >= chunk.len { break }; out[k] = chunk[cj]; k++; cj++ }
+        ci++
+    }
+    out
+}
+
+fn boundary_const_items(pruned: parser::Program, dep_prog: TProgram, cenv: Env, types: TypeTable): []@TItem() | error {
+    var dep_consts = tconstdecls_as_items(collect_module_consts(dep_prog.items))
+    var module_consts = match boundary_type_module_consts(pruned, cenv, types) { []@TItem() as x => x; error as e => return e }
+    [..dep_consts, ..module_consts]
+}
+
+fn boundary_const_maps(const_items: []@TItem()): BoundaryConstMaps | error {
+    var consts = drop_cond_consts(collect_module_consts(const_items), cond_const_names(const_items))
+    if consts.len == 0 { return BoundaryConstMaps { scalar = boundary_empty_const_map(); agg = boundary_empty_const_map() } }
+    var ordered = match const_dep_order(consts) { []TConstDecl as o => o; error as e => return e }
+    var scalar = build_scalar_map(ordered)
+    var substituted = match substitute_module_consts(TProgram { items = const_items }) { TProgram as p => p; error as e => return e }
+    var agg = match build_module_agg_map(substituted) { ScalarConstMap as m => m; error as e => return e }
+    BoundaryConstMaps { scalar = scalar; agg = agg }
+}
+
 pub fn discover_boundary(raw: parser::Program, dep_prog: TProgram, explicit: bool): DiscoveredBoundary | error {
     var folded = fold_traits_collected(raw)
     if folded.diags.len > 0 { return error { message = join_checker_diags(folded.diags) } }
@@ -5761,14 +5835,33 @@ pub fn discover_boundary(raw: parser::Program, dep_prog: TProgram, explicit: boo
     var pre = pre_walk(program, collect_with_seed(program, seed))
     if pre.cut { return error { message = join_checker_diags(pre.diags) } }
     var pruned = drop_comptime_items(program)
-    var bnd = Boundary { table = pre.types; env = pre.env; worklist = boundary_worklist(pruned); lift_seed = 0 }
+    var const_items = match boundary_const_items(pruned, dep_prog, pre.env, pre.types) { []@TItem() as x => x; error as e => return e }
+    var maps = match boundary_const_maps(const_items) { BoundaryConstMaps as m => m; error as e => return e }
+    var bnd = Boundary { table = pre.types; env = pre.env; worklist = boundary_worklist(pruned); lift_seed = 0; const_scalar = maps.scalar; const_agg = maps.agg }
     DiscoveredBoundary { boundary = bnd; program = pruned }
 }
 
 pub fn retype_unit(raw: parser::Program, unit: WorkUnit, bnd: Boundary): @TItem() | error {
     if unit.source_index >= raw.items.len { return error { message = "retype_unit: source_index out of range" } }
     var it = raw.items[unit.source_index]
-    type_item(it, with_ns(bnd.env, it.namespace), bnd.table)
+    var ti = match type_item(it, with_ns(bnd.env, it.namespace), bnd.table) { (@TItem()) as x => x; error as e => return e }
+    retype_inline_consts(ti, bnd)
+}
+
+fn retype_inline_consts(ti: @TItem(), bnd: Boundary): @TItem() | error {
+    match ti {
+        TFunction as f => retype_inline_function(f, bnd)
+        _ => ti
+    }
+}
+
+fn retype_inline_function(f: TFunction, bnd: Boundary): @TItem() | error {
+    var scalared = rewrite_function(f, bnd.const_scalar)
+    var propagated = lp_function(scalared)
+    match propagated {
+        TFunction as pf => fold_function(pf, fold_empty_table(), env_empty(), bnd.const_agg)
+        _ => propagated
+    }
 }
 
 type PreWalk = struct {
