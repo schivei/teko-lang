@@ -248,6 +248,11 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   commit anterior. Consequência dura: uma conversão que remove `push` mas CRESCE o pico (ex.: FILTRO em
   duas-passadas que pré-aloca `[src.len]T=[]` com `count << src.len` = over-alloc) **viola a lei** — a
   correção é contar exato numa 1ª passada barata, não usar o limite folgado. O número só anda pra baixo.
+  **ESCOPO (dono 2026-08-24): o ratchet vale pra TODA obra que toca o build durante a campanha.** As
+  tarefas de REDUÇÃO (jardinagem/Eixo A/B/C, DPS) têm que BAIXAR (estrito). As demais — em especial o
+  **EXPURGO DO RUNTIME C (teko_rt/assert/win → Teko)** — têm o piso **NÃO CRESCER**: o runtime reescrito em
+  Teko tem que ser tão enxuto quanto (ou mais que) o C que substitui; crescer o pico = regressão. Ninguém
+  pode piorar o pico, ponto — reduzir é a meta, não-crescer é o mínimo.
 - **TAREFA LONGA → BRANCH REAL + PUSH FREQUENTE (dono 2026-08-19).** Trabalho longo (a campanha io/fs+
   arena+expurgo é lenta até pra agente mecânico) tem que **commitar e PUSHAR regularmente** (a cada crumb/
   passo) numa **branch real no origin** — não confiar no worktree local, que **some no restart de container/
