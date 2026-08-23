@@ -237,9 +237,11 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
     que usar < 6 GB** — senão não faz sentido. O 10 GB é folga de dev, não a meta; a meta é gen2 < 6 GB
     (rumo a ≤1,5 GB). Fora desse agente-exceção, o guard 4 GiB segue inviolável. A máquina tem ~15 GiB
     física — 10 GB de um processo ainda cabe; NÃO passar disso.
-- **RATCHET DE MEMÓRIA — o pico NUNCA cresce durante a campanha (dono 2026-08-24).** Enquanto o ajuste de
-  memória está em curso, TODA mudança tem que **baixar ou manter** o pico; **qualquer aumento = regressão,
-  reverter/corrigir ANTES de landar.** A métrica ÚNICA é a linha canônica `teko: memory: peak <N> MB` do
+- **RATCHET DE MEMÓRIA — toda mudança BAIXA o pico, ou é trabalho à toa (dono 2026-08-24).** Enquanto o
+  ajuste de memória está em curso, TODA mudança tem que **BAIXAR o pico (estrito — não basta MANTER: uma
+  mudança que não baixa não fez o trabalho da campanha, é trabalho à toa; repensar pra produzir queda, ou
+  não landar)**; **qualquer aumento = regressão, reverter/corrigir ANTES de landar.** A métrica ÚNICA é a
+  linha canônica `teko: memory: peak <N> MB` do
   **build seco** (a mesma que o CI reporta — ex. `3811.9 MB`); mede-se SEMPRE o MESMO build/geração (não
   misturar rung-1 com gen2 — baseline diferente falseia a comparação) e compara-se maçã-com-maçã contra o
   commit anterior. Consequência dura: uma conversão que remove `push` mas CRESCE o pico (ex.: FILTRO em
