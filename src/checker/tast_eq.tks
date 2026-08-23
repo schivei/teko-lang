@@ -82,7 +82,7 @@ fn teq_uexprs(xs: []parser::Expr, ys: []parser::Expr): bool {
     true
 }
 
-fn teq_uexprkind(a: @parser::ExprKind(), b: @parser::ExprKind()): bool {
+fn teq_uexprkind(a: @ExprKind(), b: @ExprKind()): bool {
     match a {
         parser::Number as na => match b { parser::Number as nb => na.is_float == nb.is_float && teq_numint(na.value, nb.value) && na.fval == nb.fval; _ => false }
         parser::Var as na => match b { parser::Var as nb => na.name == nb.name; _ => false }
@@ -130,7 +130,7 @@ fn teq_uarrayelems(xs: []parser::ArrayElem, ys: []parser::ArrayElem): bool {
     true
 }
 
-fn teq_utype(a: @parser::TypeExpr(), b: @parser::TypeExpr()): bool {
+fn teq_utype(a: @TypeExpr(), b: @TypeExpr()): bool {
     match a {
         parser::NamedType as na => match b { parser::NamedType as nb => teq_path(na.path, nb.path) && teq_utypes(na.args, nb.args); _ => false }
         parser::SliceType as na => match b { parser::SliceType as nb => teq_utype(na.element, nb.element); _ => false }
@@ -141,7 +141,7 @@ fn teq_utype(a: @parser::TypeExpr(), b: @parser::TypeExpr()): bool {
     }
 }
 
-fn teq_utypes(xs: []@parser::TypeExpr(), ys: []@parser::TypeExpr()): bool {
+fn teq_utypes(xs: []@TypeExpr(), ys: []@TypeExpr()): bool {
     if xs.len != ys.len { return false }
     var i: u64 = 0
     loop {
@@ -152,14 +152,14 @@ fn teq_utypes(xs: []@parser::TypeExpr(), ys: []@parser::TypeExpr()): bool {
     true
 }
 
-fn teq_utype_opt(a: @parser::TypeExpr() | null, b: @parser::TypeExpr() | null): bool {
+fn teq_utype_opt(a: @TypeExpr() | null, b: @TypeExpr() | null): bool {
     match a {
         null => match b { null => true; _ => false }
-        (@parser::TypeExpr()) as ta => match b { (@parser::TypeExpr()) as tb => teq_utype(ta, tb); _ => false }
+        (@TypeExpr()) as ta => match b { (@TypeExpr()) as tb => teq_utype(ta, tb); _ => false }
     }
 }
 
-fn teq_pattern(a: @parser::Pattern(), b: @parser::Pattern()): bool {
+fn teq_pattern(a: @Pattern(), b: @Pattern()): bool {
     match a {
         parser::LiteralPattern as na => match b { parser::LiteralPattern as nb => teq_uexpr(na.value, nb.value); _ => false }
         parser::RangePattern as na => match b { parser::RangePattern as nb => teq_uexpr(na.lo, nb.lo) && teq_uexpr(na.hi, nb.hi); _ => false }
@@ -176,7 +176,7 @@ fn teq_pattern(a: @parser::Pattern(), b: @parser::Pattern()): bool {
     }
 }
 
-fn teq_patterns(xs: []@parser::Pattern(), ys: []@parser::Pattern()): bool {
+fn teq_patterns(xs: []@Pattern(), ys: []@Pattern()): bool {
     if xs.len != ys.len { return false }
     var i: u64 = 0
     loop {
@@ -187,7 +187,7 @@ fn teq_patterns(xs: []@parser::Pattern(), ys: []@parser::Pattern()): bool {
     true
 }
 
-fn teq_bindtarget(a: @parser::BindTarget(), b: @parser::BindTarget()): bool {
+fn teq_bindtarget(a: @BindTarget(), b: @BindTarget()): bool {
     match a {
         parser::SimpleName as na => match b { parser::SimpleName as nb => na.name == nb.name; _ => false }
         parser::DestructurePattern as na => match b { parser::DestructurePattern as nb => teq_str_slice(na.names, nb.names); _ => false }
@@ -371,6 +371,17 @@ fn teq_params(xs: []parser::Param, ys: []parser::Param): bool {
     true
 }
 
+fn teq_pred(a: parser::Pred, b: parser::Pred): bool {
+    match a.kind {
+        parser::PTrue => match b.kind { parser::PTrue => true; _ => false }
+        parser::PEq as na => match b.kind { parser::PEq as nb => na.axis == nb.axis && na.value == nb.value; _ => false }
+        parser::PFlag as na => match b.kind { parser::PFlag as nb => na.name == nb.name; _ => false }
+        parser::PNot as na => match b.kind { parser::PNot as nb => teq_pred(na.inner, nb.inner); _ => false }
+        parser::PAnd as na => match b.kind { parser::PAnd as nb => teq_pred(na.left, nb.left) && teq_pred(na.right, nb.right); _ => false }
+        parser::POr as na => match b.kind { parser::POr as nb => teq_pred(na.left, nb.left) && teq_pred(na.right, nb.right); _ => false }
+    }
+}
+
 fn teq_tfunction(a: TFunction, b: TFunction): bool {
     if a.name != b.name || a.namespace != b.namespace || a.overload_suffix != b.overload_suffix { return false }
     if a.is_extern != b.is_extern || a.is_test != b.is_test { return false }
@@ -379,6 +390,7 @@ fn teq_tfunction(a: TFunction, b: TFunction): bool {
     if !teq_str_slice(a.type_params, b.type_params) { return false }
     if !teq_type(a.return_type, b.return_type) { return false }
     if !teq_types(a.ret_extra, b.ret_extra) { return false }
+    if !teq_pred(a.guard, b.guard) { return false }
     if !teq_params(a.params, b.params) { return false }
     teq_tstmts(a.body, b.body)
 }
