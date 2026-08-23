@@ -188,15 +188,15 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
        segue ~flat. A construção da AST é suspeita do pico — a otimizar. -->
   <!-- linha de validação original abaixo mantém a métrica -->
   fixpoint (tc2==tc3) + cross-check offline.
-  - **LIBERAÇÃO CONDICIONAL — full `teko build .` (com testes) ao bater o marco de memória (dono
-    2026-08-19):** enquanto o **build seco** NÃO picar **≤ 1,5 GB**, mantém-se o regime acima (só
-    compilação/build seco, subshell `ulimit -v 4194304`, NUNCA `teko test .`). QUANDO um build seco
-    medir **pico ≤ 1,5 GB** (1572864 KB) — este ≤ 1,5 GB é APENAS o gate que LIBERA `teko test .`
-    local aos agentes, **NÃO** o alvo da campanha; o **alvo/marco REAL da campanha de redução de memória
-    (RM-C / Eixo A/C) é `< 1 GB` de RSS no build seco** (dono 2026-08-20) —, as **execuções full `teko
-    build .` que carregam testes ficam LIBERADAS** e a
-    proibição de `teko test .` cai. O gatilho é o marco MEDIDO no build seco, não uma data. Agente que
-    for validar mede o pico do build seco e reporta ao cruzar o marco.
+  - **LIBERAÇÃO CONDICIONAL — full `teko build .` ao bater `< 3 GB` (dono 2026-08-24, BAIXA o gate de
+    ≤1,5 GB de 2026-08-19):** enquanto o **build seco** NÃO picar **< 3 GB**, mantém-se o regime acima
+    (só compilação/build seco, subshell `ulimit -v 4718592`, NUNCA `teko build .` completo). QUANDO um
+    build seco medir **pico < 3 GB** (3072 MB) — este `< 3 GB` é APENAS o gate que LIBERA `teko build .`
+    completo (com testes) local aos agentes, com o **mesmo cap 4,5 GB** (`ulimit -v 4718592`), **NÃO** o
+    alvo da campanha; o **alvo/marco REAL da campanha de redução de memória é `< 1 GB` de RSS no build
+    seco** (dono 2026-08-20). Ajuda os agentes a validar mais, MAS a memória **tem que continuar caindo
+    além dos 3 GB** de pico (ratchet estrito, D68). O gatilho é o marco MEDIDO no build seco, não uma
+    data. Agente que for validar mede o pico do build seco e reporta ao cruzar o marco.
 - **GEN0 SAI DO SEED, NÃO DO `fetch_teko.sh` (dono 2026-08-20).** Todo agente que precise buildar linka o
   `gen0` a partir do `bootstrap/teko.c` commitado — **exatamente como o CI** (`CC=clang
   scripts/build_gen1_from_c.sh`) — e daí gen0→gen1→gen2→gen3. **NUNCA chama `scripts/fetch_teko.sh`**: o
