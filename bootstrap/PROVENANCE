@@ -1,5 +1,39 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
+# RESEED (hand-harvest, isolated worktree, forward-only) — MEM* FREESTANDING (D89/D85/D90,
+# expurgo/mem-freestanding). O backend sintetiza chamadas a memcpy/memset/memmove/memcmp a partir de
+# struct-copy/aggregate-init (nem -ffreestanding/-fno-builtin removem); hoje elas resolviam a' libc,
+# ferindo o criterio zero-libc (D85). Este bite PROVE os NOSSOS simbolos freestanding com os nomes C
+# exatos, implementados em Teko (src/runtime/mem.tks, namespace teko::runtime, folha — loops sobre
+# palavra/byte via teko::mem::load_u8/store_u8 volateis) e refletidos pelo codegen (D90 — sem tocar
+# teko_rt.c). Duas camadas:
+#   1. SUPERFICIE (staged seed): novos builtins teko::mem::load_u8/store_u8 (par byte dos load_u64/
+#      store_u64 ja existentes) — checker/scope.tks (assinaturas), codegen.tks (emit_load_u8/
+#      emit_store_u8 = *(volatile uint8_t*)addr, + dispatch), lir/lower.tks (lower_load_u8_call/
+#      lower_store_u8_call, LType::I8, + routing). Fundacao tambem do backend native.
+#   2. PROVEDOR: src/runtime/mem.tks define rt_memcpy/rt_memset/rt_memmove/rt_memcmp (word-at-a-time
+#      quando dst/src compartilham alinhamento mod 8, senao byte; memmove trata sobreposicao copiando
+#      backward quando dst>src; memcmp retorna <0/0/>0). cg_emit_libc_free_intrinsics (codegen.tks)
+#      emite defs C NAO-static com os nomes EXATOS memcpy/memset/memmove/memcmp delegando aos simbolos
+#      Teko teko_teko__runtime__rt_* — como a arena-provider-ladder. Injetado no prelude de runtime
+#      (project.tks rt_prelude_paths_for) p/ todo programa Teko, alem do self-build. As leituras/
+#      escritas VOLATEIS impedem o LoopIdiomRecognize do clang de reconverter o loop em memcpy (sem
+#      auto-recursao); word-at-a-time mantem o gen0 -O0 tolerable (byte-a-byte volatil explodia p/ +23min).
+#   - PROVA ZERO-LIBC (o ponto do bite): nm do objeto do teko.c emitido (clang -std=c2x -c) mostra
+#     `T memcpy`, `T memset`, `T memmove`, `T memcmp` (NOSSOS, definidos) e `nm -u` NAO lista nenhum
+#     mem*/str* libc indefinido. Zero dependencia de libc para mem*.
+#   - gen0 (staged: gen0-do-bootstrap-anterior ensinado load_u8 -> gen2 staging) linka o provider;
+#     staging -> gen1 -> gen2 -> gen3, gen2.c == gen3.c byte-identico (20 578 xxx bytes, os bytes
+#     deste arquivo, sha256 73ef54f6...). Reharvest: bootstrap/teko.c = gen2.c convergido. VALIDADO:
+#     gen0' = clang(bootstrap) reconstroi a arvore -> gen1'.c == bootstrap/teko.c byte-identico (o
+#     DEGRAU se auto-reproduz pela rota C).
+#   - Pico RSS C-route (TEKO_BACKEND=c, TEKO_CC=clang), gen2 apples-to-apples: baseline 1115.2 MB ->
+#     1116.4 MB (+1.2 MB = custo-por-linha do provider Teko + par de builtins, proporcional; << +20.4
+#     MB da familia FLOAT/FMT aceita pelo dono; NAO e' regressao de copy-grow/push). TEKO_MEM_PARANOID=1
+#     dry build exit 0. Sob o guard ulimit -v 4718592.
+#   - O DEGRAU (bootstrap/DEGRAU) permanece declarado; o seed forcado agora = este compilador.
+#
+# ----------------------------------------------------------------------------------------------------
 # RESEED (hand-harvest, isolated worktree, forward-only) — F3 BITE "O GANHO" (D91,
 # expurgo/f3-bite-ganho). Os 4 sitios do codegen que emitiam tk_region_alloc(tk_region_current(), N)
 # como C LITERAL caiam na root-C do arena-C (nunca reclamada) e vazavam. Passam a emitir pelo provider
@@ -229,9 +263,12 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  8658b19bb386b75e084335838b789b8245abc5b1e14f6174669341f961d1f919
+sha256:  73ef54f6313dc8228da42b8def47a8560c91599e385a939dceff02e9a1665fc8
 since:   0.3.1.0
-legacy:  b7f0bd64ae683db6b47256c68e455c5ef97de696179f3bb1f16fbb5f0569bd0b — the arena-provider-ladder
+legacy:  8658b19bb386b75e084335838b789b8245abc5b1e14f6174669341f961d1f919 — the F3-bite "o ganho"
+         harvest this mem*-freestanding reseed supersedes (self-reproducible on rebuild of its own
+         tip; superseded by this reseed, not cherry-picked); and
+         b7f0bd64ae683db6b47256c68e455c5ef97de696179f3bb1f16fbb5f0569bd0b — the arena-provider-ladder
          (all-OS parity) harvest this F3-bite reseed supersedes (self-reproducible on rebuild of its
          own tip; superseded by this reseed, not cherry-picked); and
          4378fda0b949e5b7a05a540de5049f858f5af98737b959835def33cab7ad6f5d — the FASE-0 arena-malloc

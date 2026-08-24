@@ -3154,6 +3154,20 @@ fn emit_store_u64(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall, es
     buf.write("))")
 }
 
+fn emit_load_u8(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
+    buf.write("((uint64_t)*(volatile uint8_t *)(uintptr_t)(")
+    emit_expr_ctx(buf, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx)
+    buf.write("))")
+}
+
+fn emit_store_u8(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
+    buf.write("(*(volatile uint8_t *)(uintptr_t)(")
+    emit_expr_ctx(buf, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx)
+    buf.write(") = (uint8_t)(")
+    emit_expr_ctx(buf, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx)
+    buf.write("))")
+}
+
 fn emit_iface_call(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
     var p = c.callee
     var f = match c.callee_type { checker::Func as ff => ff; _ => panic("codegen: malformed interface-dispatch node (internal)") }
@@ -3413,6 +3427,8 @@ fn emit_call_inner(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e
             if l == "word_ptr" { return emit_word_ptr(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "load_u64" { return emit_load_u64(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "store_u64" { return emit_store_u64(buf, prog, c, escaping, regions, fn_body, dctx) }
+            if l == "load_u8" { return emit_load_u8(buf, prog, c, escaping, regions, fn_body, dctx) }
+            if l == "store_u8" { return emit_store_u8(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "retain" { return emit_retain(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "release" { return emit_release(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "weak_get" { return emit_weak_get(buf, prog, e, c, escaping, regions, fn_body, dctx) }
@@ -9609,6 +9625,18 @@ fn cg_emit_libc_free_intrinsics(buf: teko::io::FileStream) {
     buf.write("    while (i < n) { d[i] = s[i]; i = i + 1; }\n")
     buf.write("    return dst;\n")
     buf.write("}\n\n")
+    cg_emit_mem_freestanding(buf)
+}
+
+fn cg_emit_mem_freestanding(buf: teko::io::FileStream) {
+    buf.write("extern uint64_t teko_teko__runtime__rt_memcpy(uint64_t, uint64_t, uint64_t);\n")
+    buf.write("extern uint64_t teko_teko__runtime__rt_memset(uint64_t, uint64_t, uint64_t);\n")
+    buf.write("extern uint64_t teko_teko__runtime__rt_memmove(uint64_t, uint64_t, uint64_t);\n")
+    buf.write("extern int64_t teko_teko__runtime__rt_memcmp(uint64_t, uint64_t, uint64_t);\n")
+    buf.write("void *memcpy(void *dst, const void *src, uintptr_t n) { return (void *)(uintptr_t)teko_teko__runtime__rt_memcpy((uint64_t)(uintptr_t)dst, (uint64_t)(uintptr_t)src, (uint64_t)n); }\n")
+    buf.write("void *memset(void *dst, int c, uintptr_t n) { return (void *)(uintptr_t)teko_teko__runtime__rt_memset((uint64_t)(uintptr_t)dst, (uint64_t)(unsigned int)c, (uint64_t)n); }\n")
+    buf.write("void *memmove(void *dst, const void *src, uintptr_t n) { return (void *)(uintptr_t)teko_teko__runtime__rt_memmove((uint64_t)(uintptr_t)dst, (uint64_t)(uintptr_t)src, (uint64_t)n); }\n")
+    buf.write("int memcmp(const void *a, const void *b, uintptr_t n) { return (int)teko_teko__runtime__rt_memcmp((uint64_t)(uintptr_t)a, (uint64_t)(uintptr_t)b, (uint64_t)n); }\n\n")
 }
 
 fn tk_emit_c_body(prog0: checker::TProgram, mode: CgMode, buf: teko::io::FileStream): error | null {

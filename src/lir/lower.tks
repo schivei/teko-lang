@@ -1227,6 +1227,8 @@ fn lower_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | er
     if c.call_ns.len == 0 && is_buf_ptr_call(c.callee) { return lower_buf_ptr_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_load_u64_call(c.callee) { return lower_load_u64_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_store_u64_call(c.callee) { return lower_store_u64_call(ctx, e, c) }
+    if c.call_ns.len == 0 && is_load_u8_call(c.callee) { return lower_load_u8_call(ctx, e, c) }
+    if c.call_ns.len == 0 && is_store_u8_call(c.callee) { return lower_store_u8_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_len_builtin_call(c.callee) { return lower_len_builtin_call(ctx, e, c) }
     var sym = match call_symbol(c, ctx.externs, ctx.flat_symbols) { str as s => s; error as err => return err }
     if is_ffi_aggregate_return_symbol(sym) { return lower_ffi_aggregate_return_call(ctx, e, c, sym) }
@@ -1758,6 +1760,36 @@ fn lower_store_u64_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lo
     var addr = match lower_expr(ctx, c.args[0]) { Lowered as x => x; error as err => return err }
     var value = match lower_expr(addr.ctx, c.args[1]) { Lowered as x => x; error as err => return err }
     var with_store = ctx_append(value.ctx, store_inst(addr.vreg, value.vreg, LType::I64, e.line, e.col))
+    Lowered { ctx = with_store; vreg = 0 to u32 }
+}
+
+fn is_load_u8_call(callee: parser::Path): bool {
+    var segs = callee.segments
+    segs.len > 0 && segs[segs.len - 1].name == "load_u8"
+}
+
+fn lower_load_u8_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | error {
+    if c.args.len != 1 {
+        return error { message = "native backend N1: `load_u8` expects exactly one u64 argument (internal)" }
+    }
+    var addr = match lower_expr(ctx, c.args[0]) { Lowered as x => x; error as err => return err }
+    var r = ctx_alloc(addr.ctx)
+    var with_load = ctx_append(r.ctx, load_inst(r.vreg, addr.vreg, LType::I8, e.line, e.col))
+    Lowered { ctx = with_load; vreg = r.vreg }
+}
+
+fn is_store_u8_call(callee: parser::Path): bool {
+    var segs = callee.segments
+    segs.len > 0 && segs[segs.len - 1].name == "store_u8"
+}
+
+fn lower_store_u8_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | error {
+    if c.args.len != 2 {
+        return error { message = "native backend N1: `store_u8` expects exactly two u64 arguments (internal)" }
+    }
+    var addr = match lower_expr(ctx, c.args[0]) { Lowered as x => x; error as err => return err }
+    var value = match lower_expr(addr.ctx, c.args[1]) { Lowered as x => x; error as err => return err }
+    var with_store = ctx_append(value.ctx, store_inst(addr.vreg, value.vreg, LType::I8, e.line, e.col))
     Lowered { ctx = with_store; vreg = 0 to u32 }
 }
 
