@@ -637,59 +637,88 @@ fn next_token(source: str, pos: u64): Scan | error {
 }
 
 
+type LexStep = struct {
+    token: Token
+    start: u64
+    next: u64
+    has_token: bool
+    done: bool
+}
+
+fn empty_token(): Token {
+    Token { kind = TokenKind::Newline; text = ""; line = 0; col = 0; byte_off = 0 to u64; file = "" }
+}
+
+fn lex_step(source: str, pos: u64): LexStep | error {
+    var p = skip_spaces(source, pos)
+    if p >= source.len {
+        return LexStep { token = empty_token(); start = p; next = p; has_token = false; done = true }
+    }
+
+    var c = source[p]
+
+    if c == b'/' && at(source, p + 1) == b'/' {
+        return LexStep { token = empty_token(); start = p; next = skip_line(source, p); has_token = false; done = false }
+    }
+    if c == b'/' && at(source, p + 1) == b'*' {
+        if at(source, p + 2) == b'*' && at(source, p + 3) != b'/' {
+            var scan = match read_doc_comment(source, p) { Scan as sc => sc; error as e => return e }
+            return LexStep { token = scan.token; start = p; next = scan.next; has_token = true; done = false }
+        }
+        var np = match skip_block_comment(source, p) { u64 as q => q; error as e => return e }
+        return LexStep { token = empty_token(); start = p; next = np; has_token = false; done = false }
+    }
+    if c == b'\n' {
+        return LexStep { token = sym(source, p, 1, TokenKind::Newline).token; start = p; next = p + 1; has_token = true; done = false }
+    }
+
+    var scan = match next_token(source, p) {
+        Scan as sc => sc
+        error as e => return e
+    }
+    LexStep { token = scan.token; start = p; next = scan.next; has_token = true; done = false }
+}
+
+fn count_tokens(source: str): u64 | error {
+    var pos: u64 = 0
+    var n: u64 = 0
+    loop {
+        var step = match lex_step(source, pos) { LexStep as s => s; error as e => return e }
+        if step.done { break }
+        if step.has_token { n = n + 1 }
+        pos = step.next
+    }
+    n
+}
+
 pub fn tokenize(source: str): []Token | error {
     tokenize_file(source, "")
 }
 
 pub fn tokenize_file(source: str, file: str): []Token | error {
-    var pos: u64 = 0
-    var tokens: [source.len]Token = []
+    var ntok = match count_tokens(source) { u64 as n => n; error as e => return e }
+    var tokens: [ntok]Token = []
     var count: u64 = 0
+    var pos: u64 = 0
     var cur_pos: u64 = 0
     var cur_line: u32 = 1
     var cur_col: u32 = 1
 
     loop {
-        pos = skip_spaces(source, pos)
-        if pos >= source.len { break }
+        var step = match lex_step(source, pos) { LexStep as s => s; error as e => return e }
+        if step.done { break }
 
         loop {
-            if cur_pos >= pos { break }
+            if cur_pos >= step.start { break }
             if source[cur_pos] == b'\n' { cur_line = cur_line + 1; cur_col = 1 } else { cur_col = cur_col + 1 }
             cur_pos = cur_pos + 1
         }
 
-        var c = source[pos]
-
-        if c == b'/' && at(source, pos + 1) == b'/' {
-            pos = skip_line(source, pos)
-            continue
-        }
-        if c == b'/' && at(source, pos + 1) == b'*' {
-            if at(source, pos + 2) == b'*' && at(source, pos + 3) != b'/' {
-                var scan = match read_doc_comment(source, pos) { Scan as sc => sc; error as e => return e }
-                tokens[count] = stamp_loc(scan.token, cur_line, cur_col, pos, file)
-                count++
-                pos = scan.next
-                continue
-            }
-            pos = match skip_block_comment(source, pos) { u64 as p => p; error as e => return e }
-            continue
-        }
-        if c == b'\n' {
-            tokens[count] = stamp_loc(sym(source, pos, 1, TokenKind::Newline).token, cur_line, cur_col, pos, file)
+        if step.has_token {
+            tokens[count] = stamp_loc(step.token, cur_line, cur_col, step.start, file)
             count++
-            pos = pos + 1
-            continue
         }
-
-        var scan = match next_token(source, pos) {
-            Scan as sc => sc
-            error as e => return e
-        }
-        tokens[count] = stamp_loc(scan.token, cur_line, cur_col, pos, file)
-        count++
-        pos = scan.next
+        pos = step.next
     }
 
     teko::collections::arr_slice(tokens, 0, count)
