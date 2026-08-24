@@ -1,5 +1,26 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
+# RESEED (hand-harvest, isolated worktree, forward-only) — EXPURGO DO ALOCADOR C, FASE 0
+# (perf/codegen-arena-malloc). O codegen deixa de emitir malloc: os arrays/copias de slice/cstr que
+# eram malloc(N) passam a tk_region_alloc(tk_region_current(), N) — a MESMA regiao de escopo que o
+# ramo com-spread do array-literal ja usava (cai no scope-exit, sem UAF). Tres sitios em
+# src/codegen/codegen.tks: emit_array_lit (ramo sem-spread), emit_str_from_c (cstr_from_ptr) e
+# emit_as_r_in (slice-copy por conversao de elemento). O teko.c EMITIDO fica com ZERO malloc real (o
+# unico token `malloc` remanescente vive DENTRO de um literal de string — o codegen do blob de spawn,
+# que o compilador nunca dispara ao se compilar). O blob de spawn (emit_spawn_thunk_one) NAO foi
+# roteado: ele escapa cross-thread e o trampolim faz free(_raw), incompativel com memoria de regiao —
+# fica como fork reportado ao integrador.
+#   - gen0 linkado do bootstrap/teko.c ANTERIOR (sha256 ebf0842f..., 20 449 040 bytes) constroi gen1
+#     contra a source pos-FASE-0; gen1->gen2->gen3, gen2.c == gen3.c byte-identico (20 549 707 bytes,
+#     os bytes deste arquivo, sha256 4378fda0...). Reharvest: bootstrap/teko.c = gen2.c convergido.
+#     VALIDADO pos-reseed: gen0' linkado do NOVO bootstrap/teko.c reconstroi a arvore -> gen1'.c ==
+#     bootstrap/teko.c byte-identico (o DEGRAU se auto-reproduz pela rota C).
+#   - Pico RSS C-route (TEKO_BACKEND=c, TEKO_CC=clang), std gen2 apples-to-apples: baseline malloc
+#     3644.3 MB -> arena 3642.9 MB (-1.4 MB; rotear malloc-que-vaza para arena-que-dropa BAIXOU o
+#     pico). TEKO_MEM_PARANOID=1 dry build exit 0. Sob o guard ulimit -v 4718592.
+#   - O DEGRAU (bootstrap/DEGRAU) permanece declarado; o seed forcado agora = este compilador.
+#
+# ----------------------------------------------------------------------------------------------------
 # RESEED (hand-harvest, isolated worktree, forward-only) — FLOAT/FMT EXPURGO
 # (feat/issue-c-purge-io-exit-panic-float). The snprintf-based float/format family in teko_rt.c
 # (tk_ftoa / tk_fmt_f|e|g|d|x_upper|x_lower|b|p|n_f|n_i / tk_fmt_dyn_* / tk_f64_g17 + their _len
@@ -158,9 +179,12 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  67a17be9bdf3bf2dba126f758f643148211a9eddcbb2212f91785c39125c1ee4
+sha256:  4378fda0b949e5b7a05a540de5049f858f5af98737b959835def33cab7ad6f5d
 since:   0.3.1.0
-legacy:  91d8593421ae9bd77f8c15872f190c76be184794415399e6f2caab010dfb8520 — the let/mut retirement +
+legacy:  ebf0842f65c48804135ce541a6b5e59fe5d16c16bea1d6bfce26e098bd1c59f6 — the FLOAT/FMT EXPURGO
+         harvest this FASE-0 arena-malloc reseed supersedes (self-reproducible on rebuild of its own
+         tip; superseded by this reseed, not cherry-picked); and
+         91d8593421ae9bd77f8c15872f190c76be184794415399e6f2caab010dfb8520 — the let/mut retirement +
          §7 DI-completion combined harvest this reseed supersedes (self-reproducible on rebuild of
          its own tip at the time; superseded by the grouped-bind native lowering above, not
          cherry-picked); and 694a1b2d7cf8c40df1e3ae959f2cfbeffabe350b698a53666d7d5bcd88795aaf /

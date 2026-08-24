@@ -2989,7 +2989,7 @@ fn emit_str_from_c(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall, e
     emit_expr_ctx(buf, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx)
     buf.write($"); uint64_t {v}_max = (uint64_t)(")
     emit_expr_ctx(buf, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx)
-    buf.write($"); uint64_t {v}_n = 0; if ({v}_p != NULL) {{ while ({v}_n < {v}_max && {v}_p[{v}_n] != 0) {{ {v}_n++; }} }} uint8_t *{v}_buf = (uint8_t *)malloc({v}_n ? {v}_n : 1); if (!{v}_buf) abort(); for (uint64_t {v}_i = 0; {v}_i < {v}_n; {v}_i++) {{ {v}_buf[{v}_i] = {v}_p[{v}_i]; }} (tk_str){{ {v}_buf, {v}_n }}; }})")
+    buf.write($"); uint64_t {v}_n = 0; if ({v}_p != NULL) {{ while ({v}_n < {v}_max && {v}_p[{v}_n] != 0) {{ {v}_n++; }} }} uint8_t *{v}_buf = (uint8_t *)tk_region_alloc(tk_region_current(), {v}_n ? {v}_n : 1); for (uint64_t {v}_i = 0; {v}_i < {v}_n; {v}_i++) {{ {v}_buf[{v}_i] = {v}_p[{v}_i]; }} (tk_str){{ {v}_buf, {v}_n }}; }})")
 }
 
 fn emit_region_buf(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
@@ -3725,11 +3725,13 @@ fn emit_array_lit(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, a:
         var pN = $"_arr{buf.gensym()}"
         buf.write("({ ")
         emit_type(buf, prog, elem)
-        buf.write(" *"); buf.write(pN); buf.write(" = malloc(")
+        buf.write(" *"); buf.write(pN); buf.write(" = (")
+        emit_type(buf, prog, elem)
+        buf.write(" *)tk_region_alloc(tk_region_current(), ")
         cb_u64_digits(buf, a.elements.len)
         buf.write(" * sizeof(")
         emit_type(buf, prog, elem)
-        buf.write(")); if (!"); buf.write(pN); buf.write(") abort(); ")
+        buf.write(")); ")
         var i: u64 = 0
         loop {
             if i >= a.elements.len { break }
@@ -5030,9 +5032,9 @@ fn emit_as_r_in(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), expe
                         emit_type(buf, prog, T)
                         buf.write(" *"); buf.write(rp); buf.write(" = (")
                         emit_type(buf, prog, T)
-                        buf.write(" *)malloc("); buf.write(sv); buf.write(".len * sizeof(")
+                        buf.write(" *)tk_region_alloc(tk_region_current(), "); buf.write(sv); buf.write(".len * sizeof(")
                         emit_type(buf, prog, T)
-                        buf.write(")); if ("); buf.write(rp); buf.write(" == 0 && "); buf.write(sv); buf.write(".len) abort(); ")
+                        buf.write(")); ")
                         buf.write("for (uint64_t "); buf.write(ri); buf.write(" = 0; "); buf.write(ri); buf.write(" < "); buf.write(sv); buf.write(".len; "); buf.write(ri); buf.write(" += 1) { ")
                         buf.write(rp); buf.write("["); buf.write(ri); buf.write("] = ")
                         var elem = teko::str::concat(sv, teko::str::concat(".ptr[", teko::str::concat(ri, "]")))
