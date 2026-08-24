@@ -11,48 +11,69 @@ fn nidx_empty(): NameIndex {
     NameIndex { slots = [] }
 }
 
-fn nidx_merge(left: []NameSlot, right: []NameSlot): []NameSlot {
-    var total = left.len + right.len
-    var out: [total]NameSlot = []
-    var i: u64 = 0
-    var j: u64 = 0
-    var k: u64 = 0
+fn nidx_merge_run(src: []NameSlot, dst: ref []NameSlot, lo: u64, mid: u64, hi: u64) {
+    var i = lo
+    var j = mid
+    var k = lo
     loop {
-        if i >= left.len { break }
-        if j >= right.len { break }
-        if left[i].hash <= right[j].hash {
-            out[k] = left[i]
+        if i >= mid { break }
+        if j >= hi { break }
+        if src[i].hash <= src[j].hash {
+            dst[k] = src[i]
             k++
             i++
             continue
         }
-        out[k] = right[j]
+        dst[k] = src[j]
         k++
         j++
     }
-    loop { if i >= left.len { break }; out[k] = left[i]; k++; i++ }
-    loop { if j >= right.len { break }; out[k] = right[j]; k++; j++ }
+    loop { if i >= mid { break }; dst[k] = src[i]; k++; i++ }
+    loop { if j >= hi { break }; dst[k] = src[j]; k++; j++ }
+}
+
+fn nidx_merge_pass(src: []NameSlot, dst: ref []NameSlot, width: u64, n: u64) {
+    var lo: u64 = 0
+    loop {
+        if lo >= n { break }
+        var mid = lo + width
+        if mid > n { mid = n }
+        var hi = lo + width + width
+        if hi > n { hi = n }
+        nidx_merge_run(src, dst, lo, mid, hi)
+        lo = lo + width + width
+    }
+}
+
+fn nidx_copy_slots(slots: []NameSlot): []NameSlot {
+    var n = slots.len
+    var out: [n]NameSlot = []
+    var i: u64 = 0
+    loop { if i >= n { break }; out[i] = slots[i]; i++ }
     out
 }
 
-fn nidx_msort(xs: []NameSlot, lo: u64, hi: u64): []NameSlot {
-    if hi - lo <= 1 {
-        if hi - lo == 1 {
-            var one: [1]NameSlot = []
-            one[0] = xs[lo]
-            return one
-        }
-        var none: [0]NameSlot = []
-        return none
-    }
-    var mid = lo + (hi - lo) / 2
-    var left = nidx_msort(xs, lo, mid)
-    var right = nidx_msort(xs, mid, hi)
-    nidx_merge(left, right)
-}
-
 fn nidx_sorted(slots: []NameSlot): []NameSlot {
-    nidx_msort(slots, 0, slots.len)
+    var n = slots.len
+    if n <= 1 { return nidx_copy_slots(slots) }
+    var a: [n]NameSlot = []
+    var b: [n]NameSlot = []
+    var f: u64 = 0
+    loop { if f >= n { break }; a[f] = slots[f]; f++ }
+    var from_a = true
+    var width: u64 = 1
+    loop {
+        if width >= n { break }
+        if from_a {
+            nidx_merge_pass(a, b, width, n)
+        } else {
+            nidx_merge_pass(b, a, width, n)
+        }
+        from_a = !from_a
+        width = width + width
+    }
+    if from_a { return a }
+    b
 }
 
 fn nidx_build(names: []str): NameIndex {
