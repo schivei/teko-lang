@@ -1228,27 +1228,21 @@ fn union_normalize_null(members: []@Type()): []@Type() {
     out
 }
 
-fn variant_siblings(xs: []@Type(), skip: i64): []@Type() {
-    var count = xs.len
-    if skip >= 0 && (skip to u64) < xs.len { count = xs.len - 1 }
-    var out: [count]@Type() = []
-    var k: u64 = 0
-    var i = 0
-    loop {
-        if i >= xs.len { break }
-        if i != skip { out[k] = xs[i]; k++ }
-        i++
+fn sole_sibling_is_null(members: []@Type(), skip: u64): bool {
+    if members.len != 2 { return false }
+    var other = members[0]
+    if skip == 0 { other = members[1] }
+    match other {
+        Null => true
+        _ => false
     }
-    out
 }
 
-fn variant_member_admissible(member: @Type(), siblings: []@Type(), table: TypeTable): error | null {
+fn variant_member_admissible(member: @Type(), members: []@Type(), skip: u64, table: TypeTable): error | null {
     match member {
         Void => return error { message = "a variant member may not be `void`" }
         Reference => {
-            if siblings.len == 1 {
-                match siblings[0] { Null => return null; _ => { } }
-            }
+            if sole_sibling_is_null(members, skip) { return null }
             return error { message = "a reference cannot be stored in a struct/variant/collection" }
         }
         Named as nm => {
@@ -1304,10 +1298,10 @@ pub fn resolve_type(te: @TypeExpr(), table: TypeTable, ref_ns: str): @Type() | e
                 members[i] = m
                 i++
             }
-            var j = 0
+            var j: u64 = 0
             loop {
                 if j >= members.len { break }
-                match variant_member_admissible(members[j], variant_siblings(members, j), table) {
+                match variant_member_admissible(members[j], members, j, table) {
                     error as e => return e
                     null => { }
                 }
