@@ -29,7 +29,7 @@
 #                          references; sibling of runtime/ (rt_dir()'s <parent>/sys shape).
 # assert/assert.h does #include "../runtime/teko_rt.h", so runtime/ and assert/ MUST be
 # siblings and win32_compat.h MUST sit at the bundle root (teko_rt.c reaches it via ../).
-# Build line (POSIX):   cc -std=c23 -Iruntime -Iassert teko.c runtime/teko_rt.c assert/assert.c -lm -o teko
+# Build line (POSIX):   cc -std=c23 -Iruntime -Iassert teko.c runtime/teko_rt.c assert/assert.c -o teko
 #
 # Usage:
 #   package_release.sh <LABEL> <GEN2_DIR> <SRC_DIR> <OUT_DIR> [os]
@@ -137,7 +137,7 @@ case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*|Windows_NT) REL_PTHREAD="
 # shellcheck disable=SC2086  # REL_PTHREAD is a flag and must word-split.
 "$CC" -std=c23 -w $REL_PTHREAD -Iruntime -Iassert \
     teko.c runtime/teko_rt.c assert/assert.c \
-    -lm -o teko
+    -o teko
 echo "built ./teko"
 EOF
     chmod +x "$SSTAGE/build.sh"

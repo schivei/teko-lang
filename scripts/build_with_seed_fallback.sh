@@ -302,7 +302,7 @@ declared_degrau_rung() {
   # (`cannot execute 'cc1': CreateProcess`), and its MSVC-family linker has no `m.lib` so `-lm` is a
   # hard link error. clang (x86_64-pc-windows-msvc, already on the runner) is monolithic, fast, and
   # needs no libm — the same Windows rules build_cc_argv already applies for gen1 and beyond.
-  deg_cc="cc"; deg_std="-std=c2x"; deg_libm="-lm"; deg_tgt=""; deg_pthread="-pthread"; deg_syslibs=""
+  deg_cc="cc"; deg_std="-std=c2x"; deg_libm=""; deg_tgt=""; deg_pthread="-pthread"; deg_syslibs=""
   case "$(uname -s 2>/dev/null)" in
     # Windows: the §16 sync primitives call WaitOnAddress/WakeByAddressSingle/WakeByAddressAll, which
     # live in Synchronization.lib (an API-set lib, NOT auto-linked like kernel32). teko's own run_cc
