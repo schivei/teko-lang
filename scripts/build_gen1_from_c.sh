@@ -48,7 +48,7 @@ case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*|Windows_NT) GEN1_PTHREAD=
 # shellcheck disable=SC2086  # GEN1_PTHREAD/CFLAGS_EXTRA are flag LISTs and must word-split.
 "$CC" -std=c2x -w -g $GEN1_PTHREAD ${CFLAGS_EXTRA:-} \
     -I"$SRC/runtime" -I"$SRC/assert" \
-    "$TEKO_C" "$SRC/runtime/teko_rt.c" "$SRC/assert/assert.c" -lm \
+    "$TEKO_C" "$SRC/runtime/teko_rt.c" "$SRC/assert/assert.c" \
     -o "$OUT/teko"
 
 [ -x "$OUT/teko" ] || { echo "build_gen1_from_c: the link reported success but $OUT/teko is not executable" >&2; exit 1; }
