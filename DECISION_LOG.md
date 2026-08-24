@@ -853,3 +853,11 @@ Aperto do critério de aceite do §16 (dono): "o C final não pode conter depend
 - **SWEEP (F9) corrigido:** não é `cc bootstrap/teko.c -lm` — é `cc bootstrap/teko.c` **sem `-lm` e sem lib C**. O `-lm` do critério do mapa-mestre SAI.
 - **Prova de aceite por fase (novo ritual):** além do grep de `#include` sumido, cada fase prova **link zero-libc** do braço migrado (`nm`/`objdump`: nenhum símbolo libc/libm indefinido). Grep é necessário, não suficiente.
 - **Norte = native:** o zero-libc-C é o pré-requisito do backend native (que não linka header/lib C nenhum) → gen2/gen3 native sem emitir/depender de C. Cada fase mede-se contra esse norte. Corrigido nos dispatches do F1 e do arquiteto (refresh) em voo.
+
+### D86 · Fork #2 DISSOLVIDO — usar o linker da própria plataforma contra a ABI do SO; M-linker é só endgame native (dono 2026-08-24) ✅
+O dono: "Por que não pode usar o linker do próprio Windows?" — correto, dissolve o fork #2 (precedência do braço Windows de F6). Confusão do coordenador/arquiteto entre DUAS coisas:
+- **libc** = `msvcrt.dll`/`ucrtbase.dll` (C runtime) no Windows, `glibc`/`libm` no Linux → **é isto que o expurgo mata**.
+- **ABI do SO** = `kernel32.dll`/`ntdll.dll` (Windows), raw syscall (Linux), `libSystem` (macOS) → **é o que o SO expõe, MANTÉM-se** (é o equivalente do syscall; no Windows não há syscall cru estável, a ABI oficial é kernel32/ntdll).
+- **Linkagem:** `kernel32.lib` (import-lib do SDK) + `link.exe`/`lld-link` (o linker do próprio Windows) resolvem `extern fn … from "kernel32"` (R4 já ratificado). **NÃO precisa de M-linker próprio pro expurgo.** Cada braço fecha pelo linker da sua plataforma (ld/lld no Linux, ld64 no mac, link.exe/lld-link no Windows) contra a ABI do SO.
+- **O "M-linker próprio" é concern do ENDGAME NATIVE** (emitir objeto/binário linkável sem compilador C nenhum), NÃO um bloqueio do §16. Retrata a premissa do refresh (que marcou F6-Win "bloqueado no M-linker").
+- **Consequência:** o SWEEP F9 fecha 100% em TODOS os braços (POSIX+mac+Win) na rota C-emit, cada um linkando a ABI do seu SO pelo linker do seu SO, sem libc. Fork #2 morto. Resta só o fork #3 (transporte de canais no Windows sem AF_UNIX — arquitetura, a reportar em F7).
