@@ -284,6 +284,13 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
 - **Reseed** de `bootstrap/teko.c` quando mudança de **compilador** altera o C emitido: harvest local
   (fixpoint gen2==gen3), sem gate de provenance. **NÃO reseedar no meio: LIMPEZA PRIMEIRO, reseed só no
   fim, tudo junto** (dono 2026-08-18). Módulos-folha não exigem reseed.
+- **RESEED É INCONDICIONAL POR AGENTE — bateu o objetivo ou não (dono 2026-08-24).** Todo agente que
+  toca compiler-core reseeda `bootstrap/teko.c` ao FIM do seu trabalho, TENHA ou não atingido a meta
+  (memória, etc.): o reseed é a **prova do fixpoint** e deixa a branch **pronta pra dreno**, não é o
+  prêmio do objetivo. E o agente **deixa o gen2/gen3 no scratchpad** da sua worktree — senão um
+  reseed/dreno subsequente vira **rebuild inteiro à toa** (uma etapa a mais evitável). A decisão de
+  landar/descartar é do integrador/dono, downstream; o artefato do agente já vem completo e reseedado.
+  **PROIBIDO** ao coordenador condicionar o reseed ao objetivo no dispatch (meu erro, 2026-08-24).
 - **Teko é um monólito e precisa cross-compilar.** A perna C emite **UM** `teko.c`
   que compila em toda arquitetura/SO via `#if` do C — tem que **emitir tudo**
   (todos os alvos), não podar para o host que emite. Só o backend **native** emite
