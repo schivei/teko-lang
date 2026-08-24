@@ -1475,11 +1475,66 @@ fn skip_trivia(tokens: []lexer::Token, pos: u64): u64 {
     p
 }
 
+fn is_cc_region_marker_at(tokens: []lexer::Token, pos: u64): bool {
+    is_cc_if_start(tokens, pos) ||
+    is_cc_marker(tokens, pos, "elseif") ||
+    is_cc_marker(tokens, pos, "endif") ||
+    is_cc_else(tokens, pos)
+}
+
+fn is_core_decl_keyword_at(tokens: []lexer::Token, pos: u64): bool {
+    is_kind_at(tokens, pos, lexer::TokenKind::Fn) ||
+    is_kind_at(tokens, pos, lexer::TokenKind::Type) ||
+    is_kind_at(tokens, pos, lexer::TokenKind::Flags) ||
+    is_kind_at(tokens, pos, lexer::TokenKind::Const) ||
+    is_kind_at(tokens, pos, lexer::TokenKind::Macro) ||
+    is_kind_at(tokens, pos, lexer::TokenKind::Comptime)
+}
+
+fn count_module_decls(tokens: []lexer::Token, start: u64): u64 {
+    var p = start
+    var depth: u64 = 0
+    var pending = true
+    var count: u64 = 0
+    loop {
+        if !has_token(tokens, p) { break }
+        var k = tokens[p].kind
+        if k == lexer::TokenKind::LParen || k == lexer::TokenKind::LBrace || k == lexer::TokenKind::LBracket {
+            depth = depth + 1
+            p = p + 1
+            continue
+        }
+        if k == lexer::TokenKind::RParen || k == lexer::TokenKind::RBrace || k == lexer::TokenKind::RBracket {
+            if depth > 0 { depth = depth - 1 }
+            p = p + 1
+            continue
+        }
+        if depth != 0 { p = p + 1; continue }
+        if k == lexer::TokenKind::Semicolon || k == lexer::TokenKind::Newline {
+            pending = true
+            p = p + 1
+            continue
+        }
+        if k == lexer::TokenKind::Hash && is_cc_region_marker_at(tokens, p) {
+            pending = true
+            p = p + 1
+            continue
+        }
+        if pending && is_core_decl_keyword_at(tokens, p) {
+            count = count + 1
+            pending = false
+        }
+        p = p + 1
+    }
+    count
+}
+
 pub fn parse_module(tokens: []lexer::Token, pos: u64): Parsed<Module> | error {
     var hdr = match parse_use_header(tokens, pos) { ParsedList<UseDecl> as x => x; error as e => return e }
     var p = skip_trivia(tokens, hdr.next)
-    var decls: [tokens.len]@Decl() = []
-    var decl_guards: [tokens.len]Pred = []
+    var ndecls = count_module_decls(tokens, p)
+    var decls: [ndecls]@Decl() = []
+    var decl_guards: [ndecls]Pred = []
     var count: u64 = 0
     loop {
         if !has_token(tokens, p) { break }
@@ -1511,6 +1566,9 @@ pub fn parse_module(tokens: []lexer::Token, pos: u64): Parsed<Module> | error {
             return err_at(tokens, p, "expected ';' or a newline after a declaration")
         }
         p = skip_trivia(tokens, p)
+    }
+    if count == ndecls {
+        return Parsed<Module> { node = Module { uses = hdr.items; decls = decls; decl_guards = decl_guards }; next = p }
     }
     var out_decls: [count]@Decl() = []
     var out_guards: [count]Pred = []
