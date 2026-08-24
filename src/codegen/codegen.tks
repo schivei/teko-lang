@@ -3546,7 +3546,7 @@ fn emit_call_inner(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e
             else if last == "arch" { builtin = "tk_rt_arch"; has_builtin = true }
             else if last == "version" { builtin = "tk_rt_version"; has_builtin = true }
             else if last == "peak_rss" { builtin = "tk_peak_rss"; has_builtin = true }
-            else if last == "floor" { builtin = "__builtin_floor"; has_builtin = true }
+            else if last == "floor" { builtin = "tk_floor"; has_builtin = true }
         }
     }
     if !has_builtin && c.call_ns.len == 0 { panic("codegen: no resolved namespace") }
@@ -3836,7 +3836,7 @@ fn emit_slice_of_len(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr,
     buf.write(lenN)
     buf.write(" * sizeof(")
     emit_type(buf, prog, elem)
-    buf.write(")); memset(")
+    buf.write(")); tk_memset(")
     buf.write(ptrN)
     buf.write(", 0, ")
     buf.write(lenN)
@@ -7174,10 +7174,10 @@ fn cg_spawn_fat_bytes(prog: CgProg, t: @Type(), i: u64): str {
 
 fn emit_spawn_pack_field(buf: teko::io::FileStream, prog: CgProg, t: @Type(), i: u64) {
     match t {
-        checker::Str => buf.write($"    _tail = (char *)(((uintptr_t)_tail + 15u) & ~(uintptr_t)15u); memcpy(_tail, (const void *)a{i}.ptr, (size_t)a{i}.len); _c->a{i}.ptr = (const tk_byte *)_tail; _c->a{i}.len = a{i}.len; _tail += a{i}.len;\n")
+        checker::Str => buf.write($"    _tail = (char *)(((uintptr_t)_tail + 15u) & ~(uintptr_t)15u); tk_memcpy(_tail, (const void *)a{i}.ptr, (uintptr_t)a{i}.len); _c->a{i}.ptr = (const tk_byte *)_tail; _c->a{i}.len = a{i}.len; _tail += a{i}.len;\n")
         checker::Slice as sl => {
             var elem = cg_ctype_text(prog, sl.element)
-            buf.write($"    {{ size_t _n = (size_t)a{i}.len * sizeof({elem}); _tail = (char *)(((uintptr_t)_tail + 15u) & ~(uintptr_t)15u); memcpy(_tail, (const void *)a{i}.ptr, _n); _c->a{i}.ptr = ({elem} *)_tail; _c->a{i}.len = a{i}.len; _tail += _n; }}\n")
+            buf.write($"    {{ uintptr_t _n = (uintptr_t)a{i}.len * sizeof({elem}); _tail = (char *)(((uintptr_t)_tail + 15u) & ~(uintptr_t)15u); tk_memcpy(_tail, (const void *)a{i}.ptr, _n); _c->a{i}.ptr = ({elem} *)_tail; _c->a{i}.len = a{i}.len; _tail += _n; }}\n")
         }
         _ => buf.write($"    _c->a{i} = a{i};\n")
     }
@@ -9608,6 +9608,29 @@ fn cg_emit_fixed_width_typedefs(buf: teko::io::FileStream) {
     buf.write("typedef __UINTPTR_TYPE__ uintptr_t;\n")
 }
 
+fn cg_emit_libc_free_intrinsics(buf: teko::io::FileStream) {
+    buf.write("static double tk_floor(double x) {\n")
+    buf.write("    union { double f; unsigned long long i; } u; u.f = x;\n")
+    buf.write("    int e = (int)((u.i >> 52) & 0x7ff);\n")
+    buf.write("    if (e >= 0x3ff + 52 || x == 0.0) { return x; }\n")
+    buf.write("    double toint = 4503599627370496.0; double y;\n")
+    buf.write("    if ((u.i >> 63) != 0ull) { y = x - toint + toint - x; } else { y = x + toint - toint - x; }\n")
+    buf.write("    if (e <= 0x3ff - 1) { if ((u.i >> 63) != 0ull) { return -1.0; } return 0.0; }\n")
+    buf.write("    if (y > 0.0) { return x + y - 1.0; }\n")
+    buf.write("    return x + y;\n")
+    buf.write("}\n")
+    buf.write("static void *tk_memset(void *dst, int c, uintptr_t n) {\n")
+    buf.write("    unsigned char *d = (unsigned char *)dst; uintptr_t i = 0;\n")
+    buf.write("    while (i < n) { d[i] = (unsigned char)c; i = i + 1; }\n")
+    buf.write("    return dst;\n")
+    buf.write("}\n")
+    buf.write("static void *tk_memcpy(void *dst, const void *src, uintptr_t n) {\n")
+    buf.write("    unsigned char *d = (unsigned char *)dst; const unsigned char *s = (const unsigned char *)src; uintptr_t i = 0;\n")
+    buf.write("    while (i < n) { d[i] = s[i]; i = i + 1; }\n")
+    buf.write("    return dst;\n")
+    buf.write("}\n\n")
+}
+
 fn tk_emit_c_body(prog0: checker::TProgram, mode: CgMode, buf: teko::io::FileStream): error | null {
     cg_report_phase_rss("emit-start")
     var prog_ag = match checker::inline_aggregate_consts(prog0) { checker::TProgram as p => p; error as e => panic(e.message) }
@@ -9627,6 +9650,7 @@ fn tk_emit_c_body(prog0: checker::TProgram, mode: CgMode, buf: teko::io::FileStr
     buf.write("#pragma GCC diagnostic ignored \"-Wimplicit-function-declaration\"\n")
     buf.write("#pragma GCC diagnostic ignored \"-Wimplicit-int\"\n\n")
 
+    cg_emit_libc_free_intrinsics(buf)
     cg_emit_global_target_guard(buf)
     var sc_used = cg_scan_syscall_arities(prog)
     cg_emit_syscall_helpers(buf, sc_used)
