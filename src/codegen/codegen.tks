@@ -3109,7 +3109,10 @@ fn emit_str_from_c(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall, e
     emit_expr_ctx(buf, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx)
     buf.write($"); uint64_t {v}_max = (uint64_t)(")
     emit_expr_ctx(buf, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx)
-    buf.write($"); uint64_t {v}_n = 0; if ({v}_p != NULL) {{ while ({v}_n < {v}_max && {v}_p[{v}_n] != 0) {{ {v}_n++; }} }} uint8_t *{v}_buf = (uint8_t *)tk_region_alloc(tk_region_current(), {v}_n ? {v}_n : 1); for (uint64_t {v}_i = 0; {v}_i < {v}_n; {v}_i++) {{ {v}_buf[{v}_i] = {v}_p[{v}_i]; }} (tk_str){{ {v}_buf, {v}_n }}; }})")
+    buf.write($"); uint64_t {v}_n = 0; if ({v}_p != NULL) {{ while ({v}_n < {v}_max && {v}_p[{v}_n] != 0) {{ {v}_n++; }} }} uint8_t *{v}_buf = (uint8_t *)")
+    cb_arena_sym(buf, CgArenaSym::RegionAlloc)
+    buf.write("("); buf.write(cg_scratch_region_expr(regions))
+    buf.write($", {v}_n ? {v}_n : 1); for (uint64_t {v}_i = 0; {v}_i < {v}_n; {v}_i++) {{ {v}_buf[{v}_i] = {v}_p[{v}_i]; }} (tk_str){{ {v}_buf, {v}_n }}; }})")
 }
 
 fn emit_region_buf(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
@@ -3847,7 +3850,9 @@ fn emit_array_lit(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, a:
         emit_type(buf, prog, elem)
         buf.write(" *"); buf.write(pN); buf.write(" = (")
         emit_type(buf, prog, elem)
-        buf.write(" *)tk_region_alloc(tk_region_current(), ")
+        buf.write(" *)")
+        cb_arena_sym(buf, CgArenaSym::RegionAlloc)
+        buf.write("("); buf.write(cg_scratch_region_expr(regions)); buf.write(", ")
         cb_u64_digits(buf, a.elements.len)
         buf.write(" * sizeof(")
         emit_type(buf, prog, elem)
@@ -3878,7 +3883,7 @@ fn emit_array_lit(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, a:
     buf.write("({ ")
     cg_array_lit_bind_operands(buf, prog, e, a, elem, tag, escaping, regions, fn_body, dctx)
     cg_array_lit_total(buf, a, totN, tag)
-    cg_array_lit_alloc(buf, prog, elem, accN, totN, posN)
+    cg_array_lit_alloc(buf, prog, elem, accN, totN, posN, regions)
     cg_array_lit_fill(buf, a, accN, posN, tag)
     buf.write("(")
     cg_slice_typename(buf, elem)
@@ -3932,11 +3937,13 @@ fn cg_array_lit_total(buf: teko::io::FileStream, a: checker::TArrayLit, totN: st
     buf.write("; ")
 }
 
-fn cg_array_lit_alloc(buf: teko::io::FileStream, prog: CgProg, elem: @Type(), accN: str, totN: str, posN: str) {
+fn cg_array_lit_alloc(buf: teko::io::FileStream, prog: CgProg, elem: @Type(), accN: str, totN: str, posN: str, regions: []RegionFrame) {
     emit_type(buf, prog, elem)
     buf.write(" *"); buf.write(accN); buf.write(" = (")
     emit_type(buf, prog, elem)
-    buf.write(" *)tk_region_alloc(tk_region_current(), "); buf.write(totN); buf.write(" * sizeof(")
+    buf.write(" *)")
+    cb_arena_sym(buf, CgArenaSym::RegionAlloc)
+    buf.write("("); buf.write(cg_scratch_region_expr(regions)); buf.write(", "); buf.write(totN); buf.write(" * sizeof(")
     emit_type(buf, prog, elem)
     buf.write(")); uint64_t "); buf.write(posN); buf.write(" = 0; ")
 }
@@ -5219,7 +5226,9 @@ fn emit_as_r_in(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), expe
                         emit_type(buf, prog, T)
                         buf.write(" *"); buf.write(rp); buf.write(" = (")
                         emit_type(buf, prog, T)
-                        buf.write(" *)tk_region_alloc(tk_region_current(), "); buf.write(sv); buf.write(".len * sizeof(")
+                        buf.write(" *)")
+                        cb_arena_sym(buf, CgArenaSym::RegionAlloc)
+                        buf.write("("); buf.write(cg_scratch_region_expr(regions)); buf.write(", "); buf.write(sv); buf.write(".len * sizeof(")
                         emit_type(buf, prog, T)
                         buf.write(")); ")
                         buf.write("for (uint64_t "); buf.write(ri); buf.write(" = 0; "); buf.write(ri); buf.write(" < "); buf.write(sv); buf.write(".len; "); buf.write(ri); buf.write(" += 1) { ")
