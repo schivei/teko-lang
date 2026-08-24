@@ -1,5 +1,34 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
+# RESEED (hand-harvest, isolated worktree, forward-only) — FULL `teko build .` HABILITADO + GATE
+# ROTA-C (fix/full-build-and-tests). O `teko build .` completo (projeto INTEIRO + gate de testes,
+# regua D76) rodava so pela via NATIVE (backend deferido, D52), que estoura de memoria (>11 GB) e
+# para no degrau `syscall6`/`ar_mmap` — logo o full build nunca fechava. Correcoes em
+# src/build/project.tks: (1) `append_items` deixava de ser O(a*b) (o gate copiava ~9k itens por item
+# do harness = explosao de ~10 GB na arena append-only) e vira O(a+b) por pre-alocacao+indice;
+# `native_gate_drop_statements`/`native_gate_test_refs` viram FILTRO (pre-aloca+count+trim) e
+# `native_gate_harness_src` vira BUFFER de bytes em duas passadas — todos NO-PUSH; (2) o gate de
+# testes passa a HONRAR o backend: `run_gate`/`test_stage_build` roteiam pela via C
+# (`tk_emit_c_test_file` + `run_cc`, novos `c_gate_build`/`run_c_gate`/`test_gate_build`) quando
+# `TEKO_BACKEND=c`, evitando o native deferido — o native segue intocado (so deixa de ser exigido);
+# (3) `self_stage_argv` regrediu no expurgo de push (`[exe, ..args]` duplicava argv[0], quebrando o
+# re-exec de `teko test .` com "cannot enter project directory") — restaurado para `[exe, ..args[1..]]`.
+# So .tkt: dois fixtures de teste com sintaxe/dado invalidos (nunca exercitados porque o gate native
+# dava OOM antes de rodar) — `symbols_test.tkt` usava `fn len(self)` (self e receptor sintetico,
+# rejeitado) e `jsonrpc_test.tkt` declarava Content-Length: 34 para um corpo de 30 bytes.
+#   - gen0 linkado do bootstrap/teko.c ANTERIOR (sha256 4378fda0..., 20 549 707 bytes) constroi gen1
+#     contra a source pos-correcoes; gen1->gen2->gen3, gen2.c == gen3.c byte-identico (20 569 448
+#     bytes, os bytes deste arquivo, sha256 73aab480...). Reharvest: bootstrap/teko.c = gen2.c
+#     convergido. VALIDADO: gen0' linkado do NOVO bootstrap reconstroi a arvore -> gen1'.c ==
+#     bootstrap/teko.c byte-identico (o DEGRAU se auto-reproduz pela rota C).
+#   - `teko build .` FULL (via C, gate ligado): VERDE, 35/35 testes .tkt passam, binario construido;
+#     pico self-reported 3712.8 MB (NOVO BASELINE da regua D76). Build seco C-route: 1983 MB.
+#     `teko test .` excede o cap de 4,5 GB (OOM no build-stage ~4124 MB RSS; pico real sob cap de
+#     12 GB = 6016 MB) e a camada de REGRESSAO tem 12 falhas PRE-EXISTENTES (own_native/s16/s17 =
+#     native-deferido; "unknown When entry verb" = harness tkr; probe/refbind), fora do escopo.
+#   - O DEGRAU (bootstrap/DEGRAU) permanece declarado; o seed forcado agora = este compilador.
+#
+# ----------------------------------------------------------------------------------------------------
 # RESEED (hand-harvest, isolated worktree, forward-only) — EXPURGO DO ALOCADOR C, FASE 0
 # (perf/codegen-arena-malloc). O codegen deixa de emitir malloc: os arrays/copias de slice/cstr que
 # eram malloc(N) passam a tk_region_alloc(tk_region_current(), N) — a MESMA regiao de escopo que o
@@ -179,9 +208,12 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  4378fda0b949e5b7a05a540de5049f858f5af98737b959835def33cab7ad6f5d
+sha256:  73aab480f9be0597a42f6e7a23601b1352fae08a080daa90ab8b98afa8b714c5
 since:   0.3.1.0
-legacy:  ebf0842f65c48804135ce541a6b5e59fe5d16c16bea1d6bfce26e098bd1c59f6 — the FLOAT/FMT EXPURGO
+legacy:  4378fda0b949e5b7a05a540de5049f858f5af98737b959835def33cab7ad6f5d — the FASE-0 arena-malloc
+         harvest this FULL-BUILD/gate-C reseed supersedes (self-reproducible on rebuild of its own
+         tip; superseded by this reseed, not cherry-picked); and
+         ebf0842f65c48804135ce541a6b5e59fe5d16c16bea1d6bfce26e098bd1c59f6 — the FLOAT/FMT EXPURGO
          harvest this FASE-0 arena-malloc reseed supersedes (self-reproducible on rebuild of its own
          tip; superseded by this reseed, not cherry-picked); and
          91d8593421ae9bd77f8c15872f190c76be184794415399e6f2caab010dfb8520 — the let/mut retirement +
