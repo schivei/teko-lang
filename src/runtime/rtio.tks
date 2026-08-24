@@ -1,0 +1,70 @@
+#os("macos")
+extern fn rtio_write_raw(fd: i32, buf: u64, count: u64): i64 = "write" from "System"
+
+#os("windows")
+extern fn WriteFile(h: u64, buf: u64, n: u32, put: u64, ov: u64): i32 = "WriteFile" from "kernel32"
+
+#os("windows")
+extern fn GetStdHandle(which: i32): u64 = "GetStdHandle" from "kernel32"
+
+#os("linux")
+fn rtio_os_write(fd: i64, addr: i64, count: i64): i64 {
+    teko::sys::syscall3(teko::sys::SYS_WRITE, fd, addr, count)
+}
+
+#os("macos")
+fn rtio_os_write(fd: i64, addr: i64, count: i64): i64 {
+    rtio_write_raw(fd to i32, addr to u64, count to u64)
+}
+
+#os("windows")
+fn rtio_std_handle(fd: i64): u64 {
+    if fd == 2 { return GetStdHandle(-12 to i32) }
+    GetStdHandle(-11 to i32)
+}
+
+#os("windows")
+fn rtio_os_write(fd: i64, addr: i64, count: i64): i64 {
+    var put = teko::sys::ptr_word(teko::mem::buf_ptr(8)) to u64
+    teko::mem::store_u64(put, 0 to u64)
+    if WriteFile(rtio_std_handle(fd), addr to u64, count to u32, put, 0) == 0 { return -1 }
+    teko::mem::load_u64(put) to i64
+}
+
+fn rtio_write_all(fd: i64, s: str) {
+    if s.len == 0 { return }
+    var bytes = bytes_of_str(s)
+    var off: u64 = 0
+    loop {
+        if off >= s.len { break }
+        var addr = teko::sys::ptr_word(teko::mem::byte_ptr(bytes, off))
+        var n = rtio_os_write(fd, addr, (s.len - off) to i64)
+        if n <= 0 { break }
+        off = off + (n to u64)
+    }
+}
+
+/** teko::runtime::write — write `s` to stdout verbatim (no newline) via raw SYS_write, unbuffered. */
+exp fn write(s: str) { rtio_write_all(1, s) }
+
+/** teko::runtime::print — write `s` to stdout via raw SYS_write, unbuffered. */
+exp fn print(s: str) { rtio_write_all(1, s) }
+
+/** teko::runtime::println — write `s` then a newline to stdout via raw SYS_write, unbuffered. */
+exp fn println(s: str) { rtio_write_all(1, s); rtio_write_all(1, "\n") }
+
+/** teko::runtime::ewrite — write `s` to stderr verbatim (no newline) via raw SYS_write, unbuffered. */
+exp fn ewrite(s: str) { rtio_write_all(2, s) }
+
+/** teko::runtime::eprint — write `s` to stderr via raw SYS_write, unbuffered. */
+exp fn eprint(s: str) { rtio_write_all(2, s) }
+
+/** teko::runtime::eprintln — write `s` then a newline to stderr via raw SYS_write, unbuffered. */
+exp fn eprintln(s: str) { rtio_write_all(2, s); rtio_write_all(2, "\n") }
+
+/** teko::runtime::panic — write "teko: deliberate panic: <msg>" to stderr, then terminate the
+ * process with status 134. Diverges. */
+exp fn panic(msg: str) {
+    ewrite(teko::str::concat("teko: deliberate panic: ", msg, "\n"))
+    teko::runtime::rt_exit(134)
+}
