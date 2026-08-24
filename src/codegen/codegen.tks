@@ -1625,16 +1625,33 @@ fn union_repr_class(prog: CgProg, v: checker::Variant, forced_inline: bool): Uni
 }
 
 /**
- * Is this sum a large self-recursive union eligible for the `TagPtr` representation? A union that
- * reaches itself by value through any member is boxed today and sized to its worst-case member; the
- * member-count guard scopes the bite to the AST expression-kind family (`TExprKind`/`ExprKind`) and
- * leaves the smaller recursive sums (`Type`, `Pattern`, `ConstraintExpr`) on their existing path.
+ * Is this sum eligible for the `TagPtr` representation? A union laid out `InlineTag` is sized to its
+ * worst-case member, so every occurrence pays the largest variant even when it holds the smallest.
+ * `TagPtr` replaces that with a 24-byte wrapper plus a payload boxed at the exact per-member size,
+ * which lowers the dry-build peak whenever the waste is large enough (ratchet, D68). Two independent
+ * triggers select it: the self-recursive family (bite 1) and the size threshold (bite 2).
+ *
+ * @param prog the program under codegen
+ * @param v    the union to classify
+ * @return     true iff the recursive-sum trigger or the inline-size threshold fires
+ */
+fn cg_union_is_tagptr(prog: CgProg, v: checker::Variant): bool {
+    if cg_union_is_recursive_sum(prog, v) { return true }
+    cg_union_exceeds_inline_threshold(prog, v)
+}
+
+/**
+ * Does the union reach itself by value and carry more than 20 members? This is the bite-1 trigger:
+ * the self-referential AST expression-kind sums (`TExprKind` 26, `ExprKind` 27) are already boxed by
+ * `cg_field_boxed` and sized to their worst-case member, so `TagPtr` is a strict improvement. It is
+ * kept distinct from the size threshold so those two unions flip on a principled, size-independent
+ * ground regardless of how the threshold is calibrated.
  *
  * @param prog the program under codegen
  * @param v    the union to classify
  * @return     true iff some member reaches `v` by value and `v` has more than 20 members
  */
-fn cg_union_is_tagptr(prog: CgProg, v: checker::Variant): bool {
+fn cg_union_is_recursive_sum(prog: CgProg, v: checker::Variant): bool {
     if v.members.len <= 20 { return false }
     var union_t: @Type() = checker::Variant { members = v.members }
     var i = 0
@@ -1644,6 +1661,45 @@ fn cg_union_is_tagptr(prog: CgProg, v: checker::Variant): bool {
         i++
     }
     false
+}
+
+/**
+ * Does the union's worst-case inline size waste enough to justify the 24-byte `TagPtr` wrapper? This
+ * is the bite-2 trigger: a sum of at least six members whose largest variant is at least 56 bytes
+ * (by `cg_type_min_bytes`) is dominated by that variant, so boxing the payload at its exact size and
+ * shrinking every occurrence to the wrapper lowers the dry-build peak. Calibrated by ratchet: 56
+ * captures the AST sums that dimension-to-max (`Type`, `TStatement`/`Statement`, `Pattern`) and the
+ * large backend/IR sums, while leaving the smaller sums (`ConstraintExpr`, `TypeExpr`) inline where
+ * the wrapper would cost more than it saves. Null-bearing sums are excluded: they route through the
+ * niche / box / inline-null machinery, not the exact-box payload path.
+ *
+ * @param prog the program under codegen
+ * @param v    the union to classify
+ * @return     true iff `v` has at least six members, no `null` member, and a >= 56-byte largest member
+ */
+fn cg_union_exceeds_inline_threshold(prog: CgProg, v: checker::Variant): bool {
+    if v.members.len < 6 { return false }
+    if cg_variant_has_null(v) { return false }
+    cg_union_max_member_bytes(prog, v) >= (56 to u64)
+}
+
+/**
+ * The largest per-member size estimate, in bytes, across a union's members.
+ *
+ * @param prog the program under codegen
+ * @param v    the union whose members to measure
+ * @return     the maximum `cg_type_min_bytes` over every member, or 0 for an empty union
+ */
+fn cg_union_max_member_bytes(prog: CgProg, v: checker::Variant): u64 {
+    var mx = 0 to u64
+    var i = 0
+    loop {
+        if i >= v.members.len { break }
+        var b = cg_type_min_bytes(prog, v.members[i])
+        if b > mx { mx = b }
+        i++
+    }
+    mx
 }
 
 /**
