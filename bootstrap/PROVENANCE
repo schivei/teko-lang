@@ -1,5 +1,26 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
+# RESEED (hand-harvest, isolated worktree, forward-only) — F3 BITE "O GANHO" (D91,
+# expurgo/f3-bite-ganho). Os 4 sitios do codegen que emitiam tk_region_alloc(tk_region_current(), N)
+# como C LITERAL caiam na root-C do arena-C (nunca reclamada) e vazavam. Passam a emitir pelo provider
+# da tabela de arena: TK_ARENA_region_alloc(TK_ARENA_region_current(), N), via cb_arena_sym(RegionAlloc)
+# + cb_arena_sym(RegionCurrent), igual ao box-alloc ja escopado. Sitios (src/codegen/codegen.tks):
+# emit_str_from_c (cstr->str), emit_array_lit ramo sem-spread, cg_array_lit_alloc ramo com-spread,
+# emit_as_r slice-copy por conversao de elemento. A conversao TROCA SO O BACKEND do arena (tk_region_*
+# em C -> TK_ARENA_region_* no provider Teko) preservando region_current() como a regiao — o lifetime
+# runtime e' identico ao anterior, so muda que o arena Teko RECLAMA (o arena-C root nunca reclamava).
+# Sem UAF: usar TK_ARENA_region_current() (nao o frame de bloco interno) mantem a vida-util exata; os
+# 4 valores que podem escapar (retorno) caem na regiao corrente pos-drop, como antes.
+#   - gen0 linkado do bootstrap/teko.c ANTERIOR (sha256 b7f0bd64..., 20 517 687 bytes) constroi gen1
+#     contra a source pos-bite; gen1->gen2->gen3, gen2.c == gen3.c byte-identico (20 557 203 bytes, os
+#     bytes deste arquivo, sha256 8658b19b...). Reharvest: bootstrap/teko.c = gen2.c convergido.
+#   - Pico RSS C-route (TEKO_BACKEND=c, TEKO_CC=clang): a reclamacao aparece no gen3 (quando o
+#     compilador com o novo emit RODA): baseline gen3 1183.4 MB -> gen3 1114.8 MB (-68.6 MB). O gen2
+#     (construido pelo gen1, ainda de emit antigo) fica flat (1183.4 -> 1183.5 MB). TEKO_MEM_PARANOID=1
+#     dry build (gen2 reconstroi a source) exit 0, pico 1114.8 MB (poison-on-free, sem UAF/double-free).
+#     Sob o guard ulimit -v 4718592.
+#   - O DEGRAU (bootstrap/DEGRAU) permanece declarado; o seed forcado agora = este compilador.
+#
 # RESEED (hand-harvest, isolated worktree, forward-only) — FULL `teko build .` HABILITADO + GATE
 # ROTA-C (fix/full-build-and-tests). O `teko build .` completo (projeto INTEIRO + gate de testes,
 # regua D76) rodava so pela via NATIVE (backend deferido, D52), que estoura de memoria (>11 GB) e
@@ -208,9 +229,12 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  73aab480f9be0597a42f6e7a23601b1352fae08a080daa90ab8b98afa8b714c5
+sha256:  8658b19bb386b75e084335838b789b8245abc5b1e14f6174669341f961d1f919
 since:   0.3.1.0
-legacy:  4378fda0b949e5b7a05a540de5049f858f5af98737b959835def33cab7ad6f5d — the FASE-0 arena-malloc
+legacy:  b7f0bd64ae683db6b47256c68e455c5ef97de696179f3bb1f16fbb5f0569bd0b — the arena-provider-ladder
+         (all-OS parity) harvest this F3-bite reseed supersedes (self-reproducible on rebuild of its
+         own tip; superseded by this reseed, not cherry-picked); and
+         4378fda0b949e5b7a05a540de5049f858f5af98737b959835def33cab7ad6f5d — the FASE-0 arena-malloc
          harvest this FULL-BUILD/gate-C reseed supersedes (self-reproducible on rebuild of its own
          tip; superseded by this reseed, not cherry-picked); and
          ebf0842f65c48804135ce541a6b5e59fe5d16c16bea1d6bfce26e098bd1c59f6 — the FLOAT/FMT EXPURGO
