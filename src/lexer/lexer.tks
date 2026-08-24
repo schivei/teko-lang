@@ -326,6 +326,51 @@ fn str_close_at(source: str, p: u64, multiline: bool): bool {
     at(source, p + 1) == b'"' && at(source, p + 2) == b'"'
 }
 
+fn interp_raw_span(source: str, pos: u64, inner: u64, multiline: bool): u64 | error {
+    var p = inner
+    var depth: u64 = 0
+    loop {
+        if p >= source.len { return scan_err_at(source, pos, "unterminated interpolated string") }
+        var c = source[p]
+        if depth == 0 && c == b'{' && at(source, p + 1) == b'{' { p = p + 2; continue }
+        if depth == 0 && c == b'}' && at(source, p + 1) == b'}' { p = p + 2; continue }
+        if c == b'{' { depth = depth + 1; p++; continue }
+        if c == b'}' { if depth > 0 { depth = depth - 1 }; p++; continue }
+        if c == b'"' && depth == 0 {
+            if !multiline {
+                if at(source, p + 1) == b'"' { p = p + 2; continue }
+                return p
+            }
+            if str_close_at(source, p, true) { return p }
+        }
+        p++
+    }
+}
+
+fn str_body_span(source: str, pos: u64, inner: u64, has_verbatim: bool, multiline: bool): u64 | error {
+    var p = inner
+    loop {
+        if p >= source.len { return scan_err_at(source, pos, "unterminated string literal") }
+        var c = source[p]
+        if has_verbatim {
+            if !multiline && c == b'"' && at(source, p + 1) == b'"' { p = p + 2; continue }
+            if str_close_at(source, p, multiline) { return p }
+            p++
+            continue
+        }
+        if str_close_at(source, p, multiline) { return p }
+        if c == b'\\' {
+            var e = match escape_byte(source, p) {
+                EscByte as eb => eb
+                error as err => return err
+            }
+            p = e.next
+            continue
+        }
+        p++
+    }
+}
+
 fn read_string_body(source: str, pos: u64, inner: u64, has_interp: bool, has_verbatim: bool, multiline: bool): Scan | error {
     var delim: u64 = 1
     if multiline { delim = 3 }
@@ -351,9 +396,13 @@ fn read_string_body(source: str, pos: u64, inner: u64, has_interp: bool, has_ver
                 p++
             }
         }
+        var end = match interp_raw_span(source, pos, inner, multiline) {
+            u64 as s => s
+            error as err => return err
+        }
         var p = inner
         var depth: u64 = 0
-        var bytes: [source.len - inner]byte = []
+        var bytes: [end - inner]byte = []
         var n: u64 = 0
         loop {
             if p >= source.len { return scan_err_at(source, pos, "unterminated interpolated string") }
@@ -383,8 +432,12 @@ fn read_string_body(source: str, pos: u64, inner: u64, has_interp: bool, has_ver
             p++
         }
     }
+    var end = match str_body_span(source, pos, inner, has_verbatim, multiline) {
+        u64 as s => s
+        error as err => return err
+    }
     var p = inner
-    var bytes: [source.len - inner]byte = []
+    var bytes: [end - inner]byte = []
     var n: u64 = 0
     loop {
         if p >= source.len { return scan_err_at(source, pos, "unterminated string literal") }
