@@ -208,7 +208,7 @@ build_glibc() {
     # silently make this line wrong for any host still on the pre-fold split.
     bg_cc_line="cc -std=c2x -w -O2 -pthread -DTEKO_VERSION_STRING=$TEKO_VERSION_STRING \
         -I$R_SRC/runtime -I$R_SRC/assert \
-        $R_TEKO_C $R_SRC/runtime/teko_rt.c $R_SRC/assert/assert.c -lm -ldl \
+        $R_TEKO_C $R_SRC/runtime/teko_rt.c $R_SRC/assert/assert.c -ldl \
         -o $GD/teko"
 
     {
@@ -278,7 +278,7 @@ build_musl() {
     bm_static="-static"
     bm_cc_line="musl-gcc -std=c2x -w -O2 -pthread -DTEKO_VERSION_STRING=$TEKO_VERSION_STRING $bm_static \
         -I$R_SRC/runtime -I$R_SRC/assert \
-        $R_TEKO_C $R_SRC/runtime/teko_rt.c $R_SRC/assert/assert.c -lm -ldl \
+        $R_TEKO_C $R_SRC/runtime/teko_rt.c $R_SRC/assert/assert.c -ldl \
         -o $GD/teko"
 
     {

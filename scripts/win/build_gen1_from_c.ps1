@@ -3,10 +3,10 @@
 # Synchronization.lib for the §16 WaitOnAddress/WakeByAddress primitives.
 #
 # ── WHAT IT MIRRORS, AND THE ONE THING IT FIXES ───────────────────────────────────────────────
-# scripts/build_gen1_from_c.sh links a `teko.c` for the POSIX legs (cc + -lm + -pthread). Its
-# Windows branch only dropped -pthread and STILL passed `cc` and `-lm` — the very MinGW shape the
-# owner ruled out (2026-08-05 / 2026-08-18): MinGW gcc is "lento, obeso e fraco", its MSVC-family
-# linker has no `m.lib` so `-lm` is a hard link error, and its `cc1` breaks under any PATH wrapper.
+# scripts/build_gen1_from_c.sh links a `teko.c` for the POSIX legs (cc + -pthread; -lm dropped in
+# §16 F1 — the emitted C is libm-free). Its Windows branch used to pass `cc` and `-lm` — the very
+# MinGW shape the owner ruled out (2026-08-05 / 2026-08-18): MinGW gcc is "lento, obeso e fraco", its
+# MSVC-family linker has no `m.lib` so `-lm` is a hard link error, and its `cc1` breaks under any PATH wrapper.
 # This pwsh twin serves ONLY the Windows path and applies the same rules build_with_seed_fallback.sh's
 # `declared_degrau_rung` already applies for the degrau seed and that teko's own run_cc applies for
 # gen1+ ([extern.libs.windows]):
