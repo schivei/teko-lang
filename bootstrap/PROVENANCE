@@ -1,5 +1,39 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
+# RESEED (hand-harvest, isolated worktree, forward-only) — §16-FASE2 EXIT/WRITE/FLOAT
+# (expurgo/f2-exit-write-ftoa, D90). Migra o leg I/O + exit + float-bottom do teko.c emitido pra
+# zero-libc <stdio.h>/<stdlib.h>-exit:
+#   1. EXIT -> SYS_exit_group: o builtin `exit(code)` e o `panic` baixam pra teko::runtime::rt_exit
+#      (arena.tks, decl unica -> mangle sem sufixo de overload; despacha pra rt_exit_os #os: Linux
+#      syscall1(SYS_EXIT_GROUP), macOS _exit, Windows ExitProcess). O codegen reflete (codegen.tks:
+#      shortcut de `exit` -> cb_fn_name_str("teko::runtime","rt_exit")). Sai o `abort()` libc do
+#      teko.c (o unico call libc que restava no leg).
+#   2. STDOUT/STDERR -> SYS_write (SEM buffering, write direto): novo modulo-prelude
+#      src/runtime/rtio.tks (teko::runtime) com print/println/write/ewrite/eprint/eprintln +
+#      panic sobre rtio_write_all -> rtio_os_write (#os: Linux syscall3(SYS_WRITE), macOS write,
+#      Windows GetStdHandle+WriteFile). Seam str->(ptr,len): teko::sys::ptr_word(byte_ptr(bytes,off))
+#      + s.len; short-write faz loop no resto; retorno <0 (=-errno) encerra (sinal checado). O codegen
+#      roteia os shortcuts print/write/... -> teko::runtime::* (rtio, no prelude, alcanca TODO
+#      programa; nao so o self-build). rtio.tks injetado no rt_prelude_paths_for (project.tks).
+#      teko_rt.tks perde os externs de print/write/ewrite/... + rt_abort + panic (migrados p/ rtio).
+#   3. FLOAT-BOTTOM %.17g: JA landado no FLOAT/FMT EXPURGO (numfmt.tks, teko::runtime::f64_g17/ftoa)
+#      — este bite CONFIRMA o round-trip com o oraculo f64_g17_roundtrip (bateria de 16 doubles:
+#      +-0, 0.1, pi, max, min normal/subnormal, +-inf, nan; parse(f64_g17(x))==x bit-a-bit).
+#   - PROVA ZERO-LIBC: nm -u do objeto do teko.c emitido (clang -std=c2x -c) NAO lista fwrite/fputc/
+#     fputs/snprintf/vsnprintf/exit/_Exit/abort/puts/printf indefinidos; teko_teko__runtime__print/
+#     write/ewrite/println/panic/rt_exit definidos (T). Os tokens abort/snprintf/tk_* remanescentes
+#     no teko.c sao string-literals (dados do codegen/lower), nao chamadas.
+#   - gen0 linkado do bootstrap/teko.c ANTERIOR (73ef54f6...) constroi gen1 contra a source pos-bite;
+#     gen1->gen2->gen3, gen2.c == gen3.c byte-identico (20 592 213 bytes, os bytes deste arquivo,
+#     sha256 4e23b800...). Reharvest: bootstrap/teko.c = gen2.c convergido.
+#   - 3 fixtures (examples/regressions): sys_exit_group (exit 42), sys_write_stdout ("hi", exit 0),
+#     f64_g17_roundtrip ("roundtrip ok", exit 0). Todas verdes com gen2.
+#   - Pico RSS C-route (TEKO_BACKEND=c, TEKO_CC=clang): gen2 1116.5 MB / gen3 1116.9 MB (baseline
+#     mem* 1116.4 MB -> flat dentro do jitter run-a-run ~1-2 MB; o leg I/O+exit+panic saindo do C
+#     pro Teko nao cresce o piso). TEKO_MEM_PARANOID=1 dry build exit 0, pico 1116.8 MB. Sob o guard
+#     ulimit -v 4718592.
+#   - O DEGRAU (bootstrap/DEGRAU) permanece declarado; o seed forcado agora = este compilador.
+#
 # RESEED (hand-harvest, isolated worktree, forward-only) — MEM* FREESTANDING (D89/D85/D90,
 # expurgo/mem-freestanding). O backend sintetiza chamadas a memcpy/memset/memmove/memcmp a partir de
 # struct-copy/aggregate-init (nem -ffreestanding/-fno-builtin removem); hoje elas resolviam a' libc,
@@ -263,9 +297,12 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  73ef54f6313dc8228da42b8def47a8560c91599e385a939dceff02e9a1665fc8
+sha256:  4e23b800a89044b5ecee5ffbf31f8a3061ef2639139c00fafcc229c50d0039b4
 since:   0.3.1.0
-legacy:  8658b19bb386b75e084335838b789b8245abc5b1e14f6174669341f961d1f919 — the F3-bite "o ganho"
+legacy:  73ef54f6313dc8228da42b8def47a8560c91599e385a939dceff02e9a1665fc8 — the mem*-freestanding
+         harvest this §16-FASE2 exit/write/float reseed supersedes (self-reproducible on rebuild of
+         its own tip; superseded by this reseed, not cherry-picked); and
+         8658b19bb386b75e084335838b789b8245abc5b1e14f6174669341f961d1f919 — the F3-bite "o ganho"
          harvest this mem*-freestanding reseed supersedes (self-reproducible on rebuild of its own
          tip; superseded by this reseed, not cherry-picked); and
          b7f0bd64ae683db6b47256c68e455c5ef97de696179f3bb1f16fbb5f0569bd0b — the arena-provider-ladder
