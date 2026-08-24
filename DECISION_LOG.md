@@ -758,3 +758,16 @@ Continuação da campanha D71/D72 (Eixo A, bound-frouxo→exato, um corte por re
 - **Bite 3** (`a9ca8e2d`): `parser::parse_module` `decls`/`decl_guards` `[tokens.len]`→`[ndecls]` via `count_module_decls` (varredura barata side-effect-free: keywords-núcleo `fn/type/flags/const/macro/comptime` em depth-0; exata p/ entrada válida, com guarda de corte se over-count). Pico 2624→2241 (−383 MB). Fixpoint `4edd3123`. **Evitou o double-parse** (que dobraria a AST na arena e SUBIRIA a memória).
 - **TOTAL da campanha até aqui: 3648,1 → 2240,7 MB = −1407 MB (−39%).** Marco <3 GB cruzado no bite 1. Cada bite: fixpoint byte-idêntico + reseed + gen2/gen3 no scratchpad (lei reseed-incondicional).
 - **Próximo:** o ranking do D71 era pro pico de 3648; os 3 top sites de over-alloc foram cortados. **Re-censo no novo pico (2241 MB)** pra achar o novo dominante — candidatos: buckets de struct médio (~350 MB, o censo não caracterizou se são over-alloc), nós AST (`TExprKind` 338 MB — de-inline era rodapé a 3648, agora 15% de 2241), `type_param_table` (O(n²), 118 MB, algorítmico). Medir antes de cortar (não estimar).
+
+### D74 · Re-censo @2242 + bite 4 (variant_siblings O(n²)) — pico 1978 MB; over-alloc esgotado, restam alvos algorítmicos/de-inline (coordenador autônomo 2026-08-24) ✅
+**Re-censo por-sítio @ dafe8a39 (pico 2242,5 MB; arena mmap peak-live 1755,6 MB = 78% do RSS):** a mesa de over-alloc de bound frouxo ESGOTOU (os 3 cortes varreram o ≥16KB: 1743→383 MB, e o resto ≥16KB é `type_param_table` O(n²) + cópias exatas, não bound frouxo). Novo TOP:
+1. `TExprKind` 338 MB (1,168M nós, 304B) — LEGÍTIMO 1-por-nó (de-inline = lever arriscado, ~150-250 MB potenciais, toca todos os `match`).
+2. `variant_siblings` 252 MB — ALGORÍTMICO O(n²) ✂ (CORTADO no bite 4).
+3. `type_param_table` (resolve.tks:674) 118 MB — ALGORÍTMICO O(n²) rebuild ✂ (próximo).
+4-5. `TExpr` 72 + `Type` 72 — LEGÍTIMOS 1-por-nó.
+6. `nidx_merge` 57 — legítimo (mergesort exato).
+8. block-passes (type/mono/fold/lp) ~173 MB — LEGÍTIMO mas array de statements reconstruído ×4 passes (candidato a fusão/compartilhamento).
+- Nós AST = 483 MB (30% do pico), 1-por-nó legítimos (só caem com de-inline/intern/bit-packing — o #8 do dono).
+- **Bite 4 (`ef9aad01`):** `checker::variant_siblings` — removida; `variant_member_admissible` agora recebe `(members, skip)` e itera inline (helper `sole_sibling_is_null` pro ramo Reference). Behavior-preserving. Pico 2241→1978 (−263 MB, **cruzou sub-2 GB**). Fixpoint `60a3e8b5`, reseed.
+- **CAMPANHA TOTAL: 3648 → 1978 MB = −1670 MB (−46%).**
+- **Restam (tier mais difícil):** `type_param_table` O(n²) 118 MB (algorítmico, delicado — compartilhar tabela sem quebrar aliasing); block-pass fusion ~173 MB (mudança de pipeline); **de-inline `TExprKind` 338 MB** (refactor arriscado, todos os `match`); **bit-packing dos nós AST** (#8 do dono). Estes últimos são território de decisão do dono (approach/risk); pretendo fazer `type_param_table` (se limpo) e então PARAR pra alinhar rota com o dono (incl. a análise native que ele pediu pro fim da rodada).
