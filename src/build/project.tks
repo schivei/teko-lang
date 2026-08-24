@@ -2514,29 +2514,45 @@ fn gate_paths(od: str, m: Manifest): GatePaths {
 type TestRef = struct { namespace: str; name: str }
 
 fn native_gate_test_refs(items: []parser::Item): []TestRef {
-    var out: []TestRef = []
+    var kept: [items.len]TestRef = []
+    var count: u64 = 0
     var i: u64 = 0
     loop {
         if i >= items.len { break }
         match items[i].content {
-            parser::Function as f => { if f.is_test { out = [..out, TestRef { namespace = items[i].namespace; name = f.name }] } }
+            parser::Function as f => { if f.is_test { kept[count] = TestRef { namespace = items[i].namespace; name = f.name }; count = count + 1 } }
             _ => { }
         }
         i = i + 1
+    }
+    var out: [count]TestRef = []
+    var k: u64 = 0
+    loop {
+        if k >= count { break }
+        out[k] = kept[k]
+        k = k + 1
     }
     out
 }
 
 fn native_gate_drop_statements(items: []parser::Item): []parser::Item {
-    var out: []parser::Item = []
+    var kept: [items.len]parser::Item = []
+    var count: u64 = 0
     var i: u64 = 0
     loop {
         if i >= items.len { break }
         match items[i].content {
             (@Statement()) as _dropped => { }
-            _ => { out = [..out, items[i]] }
+            _ => { kept[count] = items[i]; count = count + 1 }
         }
         i = i + 1
+    }
+    var out: [count]parser::Item = []
+    var k: u64 = 0
+    loop {
+        if k >= count { break }
+        out[k] = kept[k]
+        k = k + 1
     }
     out
 }
@@ -2545,15 +2561,36 @@ fn native_gate_test_label(t: TestRef): str {
     if t.namespace.len > 0 { teko::str::concat(t.namespace, "::", t.name) } else { t.name }
 }
 
-fn native_gate_harness_src(refs: []TestRef): str {
-    var b = ""
+fn native_gate_harness_src(refs: []TestRef): str | error {
+    var total: u64 = 0
     var i: u64 = 0
     loop {
         if i >= refs.len { break }
-        b = teko::str::concat(b, teko::str::concat(native_gate_test_label(refs[i]), "()\n"))
+        total = total + native_gate_test_label(refs[i]).len + 3
         i = i + 1
     }
-    b
+    var buf: [total]byte = []
+    var k: u64 = 0
+    var j: u64 = 0
+    loop {
+        if j >= refs.len { break }
+        var label = native_gate_test_label(refs[j])
+        var li: u64 = 0
+        loop {
+            if li >= label.len { break }
+            buf[k] = label[li]
+            k = k + 1
+            li = li + 1
+        }
+        buf[k] = b'('
+        k = k + 1
+        buf[k] = b')'
+        k = k + 1
+        buf[k] = b'\n'
+        k = k + 1
+        j = j + 1
+    }
+    teko::text::str_from_utf8(buf)
 }
 
 fn native_gate_harness_items(proj_ns: str, src: str): []parser::Item | error {
@@ -2571,12 +2608,18 @@ fn native_gate_harness_items(proj_ns: str, src: str): []parser::Item | error {
 }
 
 fn append_items(a: []parser::Item, b: []parser::Item): []parser::Item {
-    var out = a
+    var out: [a.len + b.len]parser::Item = []
     var i: u64 = 0
     loop {
-        if i >= b.len { break }
-        out = [..out, b[i]]
+        if i >= a.len { break }
+        out[i] = a[i]
         i = i + 1
+    }
+    var j: u64 = 0
+    loop {
+        if j >= b.len { break }
+        out[a.len + j] = b[j]
+        j = j + 1
     }
     out
 }
@@ -2602,7 +2645,8 @@ fn native_gate_unmark_tests(prog: checker::TProgram): checker::TProgram {
 fn native_gate_program(pf: ParsedFront, tty: bool): checker::TProgram | error {
     var refs = native_gate_test_refs(pf.parsed.items)
     var kept = native_gate_drop_statements(pf.parsed.items)
-    var harness_items = match native_gate_harness_items(pf.manifest.name, native_gate_harness_src(refs)) {
+    var harness_src = match native_gate_harness_src(refs) { str as s => s; error as e => return e }
+    var harness_items = match native_gate_harness_items(pf.manifest.name, harness_src) {
         []parser::Item as items => items
         error as e => return e
     }
@@ -2722,8 +2766,34 @@ fn run_gate_native(dir: str, out_dir: str, gen_cov: bool, fe: Frontend, pf: Pars
     release_build_of(dir, out_dir, opt, tty, start, backend, pf, debug)
 }
 
+fn c_gate_build(dir: str, od: str, gp: GatePaths, fe: Frontend): i32 {
+    var m = fe.manifest
+    match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the output directory"); null => { } }
+    match codegen::tk_emit_c_test_file(fe.prog, false, gp.cfile, codegen::tk_emit_meta(m.name, m.version, m.suffix, m.description)) { u64 => { }; error as e => return fail(dir, e.message) }
+    if run_cc(gp.cfile, gp.binp, m, fe.prog, 0) != 0 { return fail(dir, "cc failed to build the test gate") }
+    0
+}
+
+fn run_c_gate(dir: str, out_dir: str, fe: Frontend): i32 {
+    var od = gate_out_dir(out_dir)
+    var gp = gate_paths(od, fe.manifest)
+    var brc = c_gate_build(dir, od, gp, fe)
+    if brc != 0 { return brc }
+    var argv = [gp.binp]
+    teko::process::run(argv)
+}
+
+fn run_gate_c(dir: str, out_dir: str, fe: Frontend, pf: ParsedFront, opt: i32, tty: bool, start: i64, backend: Backend, debug: DebugInfo): i32 {
+    var trc = run_c_gate(dir, out_dir, fe)
+    if trc != 0 { return trc }
+    release_build_of(dir, out_dir, opt, tty, start, backend, pf, debug)
+}
+
 fn run_gate(dir: str, out_dir: str, gen_cov: bool, fe: Frontend, pf: ParsedFront, opt: i32, tty: bool, start: i64, backend: Backend, cov_validation: bool, debug: DebugInfo): i32 {
-    run_gate_native(dir, out_dir, gen_cov, fe, pf, opt, tty, start, backend, cov_validation, debug)
+    if backend == Backend::Native {
+        return run_gate_native(dir, out_dir, gen_cov, fe, pf, opt, tty, start, backend, cov_validation, debug)
+    }
+    run_gate_c(dir, out_dir, fe, pf, opt, tty, start, backend, debug)
 }
 
 fn build_no_tests_present(dir: str, out_dir: str, fe: Frontend, opt: i32, tty: bool, start: i64, backend: Backend, debug: DebugInfo): i32 { codegen_and_report(dir, out_dir, fe.prog, with_backend(fe.manifest, backend), opt, tty, start, debug) }
@@ -3684,10 +3754,17 @@ fn test_stage_build(dir: str): i32 {
     report_arith_cast_rate(fe)
     var smrc = emit_sitemap_file(dir, GATE_OUT_DIR, fe.manifest, fe.prog)
     if smrc != 0 { return smrc }
-    var brc = native_gate_build(dir, GATE_OUT_DIR, gate_paths(GATE_OUT_DIR, fe.manifest), pf, fe.manifest, tty)
+    var brc = test_gate_build(dir, GATE_OUT_DIR, gate_paths(GATE_OUT_DIR, fe.manifest), fe, pf, tty)
     if brc != 0 { return brc }
     build_regression_feed_exe(fe.manifest, fe.prog)
     0
+}
+
+fn test_gate_build(dir: str, od: str, gp: GatePaths, fe: Frontend, pf: ParsedFront, tty: bool): i32 {
+    if c_backend_selected() {
+        return c_gate_build(dir, od, gp, fe)
+    }
+    native_gate_build(dir, od, gp, pf, fe.manifest, tty)
 }
 
 fn sitemap_path(od: str, m: Manifest): str {
@@ -3804,7 +3881,16 @@ fn stage_rc_of_env(key: str): i32 {
 
 fn self_stage_argv(exe: str): []str {
     var args = teko::env::args()
-    [exe, ..args]
+    if args.len == 0 { return [exe] }
+    var out: [args.len]str = []
+    out[0] = exe
+    var i: u64 = 1
+    loop {
+        if i >= args.len { break }
+        out[i] = args[i]
+        i = i + 1
+    }
+    out
 }
 
 fn test_gate_precedence(trc: i32, floor_rc: i32, per_commit_rc: i32, has_regr: bool, regr_rc: i32): i32 {
