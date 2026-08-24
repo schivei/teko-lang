@@ -1533,7 +1533,17 @@ fn cg_union_tag_ctype(buf: teko::io::FileStream, v: checker::Variant) {
     }
 }
 
-type UnionRepr = enum { Niche; InlineTag; BoxInArena }
+/**
+ * The C representation chosen for a tagged union (sum).
+ *
+ * @member Niche       two-member `X | null` where `X` carries a spare bit-pattern; no tag word.
+ * @member InlineTag   `struct { tag; union { <every member sized to the max> } as; }`.
+ * @member BoxInArena  two-member `X | null` where the present value is heap-boxed and `null` is 0.
+ * @member TagPtr      `struct { tag; void *payload; uint64_t len; }` with the payload boxed at the
+ *                     EXACT per-member size; mirrors the native backend wrapper (24 B). Chosen for
+ *                     large self-recursive sums, which InlineTag would otherwise size to the worst case.
+ */
+type UnionRepr = enum { Niche; InlineTag; BoxInArena; TagPtr }
 
 fn cg_type_min_bytes(prog: CgProg, x: @Type()): u64 {
     cg_type_min_bytes_d(prog, x, 0)
@@ -1610,7 +1620,92 @@ fn union_repr_class(prog: CgProg, v: checker::Variant, forced_inline: bool): Uni
         (@Type()) as _gt5 => return UnionRepr::BoxInArena
         null => { }
     }
+    if cg_union_is_tagptr(prog, v) { return UnionRepr::TagPtr }
     UnionRepr::InlineTag
+}
+
+/**
+ * Is this sum a large self-recursive union eligible for the `TagPtr` representation? A union that
+ * reaches itself by value through any member is boxed today and sized to its worst-case member; the
+ * member-count guard scopes the bite to the AST expression-kind family (`TExprKind`/`ExprKind`) and
+ * leaves the smaller recursive sums (`Type`, `Pattern`, `ConstraintExpr`) on their existing path.
+ *
+ * @param prog the program under codegen
+ * @param v    the union to classify
+ * @return     true iff some member reaches `v` by value and `v` has more than 20 members
+ */
+fn cg_union_is_tagptr(prog: CgProg, v: checker::Variant): bool {
+    if v.members.len <= 20 { return false }
+    var union_t: @Type() = checker::Variant { members = v.members }
+    var i = 0
+    loop {
+        if i >= v.members.len { break }
+        if cg_union_inline_recursive(prog, union_t, v.members[i]) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * Does the union at `expected` use the `TagPtr` representation?
+ *
+ * @param prog     the program under codegen
+ * @param expected the type to inspect (only anonymous `checker::Variant` sums can be `TagPtr`)
+ * @return         true iff `union_repr_class` classifies it as `TagPtr`
+ */
+fn cg_variant_repr_is_tagptr(prog: CgProg, expected: @Type()): bool {
+    match expected {
+        checker::Variant as va => match union_repr_class(prog, va, false) {
+            UnionRepr::TagPtr => true
+            _ => false
+        }
+        _ => false
+    }
+}
+
+/**
+ * The declared type of the member whose C key is `key` in the variant, or `null` when absent.
+ *
+ * @param prog the program under codegen
+ * @param v    the variant type
+ * @param key  the mangled member key to match
+ * @return     the member's type, or `null` if no member carries that key
+ */
+fn cg_variant_member_type_of_key(prog: CgProg, v: @Type(), key: str): @Type() | null {
+    var n = cg_var_nmem(prog, v)
+    var i = 0
+    loop {
+        if i >= n { break }
+        var mk = match cg_var_mkey(prog, v, i) { str as s => s; error => "" }
+        if mk == key { return cg_var_mtype(prog, v, i) }
+        i++
+    }
+    null
+}
+
+/**
+ * Emit a read of the `key` member payload of a `TagPtr`-or-`InlineTag` union `subj`. For `InlineTag`
+ * this is `subj.as.<key>`; for `TagPtr` it dereferences the exact-typed box at `subj.payload`.
+ *
+ * @param prog  the program under codegen
+ * @param buf   the output stream
+ * @param subj  the C expression naming the wrapper value
+ * @param subjT the variant type of `subj`
+ * @param key   the mangled member key being read
+ */
+fn cg_emit_union_member_access(buf: teko::io::FileStream, prog: CgProg, subj: str, subjT: @Type(), key: str) {
+    if cg_variant_repr_is_tagptr(prog, subjT) {
+        var mt = match cg_variant_member_type_of_key(prog, subjT, key) { (@Type()) as t => t; null => checker::Void { } }
+        buf.write("(*(")
+        buf.write(emit_type_str(prog, mt))
+        buf.write(" *)")
+        buf.write(subj)
+        buf.write(".payload)")
+        return
+    }
+    buf.write(subj)
+    buf.write(".as.")
+    buf.write(key)
 }
 
 fn cg_union_inline_recursive(prog: CgProg, union_t: @Type(), x: @Type()): bool {
@@ -2322,9 +2417,7 @@ fn cg_emit_variant_member_cmp(buf: teko::io::FileStream, prog: CgProg, cmp: CgVa
     cb_upper(buf, mk)
     if is_null_member { buf.write("); })"); return }
     buf.write(if eq { " && " } else { " || " })
-    buf.write(tmp)
-    buf.write(".as.")
-    cg_member_key(buf, cmp.member.type)
+    cg_emit_union_member_access(buf, prog, tmp, checker::Variant { members = cmp.variant_type.members }, mk)
     buf.write(if eq { " == (" } else { " != (" })
     emit_expr_ctx(buf, prog, checker::Void { }, cmp.member, escaping, regions, fn_body, dctx)
     buf.write(")); })")
@@ -4473,6 +4566,73 @@ fn cg_wrap_open(buf: teko::io::FileStream, v: @Type(), mkey: str) {
     }
 }
 
+/**
+ * Open a union-member wrapper, choosing the representation. For `TagPtr` this emits the compound
+ * literal `(<wrapper>){ .tag = ..., .payload = ({ <MT> *_ubx = tk_region_alloc(...); *_ubx = ` and
+ * returns the box-variable name to close with; otherwise it defers to `cg_wrap_open` and returns "".
+ *
+ * @param prog     the program under codegen
+ * @param buf      the output stream
+ * @param expected the variant type being constructed
+ * @param mkey     the C key of the member the value fills
+ * @return         the fresh box-variable name for `TagPtr`, or "" for the inline path
+ */
+fn cg_wrap_open_r(buf: teko::io::FileStream, prog: CgProg, expected: @Type(), mkey: str): str {
+    if !cg_variant_repr_is_tagptr(prog, expected) {
+        cg_wrap_open(buf, expected, mkey)
+        return ""
+    }
+    var va = match expected { checker::Variant as v => v; _ => panic("codegen: cg_wrap_open_r TagPtr on a non-variant (internal)") }
+    var mt = match cg_variant_member_type_of_key(prog, expected, mkey) { (@Type()) as t => t; null => checker::Void { } }
+    var bxN = fresh_named("_ubx", buf.gensym() to i64)
+    buf.write("(")
+    cg_variant_typename(buf, va)
+    buf.write("){ .tag = TK_TAG_U")
+    var j = 0
+    loop {
+        if j >= va.members.len { break }
+        buf.write("_")
+        var kj = match cg_member_key_str(va.members[j]) { str as s => s; error as err => panic(err.message) }
+        cb_upper(buf, kj)
+        j++
+    }
+    buf.write("_")
+    cb_upper(buf, mkey)
+    buf.write(", .payload = ({ ")
+    emit_type(buf, prog, mt)
+    buf.write(" *")
+    buf.write(bxN)
+    buf.write(" = ")
+    cb_arena_sym(buf, CgArenaSym::RegionAlloc)
+    buf.write("(")
+    cb_arena_sym(buf, CgArenaSym::RegionCurrent)
+    buf.write("(), sizeof(")
+    emit_type(buf, prog, mt)
+    buf.write(")); *")
+    buf.write(bxN)
+    buf.write(" = ")
+    bxN
+}
+
+/**
+ * Close a wrapper opened by `cg_wrap_open_r`. For `TagPtr` this finishes the boxed payload
+ * statement-expression and the `.len` field; otherwise it emits the plain `}`.
+ *
+ * @param prog     the program under codegen
+ * @param buf      the output stream
+ * @param expected the variant type being constructed
+ * @param bxN      the box-variable name returned by `cg_wrap_open_r` (empty for the inline path)
+ */
+fn cg_wrap_close_r(buf: teko::io::FileStream, prog: CgProg, expected: @Type(), bxN: str) {
+    if !cg_variant_repr_is_tagptr(prog, expected) {
+        buf.write(" }")
+        return
+    }
+    buf.write("; ")
+    buf.write(bxN)
+    buf.write("; }), .len = 0 }")
+}
+
 fn emit_variant_wrap(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), expected: @Type(), value: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
     match expected {
         checker::Variant as bva => match cg_union_box_member(prog, bva) {
@@ -4504,9 +4664,9 @@ fn emit_variant_wrap_exact_pass(buf: teko::io::FileStream, prog: CgProg, ret_typ
         if i >= n { break }
         var mk = match cg_var_mkey(prog, expected, i) { str as s => s; error => "" }
         if mk == vkey {
-            cg_wrap_open(buf, expected, vkey)
+            var bx = cg_wrap_open_r(buf, prog, expected, vkey)
             emit_expr_ret(buf, prog, ret_type, value)
-            buf.write(" }")
+            cg_wrap_close_r(buf, prog, expected, bx)
             return true
         }
         i++
@@ -4521,9 +4681,9 @@ fn emit_variant_wrap_widen_pass(buf: teko::io::FileStream, prog: CgProg, ret_typ
         var wmt = cg_var_mtype(prog, expected, w)
         if cg_member_reached_via_subclass(prog, wmt, vkey) {
             var wmk = match cg_var_mkey(prog, expected, w) { str as s => s; error => "" }
-            cg_wrap_open(buf, expected, wmk)
+            var bx = cg_wrap_open_r(buf, prog, expected, wmk)
             emit_as_r(buf, prog, ret_type, wmt, value, escaping, regions, fn_body, dctx)
-            buf.write(" }")
+            cg_wrap_close_r(buf, prog, expected, bx)
             return true
         }
         w++
@@ -4539,9 +4699,9 @@ fn emit_variant_wrap_transitive_pass(buf: teko::io::FileStream, prog: CgProg, re
         if cg_is_variant_type(prog, mt) {
             if cg_var_reaches(prog, mt, vkey, 16) {
                 var mk = match cg_var_mkey(prog, expected, j) { str as s => s; error => "" }
-                cg_wrap_open(buf, expected, mk)
+                var bx = cg_wrap_open_r(buf, prog, expected, mk)
                 emit_variant_wrap(buf, prog, ret_type, mt, value, escaping, regions, fn_body, dctx)
-                buf.write(" }")
+                cg_wrap_close_r(buf, prog, expected, bx)
                 return true
             }
         }
@@ -4558,9 +4718,9 @@ fn emit_variant_wrap_str(buf: teko::io::FileStream, prog: CgProg, expected: @Typ
         if i >= n { break }
         var mk = match cg_var_mkey(prog, expected, i) { str as s => s; error => "" }
         if mk == vkey {
-            cg_wrap_open(buf, expected, vkey)
+            var bx = cg_wrap_open_r(buf, prog, expected, vkey)
             buf.write(cexpr)
-            buf.write(" }")
+            cg_wrap_close_r(buf, prog, expected, bx)
             return
         }
         i++
@@ -4572,9 +4732,9 @@ fn emit_variant_wrap_str(buf: teko::io::FileStream, prog: CgProg, expected: @Typ
         if cg_is_variant_type(prog, mt) {
             if cg_var_reaches(prog, mt, vkey, 16) {
                 var mk = match cg_var_mkey(prog, expected, j) { str as s => s; error => "" }
-                cg_wrap_open(buf, expected, mk)
+                var bx = cg_wrap_open_r(buf, prog, expected, mk)
                 emit_variant_wrap_str(buf, prog, mt, vtype, cexpr)
-                buf.write(" }")
+                cg_wrap_close_r(buf, prog, expected, bx)
                 return
             }
         }
@@ -5448,10 +5608,8 @@ fn emit_pat_binds(buf: teko::io::FileStream, prog: CgProg, pat: @Pattern(), subj
                 buf.write("auto ")
                 buf.write(bp.binding)
                 buf.write(" = ")
-                buf.write(subj)
-                buf.write(".as.")
                 var ck = match cg_case_key_qualified(prog, subjT, pat) { str as s => s; error as err => panic(err.message) }
-                buf.write(ck)
+                cg_emit_union_member_access(buf, prog, subj, subjT, ck)
                 buf.write(";\n")
             }
         }
@@ -5463,10 +5621,8 @@ fn emit_pat_binds(buf: teko::io::FileStream, prog: CgProg, pat: @Pattern(), subj
                 buf.write("auto ")
                 buf.write(fp.fields[i])
                 buf.write(" = ")
-                buf.write(subj)
-                buf.write(".as.")
                 var ck = match cg_case_key_qualified(prog, subjT, pat) { str as s => s; error as err => panic(err.message) }
-                buf.write(ck)
+                cg_emit_union_member_access(buf, prog, subj, subjT, ck)
                 buf.write(".")
                 buf.write(fp.fields[i])
                 buf.write(";\n")
@@ -5478,10 +5634,8 @@ fn emit_pat_binds(buf: teko::io::FileStream, prog: CgProg, pat: @Pattern(), subj
             buf.write("auto ")
             buf.write(gp.binding)
             buf.write(" = ")
-            buf.write(subj)
-            buf.write(".as.")
             var ck = match cg_case_key_qualified(prog, subjT, pat) { str as s => s; error as err => panic(err.message) }
-            buf.write(ck)
+            cg_emit_union_member_access(buf, prog, subj, subjT, ck)
             buf.write(";\n")
         }
         _ => { }
@@ -7836,7 +7990,14 @@ fn cg_emit_inline_variant_typedef(buf: teko::io::FileStream, prog: CgProg, v: ch
     cg_variant_typename(buf, v)
     buf.write(" {\n    ")
     cg_union_tag_ctype(buf, v)
-    buf.write(" tag;\n    union {\n")
+    buf.write(" tag;\n")
+    if cg_union_is_tagptr(prog, v) {
+        buf.write("    void *payload;\n    uint64_t len;\n} ")
+        cg_variant_typename(buf, v)
+        buf.write(";\n")
+        return
+    }
+    buf.write("    union {\n")
     var m = 0
     loop {
         if m >= v.members.len { break }
@@ -8144,11 +8305,13 @@ fn cg_emit_types_ordered(buf: teko::io::FileStream, prog: CgProg) {
                 var ready = true
                 match vt {
                     checker::Variant as va => {
-                        var m = 0
-                        loop {
-                            if m >= va.members.len { break }
-                            if !cg_type_ready(prog, em, set, va.members[m]) { ready = false; break }
-                            m++
+                        if !cg_union_is_tagptr(prog, va) {
+                            var m = 0
+                            loop {
+                                if m >= va.members.len { break }
+                                if !cg_type_ready(prog, em, set, va.members[m]) { ready = false; break }
+                                m++
+                            }
                         }
                     }
                     _ => { }
