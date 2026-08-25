@@ -3069,6 +3069,10 @@ fn emit_ref_word(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall, esc
     buf.write("))")
 }
 
+fn emit_environ_addr(buf: teko::io::FileStream) {
+    buf.write("((int64_t)(uintptr_t)&environ)")
+}
+
 fn emit_ptr_wrap(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
     if c.args.len != 1 { panic("codegen: __wrap expects one (receiver) argument (internal)") }
     if c.type_args.len != 1 { panic("codegen: __wrap expects one type argument (internal)") }
@@ -3407,11 +3411,8 @@ fn emit_call_inner(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e
             if l == "write_file" { return emit_host_ffi(buf, prog, e, c, "ures", "tk_rt_write_file", escaping, regions, fn_body, dctx) }
             if l == "write_file_bytes" { return emit_host_ffi(buf, prog, e, c, "ures_byteslice", "tk_rt_write_file_bytes", escaping, regions, fn_body, dctx) }
             if l == "chdir" { return emit_host_ffi(buf, prog, e, c, "ures", "tk_rt_chdir", escaping, regions, fn_body, dctx) }
-            if l == "mkdir" { return emit_host_ffi(buf, prog, e, c, "ures", "tk_rt_mkdir", escaping, regions, fn_body, dctx) }
-            if l == "remove_file" { return emit_host_ffi(buf, prog, e, c, "ures", "tk_rt_remove_file", escaping, regions, fn_body, dctx) }
             if l == "cwd" { return emit_host_ffi(buf, prog, e, c, "sres", "tk_rt_getcwd", escaping, regions, fn_body, dctx) }
             if l == "set_var" { return emit_host_ffi(buf, prog, e, c, "ures", "tk_rt_setenv", escaping, regions, fn_body, dctx) }
-            if l == "list_dir" { return emit_host_ffi(buf, prog, e, c, "slres", "tk_rt_list_dir", escaping, regions, fn_body, dctx) }
             if l == "last_index_of" { return emit_host_ffi(buf, prog, e, c, "u64res", "tk_rt_last_index_of", escaping, regions, fn_body, dctx) }
             if l == "args" { return emit_host_ffi(buf, prog, e, c, "args", "tk_rt_args", escaping, regions, fn_body, dctx) }
             if l == "run" { return emit_host_ffi(buf, prog, e, c, "run", "tk_rt_run", escaping, regions, fn_body, dctx) }
@@ -3423,6 +3424,7 @@ fn emit_call_inner(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e
             if l == "as_cstr" { return emit_as_cstr(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "str_from_c" { return emit_str_from_c(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "region_buf" { return emit_region_buf(buf, prog, c, escaping, regions, fn_body, dctx) }
+            if l == "environ_addr" { return emit_environ_addr(buf) }
             if l == "ptr_word" { return emit_ptr_word(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "word_ptr" { return emit_word_ptr(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "load_u64" { return emit_load_u64(buf, prog, c, escaping, regions, fn_body, dctx) }
@@ -3535,7 +3537,7 @@ fn emit_call_inner(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e
             else if last == "os" { builtin = "tk_rt_os"; has_builtin = true }
             else if last == "arch" { builtin = "tk_rt_arch"; has_builtin = true }
             else if last == "version" { builtin = "tk_rt_version"; has_builtin = true }
-            else if last == "peak_rss" { builtin = "tk_peak_rss"; has_builtin = true }
+            else if last == "peak_rss" { builtin = cb_fn_name_str("teko::runtime", "peak_rss"); has_builtin = true }
             else if last == "floor" { builtin = "tk_floor"; has_builtin = true }
         }
     }
@@ -9352,6 +9354,10 @@ fn cg_emit_syscall_helpers_aarch64(buf: teko::io::FileStream, used: SyscallUse) 
     if used.s6 { buf.write(cg_emit_syscall_helper_text_aarch64(6 to u64)) }
 }
 
+fn cg_emit_environ_decl(buf: teko::io::FileStream) {
+    buf.write("#if !defined(_WIN32)\nextern char **environ;\n#endif\n\n")
+}
+
 fn cg_emit_syscall_helpers(buf: teko::io::FileStream, used: SyscallUse) {
     if !cg_syscall_use_any(used) { return }
     buf.write("#if defined(__x86_64__) || defined(__amd64__)\n")
@@ -9574,8 +9580,6 @@ pub fn tk_emit_c_test_analyze_file(prog0: checker::TProgram, out_path: str, meta
     cg_emit_c_file_mode(prog0, CgMode::TestAnalyze, out_path, meta, false)
 }
 
-extern fn cg_cur_rss(): u64 = "tk_cur_rss" from "teko_rt"
-
 fn cg_phase_rss_enabled(): bool {
     match teko::env::var("TEKO_PHASE_RSS") { str as v => v == "1"; error => false }
 }
@@ -9587,7 +9591,7 @@ fn cg_mb_tenths(bytes: u64): str {
 
 fn cg_report_phase_rss(label: str) {
     if !cg_phase_rss_enabled() { return }
-    var cur = cg_cur_rss()
+    var cur = teko::runtime::cur_rss()
     if cur == 0 { return }
     teko::io::eprintln($"teko: memory: codegen {label}: cur {cg_mb_tenths(cur)} MB / peak {cg_mb_tenths(teko::mem::peak_rss())} MB")
 }
@@ -9662,6 +9666,7 @@ fn tk_emit_c_body(prog0: checker::TProgram, mode: CgMode, buf: teko::io::FileStr
     cg_emit_global_target_guard(buf)
     var sc_used = cg_scan_syscall_arities(prog)
     cg_emit_syscall_helpers(buf, sc_used)
+    cg_emit_environ_decl(buf)
     cg_emit_cond_const_ladder(buf, prog)
     cg_emit_arena_provider_ladder(buf)
     cg_emit_thread_clone_helper(buf, sc_used.clone)

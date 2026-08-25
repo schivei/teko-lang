@@ -46,13 +46,93 @@ const DATE_DAYS_MAX: i64 = 2147483647
 
 const DATE_DAYS_MIN: i64 = -2147483648
 
-extern fn wall_days(): i32 = "tk_rt_wall_days" from "teko_rt"
+#os("linux")
+fn clock_read_ns(clockid: i64): i64 {
+    var ts = teko::sys::ptr_word(teko::mem::buf_ptr(16))
+    _ = teko::sys::syscall2(teko::sys::SYS_CLOCK_GETTIME, clockid, ts)
+    (teko::mem::load_u64(ts to u64) to i64) * 1000000000 + (teko::mem::load_u64((ts + 8) to u64) to i64)
+}
 
-extern fn wall_ns_of_day(): u64 = "tk_rt_wall_ns_of_day" from "teko_rt"
+#os("linux")
+fn wall_now_ns(): i64 {
+    clock_read_ns(teko::sys::CLOCK_REALTIME to i64)
+}
+
+#os("linux")
+fn mono_now_ns(): i64 {
+    clock_read_ns(teko::sys::CLOCK_MONOTONIC to i64)
+}
+
+#os("macos")
+extern fn os_clock_gettime(clk: i32, ts: u64): i32 = "clock_gettime" from "System"
+
+#os("macos")
+fn clock_read_ns(clockid: i32): i64 {
+    var ts = teko::sys::ptr_word(teko::mem::buf_ptr(16))
+    _ = os_clock_gettime(clockid, ts to u64)
+    (teko::mem::load_u64(ts to u64) to i64) * 1000000000 + (teko::mem::load_u64((ts + 8) to u64) to i64)
+}
+
+#os("macos")
+fn wall_now_ns(): i64 {
+    clock_read_ns(teko::sys::CLOCK_REALTIME)
+}
+
+#os("macos")
+fn mono_now_ns(): i64 {
+    clock_read_ns(teko::sys::CLOCK_MONOTONIC)
+}
+
+#os("windows")
+extern fn GetSystemTimePreciseAsFileTime(ft: u64) = "GetSystemTimePreciseAsFileTime" from "kernel32"
+
+#os("windows")
+extern fn QueryPerformanceCounter(c: u64): i32 = "QueryPerformanceCounter" from "kernel32"
+
+#os("windows")
+extern fn QueryPerformanceFrequency(f: u64): i32 = "QueryPerformanceFrequency" from "kernel32"
+
+#os("windows")
+fn wall_now_ns(): i64 {
+    var ft = teko::sys::ptr_word(teko::mem::buf_ptr(8))
+    GetSystemTimePreciseAsFileTime(ft to u64)
+    var ticks = teko::mem::load_u64(ft to u64) to i64
+    (ticks - 116444736000000000) * 100
+}
+
+#os("windows")
+fn mono_now_ns(): i64 {
+    var f = teko::sys::ptr_word(teko::mem::buf_ptr(8))
+    var c = teko::sys::ptr_word(teko::mem::buf_ptr(8))
+    _ = QueryPerformanceFrequency(f to u64)
+    _ = QueryPerformanceCounter(c to u64)
+    var freq = teko::mem::load_u64(f to u64) to i64
+    var cnt = teko::mem::load_u64(c to u64) to i64
+    if freq == 0 { return 0 }
+    (cnt / freq) * 1000000000 + ((cnt % freq) * 1000000000) / freq
+}
 
 extern fn wall_offset_minutes(): i16 = "tk_rt_wall_offset_minutes" from "teko_rt"
 
-extern fn monotonic_ns(): i64 = "tk_rt_monotonic_ns" from "teko_rt"
+fn wall_days(): i32 {
+    var secs = wall_now_ns() / 1000000000
+    if secs >= 0 { return (secs / 86400) to i32 }
+    ((secs - 86399) / 86400) to i32
+}
+
+fn wall_ns_of_day(): u64 {
+    var ns = wall_now_ns()
+    var day_ns: i64 = 86400 * 1000000000
+    var rem = ns % day_ns
+    if rem < 0 { rem = rem + day_ns }
+    rem to u64
+}
+
+/** teko::time::monotonic_ns — a monotonic-clock reading in nanoseconds; meaningful only against
+ * another reading from the same process run. */
+exp fn monotonic_ns(): i64 {
+    mono_now_ns()
+}
 
 /** teko::time::date_from_days — a `date` from an explicit days-since-epoch value. */
 exp fn date_from_days(days: i32): date {

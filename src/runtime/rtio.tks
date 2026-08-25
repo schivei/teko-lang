@@ -68,3 +68,83 @@ exp fn panic(msg: str) {
     ewrite(teko::str::concat("teko: deliberate panic: ", msg, "\n"))
     teko::runtime::rt_exit(134)
 }
+
+#os("linux")
+fn peak_rss_impl(): u64 {
+    var rbuf = teko::sys::ptr_word(teko::mem::buf_ptr(256))
+    var r = teko::sys::syscall2(teko::sys::SYS_GETRUSAGE, teko::sys::RUSAGE_SELF, rbuf)
+    if r < 0 { return 0 }
+    teko::mem::load_u64((rbuf + 32) to u64) * 1024
+}
+
+#os("macos")
+extern fn os_getrusage(who: i32, rbuf: u64): i32 = "getrusage" from "System"
+
+#os("macos")
+fn peak_rss_impl(): u64 {
+    var rbuf = teko::sys::ptr_word(teko::mem::buf_ptr(256))
+    var r = os_getrusage(teko::sys::RUSAGE_SELF to i32, rbuf to u64)
+    if r != 0 { return 0 }
+    teko::mem::load_u64((rbuf + 32) to u64)
+}
+
+#os("windows")
+fn peak_rss_impl(): u64 {
+    0
+}
+
+/** teko::runtime::peak_rss — this process's peak resident set size in bytes (0 when unavailable). */
+exp fn peak_rss(): u64 {
+    peak_rss_impl()
+}
+
+#os("linux")
+fn statm_resident_bytes(addr: i64, n: u64): u64 {
+    var i: u64 = 0
+    loop {
+        if i >= n { return 0 }
+        if teko::mem::load_u8((addr + (i to i64)) to u64) == 32 { break }
+        i = i + 1
+    }
+    loop {
+        if i >= n { return 0 }
+        if teko::mem::load_u8((addr + (i to i64)) to u64) != 32 { break }
+        i = i + 1
+    }
+    var pages: u64 = 0
+    loop {
+        if i >= n { break }
+        var c = teko::mem::load_u8((addr + (i to i64)) to u64)
+        if c < 48 || c > 57 { break }
+        pages = pages * 10 + (c - 48)
+        i = i + 1
+    }
+    pages * 4096
+}
+
+#os("linux")
+fn cur_rss_impl(): u64 {
+    var path = teko::sys::ptr_word(teko::mem::as_cstr("/proc/self/statm"))
+    var fd = teko::sys::syscall4(teko::sys::SYS_OPENAT, teko::sys::AT_FDCWD, path, teko::sys::O_RDONLY, 0)
+    if fd < 0 { return 0 }
+    var buf = teko::sys::ptr_word(teko::mem::buf_ptr(128))
+    var got = teko::sys::syscall3(teko::sys::SYS_READ, fd, buf, 127)
+    _ = teko::sys::syscall1(teko::sys::SYS_CLOSE, fd)
+    if got <= 0 { return 0 }
+    statm_resident_bytes(buf, got to u64)
+}
+
+#os("macos")
+fn cur_rss_impl(): u64 {
+    0
+}
+
+#os("windows")
+fn cur_rss_impl(): u64 {
+    0
+}
+
+/** teko::runtime::cur_rss — this process's current resident set size in bytes (0 when unavailable). */
+exp fn cur_rss(): u64 {
+    cur_rss_impl()
+}
