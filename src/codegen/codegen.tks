@@ -806,6 +806,42 @@ fn cg_is_class_named(prog: CgProg, name: str): bool {
     }
 }
 
+fn cg_extern_native_tag(prog: CgProg, name: str): str | null {
+    match cg_find_decl(prog, name) {
+        parser::TypeDecl as td => match td.body {
+            parser::ExternStructBody as esb => if esb.c_tag.len > 0 { esb.c_tag } else { null }
+            _ => null
+        }
+        error => null
+    }
+}
+
+fn cg_class_body_is_poly(cb: parser::ClassBody): bool {
+    match cb.kind { parser::ClassKind::Sealed => false; _ => true }
+}
+
+fn cg_emit_named_ctype(buf: teko::io::FileStream, prog: CgProg, name: str) {
+    match cg_find_decl(prog, name) {
+        parser::TypeDecl as td => match td.body {
+            parser::ClassBody as cb => if cg_class_body_is_poly(cb) { buf.write("tk_base_"); cb_tysym(buf, name) } else { mangle_type_name(buf, "", name); buf.write(" *") }
+            parser::ExternStructBody as esb => if esb.c_tag.len > 0 { buf.write("struct "); buf.write(esb.c_tag) } else { mangle_type_name(buf, "", name) }
+            _ => mangle_type_name(buf, "", name)
+        }
+        error => mangle_type_name(buf, "", name)
+    }
+}
+
+fn cg_named_ctype_str(prog: CgProg, name: str): str {
+    match cg_find_decl(prog, name) {
+        parser::TypeDecl as td => match td.body {
+            parser::ClassBody as cb => if cg_class_body_is_poly(cb) { teko::str::concat("tk_base_", cb_tysym_str(name)) } else { teko::str::concat(mangle_type_name_str("", name), " *") }
+            parser::ExternStructBody as esb => if esb.c_tag.len > 0 { teko::str::concat("struct ", esb.c_tag) } else { mangle_type_name_str("", name) }
+            _ => mangle_type_name_str("", name)
+        }
+        error => mangle_type_name_str("", name)
+    }
+}
+
 fn cg_is_interface_named(prog: CgProg, name: str): bool {
     match cg_find_decl(prog, name) {
         parser::TypeDecl as td => match td.body { parser::InterfaceBody => true; _ => false }
@@ -1122,11 +1158,7 @@ fn emit_type(buf: teko::io::FileStream, prog: CgProg, t: @Type()) {
             checker::Void => panic("codegen: an untyped empty slice needs a known element type from context (internal)")
             _ => cg_slice_typename(buf, sl.element)
         }
-        checker::Named as nm => {
-            if cg_is_polymorphic_base(prog, nm.name) { buf.write("tk_base_"); cb_tysym(buf, nm.name) }
-            else if cg_is_class_named(prog, nm.name) { mangle_type_name(buf, "", nm.name); buf.write(" *") }
-            else { mangle_type_name(buf, "", nm.name) }
-        }
+        checker::Named as nm => cg_emit_named_ctype(buf, prog, nm.name)
         checker::Variant as va => match cg_union_niche_member(prog, va) {
             (@Type()) as x => emit_type(buf, prog, x)
             null => match cg_union_box_member(prog, va) {
@@ -1157,11 +1189,7 @@ fn emit_type_str(prog: CgProg, t: @Type()): str {
             checker::Void => panic("codegen: an untyped empty slice needs a known element type from context (internal)")
             _ => teko::str::concat("tk_slice_", match cg_opt_mangle_str(sl.element) { str as s => s; error as e => panic(e.message) })
         }
-        checker::Named as nm => {
-            if cg_is_polymorphic_base(prog, nm.name) { teko::str::concat("tk_base_", cb_tysym_str(nm.name)) }
-            else if cg_is_class_named(prog, nm.name) { teko::str::concat(mangle_type_name_str("", nm.name), " *") }
-            else { mangle_type_name_str("", nm.name) }
-        }
+        checker::Named as nm => cg_named_ctype_str(prog, nm.name)
         checker::Variant as va => match cg_union_niche_member(prog, va) {
             (@Type()) as x => emit_type_str(prog, x)
             null => match cg_union_box_member(prog, va) {
@@ -1993,6 +2021,7 @@ fn emit_type_expr(buf: teko::io::FileStream, prog: CgProg, te: @TypeExpr(), ref_
             match cg_find_decl_ns(prog, nt.path, ref_ns) {
                 parser::TypeDecl as cd => match cd.body {
                     parser::ClassBody => { mangle_type_name(buf, "", cdname); buf.write(" *"); return }
+                    parser::ExternStructBody as esb => if esb.c_tag.len > 0 { buf.write("struct "); buf.write(esb.c_tag); return }
                     _ => { }
                 }
                 error => { }
@@ -4235,7 +4264,10 @@ fn emit_struct_init_literal(buf: teko::io::FileStream, prog: CgProg, e: checker:
         _ => panic("codegen: struct literal with a non-named type not yet supported")
     }
     buf.write("(")
-    mangle_type_name(buf, "", name)
+    match cg_extern_native_tag(prog, name) {
+        str as tag => { buf.write("struct "); buf.write(tag) }
+        null => mangle_type_name(buf, "", name)
+    }
     buf.write("){ ")
     var i = 0
     loop {
@@ -7732,6 +7764,7 @@ fn emit_type_decl(buf: teko::io::FileStream, prog: CgProg, d: parser::TypeDecl) 
 }
 
 fn emit_extern_struct_typedef(buf: teko::io::FileStream, prog: CgProg, d: parser::TypeDecl, esb: parser::ExternStructBody) {
+    if esb.c_tag.len > 0 { return }
     buf.write("typedef struct ")
     mangle_type_name(buf, "", d.name)
     buf.write(" {\n")
@@ -9738,7 +9771,7 @@ fn cg_emit_forward_typedef(buf: teko::io::FileStream, d: parser::TypeDecl) {
             mangle_type_name(buf, "", d.name)
             buf.write(";\n")
         }
-        parser::ExternStructBody => cg_emit_forward_struct_typedef(buf, d.name)
+        parser::ExternStructBody as esb => if esb.c_tag.len == 0 { cg_emit_forward_struct_typedef(buf, d.name) }
         _ => { }
     }
 }
