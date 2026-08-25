@@ -365,3 +365,303 @@ pub fn intern_reset() {
     teko::runtime::set_intern_region_slot(0)
     teko::runtime::set_intern_table_slot(0)
 }
+
+const NAMES_GEN_SHIFT: u64 = 32
+
+const NAMES_SLOT_MASK: u64 = 4294967295
+
+const NAMES_NO_SLOT: u64 = 4294967295
+
+const NAMES_GEN_MAX: u64 = 4294967295
+
+const NAMES_INITIAL_CAP: u64 = 16
+
+const NAMES_KIND_CELL: u64 = 1
+
+const NAMES_OK: i64 = 0
+
+const NAMES_ERR_UNKNOWN: i64 = -1
+
+const NAMES_ERR_CLOSED: i64 = -2
+
+const NAMES_ERR_KIND: i64 = -3
+
+const NAMES_NO_VALUE: i64 = -9223372036854775807 - 1
+
+const NS_TABLE: u64 = 0
+
+const NS_CAP: u64 = 8
+
+const NS_USED: u64 = 16
+
+const NS_LIVE: u64 = 24
+
+const NS_FREE: u64 = 32
+
+const NS_BYTES: u64 = 40
+
+const NAME_RESOURCE: u64 = 0
+
+const NAME_GEN: u64 = 8
+
+const NAME_KIND: u64 = 16
+
+const NAME_NEXT_FREE: u64 = 24
+
+const NAME_LIVE: u64 = 32
+
+const NAME_SLOT_BYTES: u64 = 40
+
+/**
+ * Returns the name-registry state block, allocating and initializing it in the program region the
+ * first time the registry is touched so the handle table is program-resident (survives task exit).
+ *
+ * @return  the state-block address
+ */
+fn names_state(): u64 {
+    var existing = teko::runtime::names_state_slot()
+    if existing != 0 { return existing }
+    var block = teko::sys::ptr_word(teko::runtime::region_alloc(teko::runtime::region_program(), NS_BYTES)) to u64
+    teko::mem::store_u64(block + NS_TABLE, 0)
+    teko::mem::store_u64(block + NS_CAP, 0)
+    teko::mem::store_u64(block + NS_USED, 0)
+    teko::mem::store_u64(block + NS_LIVE, 0)
+    teko::mem::store_u64(block + NS_FREE, NAMES_NO_SLOT)
+    teko::runtime::set_names_state_slot(block)
+    block
+}
+
+/**
+ * Returns the address of slot `index` within the registry's slot array.
+ *
+ * @param st     the registry state block
+ * @param index  the zero-based slot index
+ * @return       the slot's base address
+ */
+fn names_slot_addr(st: u64, index: u64): u64 {
+    teko::mem::load_u64(st + NS_TABLE) + index * NAME_SLOT_BYTES
+}
+
+/**
+ * Doubles the slot array inside the program region and copies the live prefix over. The bump
+ * allocator has no realloc, so the previous array is abandoned until process exit.
+ *
+ * @param st  the registry state block
+ * @return    true when the array grew, false when the index space is exhausted
+ */
+fn names_grow(st: u64): bool {
+    var cap = teko::mem::load_u64(st + NS_CAP)
+    var ncap = if cap == 0 { NAMES_INITIAL_CAP } else { cap * 2 }
+    if ncap > NAMES_NO_SLOT { ncap = NAMES_NO_SLOT }
+    if ncap <= cap { return false }
+    var grown = teko::sys::ptr_word(teko::runtime::region_alloc(teko::runtime::region_program(), ncap * NAME_SLOT_BYTES)) to u64
+    var used_bytes = teko::mem::load_u64(st + NS_USED) * NAME_SLOT_BYTES
+    var old = teko::mem::load_u64(st + NS_TABLE)
+    var i: u64 = 0
+    loop {
+        if i >= used_bytes { break }
+        teko::mem::store_u64(grown + i, teko::mem::load_u64(old + i))
+        i = i + 8
+    }
+    teko::mem::store_u64(st + NS_TABLE, grown)
+    teko::mem::store_u64(st + NS_CAP, ncap)
+    true
+}
+
+/**
+ * Reserves a slot and returns its index, recycling the free list when possible and growing the
+ * array otherwise, without touching `kind` or `resource` (the caller decides those).
+ *
+ * @param st  the registry state block
+ * @return    the reserved slot index, or `NAMES_NO_SLOT` when no slot can be issued
+ */
+fn names_take(st: u64): u64 {
+    var free = teko::mem::load_u64(st + NS_FREE)
+    var index: u64 = 0
+    if free != NAMES_NO_SLOT {
+        index = free
+        teko::mem::store_u64(st + NS_FREE, teko::mem::load_u64(names_slot_addr(st, index) + NAME_NEXT_FREE))
+    } else {
+        var used = teko::mem::load_u64(st + NS_USED)
+        if used == teko::mem::load_u64(st + NS_CAP) {
+            if !names_grow(st) { return NAMES_NO_SLOT }
+        }
+        index = used
+        teko::mem::store_u64(st + NS_USED, used + 1)
+        var fresh = names_slot_addr(st, index)
+        teko::mem::store_u64(fresh + NAME_RESOURCE, 0)
+        teko::mem::store_u64(fresh + NAME_GEN, 1)
+        teko::mem::store_u64(fresh + NAME_KIND, 0)
+    }
+    var slot = names_slot_addr(st, index)
+    teko::mem::store_u64(slot + NAME_NEXT_FREE, NAMES_NO_SLOT)
+    teko::mem::store_u64(slot + NAME_LIVE, 1)
+    teko::mem::store_u64(st + NS_LIVE, teko::mem::load_u64(st + NS_LIVE) + 1)
+    index
+}
+
+/**
+ * Mints the name (generation in the high half, slot index in the low half) that slot `index`
+ * currently carries.
+ *
+ * @param st     the registry state block
+ * @param index  the slot index
+ * @return       the packed name
+ */
+fn names_name_of(st: u64, index: u64): u64 {
+    (teko::mem::load_u64(names_slot_addr(st, index) + NAME_GEN) << NAMES_GEN_SHIFT) | index
+}
+
+/**
+ * Classifies `name` against the registry: live, never-issued, or closed. The three generation
+ * comparisons are the guarantee — a stamp above the slot's was never issued, one below belonged to a
+ * closed tenant, and a non-live slot is unknown.
+ *
+ * @param st    the registry state block
+ * @param name  the name to classify
+ * @return      `NAMES_OK`, `NAMES_ERR_UNKNOWN`, or `NAMES_ERR_CLOSED`
+ */
+fn names_check(st: u64, name: u64): i64 {
+    var index = name & NAMES_SLOT_MASK
+    var gen = name >> NAMES_GEN_SHIFT
+    if gen == 0 || index >= teko::mem::load_u64(st + NS_USED) { return NAMES_ERR_UNKNOWN }
+    var sgen = teko::mem::load_u64(names_slot_addr(st, index) + NAME_GEN)
+    if gen > sgen { return NAMES_ERR_UNKNOWN }
+    if gen < sgen { return NAMES_ERR_CLOSED }
+    if teko::mem::load_u64(names_slot_addr(st, index) + NAME_LIVE) == 0 { return NAMES_ERR_UNKNOWN }
+    NAMES_OK
+}
+
+/**
+ * Returns the resource `name` stands for when it is a live handle of `kind`, else 0.
+ *
+ * @param st    the registry state block
+ * @param name  the name to resolve
+ * @param kind  the required resource kind
+ * @return      the resource address, or 0 when the name is stale or of another kind
+ */
+fn names_lookup(st: u64, name: u64, kind: u64): u64 {
+    if names_check(st, name) != NAMES_OK { return 0 }
+    var slot = names_slot_addr(st, name & NAMES_SLOT_MASK)
+    if teko::mem::load_u64(slot + NAME_KIND) != kind { return 0 }
+    teko::mem::load_u64(slot + NAME_RESOURCE)
+}
+
+/**
+ * Opens a cell (one int64 in the program region) holding `value` and returns its name. Migrates
+ * `tk_names_cell_open`; a recycled slot reuses its previous cell's storage.
+ *
+ * @param value  the initial cell value; `NAMES_NO_VALUE` is refused (not storable)
+ * @return       the fresh name, or 0 on refusal or slot exhaustion
+ */
+pub fn names_cell_open(value: i64): u64 {
+    if value == NAMES_NO_VALUE { return 0 }
+    var st = names_state()
+    var index = names_take(st)
+    if index == NAMES_NO_SLOT { return 0 }
+    var slot = names_slot_addr(st, index)
+    if teko::mem::load_u64(slot + NAME_KIND) != NAMES_KIND_CELL || teko::mem::load_u64(slot + NAME_RESOURCE) == 0 {
+        var cell = teko::sys::ptr_word(teko::runtime::region_alloc(teko::runtime::region_program(), 8)) to u64
+        teko::mem::store_u64(slot + NAME_RESOURCE, cell)
+        teko::mem::store_u64(slot + NAME_KIND, NAMES_KIND_CELL)
+    }
+    teko::mem::store_u64(teko::mem::load_u64(slot + NAME_RESOURCE), value to u64)
+    names_name_of(st, index)
+}
+
+/**
+ * Reads the value held by the cell named `name`, or `NAMES_NO_VALUE` for a dead name. Migrates
+ * `tk_names_cell_read`.
+ *
+ * @param name  the cell's name
+ * @return      the cell's value, or `NAMES_NO_VALUE` when the name is not a live cell
+ */
+pub fn names_cell_read(name: u64): i64 {
+    var cell = names_lookup(names_state(), name, NAMES_KIND_CELL)
+    if cell == 0 { return NAMES_NO_VALUE }
+    teko::mem::load_u64(cell) to i64
+}
+
+/**
+ * Reports whether `name` is a live cell, else the failure mode. Migrates `tk_names_cell_status`.
+ *
+ * @param name  the name to check
+ * @return      `NAMES_OK`, or the failure status (`NAMES_ERR_KIND` when it names another kind)
+ */
+pub fn names_cell_status(name: u64): i64 {
+    var st = names_state()
+    var status = names_check(st, name)
+    if status != NAMES_OK { return status }
+    if teko::mem::load_u64(names_slot_addr(st, name & NAMES_SLOT_MASK) + NAME_KIND) != NAMES_KIND_CELL { return NAMES_ERR_KIND }
+    NAMES_OK
+}
+
+/**
+ * Reports the liveness/staleness status of `name`, kind-agnostic. Migrates `tk_names_status`.
+ *
+ * @param name  the name to classify
+ * @return      `NAMES_OK` or the failure mode
+ */
+pub fn names_status(name: u64): i64 {
+    names_check(names_state(), name)
+}
+
+/**
+ * Closes `name`, bumping its slot's generation so every name ever issued for that slot becomes
+ * strictly older, and recycles the slot unless its stamp has retired. Migrates `tk_names_close`.
+ *
+ * @param name  the name to close
+ * @return      `NAMES_OK`, or the failure mode when the name was not live
+ */
+pub fn names_close(name: u64): i64 {
+    var st = names_state()
+    var status = names_check(st, name)
+    if status != NAMES_OK { return status }
+    var index = name & NAMES_SLOT_MASK
+    var slot = names_slot_addr(st, index)
+    teko::mem::store_u64(slot + NAME_LIVE, 0)
+    teko::mem::store_u64(slot + NAME_GEN, teko::mem::load_u64(slot + NAME_GEN) + 1)
+    teko::mem::store_u64(st + NS_LIVE, teko::mem::load_u64(st + NS_LIVE) - 1)
+    if teko::mem::load_u64(slot + NAME_GEN) >= NAMES_GEN_MAX { return NAMES_OK }
+    teko::mem::store_u64(slot + NAME_NEXT_FREE, teko::mem::load_u64(st + NS_FREE))
+    teko::mem::store_u64(st + NS_FREE, index)
+    NAMES_OK
+}
+
+/**
+ * Returns how many names are live right now. Migrates `tk_names_live_count`.
+ *
+ * @return  the live-name count
+ */
+pub fn names_live_count(): u64 {
+    teko::mem::load_u64(names_state() + NS_LIVE)
+}
+
+/**
+ * Returns the slot array's current capacity. Migrates `tk_names_capacity`.
+ *
+ * @return  the number of slots the array can hold
+ */
+pub fn names_capacity(): u64 {
+    teko::mem::load_u64(names_state() + NS_CAP)
+}
+
+/**
+ * Extracts the slot index encoded in `name`. Migrates `tk_names_slot_of`.
+ *
+ * @param name  the packed name
+ * @return      the slot index (the name's low half)
+ */
+pub fn names_slot_of(name: u64): u64 {
+    name & NAMES_SLOT_MASK
+}
+
+/**
+ * Extracts the generation stamp encoded in `name`. Migrates `tk_names_generation_of`.
+ *
+ * @param name  the packed name
+ * @return      the generation stamp (the name's high half)
+ */
+pub fn names_generation_of(name: u64): u64 {
+    name >> NAMES_GEN_SHIFT
+}
