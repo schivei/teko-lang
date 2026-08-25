@@ -1,5 +1,30 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
+# RESEED (hand-harvest, isolated worktree, forward-only) — §16 RT-L5 INTERNING + NAMES
+# (expurgo/rt-l5-interning-task, D90/D100). Migrou duas das quatro familias L5 do teko_rt.c para
+# Teko sobre a arena L1 (metodo D90: teko_rt.c/.h INTOCADOS; os wrappers C viram mortos, morrem no F9):
+#   - INTERNING (tk_intern_find/_dup/_get/_put/_reset): hash-map FNV-1a sobre a arena; tabela de
+#     baldes (1024) + entradas bump-alocadas numa regiao dedicada filha da regiao de programa
+#     (sobrevive ao arena_pop por-teste; intern_reset larga a regiao). O builtin intern_* emite o
+#     simbolo Teko (teko_teko__runtime__intern_*) em codegen.tks e lower.tks.
+#   - NAMES (tk_names_open/_lookup/_close/_status/_grow/_take/_cell_*/_live_count/_capacity/_slot_of/
+#     _generation_of): tabela de handles geracional na regiao de programa (sede de chan/wait_group).
+#     names.tks delega em teko::runtime::names_*. O CAS cross-thread (S16-SYNC) e antecipatorio pro
+#     chan; o C atual e single-threaded e o port preserva isso — corretude raciocinada, validada no CI.
+#   - Bloco de controlo da arena: +3 slots (CTRL_INTERN_TABLE/_REGION, CTRL_NAMES_STATE);
+#     CTRL_BYTES 34496 -> 34520.
+#   - NAO migrados neste lote: COVERAGE e TASK (tk_task_reset). task_reset agrega o reset de estado de
+#     test-harness Categoria-C (tally/chan/scope/cast_loc/stdin/fd) FORA do escopo do RT-L5; e o reset
+#     por-teste dos sinks de cobertura e chamado por task_reset -> coverage fica ACOPLADA ao
+#     task_reset bloqueado. Reportado ao integrador (fork: migrar o Categoria-C ou rachar o task_reset).
+#   - FIXPOINT: gen2.c == gen3.c byte-identico (rota C, Linux), 20745646 bytes; gen1.c==gen2.c==gen3.c;
+#     reproducao gen0(bootstrap novo) -> gen1.c == bootstrap/teko.c.
+#   - PROVA de simbolos: no gen2.c emitido, 0 refs tk_intern_ / tk_names_; 8 refs
+#     teko_teko__runtime__intern_, 67 refs teko_teko__runtime__names_ (o path do compilador usa os
+#     simbolos Teko; os tk_intern_/tk_names_ remanescentes vem SO do teko_rt.c morto).
+#   - MEM_PARANOID=1: build seco exit 0. Pico RSS (rota C, gen2): 1132.7 MB. Base gen1 (gen0->src)
+#     1132.6 -> 1136.5 (+3.9, add proporcional D100 — reclamado no F9 quando o C morto sai).
+#
 # RESEED (hand-harvest, isolated worktree, forward-only) — CROSS-PLATFORM F6 (fix/f6-crossplatform,
 # D90/D102). Conserta o CI vermelho de macOS E Windows aberto pela migração F6 process/exec (Linux
 # ficou verde só porque o reseed foi buildado no Linux). Só src/process/process.tks mudou; teko_rt.c/
