@@ -1,37 +1,38 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, isolated worktree, forward-only) — §16-FASE4 FS + TIME + RUSAGE
-# (expurgo/f4-fs-env-time-random, D90). Migra as pernas de filesystem, relógio e pico de RSS do
-# teko.c emitido do FFI teko_rt.c para syscall intrínseco (Linux) / extern fn por-target
-# (macOS libSystem, Windows kernel32), zerando o libc dessas pernas no objeto do teko.c:
-#   1. FS -> syscall (src/fs/fs.tks, por #os): list_dir sobre SYS_getdents64 (buffer + parse dos
-#      registros linux_dirent64 por offset em Teko, ordenacao byte-lexicografica out-of-place para
-#      um walk reproduzivel), mkdir sobre SYS_mkdirat, remove_file sobre SYS_unlinkat, is_dir/stat
-#      sobre SYS_statx. macOS: libSystem opendir/readdir/closedir/mkdir/unlink/stat. Windows:
-#      kernel32 FindFirstFileA/FindNextFileA/FindClose/CreateDirectoryA/DeleteFileA/
-#      GetFileAttributesA (buffer WIN32_FIND_DATAA cru, cFileName no offset 44). O codegen perde os
-#      shortcuts host-ffi de list_dir/mkdir/remove_file (agora fns Teko user-declared).
-#   2. TIME -> SYS_clock_gettime (src/time/time.tks, por #os): wall_days/wall_ns_of_day/monotonic_ns
-#      sobre CLOCK_REALTIME/CLOCK_MONOTONIC (Linux syscall2; macOS clock_gettime libSystem; Windows
-#      GetSystemTimePreciseAsFileTime + QueryPerformanceCounter/Frequency). localtime segue
-#      civil_from_days puro (ja em Teko). journal.tks e project.tks passam a chamar
-#      teko::time::monotonic_ns (saem os externs tk_rt_monotonic_ns). wall_offset_minutes (offset de
-#      fuso = base de dados TZ) fica em teko_rt.c — fora do escopo civil-calendar deste bite.
-#   3. RUSAGE -> SYS_getrusage (src/runtime/rtio.tks): peak_rss le ru_maxrss (offset 32) via
-#      getrusage (Linux syscall2; macOS getrusage libSystem; Windows 0); cur_rss le /proc/self/statm
-#      por SYS_openat/SYS_read/SYS_close. O intrinseco `peak_rss` do codegen/lower e o extern cur_rss
-#      (codegen.tks, project.tks) reroteiam para teko::runtime::peak_rss/cur_rss (saem tk_peak_rss/
-#      tk_cur_rss do emit do C-backend; o native leg mantem os simbolos C ate o SWEEP).
-#   4. SYS consts (src/sys/sys.tks): numeros de syscall #arch-split (getdents64/mkdirat/unlinkat/
-#      getrusage/chdir/getcwd, x86_64 + arm64) + O_DIRECTORY/STATX_BASIC_STATS/S_IF*/RUSAGE_SELF +
-#      extern type Statx por-#os (R3, layout de statx fixado pela fixture sys_stat_size via ref_word).
-#   - PROVA ZERO-LIBC: nm -u do objeto do teko.c emitido (clang -std=c2x -c) NAO lista open/openat/
-#     stat/statx/mkdir/opendir/readdir/closedir/getrusage/fopen/getcwd/chdir/unlink indefinidos; os
-#     externs tk_rt_list_dir/mkdir/remove_file/wall_days/wall_ns_of_day/monotonic e tk_peak_rss/
-#     tk_cur_rss sairam do emit. Restam tk_rt_getenv/setenv/getcwd/chdir (env: deferido) e
-#     tk_rt_wall_offset_minutes (TZ: deferido) — ambos ainda satisfeitos por teko_rt.c.
-#   - FIXPOINT: gen2.c == gen3.c byte-identico; reproducao gen0(bootstrap)->gen1.c == bootstrap/teko.c.
-#   - Fixtures (examples/regressions/): sys_openat_read, sys_getdents, sys_stat_size, localtime_civil,
-#     sys_getrusage_rss — todas exit 0 sob o gen2.
+# RESEED (hand-harvest, isolated worktree, forward-only) — §16-FASE5 ASSERT (expurgo/f5-assert-teko,
+# D90). Fecha a família teko::assert como Teko puro sobre o panic migrado (S16-IO/FASE2), zerando o
+# uso do seed C assert.c: nenhum caminho referencia os símbolos teko__assert__* do assert.c.
+#   1. CALL LOWERING -> corpo Teko (src/codegen/codegen.tks cg_assert_symbol; src/lir/lower.tks
+#      assert_seed_symbol): uma chamada a teko::assert::<name> baixa para o símbolo do objeto Teko
+#      (mangle teko_teko__assert__<name>, via cb_fn_name_str / mangle_fn_symbol) em vez do símbolo C
+#      do seed (teko__assert__<name>). Como o corpo compare+panic ja vive em src/assert/assert.tks
+#      (is_true/eq_i64/ne_i64/lt/le/gt/ge_i64/eq_u64/eq_f64/eq_str/ne_str/str_contains/str_absent/
+#      str_starts_with/str_ends_with/len_eq/bytes_eq/is_present/is_absent/is_ok/is_error/scenario_*),
+#      a família passa a ser servida pelo objeto Teko. Os hooks de scenario-name (scenario_prefix_rt/
+#      scenario_set_rt/scenario_ok_rt) seguem extern a teko_rt (estado de process/task; migram com
+#      RT-L5/L6 — parcial honesto).
+#   2. PRELUDE INJECTION (src/build/project.tks rt_inject_namespaces/rt_prelude_paths_for): teko::assert
+#      entra no prelude injetado (ao lado de teko::runtime e teko::sys), então um programa que CHAMA
+#      teko::assert mas não o DEFINE compila os corpos Teko no próprio objeto — o papel dual do seed
+#      (fill-in) passa a ser servido pelo objeto Teko, como as 11 símbolos runtime já provaram. O
+#      rt_already_present garante single-def: o build do próprio compilador (corpus já tem assert.tks)
+#      pula a injeção -> cada teko_teko__assert__* definido EXATAMENTE UMA vez (sem double-def).
+#   3. assert.c/.h ficam MORTOS-mas-PRESENTES (F9 SWEEP os deleta). PROVA DE DEADNESS: o binário da
+#      fixture relinca e roda SEM assert.c (clang teko.c + teko_rt.c, exit 0); nm mostra
+#      T teko_teko__assert__* (corpo Teko forte, vivo) e W teko__assert__* (seed C fraco, não
+#      referenciado). NÃO editei assert.c/teko_rt.c/.h (método D90).
+#   - FIXPOINT: gen2.c == gen3.c byte-idêntico; reprodução gen0(bootstrap)->gen1.c == bootstrap/teko.c.
+#   - MEM_PARANOID=1: build exit 0. Pico RSS (build seco C-route): 1120.9 MB (baseline gen2 clean =
+#     1120.7 MB; +0.2 MB, nível de ruído — flag do padrão-expurgo D95).
+#   - Fixture (examples/regressions/assert_migrated): bateria passa (exit 0), eq_i64/bytes_eq
+#     divergentes panicam (traps + stderr "assertion failed: …") — rota C.
+#
+# HISTÓRICO — §16-FASE4 FS + TIME + RUSAGE (expurgo/f4-fs-env-time-random, D90): migrou as pernas de
+# filesystem, relógio e pico de RSS do teko.c emitido do FFI teko_rt.c para syscall intrínseco (Linux)
+# / extern fn por-target (macOS libSystem, Windows kernel32), zerando o libc dessas pernas no objeto
+# do teko.c (FS -> getdents64/mkdirat/unlinkat/statx; TIME -> clock_gettime; RUSAGE -> getrusage +
+# /proc/self/statm; SYS consts #arch-split). env e wall_offset_minutes (TZ) ficaram diferidos em
+# teko_rt.c.
 #
 # O DEGRAU (bootstrap/DEGRAU) segue declarado: o release publicado nao compila esta arvore.
