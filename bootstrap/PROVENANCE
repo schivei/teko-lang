@@ -1,6 +1,37 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, isolated worktree, forward-only) — MEMORY-CAMPAIGN CHECKPOINT (expurgo de
+# RESEED (hand-harvest, isolated worktree, forward-only) — EIXO A CHECKPOINT SOB 4 GiB
+# (perf/expurgo-total-mecanico, RM-C4/C5). Conserto de causa-raiz + conversao de acumuladores
+# `[..l,x]`-em-loop (copy-grow O(n^2) que vazava na arena root ao remover o free-old) para
+# pre-alocacao de tamanho conhecido:
+#   * CONSERTO DE CODEGEN (monomorph.tks): `type_to_texpr`/`mono_type_mangle` colapsavam um tipo
+#     `Variant` (union) passado como argumento generico ao placeholder "variant", emitindo
+#     `tk_slice_variant`/`tk_t_variant` sem typedef => cc falhava ao instanciar `arr_slice<@X()>`
+#     sobre qualquer tipo erased/union. Agora reconstroi o `UnionType` real e mangla pelos membros,
+#     destravando a pre-alocacao das listas de AST (elemento erased) por todo o compilador.
+#   * PARSER (duas passadas nao-alocantes, cursor.tks count_comma_items/count_block_stmts):
+#     parse_array_elems, parse_call_args, parse_struct_lit, parse_in_elems, parse_block.
+#   * CHECKER: scope.define/define_fn/define_const/seal (bindings_with/bindings_concat),
+#     resolve.tt_push (regs_with — corta o copy-grow O(N^2) da tabela de tipos),
+#     collect.func_type/method_func_type (defaults FILTER), collect.synthesize_mret_structs
+#     (lista de items inteira), collect.effective_class_fields, typer MAPs (resolve_phantom_args,
+#     type_array_elems, type_path_expr segs, type_comptime_args, resolve_type_args,
+#     resolve_foreach_placeholders, tipagem dos argumentos de chamada), monomorph.subst_typeexprs.
+# Pico do self-compile: de OOM sob 4 GiB (entrando no codegen, baseline ~3,89 GB virtual) para
+# FIXPOINT COMPLETO SOB 4 GiB, pico ~3,63 GB RSS. teko.c emitido: de 24 976 589 para 21 807 301
+# bytes. O piso restante (rumo a ~1,1 GB) e o long-tail dos demais acumuladores `[..l,x]` (typer/
+# consteval/lir residuais) — proxima onda desta mesma branch.
+#
+# GATE: SELF-REPRODUCE — CLEAN FIXPOINT (gen2 == gen3), backend C, sob `ulimit -v 4194304` (4 GiB):
+#   - gen0 linkado do bootstrap/teko.c NOVO (sha256 ceaa710ed23e47eced96056621199a888ae2a2e4d7795faf3
+#     ce82ff7d14a86a5, 21 807 301 bytes) constroi gen1; gen1 constroi gen2; gen2 constroi gen3.
+#     gen1.c == gen2.c == gen3.c byte-identico (21 807 301 bytes, os bytes deste arquivo), e c1 ==
+#     bootstrap (o seed se reproduz). Picos C-route: gen1 3659.3 MB, gen2 3631.6 MB, gen3 3632.3 MB
+#     (TEKO_BACKEND=c, TEKO_CC=clang) — todos sob o guard 4 GiB.
+#   - RESEED: bootstrap/teko.c substituido pelo gen1.c colhido acima.
+#
+# ----------------------------------------------------------------------------------------------------
+# RESEED ANTERIOR (mantida abaixo, nao apagada) — MEMORY-CAMPAIGN CHECKPOINT (expurgo de
 # arrays dinamicos, perf/expurgo-total-mecanico). The self-compile accumulators that grew via
 # `[..l,x]`-em-loop (copy-grow O(n^2), vazando cada copia na arena append-only) foram convertidos:
 #   * pre-alocacao + indice para os MAP/FILTER de tamanho conhecido (checker: collect_types,
@@ -101,9 +132,11 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  92b2bea4a190d3684ae229eeac0c5bf9ae27ec63e86e1d01511544db790f2327
+sha256:  ceaa710ed23e47eced96056621199a888ae2a2e4d7795faf3ce82ff7d14a86a5
 since:   0.3.1.0
-legacy:  91d8593421ae9bd77f8c15872f190c76be184794415399e6f2caab010dfb8520 — the let/mut retirement +
+legacy:  92b2bea4a190d3684ae229eeac0c5bf9ae27ec63e86e1d01511544db790f2327 — the memory-campaign
+         checkpoint (10 GB escape, gen2<6GB) this reseed supersedes, now brought under the 4 GiB
+         guard; and 91d8593421ae9bd77f8c15872f190c76be184794415399e6f2caab010dfb8520 — the let/mut retirement +
          §7 DI-completion combined harvest this reseed supersedes (self-reproducible on rebuild of
          its own tip at the time; superseded by the grouped-bind native lowering above, not
          cherry-picked); and 694a1b2d7cf8c40df1e3ae959f2cfbeffabe350b698a53666d7d5bcd88795aaf /
