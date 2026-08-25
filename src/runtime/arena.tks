@@ -152,24 +152,6 @@ fn ar_store(address: u64, value: u64) {
     teko::mem::store_u64(address, value)
 }
 
-#os("macos")
-extern fn os_mmap(addr: u64, len: u64, prot: i32, mflags: i32, fd: i32, off: i64): u64 = "mmap" from "System"
-
-#os("macos")
-extern fn os_munmap(addr: u64, len: u64): i32 = "munmap" from "System"
-
-#os("macos")
-extern fn os_exit(status: i32) = "_exit" from "System"
-
-#os("windows")
-extern fn VirtualAlloc(addr: u64, size: u64, alloc_type: u32, protect: u32): u64 = "VirtualAlloc" from "kernel32"
-
-#os("windows")
-extern fn VirtualFree(addr: u64, size: u64, free_type: u32): i32 = "VirtualFree" from "kernel32"
-
-#os("windows")
-extern fn ExitProcess(code: u32) = "ExitProcess" from "kernel32"
-
 #os("linux")
 fn ar_mmap(length: u64): u64 {
     var result = teko::sys::syscall6(teko::sys::SYS_MMAP, 0, length to i64,
@@ -181,7 +163,7 @@ fn ar_mmap(length: u64): u64 {
 
 #os("macos")
 fn ar_mmap(length: u64): u64 {
-    var r = os_mmap(0, length, teko::sys::PROT_READ | teko::sys::PROT_WRITE,
+    var r = teko::sys::abi::os_mmap(0, length, teko::sys::PROT_READ | teko::sys::PROT_WRITE,
         teko::sys::MAP_PRIVATE | teko::sys::MAP_ANON, -1 to i32, 0)
     if r == teko::sys::MAP_FAILED_WORD { return 0 }
     r
@@ -189,7 +171,7 @@ fn ar_mmap(length: u64): u64 {
 
 #os("windows")
 fn ar_mmap(length: u64): u64 {
-    VirtualAlloc(0, length, teko::sys::MEM_COMMIT | teko::sys::MEM_RESERVE, teko::sys::PAGE_READWRITE)
+    teko::sys::abi::VirtualAlloc(0, length, teko::sys::MEM_COMMIT | teko::sys::MEM_RESERVE, teko::sys::PAGE_READWRITE)
 }
 
 #os("linux")
@@ -199,13 +181,13 @@ fn ar_munmap(address: u64, length: u64) {
 
 #os("macos")
 fn ar_munmap(address: u64, length: u64) {
-    _ = os_munmap(address, length)
+    _ = teko::sys::abi::os_munmap(address, length)
 }
 
 #os("windows")
 fn ar_munmap(address: u64, length: u64) {
     _ = length
-    _ = VirtualFree(address, 0, teko::sys::MEM_RELEASE)
+    _ = teko::sys::abi::VirtualFree(address, 0, teko::sys::MEM_RELEASE)
 }
 
 #os("linux")
@@ -215,12 +197,12 @@ fn ar_oom() {
 
 #os("macos")
 fn ar_oom() {
-    os_exit(AR_OOM_CODE to i32)
+    teko::sys::abi::os_exit(AR_OOM_CODE to i32)
 }
 
 #os("windows")
 fn ar_oom() {
-    ExitProcess(AR_OOM_CODE to u32)
+    teko::sys::abi::ExitProcess(AR_OOM_CODE to u32)
 }
 
 #os("linux")
@@ -230,12 +212,12 @@ fn rt_exit_os(code: i64) {
 
 #os("macos")
 fn rt_exit_os(code: i64) {
-    os_exit(code to i32)
+    teko::sys::abi::os_exit(code to i32)
 }
 
 #os("windows")
 fn rt_exit_os(code: i64) {
-    ExitProcess(code to u32)
+    teko::sys::abi::ExitProcess(code to u32)
 }
 
 /** teko::runtime::rt_exit — terminate the whole process with status `code` (low byte) via the raw

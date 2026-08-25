@@ -122,45 +122,6 @@ const WIN_FILE_ATTR_NORMAL: u32 = 0x80
 
 const WIN_INVALID_HANDLE: i64 = -1
 
-#os("macos")
-extern fn os_open_raw(path: u64, oflags: i32, mode: i32): i32 = "open" from "System"
-
-#os("macos")
-extern fn os_creat_raw(path: u64, mode: i32): i32 = "creat" from "System"
-
-#os("macos")
-extern fn os_read_raw(fd: i32, buf: u64, count: u64): i64 = "read" from "System"
-
-#os("macos")
-extern fn os_write_raw(fd: i32, buf: u64, count: u64): i64 = "write" from "System"
-
-#os("macos")
-extern fn os_lseek_raw(fd: i32, off: i64, whence: i32): i64 = "lseek" from "System"
-
-#os("macos")
-extern fn os_close_raw(fd: i32): i32 = "close" from "System"
-
-#os("windows")
-extern fn MultiByteToWideChar(cp: u32, oflags: u32, mbstr: u64, cb: i32, wstr: u64, cch: i32): i32 = "MultiByteToWideChar" from "kernel32"
-
-#os("windows")
-extern fn CreateFileW(name: u64, access: u32, share: u32, sec: u64, disp: u32, oflags: u32, tmpl: u64): u64 = "CreateFileW" from "kernel32"
-
-#os("windows")
-extern fn ReadFile(h: u64, buf: u64, n: u32, got: u64, ov: u64): i32 = "ReadFile" from "kernel32"
-
-#os("windows")
-extern fn WriteFile(h: u64, buf: u64, n: u32, put: u64, ov: u64): i32 = "WriteFile" from "kernel32"
-
-#os("windows")
-extern fn SetFilePointerEx(h: u64, dist: i64, newp: u64, method: u32): i32 = "SetFilePointerEx" from "kernel32"
-
-#os("windows")
-extern fn GetFileSizeEx(h: u64, size: u64): i32 = "GetFileSizeEx" from "kernel32"
-
-#os("windows")
-extern fn CloseHandle(h: u64): i32 = "CloseHandle" from "kernel32"
-
 /** cstr_addr — the address of a NUL-terminated C copy of `path`.
  * @param path  the text to materialize
  * @return the word address of the C string */
@@ -195,40 +156,40 @@ fn os_close(fd: i64): i64 {
 
 #os("macos")
 fn os_open(path: str, oflags: i64, mode: i64): i64 {
-    os_open_raw(cstr_addr(path) to u64, oflags to i32, mode to i32) to i64
+    teko::sys::abi::os_open_raw(cstr_addr(path) to u64, oflags to i32, mode to i32) to i64
 }
 
 #os("macos")
 fn os_read(fd: i64, addr: i64, count: i64): i64 {
-    os_read_raw(fd to i32, addr to u64, count to u64)
+    teko::sys::abi::os_read_raw(fd to i32, addr to u64, count to u64)
 }
 
 #os("macos")
 fn os_write(fd: i64, addr: i64, count: i64): i64 {
-    os_write_raw(fd to i32, addr to u64, count to u64)
+    teko::sys::abi::os_write_raw(fd to i32, addr to u64, count to u64)
 }
 
 #os("macos")
 fn os_lseek(fd: i64, off: i64, whence: i64): i64 {
-    os_lseek_raw(fd to i32, off, whence to i32)
+    teko::sys::abi::os_lseek_raw(fd to i32, off, whence to i32)
 }
 
 #os("macos")
 fn os_close(fd: i64): i64 {
-    os_close_raw(fd to i32) to i64
+    teko::sys::abi::os_close_raw(fd to i32) to i64
 }
 
 #os("windows")
 fn win_wide_path(path: str): i64 {
     var addr = cstr_addr(path)
     var wbuf = teko::sys::ptr_word(teko::mem::buf_ptr((path.len + 1) * 2))
-    _ = MultiByteToWideChar(WIN_CP_UTF8, 0, addr to u64, -1 to i32, wbuf to u64, (path.len + 1) to i32)
+    _ = teko::sys::abi::MultiByteToWideChar(WIN_CP_UTF8, 0, addr to u64, -1 to i32, wbuf to u64, (path.len + 1) to i32)
     wbuf
 }
 
 #os("windows")
 fn win_open(path: str, access: u32, disp: u32): i64 {
-    var h = CreateFileW(win_wide_path(path) to u64, access, WIN_FILE_SHARE_READ, 0, disp, WIN_FILE_ATTR_NORMAL, 0)
+    var h = teko::sys::abi::CreateFileW(win_wide_path(path) to u64, access, WIN_FILE_SHARE_READ, 0, disp, WIN_FILE_ATTR_NORMAL, 0)
     h to i64
 }
 
@@ -236,7 +197,7 @@ fn win_open(path: str, access: u32, disp: u32): i64 {
 fn os_read(fd: i64, addr: i64, count: i64): i64 {
     var got = teko::sys::ptr_word(teko::mem::buf_ptr(8)) to u64
     teko::mem::store_u64(got, 0 to u64)
-    if ReadFile(fd to u64, addr to u64, count to u32, got, 0) == 0 { return -1 }
+    if teko::sys::abi::ReadFile(fd to u64, addr to u64, count to u32, got, 0) == 0 { return -1 }
     teko::mem::load_u64(got) to i64
 }
 
@@ -244,20 +205,20 @@ fn os_read(fd: i64, addr: i64, count: i64): i64 {
 fn os_write(fd: i64, addr: i64, count: i64): i64 {
     var put = teko::sys::ptr_word(teko::mem::buf_ptr(8)) to u64
     teko::mem::store_u64(put, 0 to u64)
-    if WriteFile(fd to u64, addr to u64, count to u32, put, 0) == 0 { return -1 }
+    if teko::sys::abi::WriteFile(fd to u64, addr to u64, count to u32, put, 0) == 0 { return -1 }
     teko::mem::load_u64(put) to i64
 }
 
 #os("windows")
 fn os_lseek(fd: i64, off: i64, whence: i64): i64 {
     var newp = teko::mem::buf_ptr(8)
-    if SetFilePointerEx(fd to u64, off, teko::sys::ptr_word(newp) to u64, whence to u32) == 0 { return -1 }
+    if teko::sys::abi::SetFilePointerEx(fd to u64, off, teko::sys::ptr_word(newp) to u64, whence to u32) == 0 { return -1 }
     teko::mem::load_u64(teko::sys::ptr_word(newp) to u64) to i64
 }
 
 #os("windows")
 fn os_close(fd: i64): i64 {
-    if CloseHandle(fd to u64) == 0 { return -1 }
+    if teko::sys::abi::CloseHandle(fd to u64) == 0 { return -1 }
     0
 }
 
@@ -318,7 +279,7 @@ fn os_open_write(path: str): i64 {
 
 #os("macos")
 fn os_open_write(path: str): i64 {
-    os_creat_raw(cstr_addr(path) to u64, teko::sys::OPEN_MODE_644 to i32) to i64
+    teko::sys::abi::os_creat_raw(cstr_addr(path) to u64, teko::sys::OPEN_MODE_644 to i32) to i64
 }
 
 #os("windows")
@@ -348,7 +309,7 @@ fn os_open_append(path: str): i64 {
 fn os_open_append(path: str): i64 {
     var h = os_open(path, teko::sys::O_WRONLY | teko::sys::O_APPEND, 0)
     if !is_os_error(h) { return h }
-    var c = os_creat_raw(cstr_addr(path) to u64, teko::sys::OPEN_MODE_644 to i32) to i64
+    var c = teko::sys::abi::os_creat_raw(cstr_addr(path) to u64, teko::sys::OPEN_MODE_644 to i32) to i64
     if is_os_error(c) { return -1 }
     _ = os_close(c)
     os_open(path, teko::sys::O_WRONLY | teko::sys::O_APPEND, 0)

@@ -177,28 +177,10 @@ fn os_is_dir(path: str): bool {
 }
 
 #os("macos")
-extern fn os_opendir_raw(path: u64): u64 = "opendir" from "System"
-
-#os("macos")
-extern fn os_readdir_raw(dir: u64): u64 = "readdir" from "System"
-
-#os("macos")
-extern fn os_closedir_raw(dir: u64): i32 = "closedir" from "System"
-
-#os("macos")
-extern fn os_mkdir_raw(path: u64, mode: u32): i32 = "mkdir" from "System"
-
-#os("macos")
-extern fn os_unlink_raw(path: u64): i32 = "unlink" from "System"
-
-#os("macos")
-extern fn os_stat_raw(path: u64, buf: u64): i32 = "stat" from "System"
-
-#os("macos")
 fn readdir_scan(dir: u64, out: ref []str, counting: bool): u64 {
     var k: u64 = 0
     loop {
-        var ent = os_readdir_raw(dir)
+        var ent = teko::sys::abi::os_readdir_raw(dir)
         if ent == 0 { break }
         var name_addr = (ent to i64) + 21
         if !is_dot_name(name_addr) {
@@ -211,22 +193,22 @@ fn readdir_scan(dir: u64, out: ref []str, counting: bool): u64 {
 
 #os("macos")
 fn os_list_dir(path: str): []str | error {
-    var d1 = os_opendir_raw(cstr_addr(path) to u64)
+    var d1 = teko::sys::abi::os_opendir_raw(cstr_addr(path) to u64)
     if d1 == 0 { return error { message = teko::str::concat("teko::fs::list_dir: cannot open directory ", path) } }
     var empty: []str = []
     var n = readdir_scan(d1, empty, true)
-    _ = os_closedir_raw(d1)
-    var d2 = os_opendir_raw(cstr_addr(path) to u64)
+    _ = teko::sys::abi::os_closedir_raw(d1)
+    var d2 = teko::sys::abi::os_opendir_raw(cstr_addr(path) to u64)
     if d2 == 0 { return error { message = teko::str::concat("teko::fs::list_dir: cannot open directory ", path) } }
     var out: [n]str = []
     _ = readdir_scan(d2, out, false)
-    _ = os_closedir_raw(d2)
+    _ = teko::sys::abi::os_closedir_raw(d2)
     sorted_names(out)
 }
 
 #os("macos")
 fn os_mkdir(path: str): error | null {
-    var r = os_mkdir_raw(cstr_addr(path) to u64, 0x1ED to u32)
+    var r = teko::sys::abi::os_mkdir_raw(cstr_addr(path) to u64, 0x1ED to u32)
     if r == 0 { return null }
     if os_is_dir(path) { return null }
     error { message = teko::str::concat("teko::fs::mkdir: cannot create directory ", path) }
@@ -234,7 +216,7 @@ fn os_mkdir(path: str): error | null {
 
 #os("macos")
 fn os_remove_file(path: str): error | null {
-    var r = os_unlink_raw(cstr_addr(path) to u64)
+    var r = teko::sys::abi::os_unlink_raw(cstr_addr(path) to u64)
     if r == 0 { return null }
     error { message = teko::str::concat("teko::fs::remove_file: cannot remove file ", path) }
 }
@@ -242,28 +224,10 @@ fn os_remove_file(path: str): error | null {
 #os("macos")
 fn os_is_dir(path: str): bool {
     var buf = teko::sys::ptr_word(teko::mem::buf_ptr(256))
-    var r = os_stat_raw(cstr_addr(path) to u64, buf to u64)
+    var r = teko::sys::abi::os_stat_raw(cstr_addr(path) to u64, buf to u64)
     if r != 0 { return false }
     (load_u16(buf + 4) & teko::sys::S_IFMT) == teko::sys::S_IFDIR
 }
-
-#os("windows")
-extern fn FindFirstFileA(name: u64, data: u64): u64 = "FindFirstFileA" from "kernel32"
-
-#os("windows")
-extern fn FindNextFileA(h: u64, data: u64): i32 = "FindNextFileA" from "kernel32"
-
-#os("windows")
-extern fn FindClose(h: u64): i32 = "FindClose" from "kernel32"
-
-#os("windows")
-extern fn CreateDirectoryA(path: u64, sec: u64): i32 = "CreateDirectoryA" from "kernel32"
-
-#os("windows")
-extern fn DeleteFileA(path: u64): i32 = "DeleteFileA" from "kernel32"
-
-#os("windows")
-extern fn GetFileAttributesA(path: u64): u32 = "GetFileAttributesA" from "kernel32"
 
 #os("windows")
 fn win_find_pattern(path: str): i64 {
@@ -281,7 +245,7 @@ fn win_scan(h: u64, data: i64, out: ref []str, counting: bool): u64 {
             if !counting { out[k] = name_at(name_addr) }
             k = k + 1
         }
-        if FindNextFileA(h, data to u64) == 0 { more = false }
+        if teko::sys::abi::FindNextFileA(h, data to u64) == 0 { more = false }
     }
     k
 }
@@ -289,37 +253,37 @@ fn win_scan(h: u64, data: i64, out: ref []str, counting: bool): u64 {
 #os("windows")
 fn os_list_dir(path: str): []str | error {
     var data = teko::sys::ptr_word(teko::mem::buf_ptr(512))
-    var h1 = FindFirstFileA(win_find_pattern(path) to u64, data to u64)
+    var h1 = teko::sys::abi::FindFirstFileA(win_find_pattern(path) to u64, data to u64)
     if h1 == 0xFFFFFFFFFFFFFFFF { return error { message = teko::str::concat("teko::fs::list_dir: cannot open directory ", path) } }
     var empty: []str = []
     var n = win_scan(h1, data, empty, true)
-    _ = FindClose(h1)
+    _ = teko::sys::abi::FindClose(h1)
     var data2 = teko::sys::ptr_word(teko::mem::buf_ptr(512))
-    var h2 = FindFirstFileA(win_find_pattern(path) to u64, data2 to u64)
+    var h2 = teko::sys::abi::FindFirstFileA(win_find_pattern(path) to u64, data2 to u64)
     if h2 == 0xFFFFFFFFFFFFFFFF { return error { message = teko::str::concat("teko::fs::list_dir: cannot open directory ", path) } }
     var out: [n]str = []
     _ = win_scan(h2, data2, out, false)
-    _ = FindClose(h2)
+    _ = teko::sys::abi::FindClose(h2)
     sorted_names(out)
 }
 
 #os("windows")
 fn os_mkdir(path: str): error | null {
-    if CreateDirectoryA(cstr_addr(path) to u64, 0) != 0 { return null }
+    if teko::sys::abi::CreateDirectoryA(cstr_addr(path) to u64, 0) != 0 { return null }
     if os_is_dir(path) { return null }
     error { message = teko::str::concat("teko::fs::mkdir: cannot create directory ", path) }
 }
 
 #os("windows")
 fn os_remove_file(path: str): error | null {
-    if DeleteFileA(cstr_addr(path) to u64) != 0 { return null }
-    if GetFileAttributesA(cstr_addr(path) to u64) == 0xFFFFFFFF { return null }
+    if teko::sys::abi::DeleteFileA(cstr_addr(path) to u64) != 0 { return null }
+    if teko::sys::abi::GetFileAttributesA(cstr_addr(path) to u64) == 0xFFFFFFFF { return null }
     error { message = teko::str::concat("teko::fs::remove_file: cannot remove file ", path) }
 }
 
 #os("windows")
 fn os_is_dir(path: str): bool {
-    var attr = GetFileAttributesA(cstr_addr(path) to u64)
+    var attr = teko::sys::abi::GetFileAttributesA(cstr_addr(path) to u64)
     if attr == 0xFFFFFFFF { return false }
     ((attr to u64) & 0x10) != 0
 }

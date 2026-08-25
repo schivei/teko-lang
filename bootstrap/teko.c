@@ -20664,15 +20664,6 @@ tk_u_str_error teko_teko__env__cwd__ov_nm(void);
 tk_error teko_teko__env__chdir__ov_str_nm_path(tk_str path);
 #endif
 #if defined(__APPLE__)
-extern uint64_t _NSGetEnviron(void);
-#endif
-#if defined(__APPLE__)
-extern uint64_t getcwd(uint64_t buf, uint64_t size);
-#endif
-#if defined(__APPLE__)
-extern int32_t chdir(uint64_t path);
-#endif
-#if defined(__APPLE__)
 void teko_teko__env__env_source_charpp(uint64_t hdr, uint64_t envp);
 #endif
 #if defined(__APPLE__)
@@ -20683,22 +20674,6 @@ tk_u_str_error teko_teko__env__cwd__ov_nm(void);
 #endif
 #if defined(__APPLE__)
 tk_error teko_teko__env__chdir__ov_str_nm_path(tk_str path);
-#endif
-#if defined(_WIN32)
-extern uint64_t GetEnvironmentStringsW(void);
-#pragma comment(lib, "kernel32")
-#endif
-#if defined(_WIN32)
-extern int32_t FreeEnvironmentStringsW(uint64_t p);
-#pragma comment(lib, "kernel32")
-#endif
-#if defined(_WIN32)
-extern uint32_t GetCurrentDirectoryA(uint32_t len, uint64_t buf);
-#pragma comment(lib, "kernel32")
-#endif
-#if defined(_WIN32)
-extern int32_t SetCurrentDirectoryA(uint64_t path);
-#pragma comment(lib, "kernel32")
 #endif
 #if defined(_WIN32)
 uint64_t teko_teko__env__utf16_at(uint64_t blk, uint64_t idx);
@@ -20797,24 +20772,6 @@ tk_error teko_teko__fs__os_remove_file__ov_str_nm_path(tk_str path);
 bool teko_teko__fs__os_is_dir__ov_str_nm_path(tk_str path);
 #endif
 #if defined(__APPLE__)
-extern uint64_t opendir(uint64_t path);
-#endif
-#if defined(__APPLE__)
-extern uint64_t readdir(uint64_t dir);
-#endif
-#if defined(__APPLE__)
-extern int32_t closedir(uint64_t dir);
-#endif
-#if defined(__APPLE__)
-extern int32_t mkdir(uint64_t path, uint32_t mode);
-#endif
-#if defined(__APPLE__)
-extern int32_t unlink(uint64_t path);
-#endif
-#if defined(__APPLE__)
-extern int32_t stat(uint64_t path, uint64_t buf);
-#endif
-#if defined(__APPLE__)
 uint64_t teko_teko__fs__readdir_scan(uint64_t dir, tk_slice_str * out, bool counting);
 #endif
 #if defined(__APPLE__)
@@ -20828,30 +20785,6 @@ tk_error teko_teko__fs__os_remove_file__ov_str_nm_path(tk_str path);
 #endif
 #if defined(__APPLE__)
 bool teko_teko__fs__os_is_dir__ov_str_nm_path(tk_str path);
-#endif
-#if defined(_WIN32)
-extern uint64_t FindFirstFileA(uint64_t name, uint64_t data);
-#pragma comment(lib, "kernel32")
-#endif
-#if defined(_WIN32)
-extern int32_t FindNextFileA(uint64_t h, uint64_t data);
-#pragma comment(lib, "kernel32")
-#endif
-#if defined(_WIN32)
-extern int32_t FindClose(uint64_t h);
-#pragma comment(lib, "kernel32")
-#endif
-#if defined(_WIN32)
-extern int32_t CreateDirectoryA(uint64_t path, uint64_t sec);
-#pragma comment(lib, "kernel32")
-#endif
-#if defined(_WIN32)
-extern int32_t DeleteFileA(uint64_t path);
-#pragma comment(lib, "kernel32")
-#endif
-#if defined(_WIN32)
-extern uint32_t GetFileAttributesA(uint64_t path);
-#pragma comment(lib, "kernel32")
 #endif
 #if defined(_WIN32)
 int64_t teko_teko__fs__win_find_pattern(tk_str path);
@@ -20884,52 +20817,6 @@ void teko_teko__io__FileStream__write_bytes(tk_t_teko__io__FileStream * self, tk
 void teko_teko__io__FileStream__write_byte(tk_t_teko__io__FileStream * self, uint8_t x);
 uint64_t teko_teko__io__FileStream__gensym(tk_t_teko__io__FileStream * self);
 void teko_teko__io__FileStream__reset_gensym(tk_t_teko__io__FileStream * self);
-#if defined(__APPLE__)
-extern int32_t open(uint64_t path, int32_t oflags, int32_t mode);
-#endif
-#if defined(__APPLE__)
-extern int32_t creat(uint64_t path, int32_t mode);
-#endif
-#if defined(__APPLE__)
-extern int64_t read(int32_t fd, uint64_t buf, uint64_t count);
-#endif
-#if defined(__APPLE__)
-extern int64_t write(int32_t fd, uint64_t buf, uint64_t count);
-#endif
-#if defined(__APPLE__)
-extern int64_t lseek(int32_t fd, int64_t off, int32_t whence);
-#endif
-#if defined(__APPLE__)
-extern int32_t close(int32_t fd);
-#endif
-#if defined(_WIN32)
-extern int32_t MultiByteToWideChar(uint32_t cp, uint32_t oflags, uint64_t mbstr, int32_t cb, uint64_t wstr, int32_t cch);
-#pragma comment(lib, "kernel32")
-#endif
-#if defined(_WIN32)
-extern uint64_t CreateFileW(uint64_t name, uint32_t access, uint32_t share, uint64_t sec, uint32_t disp, uint32_t oflags, uint64_t tmpl);
-#pragma comment(lib, "kernel32")
-#endif
-#if defined(_WIN32)
-extern int32_t ReadFile(uint64_t h, uint64_t buf, uint32_t n, uint64_t got, uint64_t ov);
-#pragma comment(lib, "kernel32")
-#endif
-#if defined(_WIN32)
-extern int32_t WriteFile(uint64_t h, uint64_t buf, uint32_t n, uint64_t put, uint64_t ov);
-#pragma comment(lib, "kernel32")
-#endif
-#if defined(_WIN32)
-extern int32_t SetFilePointerEx(uint64_t h, int64_t dist, uint64_t newp, uint32_t method);
-#pragma comment(lib, "kernel32")
-#endif
-#if defined(_WIN32)
-extern int32_t GetFileSizeEx(uint64_t h, uint64_t size);
-#pragma comment(lib, "kernel32")
-#endif
-#if defined(_WIN32)
-extern int32_t CloseHandle(uint64_t h);
-#pragma comment(lib, "kernel32")
-#endif
 int64_t teko_teko__io__cstr_addr(tk_str path);
 #if defined(__linux__)
 int64_t teko_teko__io__os_open__ov_str_i64_i64_nm_path_oflags_mode(tk_str path, int64_t oflags, int64_t mode);
@@ -22884,42 +22771,6 @@ int32_t teko_teko__process__os_fd_take_byte__ov_nm(void);
 int32_t teko_teko__process__os_fd_take_byte__ov_nm(void);
 #endif
 #if defined(__APPLE__)
-extern int32_t fork(void);
-#endif
-#if defined(__APPLE__)
-extern int32_t execve(uint64_t path, uint64_t argv, uint64_t envp);
-#endif
-#if defined(__APPLE__)
-extern int32_t wait4(int32_t pid, int32_t * status, int32_t options, struct rusage * rusage);
-#endif
-#if defined(__APPLE__)
-extern int32_t pipe(uint64_t fds);
-#endif
-#if defined(__APPLE__)
-extern int32_t dup2(int32_t oldfd, int32_t newfd);
-#endif
-#if defined(__APPLE__)
-extern int32_t close(int32_t fd);
-#endif
-#if defined(__APPLE__)
-extern int32_t open(uint64_t path, int32_t oflags, int32_t mode);
-#endif
-#if defined(__APPLE__)
-extern int32_t poll(uint64_t fds, uint32_t nfds, int32_t timeout);
-#endif
-#if defined(__APPLE__)
-extern int64_t read(int32_t fd, uint64_t buf, uint64_t n);
-#endif
-#if defined(__APPLE__)
-extern int32_t chdir(uint64_t path);
-#endif
-#if defined(__APPLE__)
-extern int32_t fcntl(int32_t fd, int32_t cmd, int32_t arg);
-#endif
-#if defined(__APPLE__)
-extern void _exit(int32_t code);
-#endif
-#if defined(__APPLE__)
 void teko_teko__process__mac_child_fail(void);
 #endif
 #if defined(__APPLE__)
@@ -22981,30 +22832,6 @@ int32_t teko_teko__process__os_fd_wait_readable__ov_i64_i64_nm_fd_timeout_ms(int
 #endif
 #if defined(__APPLE__)
 int64_t teko_teko__process__os_fd_fill__ov_i64_i64_nm_fd_timeout_ms(int64_t fd, int64_t timeout_ms);
-#endif
-#if defined(_WIN32)
-extern int32_t CreateProcessA(uint64_t app, uint64_t cmd, uint64_t proc_attr, uint64_t thread_attr, int32_t inherit, uint32_t create_flags, uint64_t env, uint64_t cur_dir, uint64_t startup, uint64_t proc_info);
-#pragma comment(lib, "kernel32")
-#endif
-#if defined(_WIN32)
-extern uint32_t WaitForSingleObject(uint64_t handle, uint32_t ms);
-#pragma comment(lib, "kernel32")
-#endif
-#if defined(_WIN32)
-extern int32_t GetExitCodeProcess(uint64_t handle, uint64_t code);
-#pragma comment(lib, "kernel32")
-#endif
-#if defined(_WIN32)
-extern int32_t CloseHandle(uint64_t handle);
-#pragma comment(lib, "kernel32")
-#endif
-#if defined(_WIN32)
-extern uint64_t CreateFileA(uint64_t name, uint32_t access, uint32_t share, uint64_t sec, uint32_t disp, uint32_t open_flags, uint64_t template);
-#pragma comment(lib, "kernel32")
-#endif
-#if defined(_WIN32)
-extern uint64_t GetStdHandle(uint32_t which);
-#pragma comment(lib, "kernel32")
 #endif
 #if defined(_WIN32)
 tk_str teko_teko__process__count_prefixed_list(tk_slice_str items);
@@ -23111,27 +22938,6 @@ uint64_t teko_teko__runtime__ar_align_up(uint64_t n);
 uint64_t teko_teko__runtime__ar_align_down(uint64_t n);
 uint64_t teko_teko__runtime__ar_load(uint64_t address);
 void teko_teko__runtime__ar_store(uint64_t address, uint64_t value);
-#if defined(__APPLE__)
-extern uint64_t mmap(uint64_t addr, uint64_t len, int32_t prot, int32_t mflags, int32_t fd, int64_t off);
-#endif
-#if defined(__APPLE__)
-extern int32_t munmap(uint64_t addr, uint64_t len);
-#endif
-#if defined(__APPLE__)
-extern void _exit(int32_t status);
-#endif
-#if defined(_WIN32)
-extern uint64_t VirtualAlloc(uint64_t addr, uint64_t size, uint32_t alloc_type, uint32_t protect);
-#pragma comment(lib, "kernel32")
-#endif
-#if defined(_WIN32)
-extern int32_t VirtualFree(uint64_t addr, uint64_t size, uint32_t free_type);
-#pragma comment(lib, "kernel32")
-#endif
-#if defined(_WIN32)
-extern void ExitProcess(uint32_t code);
-#pragma comment(lib, "kernel32")
-#endif
 #if defined(__linux__)
 uint64_t teko_teko__runtime__ar_mmap__ov_u64_nm_length(uint64_t length);
 #endif
@@ -23342,17 +23148,6 @@ int64_t teko_teko__runtime__fmt_n_i_len(int64_t x, uint64_t out_len);
 int64_t teko_teko__runtime__fmt_dyn_f64_len(double x, uint64_t sptr, uint64_t slen, uint64_t out_len);
 int64_t teko_teko__runtime__fmt_dyn_i64_len(int64_t x, uint64_t sptr, uint64_t slen, uint64_t out_len);
 int64_t teko_teko__runtime__fmt_dyn_u64_len(uint64_t x, uint64_t sptr, uint64_t slen, uint64_t out_len);
-#if defined(__APPLE__)
-extern int64_t write(int32_t fd, uint64_t buf, uint64_t count);
-#endif
-#if defined(_WIN32)
-extern int32_t WriteFile(uint64_t h, uint64_t buf, uint32_t n, uint64_t put, uint64_t ov);
-#pragma comment(lib, "kernel32")
-#endif
-#if defined(_WIN32)
-extern uint64_t GetStdHandle(int32_t which);
-#pragma comment(lib, "kernel32")
-#endif
 #if defined(__linux__)
 int64_t teko_teko__runtime__rtio_os_write__ov_i64_i64_i64_nm_fd_addr_count(int64_t fd, int64_t addr, int64_t count);
 #endif
@@ -23377,9 +23172,6 @@ void teko_teko__runtime__panic(tk_str msg);
 uint64_t teko_teko__runtime__peak_rss_impl__ov_nm(void);
 #endif
 #if defined(__APPLE__)
-extern int32_t getrusage(int32_t who, struct rusage * rbuf);
-#endif
-#if defined(__APPLE__)
 uint64_t teko_teko__runtime__peak_rss_impl__ov_nm(void);
 #endif
 #if defined(_WIN32)
@@ -23399,15 +23191,6 @@ uint64_t teko_teko__runtime__cur_rss_impl__ov_nm(void);
 uint64_t teko_teko__runtime__cur_rss_impl__ov_nm(void);
 #endif
 uint64_t teko_teko__runtime__cur_rss(void);
-#if defined(__APPLE__)
-extern int32_t os_sync_wait_on_address(uint64_t addr, uint64_t value, uint64_t size, uint32_t mode);
-#endif
-#if defined(__APPLE__)
-extern int32_t os_sync_wake_by_address_any(uint64_t addr, uint64_t size, uint32_t mode);
-#endif
-#if defined(__APPLE__)
-extern int32_t os_sync_wake_by_address_all(uint64_t addr, uint64_t size, uint32_t mode);
-#endif
 #if defined(_WIN32)
 extern int32_t WaitOnAddress(uint64_t addr, uint64_t compare, uint64_t size, uint32_t ms);
 #pragma comment(lib, "synchronization")
@@ -23493,13 +23276,6 @@ uint64_t teko_teko__runtime__names_live_count(void);
 uint64_t teko_teko__runtime__names_capacity(void);
 uint64_t teko_teko__runtime__names_slot_of(uint64_t name);
 uint64_t teko_teko__runtime__names_generation_of(uint64_t name);
-#if defined(__APPLE__)
-extern int32_t mprotect(uint64_t addr, uint64_t len, int32_t prot);
-#endif
-#if defined(_WIN32)
-extern int32_t VirtualProtect(uint64_t addr, uint64_t size, uint32_t new_prot, uint64_t old_prot);
-#pragma comment(lib, "kernel32")
-#endif
 #if defined(__linux__)
 uint64_t teko_teko__runtime__thr_mmap__ov_u64_nm_length(uint64_t length);
 #endif
@@ -23578,6 +23354,215 @@ tk_slice_f64 teko_teko__sort__sort_f64(tk_slice_f64 xs);
 tk_slice_byte teko_teko__sort__merge_bytes(tk_slice_byte left, tk_slice_byte right);
 __attribute__((noinline)) tk_slice_byte teko_teko__sort__msort_bytes(tk_slice_byte xs, uint64_t lo, uint64_t hi);
 tk_slice_byte teko_teko__sort__sort_bytes(tk_slice_byte xs);
+#if defined(__APPLE__)
+extern int32_t open(uint64_t path, int32_t oflags, int32_t mode);
+#endif
+#if defined(__APPLE__)
+extern int32_t creat(uint64_t path, int32_t mode);
+#endif
+#if defined(__APPLE__)
+extern int64_t read(int32_t fd, uint64_t buf, uint64_t count);
+#endif
+#if defined(__APPLE__)
+extern int64_t write(int32_t fd, uint64_t buf, uint64_t count);
+#endif
+#if defined(__APPLE__)
+extern int64_t lseek(int32_t fd, int64_t off, int32_t whence);
+#endif
+#if defined(__APPLE__)
+extern int32_t close(int32_t fd);
+#endif
+#if defined(__APPLE__)
+extern int32_t clock_gettime(int32_t clk, uint64_t ts);
+#endif
+#if defined(__APPLE__)
+extern int32_t fork(void);
+#endif
+#if defined(__APPLE__)
+extern int32_t execve(uint64_t path, uint64_t argv, uint64_t envp);
+#endif
+#if defined(__APPLE__)
+extern int32_t wait4(int32_t pid, int32_t * status, int32_t options, struct rusage * rusage);
+#endif
+#if defined(__APPLE__)
+extern int32_t pipe(uint64_t fds);
+#endif
+#if defined(__APPLE__)
+extern int32_t dup2(int32_t oldfd, int32_t newfd);
+#endif
+#if defined(__APPLE__)
+extern int32_t poll(uint64_t fds, uint32_t nfds, int32_t timeout);
+#endif
+#if defined(__APPLE__)
+extern int32_t chdir(uint64_t path);
+#endif
+#if defined(__APPLE__)
+extern int32_t fcntl(int32_t fd, int32_t cmd, int32_t arg);
+#endif
+#if defined(__APPLE__)
+extern void _exit(int32_t code);
+#endif
+#if defined(__APPLE__)
+extern uint64_t opendir(uint64_t path);
+#endif
+#if defined(__APPLE__)
+extern uint64_t readdir(uint64_t dir);
+#endif
+#if defined(__APPLE__)
+extern int32_t closedir(uint64_t dir);
+#endif
+#if defined(__APPLE__)
+extern int32_t mkdir(uint64_t path, uint32_t mode);
+#endif
+#if defined(__APPLE__)
+extern int32_t unlink(uint64_t path);
+#endif
+#if defined(__APPLE__)
+extern int32_t stat(uint64_t path, uint64_t buf);
+#endif
+#if defined(__APPLE__)
+extern uint64_t _NSGetEnviron(void);
+#endif
+#if defined(__APPLE__)
+extern uint64_t getcwd(uint64_t buf, uint64_t size);
+#endif
+#if defined(__APPLE__)
+extern uint64_t mmap(uint64_t addr, uint64_t len, int32_t prot, int32_t mflags, int32_t fd, int64_t off);
+#endif
+#if defined(__APPLE__)
+extern int32_t munmap(uint64_t addr, uint64_t len);
+#endif
+#if defined(__APPLE__)
+extern int32_t mprotect(uint64_t addr, uint64_t len, int32_t prot);
+#endif
+#if defined(__APPLE__)
+extern int32_t getrusage(int32_t who, struct rusage * rbuf);
+#endif
+#if defined(__APPLE__)
+extern int32_t os_sync_wait_on_address(uint64_t addr, uint64_t value, uint64_t size, uint32_t mode);
+#endif
+#if defined(__APPLE__)
+extern int32_t os_sync_wake_by_address_any(uint64_t addr, uint64_t size, uint32_t mode);
+#endif
+#if defined(__APPLE__)
+extern int32_t os_sync_wake_by_address_all(uint64_t addr, uint64_t size, uint32_t mode);
+#endif
+#if defined(_WIN32)
+extern int32_t MultiByteToWideChar(uint32_t cp, uint32_t oflags, uint64_t mbstr, int32_t cb, uint64_t wstr, int32_t cch);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern uint64_t CreateFileW(uint64_t name, uint32_t access, uint32_t share, uint64_t sec, uint32_t disp, uint32_t oflags, uint64_t tmpl);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern uint64_t CreateFileA(uint64_t name, uint32_t access, uint32_t share, uint64_t sec, uint32_t disp, uint32_t open_flags, uint64_t template);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern int32_t ReadFile(uint64_t h, uint64_t buf, uint32_t n, uint64_t got, uint64_t ov);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern int32_t WriteFile(uint64_t h, uint64_t buf, uint32_t n, uint64_t put, uint64_t ov);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern int32_t SetFilePointerEx(uint64_t h, int64_t dist, uint64_t newp, uint32_t method);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern int32_t GetFileSizeEx(uint64_t h, uint64_t size);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern int32_t CloseHandle(uint64_t h);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern uint64_t GetStdHandle(uint32_t which);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern void GetSystemTimePreciseAsFileTime(uint64_t ft);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern int32_t QueryPerformanceCounter(uint64_t c);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern int32_t QueryPerformanceFrequency(uint64_t f);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern int32_t CreateProcessA(uint64_t app, uint64_t cmd, uint64_t proc_attr, uint64_t thread_attr, int32_t inherit, uint32_t create_flags, uint64_t env, uint64_t cur_dir, uint64_t startup, uint64_t proc_info);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern uint32_t WaitForSingleObject(uint64_t handle, uint32_t ms);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern int32_t GetExitCodeProcess(uint64_t handle, uint64_t code);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern uint64_t FindFirstFileA(uint64_t name, uint64_t data);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern int32_t FindNextFileA(uint64_t h, uint64_t data);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern int32_t FindClose(uint64_t h);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern int32_t CreateDirectoryA(uint64_t path, uint64_t sec);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern int32_t DeleteFileA(uint64_t path);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern uint32_t GetFileAttributesA(uint64_t path);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern uint64_t GetEnvironmentStringsW(void);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern int32_t FreeEnvironmentStringsW(uint64_t p);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern uint32_t GetCurrentDirectoryA(uint32_t len, uint64_t buf);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern int32_t SetCurrentDirectoryA(uint64_t path);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern uint64_t VirtualAlloc(uint64_t addr, uint64_t size, uint32_t alloc_type, uint32_t protect);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern int32_t VirtualFree(uint64_t addr, uint64_t size, uint32_t free_type);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern int32_t VirtualProtect(uint64_t addr, uint64_t size, uint32_t new_prot, uint64_t old_prot);
+#pragma comment(lib, "kernel32")
+#endif
+#if defined(_WIN32)
+extern void ExitProcess(uint32_t code);
+#pragma comment(lib, "kernel32")
+#endif
 tk_str teko_teko__test__scope(void);
 tk_str teko_teko__test__scoped(tk_str stem);
 bool teko_teko__text__valid_utf8(tk_slice_byte s);
@@ -23609,9 +23594,6 @@ int64_t teko_teko__time__wall_now_ns__ov_nm(void);
 int64_t teko_teko__time__mono_now_ns__ov_nm(void);
 #endif
 #if defined(__APPLE__)
-extern int32_t clock_gettime(int32_t clk, uint64_t ts);
-#endif
-#if defined(__APPLE__)
 int64_t teko_teko__time__clock_read_ns__ov_i32(int32_t clockid);
 #endif
 #if defined(__APPLE__)
@@ -23619,18 +23601,6 @@ int64_t teko_teko__time__wall_now_ns__ov_nm(void);
 #endif
 #if defined(__APPLE__)
 int64_t teko_teko__time__mono_now_ns__ov_nm(void);
-#endif
-#if defined(_WIN32)
-extern void GetSystemTimePreciseAsFileTime(uint64_t ft);
-#pragma comment(lib, "kernel32")
-#endif
-#if defined(_WIN32)
-extern int32_t QueryPerformanceCounter(uint64_t c);
-#pragma comment(lib, "kernel32")
-#endif
-#if defined(_WIN32)
-extern int32_t QueryPerformanceFrequency(uint64_t f);
-#pragma comment(lib, "kernel32")
 #endif
 #if defined(_WIN32)
 int64_t teko_teko__time__wall_now_ns__ov_nm(void);
@@ -151317,7 +151287,7 @@ void teko_teko__env__env_source_initial__ov_u64_nm_hdr(uint64_t hdr) {
 tk_u_str_error teko_teko__env__cwd__ov_nm(void) {
     uint64_t cap = ((uint64_t)4096ULL);
     void * buf = (uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(cap));
-    uint64_t r = getcwd(({ _tk_cast_loc_line = 295; _tk_cast_loc_col = 27; tk_to_u64_s(((int64_t)(uintptr_t)(buf))); }), cap);
+    uint64_t r = getcwd(({ _tk_cast_loc_line = 286; _tk_cast_loc_col = 43; tk_to_u64_s(((int64_t)(uintptr_t)(buf))); }), cap);
     if (((r == ((uint64_t)0ULL)))) {
         return (tk_u_str_error){ .tag = TK_TAG_U_STR_ERROR_ERROR, .as.error = tk_error_make((tk_str){ (const tk_byte *)"teko::env::cwd: cannot get working directory", 44 }) };
     }
@@ -151327,7 +151297,7 @@ tk_u_str_error teko_teko__env__cwd__ov_nm(void) {
 #endif
 #if defined(__APPLE__)
 tk_error teko_teko__env__chdir__ov_str_nm_path(tk_str path) {
-    if (((chdir(({ _tk_cast_loc_line = 302; _tk_cast_loc_col = 21; tk_to_u64_s(teko_teko__env__cstr_addr(path)); })) != ((int32_t)0ULL)))) {
+    if (((chdir(({ _tk_cast_loc_line = 293; _tk_cast_loc_col = 37; tk_to_u64_s(teko_teko__env__cstr_addr(path)); })) != ((int32_t)0ULL)))) {
         return tk_error_make(({ tk_slice_str _cs35411 = ({ tk_str *_arr35414 = (tk_str *)TK_ARENA_region_alloc(TK_ARENA_region_current(), 2 * sizeof(tk_str)); _arr35414[0] = (tk_str){ (const tk_byte *)"teko::env::chdir: cannot change directory to ", 45 }; _arr35414[1] = path; (tk_slice_str){ .ptr = _arr35414, .len = 2, .cap = 2 }; }); tk_str _ca35413 = (tk_str){0,0}; for (uint64_t _ci35412 = 0; _ci35412 < _cs35411.len; _ci35412++) { _ca35413 = tk_str_concat(_ca35413, _cs35411.ptr[_ci35412]); } _ca35413; }));
     }
     return (tk_error){0};
@@ -151463,7 +151433,7 @@ void teko_teko__env__env_source_initial__ov_u64_nm_hdr(uint64_t hdr) {
 tk_u_str_error teko_teko__env__cwd__ov_nm(void) {
     uint64_t cap = ((uint64_t)4096ULL);
     void * buf = (uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(cap));
-    uint32_t r = GetCurrentDirectoryA(({ _tk_cast_loc_line = 429; _tk_cast_loc_col = 34; tk_to_u32_u(cap); }), ({ _tk_cast_loc_line = 429; _tk_cast_loc_col = 46; tk_to_u64_s(((int64_t)(uintptr_t)(buf))); }));
+    uint32_t r = GetCurrentDirectoryA(({ _tk_cast_loc_line = 408; _tk_cast_loc_col = 50; tk_to_u32_u(cap); }), ({ _tk_cast_loc_line = 408; _tk_cast_loc_col = 62; tk_to_u64_s(((int64_t)(uintptr_t)(buf))); }));
     if (((r == ((uint32_t)0ULL)))) {
         return (tk_u_str_error){ .tag = TK_TAG_U_STR_ERROR_ERROR, .as.error = tk_error_make((tk_str){ (const tk_byte *)"teko::env::cwd: cannot get working directory", 44 }) };
     }
@@ -151473,7 +151443,7 @@ tk_u_str_error teko_teko__env__cwd__ov_nm(void) {
 #endif
 #if defined(_WIN32)
 tk_error teko_teko__env__chdir__ov_str_nm_path(tk_str path) {
-    if (((SetCurrentDirectoryA(({ _tk_cast_loc_line = 436; _tk_cast_loc_col = 29; tk_to_u64_s(teko_teko__env__cstr_addr(path)); })) == ((int32_t)0ULL)))) {
+    if (((SetCurrentDirectoryA(({ _tk_cast_loc_line = 415; _tk_cast_loc_col = 45; tk_to_u64_s(teko_teko__env__cstr_addr(path)); })) == ((int32_t)0ULL)))) {
         return tk_error_make(({ tk_slice_str _cs35420 = ({ tk_str *_arr35423 = (tk_str *)TK_ARENA_region_alloc(TK_ARENA_region_current(), 2 * sizeof(tk_str)); _arr35423[0] = (tk_str){ (const tk_byte *)"teko::env::chdir: cannot change directory to ", 45 }; _arr35423[1] = path; (tk_slice_str){ .ptr = _arr35423, .len = 2, .cap = 2 }; }); tk_str _ca35422 = (tk_str){0,0}; for (uint64_t _ci35421 = 0; _ci35421 < _cs35420.len; _ci35421++) { _ca35422 = tk_str_concat(_ca35422, _cs35420.ptr[_ci35421]); } _ca35422; }));
     }
     return (tk_error){0};
@@ -152830,10 +152800,10 @@ uint64_t teko_teko__fs__readdir_scan(uint64_t dir, tk_slice_str * out, bool coun
         if (((ent == ((uint64_t)0ULL)))) {
             break;
         }
-        int64_t name_addr = tk_add_i64(({ _tk_cast_loc_line = 203; _tk_cast_loc_col = 26; tk_to_i64_u(ent); }), ((int64_t)21ULL));
+        int64_t name_addr = tk_add_i64(({ _tk_cast_loc_line = 185; _tk_cast_loc_col = 26; tk_to_i64_u(ent); }), ((int64_t)21ULL));
         if ((!teko_teko__fs__is_dot_name(name_addr))) {
             if ((!counting)) {
-                { tk_slice_str _ws35668 = ((*(out))); uint64_t _wi35669 = (uint64_t)(k); if (_wi35669 < _ws35668.len) { _ws35668.ptr[_wi35669] = teko_teko__fs__name_at(name_addr); } else { tk_panic_oob_at(205, 28); }
+                { tk_slice_str _ws35668 = ((*(out))); uint64_t _wi35669 = (uint64_t)(k); if (_wi35669 < _ws35668.len) { _ws35668.ptr[_wi35669] = teko_teko__fs__name_at(name_addr); } else { tk_panic_oob_at(187, 28); }
  }
             }
             k = tk_add_u64(k, ((uint64_t)1ULL));
@@ -152845,14 +152815,14 @@ uint64_t teko_teko__fs__readdir_scan(uint64_t dir, tk_slice_str * out, bool coun
 #endif
 #if defined(__APPLE__)
 tk_u_slice_str_error teko_teko__fs__os_list_dir__ov_str_nm_path(tk_str path) {
-    uint64_t d1 = opendir(({ _tk_cast_loc_line = 214; _tk_cast_loc_col = 29; tk_to_u64_s(teko_teko__fs__cstr_addr(path)); }));
+    uint64_t d1 = opendir(({ _tk_cast_loc_line = 196; _tk_cast_loc_col = 45; tk_to_u64_s(teko_teko__fs__cstr_addr(path)); }));
     if (((d1 == ((uint64_t)0ULL)))) {
         return (tk_u_slice_str_error){ .tag = TK_TAG_U_SLICE_STR_ERROR_ERROR, .as.error = tk_error_make(({ tk_slice_str _cs35670 = ({ tk_str *_arr35673 = (tk_str *)TK_ARENA_region_alloc(TK_ARENA_region_current(), 2 * sizeof(tk_str)); _arr35673[0] = (tk_str){ (const tk_byte *)"teko::fs::list_dir: cannot open directory ", 42 }; _arr35673[1] = path; (tk_slice_str){ .ptr = _arr35673, .len = 2, .cap = 2 }; }); tk_str _ca35672 = (tk_str){0,0}; for (uint64_t _ci35671 = 0; _ci35671 < _cs35670.len; _ci35671++) { _ca35672 = tk_str_concat(_ca35672, _cs35670.ptr[_ci35671]); } _ca35672; })) };
     }
     tk_slice_str empty = (tk_slice_str){ .ptr = 0, .len = 0 };
     uint64_t n = teko_teko__fs__readdir_scan(d1, &empty, true);
     (void)(closedir(d1));
-    uint64_t d2 = opendir(({ _tk_cast_loc_line = 219; _tk_cast_loc_col = 29; tk_to_u64_s(teko_teko__fs__cstr_addr(path)); }));
+    uint64_t d2 = opendir(({ _tk_cast_loc_line = 201; _tk_cast_loc_col = 45; tk_to_u64_s(teko_teko__fs__cstr_addr(path)); }));
     if (((d2 == ((uint64_t)0ULL)))) {
         return (tk_u_slice_str_error){ .tag = TK_TAG_U_SLICE_STR_ERROR_ERROR, .as.error = tk_error_make(({ tk_slice_str _cs35674 = ({ tk_str *_arr35677 = (tk_str *)TK_ARENA_region_alloc(TK_ARENA_region_current(), 2 * sizeof(tk_str)); _arr35677[0] = (tk_str){ (const tk_byte *)"teko::fs::list_dir: cannot open directory ", 42 }; _arr35677[1] = path; (tk_slice_str){ .ptr = _arr35677, .len = 2, .cap = 2 }; }); tk_str _ca35676 = (tk_str){0,0}; for (uint64_t _ci35675 = 0; _ci35675 < _cs35674.len; _ci35675++) { _ca35676 = tk_str_concat(_ca35676, _cs35674.ptr[_ci35675]); } _ca35676; })) };
     }
@@ -152865,7 +152835,7 @@ tk_u_slice_str_error teko_teko__fs__os_list_dir__ov_str_nm_path(tk_str path) {
 #endif
 #if defined(__APPLE__)
 tk_error teko_teko__fs__os_mkdir__ov_str_nm_path(tk_str path) {
-    int32_t r = mkdir(({ _tk_cast_loc_line = 229; _tk_cast_loc_col = 26; tk_to_u64_s(teko_teko__fs__cstr_addr(path)); }), ((uint32_t)493ULL));
+    int32_t r = mkdir(({ _tk_cast_loc_line = 211; _tk_cast_loc_col = 42; tk_to_u64_s(teko_teko__fs__cstr_addr(path)); }), ((uint32_t)493ULL));
     if (((r == ((int32_t)0ULL)))) {
         return (tk_error){0};
     }
@@ -152878,7 +152848,7 @@ tk_error teko_teko__fs__os_mkdir__ov_str_nm_path(tk_str path) {
 #endif
 #if defined(__APPLE__)
 tk_error teko_teko__fs__os_remove_file__ov_str_nm_path(tk_str path) {
-    int32_t r = unlink(({ _tk_cast_loc_line = 237; _tk_cast_loc_col = 27; tk_to_u64_s(teko_teko__fs__cstr_addr(path)); }));
+    int32_t r = unlink(({ _tk_cast_loc_line = 219; _tk_cast_loc_col = 43; tk_to_u64_s(teko_teko__fs__cstr_addr(path)); }));
     if (((r == ((int32_t)0ULL)))) {
         return (tk_error){0};
     }
@@ -152889,7 +152859,7 @@ tk_error teko_teko__fs__os_remove_file__ov_str_nm_path(tk_str path) {
 #if defined(__APPLE__)
 bool teko_teko__fs__os_is_dir__ov_str_nm_path(tk_str path) {
     int64_t buf = ((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)256ULL)))));
-    int32_t r = stat(({ _tk_cast_loc_line = 245; _tk_cast_loc_col = 25; tk_to_u64_s(teko_teko__fs__cstr_addr(path)); }), ({ _tk_cast_loc_line = 245; _tk_cast_loc_col = 49; tk_to_u64_s(buf); }));
+    int32_t r = stat(({ _tk_cast_loc_line = 227; _tk_cast_loc_col = 41; tk_to_u64_s(teko_teko__fs__cstr_addr(path)); }), ({ _tk_cast_loc_line = 227; _tk_cast_loc_col = 65; tk_to_u64_s(buf); }));
     if (((r != ((int32_t)0ULL)))) {
         return false;
     }
@@ -152914,12 +152884,12 @@ uint64_t teko_teko__fs__win_scan(uint64_t h, int64_t data, tk_slice_str * out, b
         int64_t name_addr = tk_add_i64(data, ((int64_t)44ULL));
         if ((!teko_teko__fs__is_dot_name(name_addr))) {
             if ((!counting)) {
-                { tk_slice_str _ws35692 = ((*(out))); uint64_t _wi35693 = (uint64_t)(k); if (_wi35693 < _ws35692.len) { _ws35692.ptr[_wi35693] = teko_teko__fs__name_at(name_addr); } else { tk_panic_oob_at(281, 28); }
+                { tk_slice_str _ws35692 = ((*(out))); uint64_t _wi35693 = (uint64_t)(k); if (_wi35693 < _ws35692.len) { _ws35692.ptr[_wi35693] = teko_teko__fs__name_at(name_addr); } else { tk_panic_oob_at(245, 28); }
  }
             }
             k = tk_add_u64(k, ((uint64_t)1ULL));
         }
-        if (((FindNextFileA(h, ({ _tk_cast_loc_line = 284; _tk_cast_loc_col = 29; tk_to_u64_s(data); })) == ((int32_t)0ULL)))) {
+        if (((FindNextFileA(h, ({ _tk_cast_loc_line = 248; _tk_cast_loc_col = 45; tk_to_u64_s(data); })) == ((int32_t)0ULL)))) {
             more = false;
         }
     }
@@ -152930,7 +152900,7 @@ uint64_t teko_teko__fs__win_scan(uint64_t h, int64_t data, tk_slice_str * out, b
 #if defined(_WIN32)
 tk_u_slice_str_error teko_teko__fs__os_list_dir__ov_str_nm_path(tk_str path) {
     int64_t data = ((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)512ULL)))));
-    uint64_t h1 = FindFirstFileA(({ _tk_cast_loc_line = 292; _tk_cast_loc_col = 29; tk_to_u64_s(teko_teko__fs__win_find_pattern(path)); }), ({ _tk_cast_loc_line = 292; _tk_cast_loc_col = 60; tk_to_u64_s(data); }));
+    uint64_t h1 = FindFirstFileA(({ _tk_cast_loc_line = 256; _tk_cast_loc_col = 45; tk_to_u64_s(teko_teko__fs__win_find_pattern(path)); }), ({ _tk_cast_loc_line = 256; _tk_cast_loc_col = 76; tk_to_u64_s(data); }));
     if (((h1 == ((uint64_t)18446744073709551615ULL)))) {
         return (tk_u_slice_str_error){ .tag = TK_TAG_U_SLICE_STR_ERROR_ERROR, .as.error = tk_error_make(({ tk_slice_str _cs35694 = ({ tk_str *_arr35697 = (tk_str *)TK_ARENA_region_alloc(TK_ARENA_region_current(), 2 * sizeof(tk_str)); _arr35697[0] = (tk_str){ (const tk_byte *)"teko::fs::list_dir: cannot open directory ", 42 }; _arr35697[1] = path; (tk_slice_str){ .ptr = _arr35697, .len = 2, .cap = 2 }; }); tk_str _ca35696 = (tk_str){0,0}; for (uint64_t _ci35695 = 0; _ci35695 < _cs35694.len; _ci35695++) { _ca35696 = tk_str_concat(_ca35696, _cs35694.ptr[_ci35695]); } _ca35696; })) };
     }
@@ -152938,7 +152908,7 @@ tk_u_slice_str_error teko_teko__fs__os_list_dir__ov_str_nm_path(tk_str path) {
     uint64_t n = teko_teko__fs__win_scan(h1, data, &empty, true);
     (void)(FindClose(h1));
     int64_t data2 = ((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)512ULL)))));
-    uint64_t h2 = FindFirstFileA(({ _tk_cast_loc_line = 298; _tk_cast_loc_col = 29; tk_to_u64_s(teko_teko__fs__win_find_pattern(path)); }), ({ _tk_cast_loc_line = 298; _tk_cast_loc_col = 60; tk_to_u64_s(data2); }));
+    uint64_t h2 = FindFirstFileA(({ _tk_cast_loc_line = 262; _tk_cast_loc_col = 45; tk_to_u64_s(teko_teko__fs__win_find_pattern(path)); }), ({ _tk_cast_loc_line = 262; _tk_cast_loc_col = 76; tk_to_u64_s(data2); }));
     if (((h2 == ((uint64_t)18446744073709551615ULL)))) {
         return (tk_u_slice_str_error){ .tag = TK_TAG_U_SLICE_STR_ERROR_ERROR, .as.error = tk_error_make(({ tk_slice_str _cs35698 = ({ tk_str *_arr35701 = (tk_str *)TK_ARENA_region_alloc(TK_ARENA_region_current(), 2 * sizeof(tk_str)); _arr35701[0] = (tk_str){ (const tk_byte *)"teko::fs::list_dir: cannot open directory ", 42 }; _arr35701[1] = path; (tk_slice_str){ .ptr = _arr35701, .len = 2, .cap = 2 }; }); tk_str _ca35700 = (tk_str){0,0}; for (uint64_t _ci35699 = 0; _ci35699 < _cs35698.len; _ci35699++) { _ca35700 = tk_str_concat(_ca35700, _cs35698.ptr[_ci35699]); } _ca35700; })) };
     }
@@ -152951,7 +152921,7 @@ tk_u_slice_str_error teko_teko__fs__os_list_dir__ov_str_nm_path(tk_str path) {
 #endif
 #if defined(_WIN32)
 tk_error teko_teko__fs__os_mkdir__ov_str_nm_path(tk_str path) {
-    if (((CreateDirectoryA(({ _tk_cast_loc_line = 308; _tk_cast_loc_col = 25; tk_to_u64_s(teko_teko__fs__cstr_addr(path)); }), ((uint64_t)0ULL)) != ((int32_t)0ULL)))) {
+    if (((CreateDirectoryA(({ _tk_cast_loc_line = 272; _tk_cast_loc_col = 41; tk_to_u64_s(teko_teko__fs__cstr_addr(path)); }), ((uint64_t)0ULL)) != ((int32_t)0ULL)))) {
         return (tk_error){0};
     }
     if (teko_teko__fs__os_is_dir__ov_str_nm_path(path)) {
@@ -152963,10 +152933,10 @@ tk_error teko_teko__fs__os_mkdir__ov_str_nm_path(tk_str path) {
 #endif
 #if defined(_WIN32)
 tk_error teko_teko__fs__os_remove_file__ov_str_nm_path(tk_str path) {
-    if (((DeleteFileA(({ _tk_cast_loc_line = 315; _tk_cast_loc_col = 20; tk_to_u64_s(teko_teko__fs__cstr_addr(path)); })) != ((int32_t)0ULL)))) {
+    if (((DeleteFileA(({ _tk_cast_loc_line = 279; _tk_cast_loc_col = 36; tk_to_u64_s(teko_teko__fs__cstr_addr(path)); })) != ((int32_t)0ULL)))) {
         return (tk_error){0};
     }
-    if (((GetFileAttributesA(({ _tk_cast_loc_line = 316; _tk_cast_loc_col = 27; tk_to_u64_s(teko_teko__fs__cstr_addr(path)); })) == ((uint32_t)4294967295ULL)))) {
+    if (((GetFileAttributesA(({ _tk_cast_loc_line = 280; _tk_cast_loc_col = 43; tk_to_u64_s(teko_teko__fs__cstr_addr(path)); })) == ((uint32_t)4294967295ULL)))) {
         return (tk_error){0};
     }
     return tk_error_make(({ tk_slice_str _cs35708 = ({ tk_str *_arr35711 = (tk_str *)TK_ARENA_region_alloc(TK_ARENA_region_current(), 2 * sizeof(tk_str)); _arr35711[0] = (tk_str){ (const tk_byte *)"teko::fs::remove_file: cannot remove file ", 42 }; _arr35711[1] = path; (tk_slice_str){ .ptr = _arr35711, .len = 2, .cap = 2 }; }); tk_str _ca35710 = (tk_str){0,0}; for (uint64_t _ci35709 = 0; _ci35709 < _cs35708.len; _ci35709++) { _ca35710 = tk_str_concat(_ca35710, _cs35708.ptr[_ci35709]); } _ca35710; }));
@@ -152975,7 +152945,7 @@ tk_error teko_teko__fs__os_remove_file__ov_str_nm_path(tk_str path) {
 #endif
 #if defined(_WIN32)
 bool teko_teko__fs__os_is_dir__ov_str_nm_path(tk_str path) {
-    uint32_t attr = GetFileAttributesA(({ _tk_cast_loc_line = 322; _tk_cast_loc_col = 35; tk_to_u64_s(teko_teko__fs__cstr_addr(path)); }));
+    uint32_t attr = GetFileAttributesA(({ _tk_cast_loc_line = 286; _tk_cast_loc_col = 51; tk_to_u64_s(teko_teko__fs__cstr_addr(path)); }));
     if (((attr == ((uint32_t)4294967295ULL)))) {
         return false;
     }
@@ -153155,31 +153125,31 @@ int64_t teko_teko__io__os_close__ov_i64_nm_fd(int64_t fd) {
 #endif
 #if defined(__APPLE__)
 int64_t teko_teko__io__os_open__ov_str_i64_i64_nm_path_oflags_mode(tk_str path, int64_t oflags, int64_t mode) {
-    return ((int64_t)(open(({ _tk_cast_loc_line = 198; _tk_cast_loc_col = 17; tk_to_u64_s(teko_teko__io__cstr_addr(path)); }), ({ _tk_cast_loc_line = 198; _tk_cast_loc_col = 41; tk_to_i32_s(oflags); }), ({ _tk_cast_loc_line = 198; _tk_cast_loc_col = 56; tk_to_i32_s(mode); }))));
+    return ((int64_t)(open(({ _tk_cast_loc_line = 159; _tk_cast_loc_col = 33; tk_to_u64_s(teko_teko__io__cstr_addr(path)); }), ({ _tk_cast_loc_line = 159; _tk_cast_loc_col = 57; tk_to_i32_s(oflags); }), ({ _tk_cast_loc_line = 159; _tk_cast_loc_col = 72; tk_to_i32_s(mode); }))));
 }
 
 #endif
 #if defined(__APPLE__)
 int64_t teko_teko__io__os_read__ov_i64_i64_i64_nm_fd_addr_count(int64_t fd, int64_t addr, int64_t count) {
-    return read(({ _tk_cast_loc_line = 203; _tk_cast_loc_col = 17; tk_to_i32_s(fd); }), ({ _tk_cast_loc_line = 203; _tk_cast_loc_col = 28; tk_to_u64_s(addr); }), ({ _tk_cast_loc_line = 203; _tk_cast_loc_col = 41; tk_to_u64_s(count); }));
+    return read(({ _tk_cast_loc_line = 164; _tk_cast_loc_col = 33; tk_to_i32_s(fd); }), ({ _tk_cast_loc_line = 164; _tk_cast_loc_col = 44; tk_to_u64_s(addr); }), ({ _tk_cast_loc_line = 164; _tk_cast_loc_col = 57; tk_to_u64_s(count); }));
 }
 
 #endif
 #if defined(__APPLE__)
 int64_t teko_teko__io__os_write__ov_i64_i64_i64_nm_fd_addr_count(int64_t fd, int64_t addr, int64_t count) {
-    return write(({ _tk_cast_loc_line = 208; _tk_cast_loc_col = 18; tk_to_i32_s(fd); }), ({ _tk_cast_loc_line = 208; _tk_cast_loc_col = 29; tk_to_u64_s(addr); }), ({ _tk_cast_loc_line = 208; _tk_cast_loc_col = 42; tk_to_u64_s(count); }));
+    return write(({ _tk_cast_loc_line = 169; _tk_cast_loc_col = 34; tk_to_i32_s(fd); }), ({ _tk_cast_loc_line = 169; _tk_cast_loc_col = 45; tk_to_u64_s(addr); }), ({ _tk_cast_loc_line = 169; _tk_cast_loc_col = 58; tk_to_u64_s(count); }));
 }
 
 #endif
 #if defined(__APPLE__)
 int64_t teko_teko__io__os_lseek__ov_i64_i64_i64_nm_fd_off_whence(int64_t fd, int64_t off, int64_t whence) {
-    return lseek(({ _tk_cast_loc_line = 213; _tk_cast_loc_col = 18; tk_to_i32_s(fd); }), off, ({ _tk_cast_loc_line = 213; _tk_cast_loc_col = 34; tk_to_i32_s(whence); }));
+    return lseek(({ _tk_cast_loc_line = 174; _tk_cast_loc_col = 34; tk_to_i32_s(fd); }), off, ({ _tk_cast_loc_line = 174; _tk_cast_loc_col = 50; tk_to_i32_s(whence); }));
 }
 
 #endif
 #if defined(__APPLE__)
 int64_t teko_teko__io__os_close__ov_i64_nm_fd(int64_t fd) {
-    return ((int64_t)(close(({ _tk_cast_loc_line = 218; _tk_cast_loc_col = 18; tk_to_i32_s(fd); }))));
+    return ((int64_t)(close(({ _tk_cast_loc_line = 179; _tk_cast_loc_col = 34; tk_to_i32_s(fd); }))));
 }
 
 #endif
@@ -153187,53 +153157,53 @@ int64_t teko_teko__io__os_close__ov_i64_nm_fd(int64_t fd) {
 int64_t teko_teko__io__win_wide_path(tk_str path) {
     int64_t addr = teko_teko__io__cstr_addr(path);
     int64_t wbuf = ((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(tk_mul_u64(tk_add_u64(((path.len)), ((uint64_t)1ULL)), ((uint64_t)2ULL))))));
-    (void)(MultiByteToWideChar(((uint32_t)65001ULL), ((uint32_t)0ULL), ({ _tk_cast_loc_line = 225; _tk_cast_loc_col = 45; tk_to_u64_s(addr); }), ((int32_t)-(1ULL)), ({ _tk_cast_loc_line = 225; _tk_cast_loc_col = 69; tk_to_u64_s(wbuf); }), ({ _tk_cast_loc_line = 225; _tk_cast_loc_col = 82; tk_to_i32_u(tk_add_u64(((path.len)), ((uint64_t)1ULL))); })));
+    (void)(MultiByteToWideChar(((uint32_t)65001ULL), ((uint32_t)0ULL), ({ _tk_cast_loc_line = 186; _tk_cast_loc_col = 61; tk_to_u64_s(addr); }), ((int32_t)-(1ULL)), ({ _tk_cast_loc_line = 186; _tk_cast_loc_col = 85; tk_to_u64_s(wbuf); }), ({ _tk_cast_loc_line = 186; _tk_cast_loc_col = 98; tk_to_i32_u(tk_add_u64(((path.len)), ((uint64_t)1ULL))); })));
     return wbuf;
 }
 
 #endif
 #if defined(_WIN32)
 int64_t teko_teko__io__win_open(tk_str path, uint32_t access, uint32_t disp) {
-    uint64_t h = CreateFileW(({ _tk_cast_loc_line = 231; _tk_cast_loc_col = 25; tk_to_u64_s(teko_teko__io__win_wide_path(path)); }), access, ((uint32_t)1ULL), ((uint64_t)0ULL), disp, ((uint32_t)128ULL), ((uint64_t)0ULL));
-    return ({ _tk_cast_loc_line = 232; _tk_cast_loc_col = 5; tk_to_i64_u(h); });
+    uint64_t h = CreateFileW(({ _tk_cast_loc_line = 192; _tk_cast_loc_col = 41; tk_to_u64_s(teko_teko__io__win_wide_path(path)); }), access, ((uint32_t)1ULL), ((uint64_t)0ULL), disp, ((uint32_t)128ULL), ((uint64_t)0ULL));
+    return ({ _tk_cast_loc_line = 193; _tk_cast_loc_col = 5; tk_to_i64_u(h); });
 }
 
 #endif
 #if defined(_WIN32)
 int64_t teko_teko__io__os_read__ov_i64_i64_i64_nm_fd_addr_count(int64_t fd, int64_t addr, int64_t count) {
-    uint64_t got = ({ _tk_cast_loc_line = 237; _tk_cast_loc_col = 15; tk_to_u64_s(((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)8ULL)))))); });
+    uint64_t got = ({ _tk_cast_loc_line = 198; _tk_cast_loc_col = 15; tk_to_u64_s(((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)8ULL)))))); });
     (*(volatile uint64_t *)(uintptr_t)(got) = (uint64_t)(((uint64_t)0ULL)));
-    if (((ReadFile(({ _tk_cast_loc_line = 239; _tk_cast_loc_col = 17; tk_to_u64_s(fd); }), ({ _tk_cast_loc_line = 239; _tk_cast_loc_col = 28; tk_to_u64_s(addr); }), ({ _tk_cast_loc_line = 239; _tk_cast_loc_col = 41; tk_to_u32_s(count); }), got, ((uint64_t)0ULL)) == ((int32_t)0ULL)))) {
+    if (((ReadFile(({ _tk_cast_loc_line = 200; _tk_cast_loc_col = 33; tk_to_u64_s(fd); }), ({ _tk_cast_loc_line = 200; _tk_cast_loc_col = 44; tk_to_u64_s(addr); }), ({ _tk_cast_loc_line = 200; _tk_cast_loc_col = 57; tk_to_u32_s(count); }), got, ((uint64_t)0ULL)) == ((int32_t)0ULL)))) {
         return ((int64_t)-(1ULL));
     }
-    return ({ _tk_cast_loc_line = 240; _tk_cast_loc_col = 5; tk_to_i64_u(((uint64_t)*(volatile uint64_t *)(uintptr_t)(got))); });
+    return ({ _tk_cast_loc_line = 201; _tk_cast_loc_col = 5; tk_to_i64_u(((uint64_t)*(volatile uint64_t *)(uintptr_t)(got))); });
 }
 
 #endif
 #if defined(_WIN32)
 int64_t teko_teko__io__os_write__ov_i64_i64_i64_nm_fd_addr_count(int64_t fd, int64_t addr, int64_t count) {
-    uint64_t put = ({ _tk_cast_loc_line = 245; _tk_cast_loc_col = 15; tk_to_u64_s(((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)8ULL)))))); });
+    uint64_t put = ({ _tk_cast_loc_line = 206; _tk_cast_loc_col = 15; tk_to_u64_s(((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)8ULL)))))); });
     (*(volatile uint64_t *)(uintptr_t)(put) = (uint64_t)(((uint64_t)0ULL)));
-    if (((WriteFile(({ _tk_cast_loc_line = 247; _tk_cast_loc_col = 18; tk_to_u64_s(fd); }), ({ _tk_cast_loc_line = 247; _tk_cast_loc_col = 29; tk_to_u64_s(addr); }), ({ _tk_cast_loc_line = 247; _tk_cast_loc_col = 42; tk_to_u32_s(count); }), put, ((uint64_t)0ULL)) == ((int32_t)0ULL)))) {
+    if (((WriteFile(({ _tk_cast_loc_line = 208; _tk_cast_loc_col = 34; tk_to_u64_s(fd); }), ({ _tk_cast_loc_line = 208; _tk_cast_loc_col = 45; tk_to_u64_s(addr); }), ({ _tk_cast_loc_line = 208; _tk_cast_loc_col = 58; tk_to_u32_s(count); }), put, ((uint64_t)0ULL)) == ((int32_t)0ULL)))) {
         return ((int64_t)-(1ULL));
     }
-    return ({ _tk_cast_loc_line = 248; _tk_cast_loc_col = 5; tk_to_i64_u(((uint64_t)*(volatile uint64_t *)(uintptr_t)(put))); });
+    return ({ _tk_cast_loc_line = 209; _tk_cast_loc_col = 5; tk_to_i64_u(((uint64_t)*(volatile uint64_t *)(uintptr_t)(put))); });
 }
 
 #endif
 #if defined(_WIN32)
 int64_t teko_teko__io__os_lseek__ov_i64_i64_i64_nm_fd_off_whence(int64_t fd, int64_t off, int64_t whence) {
     void * newp = (uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)8ULL)));
-    if (((SetFilePointerEx(({ _tk_cast_loc_line = 254; _tk_cast_loc_col = 25; tk_to_u64_s(fd); }), off, ({ _tk_cast_loc_line = 254; _tk_cast_loc_col = 41; tk_to_u64_s(((int64_t)(uintptr_t)(newp))); }), ({ _tk_cast_loc_line = 254; _tk_cast_loc_col = 75; tk_to_u32_s(whence); })) == ((int32_t)0ULL)))) {
+    if (((SetFilePointerEx(({ _tk_cast_loc_line = 215; _tk_cast_loc_col = 41; tk_to_u64_s(fd); }), off, ({ _tk_cast_loc_line = 215; _tk_cast_loc_col = 57; tk_to_u64_s(((int64_t)(uintptr_t)(newp))); }), ({ _tk_cast_loc_line = 215; _tk_cast_loc_col = 91; tk_to_u32_s(whence); })) == ((int32_t)0ULL)))) {
         return ((int64_t)-(1ULL));
     }
-    return ({ _tk_cast_loc_line = 255; _tk_cast_loc_col = 5; tk_to_i64_u(((uint64_t)*(volatile uint64_t *)(uintptr_t)(({ _tk_cast_loc_line = 255; _tk_cast_loc_col = 25; tk_to_u64_s(((int64_t)(uintptr_t)(newp))); })))); });
+    return ({ _tk_cast_loc_line = 216; _tk_cast_loc_col = 5; tk_to_i64_u(((uint64_t)*(volatile uint64_t *)(uintptr_t)(({ _tk_cast_loc_line = 216; _tk_cast_loc_col = 25; tk_to_u64_s(((int64_t)(uintptr_t)(newp))); })))); });
 }
 
 #endif
 #if defined(_WIN32)
 int64_t teko_teko__io__os_close__ov_i64_nm_fd(int64_t fd) {
-    if (((CloseHandle(({ _tk_cast_loc_line = 260; _tk_cast_loc_col = 20; tk_to_u64_s(fd); })) == ((int32_t)0ULL)))) {
+    if (((CloseHandle(({ _tk_cast_loc_line = 221; _tk_cast_loc_col = 36; tk_to_u64_s(fd); })) == ((int32_t)0ULL)))) {
         return ((int64_t)-(1ULL));
     }
     return ((int64_t)0ULL);
@@ -153294,7 +153264,7 @@ int64_t teko_teko__io__os_open_write__ov_str_nm_path(tk_str path) {
 #endif
 #if defined(__APPLE__)
 int64_t teko_teko__io__os_open_write__ov_str_nm_path(tk_str path) {
-    return ((int64_t)(creat(({ _tk_cast_loc_line = 321; _tk_cast_loc_col = 18; tk_to_u64_s(teko_teko__io__cstr_addr(path)); }), ({ _tk_cast_loc_line = 321; _tk_cast_loc_col = 42; tk_to_i32_s(tk_const_teko__sys__OPEN_MODE_644); }))));
+    return ((int64_t)(creat(({ _tk_cast_loc_line = 282; _tk_cast_loc_col = 34; tk_to_u64_s(teko_teko__io__cstr_addr(path)); }), ({ _tk_cast_loc_line = 282; _tk_cast_loc_col = 58; tk_to_i32_s(tk_const_teko__sys__OPEN_MODE_644); }))));
 }
 
 #endif
@@ -153328,7 +153298,7 @@ int64_t teko_teko__io__os_open_append__ov_str_nm_path(tk_str path) {
     if ((!teko_teko__io__is_os_error(h))) {
         return h;
     }
-    int64_t c = ((int64_t)(creat(({ _tk_cast_loc_line = 351; _tk_cast_loc_col = 26; tk_to_u64_s(teko_teko__io__cstr_addr(path)); }), ({ _tk_cast_loc_line = 351; _tk_cast_loc_col = 50; tk_to_i32_s(tk_const_teko__sys__OPEN_MODE_644); }))));
+    int64_t c = ((int64_t)(creat(({ _tk_cast_loc_line = 312; _tk_cast_loc_col = 42; tk_to_u64_s(teko_teko__io__cstr_addr(path)); }), ({ _tk_cast_loc_line = 312; _tk_cast_loc_col = 66; tk_to_i32_s(tk_const_teko__sys__OPEN_MODE_644); }))));
     if (teko_teko__io__is_os_error(c)) {
         return ((int64_t)-(1ULL));
     }
@@ -153356,11 +153326,11 @@ tk_u_u64_error teko_teko__io__stream_read(tk_t_teko__io__FileStream * s, tk_slic
     if (((want == ((uint64_t)0ULL)))) {
         return (tk_u_u64_error){ .tag = TK_TAG_U_U64_ERROR_U64, .as.u64 = ((uint64_t)0ULL) };
     }
-    int64_t n = teko_teko__io__os_read__ov_i64_i64_i64_nm_fd_addr_count(((*(tk_t_teko__io__FileStream *)tk_nn((void *)(s), 375, 21)).handle), teko_teko__io__buf_base(into, ((uint64_t)0ULL)), ({ _tk_cast_loc_line = 375; _tk_cast_loc_col = 50; tk_to_i64_u(want); }));
+    int64_t n = teko_teko__io__os_read__ov_i64_i64_i64_nm_fd_addr_count(((*(tk_t_teko__io__FileStream *)tk_nn((void *)(s), 336, 21)).handle), teko_teko__io__buf_base(into, ((uint64_t)0ULL)), ({ _tk_cast_loc_line = 336; _tk_cast_loc_col = 50; tk_to_i64_u(want); }));
     if (teko_teko__io__is_os_error(n)) {
         return (tk_u_u64_error){ .tag = TK_TAG_U_U64_ERROR_ERROR, .as.error = tk_error_make((tk_str){ (const tk_byte *)"teko::io::stream_read: read failed", 34 }) };
     }
-    return (tk_u_u64_error){ .tag = TK_TAG_U_U64_ERROR_U64, .as.u64 = ({ _tk_cast_loc_line = 377; _tk_cast_loc_col = 5; tk_to_u64_s(n); }) };
+    return (tk_u_u64_error){ .tag = TK_TAG_U_U64_ERROR_U64, .as.u64 = ({ _tk_cast_loc_line = 338; _tk_cast_loc_col = 5; tk_to_u64_s(n); }) };
 }
 
 tk_u_u64_error teko_teko__io__stream_write(tk_t_teko__io__FileStream * s, tk_slice_byte data) {
@@ -153373,14 +153343,14 @@ tk_u_u64_error teko_teko__io__stream_write(tk_t_teko__io__FileStream * s, tk_sli
         if (((take > ((uint64_t)1024ULL)))) {
             take = ((uint64_t)1024ULL);
         }
-        int64_t n = teko_teko__io__os_write__ov_i64_i64_i64_nm_fd_addr_count(((*(tk_t_teko__io__FileStream *)tk_nn((void *)(s), 392, 26)).handle), teko_teko__io__buf_base(data, off), ({ _tk_cast_loc_line = 392; _tk_cast_loc_col = 57; tk_to_i64_u(take); }));
+        int64_t n = teko_teko__io__os_write__ov_i64_i64_i64_nm_fd_addr_count(((*(tk_t_teko__io__FileStream *)tk_nn((void *)(s), 353, 26)).handle), teko_teko__io__buf_base(data, off), ({ _tk_cast_loc_line = 353; _tk_cast_loc_col = 57; tk_to_i64_u(take); }));
         if (teko_teko__io__is_os_error(n)) {
             return (tk_u_u64_error){ .tag = TK_TAG_U_U64_ERROR_ERROR, .as.error = tk_error_make((tk_str){ (const tk_byte *)"teko::io::stream_write: write failed", 36 }) };
         }
         if (((n == ((int64_t)0ULL)))) {
             return (tk_u_u64_error){ .tag = TK_TAG_U_U64_ERROR_ERROR, .as.error = tk_error_make((tk_str){ (const tk_byte *)"teko::io::stream_write: no progress", 35 }) };
         }
-        off = tk_add_u64(off, ({ _tk_cast_loc_line = 395; _tk_cast_loc_col = 22; tk_to_u64_s(n); }));
+        off = tk_add_u64(off, ({ _tk_cast_loc_line = 356; _tk_cast_loc_col = 22; tk_to_u64_s(n); }));
     }
     return (tk_u_u64_error){ .tag = TK_TAG_U_U64_ERROR_U64, .as.u64 = off };
 }
@@ -153395,14 +153365,14 @@ tk_u_u64_error teko_teko__io__stream_write_prefix(tk_t_teko__io__FileStream * s,
         if (((take > ((uint64_t)1024ULL)))) {
             take = ((uint64_t)1024ULL);
         }
-        int64_t w = teko_teko__io__os_write__ov_i64_i64_i64_nm_fd_addr_count(((*(tk_t_teko__io__FileStream *)tk_nn((void *)(s), 413, 26)).handle), teko_teko__io__buf_base(data, off), ({ _tk_cast_loc_line = 413; _tk_cast_loc_col = 57; tk_to_i64_u(take); }));
+        int64_t w = teko_teko__io__os_write__ov_i64_i64_i64_nm_fd_addr_count(((*(tk_t_teko__io__FileStream *)tk_nn((void *)(s), 374, 26)).handle), teko_teko__io__buf_base(data, off), ({ _tk_cast_loc_line = 374; _tk_cast_loc_col = 57; tk_to_i64_u(take); }));
         if (teko_teko__io__is_os_error(w)) {
             return (tk_u_u64_error){ .tag = TK_TAG_U_U64_ERROR_ERROR, .as.error = tk_error_make((tk_str){ (const tk_byte *)"teko::io::stream_write_prefix: write failed", 43 }) };
         }
         if (((w == ((int64_t)0ULL)))) {
             return (tk_u_u64_error){ .tag = TK_TAG_U_U64_ERROR_ERROR, .as.error = tk_error_make((tk_str){ (const tk_byte *)"teko::io::stream_write_prefix: no progress", 42 }) };
         }
-        off = tk_add_u64(off, ({ _tk_cast_loc_line = 416; _tk_cast_loc_col = 22; tk_to_u64_s(w); }));
+        off = tk_add_u64(off, ({ _tk_cast_loc_line = 377; _tk_cast_loc_col = 22; tk_to_u64_s(w); }));
     }
     return (tk_u_u64_error){ .tag = TK_TAG_U_U64_ERROR_U64, .as.u64 = off };
 }
@@ -153429,28 +153399,28 @@ int64_t teko_teko__io__whence_code(tk_t_teko__io__Whence whence) {
 }
 
 tk_u_u64_error teko_teko__io__stream_seek(tk_t_teko__io__FileStream * s, int64_t off, tk_t_teko__io__Whence whence) {
-    int64_t pos = teko_teko__io__os_lseek__ov_i64_i64_i64_nm_fd_off_whence(((*(tk_t_teko__io__FileStream *)tk_nn((void *)(s), 439, 24)).handle), off, teko_teko__io__whence_code(whence));
+    int64_t pos = teko_teko__io__os_lseek__ov_i64_i64_i64_nm_fd_off_whence(((*(tk_t_teko__io__FileStream *)tk_nn((void *)(s), 400, 24)).handle), off, teko_teko__io__whence_code(whence));
     if (teko_teko__io__is_os_error(pos)) {
         return (tk_u_u64_error){ .tag = TK_TAG_U_U64_ERROR_ERROR, .as.error = tk_error_make((tk_str){ (const tk_byte *)"teko::io::stream_seek: negative or failed seek", 46 }) };
     }
-    return (tk_u_u64_error){ .tag = TK_TAG_U_U64_ERROR_U64, .as.u64 = ({ _tk_cast_loc_line = 441; _tk_cast_loc_col = 5; tk_to_u64_s(pos); }) };
+    return (tk_u_u64_error){ .tag = TK_TAG_U_U64_ERROR_U64, .as.u64 = ({ _tk_cast_loc_line = 402; _tk_cast_loc_col = 5; tk_to_u64_s(pos); }) };
 }
 
 tk_u_u64_error teko_teko__io__stream_size(tk_t_teko__io__FileStream * s) {
-    int64_t here = teko_teko__io__os_lseek__ov_i64_i64_i64_nm_fd_off_whence(((*(tk_t_teko__io__FileStream *)tk_nn((void *)(s), 448, 25)).handle), ((int64_t)0ULL), ((int64_t)1ULL));
+    int64_t here = teko_teko__io__os_lseek__ov_i64_i64_i64_nm_fd_off_whence(((*(tk_t_teko__io__FileStream *)tk_nn((void *)(s), 409, 25)).handle), ((int64_t)0ULL), ((int64_t)1ULL));
     if (teko_teko__io__is_os_error(here)) {
         return (tk_u_u64_error){ .tag = TK_TAG_U_U64_ERROR_ERROR, .as.error = tk_error_make((tk_str){ (const tk_byte *)"teko::io::stream_size: seek failed", 34 }) };
     }
-    int64_t total = teko_teko__io__os_lseek__ov_i64_i64_i64_nm_fd_off_whence(((*(tk_t_teko__io__FileStream *)tk_nn((void *)(s), 450, 26)).handle), ((int64_t)0ULL), ((int64_t)2ULL));
+    int64_t total = teko_teko__io__os_lseek__ov_i64_i64_i64_nm_fd_off_whence(((*(tk_t_teko__io__FileStream *)tk_nn((void *)(s), 411, 26)).handle), ((int64_t)0ULL), ((int64_t)2ULL));
     if (teko_teko__io__is_os_error(total)) {
         return (tk_u_u64_error){ .tag = TK_TAG_U_U64_ERROR_ERROR, .as.error = tk_error_make((tk_str){ (const tk_byte *)"teko::io::stream_size: seek failed", 34 }) };
     }
-    (void)(teko_teko__io__os_lseek__ov_i64_i64_i64_nm_fd_off_whence(((*(tk_t_teko__io__FileStream *)tk_nn((void *)(s), 452, 18)).handle), here, ((int64_t)0ULL)));
-    return (tk_u_u64_error){ .tag = TK_TAG_U_U64_ERROR_U64, .as.u64 = ({ _tk_cast_loc_line = 453; _tk_cast_loc_col = 5; tk_to_u64_s(total); }) };
+    (void)(teko_teko__io__os_lseek__ov_i64_i64_i64_nm_fd_off_whence(((*(tk_t_teko__io__FileStream *)tk_nn((void *)(s), 413, 18)).handle), here, ((int64_t)0ULL)));
+    return (tk_u_u64_error){ .tag = TK_TAG_U_U64_ERROR_U64, .as.u64 = ({ _tk_cast_loc_line = 414; _tk_cast_loc_col = 5; tk_to_u64_s(total); }) };
 }
 
 tk_error teko_teko__io__stream_close(tk_t_teko__io__FileStream * s) {
-    if (teko_teko__io__is_os_error(teko_teko__io__os_close__ov_i64_nm_fd(((*(tk_t_teko__io__FileStream *)tk_nn((void *)(s), 460, 29)).handle)))) {
+    if (teko_teko__io__is_os_error(teko_teko__io__os_close__ov_i64_nm_fd(((*(tk_t_teko__io__FileStream *)tk_nn((void *)(s), 421, 29)).handle)))) {
         return tk_error_make((tk_str){ (const tk_byte *)"teko::io::stream_close: close failed", 36 });
     }
     return (tk_error){0};
@@ -153564,7 +153534,7 @@ tk_u_slice_byte_error teko_teko__io__read_stream(tk_str path) {
             if (((j >= n))) {
                 break;
             }
-            { tk_slice_byte _ws35761 = (out); uint64_t _wi35762 = (uint64_t)(tk_add_u64(got, j)); if (_wi35762 < _ws35761.len) { _ws35761.ptr[_wi35762] = ({ uint8_t const *_ls35763 = (scratch).ptr; uint64_t _li35764 = (uint64_t)(j); _li35764 < (scratch).len ? _ls35763[_li35764] : (tk_panic_oob_at(505, 28), (uint8_t){0}); }); } else { tk_panic_oob_at(505, 13); }
+            { tk_slice_byte _ws35761 = (out); uint64_t _wi35762 = (uint64_t)(tk_add_u64(got, j)); if (_wi35762 < _ws35761.len) { _ws35761.ptr[_wi35762] = ({ uint8_t const *_ls35763 = (scratch).ptr; uint64_t _li35764 = (uint64_t)(j); _li35764 < (scratch).len ? _ls35763[_li35764] : (tk_panic_oob_at(466, 28), (uint8_t){0}); }); } else { tk_panic_oob_at(466, 13); }
  }
             j = tk_add_u64(j, ((uint64_t)1ULL));
         }
@@ -189497,7 +189467,7 @@ void teko_teko__process__mac_child_fail(void) {
 #endif
 #if defined(__APPLE__)
 void teko_teko__process__mac_execve(tk_str path, uint64_t argv, uint64_t envp) {
-    (void)(execve(({ _tk_cast_loc_line = 436; _tk_cast_loc_col = 23; tk_to_u64_s(teko_teko__process__cstr_addr(path)); }), argv, envp));
+    (void)(execve(({ _tk_cast_loc_line = 397; _tk_cast_loc_col = 39; tk_to_u64_s(teko_teko__process__cstr_addr(path)); }), argv, envp));
 }
 
 #endif
@@ -189544,7 +189514,7 @@ void teko_teko__process__mac_exec_search(tk_str path, tk_str argv0, uint64_t arg
         if (((i >= ((path.len))))) {
             break;
         }
-        if (((((uint64_t)(({ tk_str _s45775 = path; uint64_t _i45776 = (uint64_t)(i); _i45776 < _s45775.len ? _s45775.ptr[_i45776] : (tk_panic_oob_at(459, 13), (tk_byte)0); }))) == ((uint64_t)58ULL)))) {
+        if (((((uint64_t)(({ tk_str _s45775 = path; uint64_t _i45776 = (uint64_t)(i); _i45776 < _s45775.len ? _s45775.ptr[_i45776] : (tk_panic_oob_at(420, 13), (tk_byte)0); }))) == ((uint64_t)58ULL)))) {
             teko_teko__process__mac_try_dir(tk_str_slice(path, start, i), argv0, argv, envp);
             start = tk_add_u64(i, ((uint64_t)1ULL));
         }
@@ -189567,7 +189537,7 @@ void teko_teko__process__mac_exec_resolved(tk_str argv0, uint64_t argv, uint64_t
 #endif
 #if defined(__APPLE__)
 void teko_teko__process__mac_quiet_redirect(void) {
-    int32_t nfd = open(({ _tk_cast_loc_line = 480; _tk_cast_loc_col = 27; tk_to_u64_s(teko_teko__process__cstr_addr((tk_str){ (const tk_byte *)"/dev/null", 9 })); }), ({ _tk_cast_loc_line = 480; _tk_cast_loc_col = 58; tk_to_i32_s(tk_const_teko__sys__O_WRONLY); }), ((int32_t)0ULL));
+    int32_t nfd = open(({ _tk_cast_loc_line = 441; _tk_cast_loc_col = 43; tk_to_u64_s(teko_teko__process__cstr_addr((tk_str){ (const tk_byte *)"/dev/null", 9 })); }), ({ _tk_cast_loc_line = 441; _tk_cast_loc_col = 74; tk_to_i32_s(tk_const_teko__sys__O_WRONLY); }), ((int32_t)0ULL));
     if (((nfd < ((int32_t)0ULL)))) {
         return;
     }
@@ -189581,10 +189551,10 @@ void teko_teko__process__mac_quiet_redirect(void) {
 int32_t teko_teko__process__mac_wait_status(int64_t pid) {
     int32_t status = ((int32_t)0ULL);
     struct rusage rusage = (struct rusage){ .ru_maxrss = ((int64_t)0ULL) };
-    if (((wait4(({ _tk_cast_loc_line = 491; _tk_cast_loc_col = 21; tk_to_i32_s(pid); }), &status, ((int32_t)0ULL), &rusage) < ((int32_t)0ULL)))) {
+    if (((wait4(({ _tk_cast_loc_line = 452; _tk_cast_loc_col = 37; tk_to_i32_s(pid); }), &status, ((int32_t)0ULL), &rusage) < ((int32_t)0ULL)))) {
         return ((int32_t)-(1ULL));
     }
-    return teko_teko__process__decode_wait_status(((uint64_t)(({ _tk_cast_loc_line = 492; _tk_cast_loc_col = 25; tk_to_u32_s(status); }))));
+    return teko_teko__process__decode_wait_status(((uint64_t)(({ _tk_cast_loc_line = 453; _tk_cast_loc_col = 25; tk_to_u32_s(status); }))));
 }
 
 #endif
@@ -189603,7 +189573,7 @@ int32_t teko_teko__process__os_run__ov_Sstr_bool_nm_args_quiet(tk_slice_str args
         if (quiet) {
             teko_teko__process__mac_quiet_redirect();
         }
-        teko_teko__process__mac_exec_resolved(({ tk_str const *_ls45778 = (args).ptr; uint64_t _li45779 = (uint64_t)(((int64_t)0ULL)); _li45779 < (args).len ? _ls45778[_li45779] : (tk_panic_oob_at(504, 27), (tk_str){0}); }), argv, envp);
+        teko_teko__process__mac_exec_resolved(({ tk_str const *_ls45778 = (args).ptr; uint64_t _li45779 = (uint64_t)(((int64_t)0ULL)); _li45779 < (args).len ? _ls45778[_li45779] : (tk_panic_oob_at(465, 27), (tk_str){0}); }), argv, envp);
         teko_teko__process__mac_child_fail();
     }
     return teko_teko__process__mac_wait_status(pid);
@@ -189618,7 +189588,7 @@ tk_t_teko__process__RedirectFd teko_teko__process__mac_open_redirect(tk_str path
     if (((((path.len)) == ((uint64_t)0ULL)))) {
         return (tk_t_teko__process__RedirectFd){ .fd = ((int64_t)-(1ULL)), .owned = false };
     }
-    int64_t fd = ((int64_t)(open(({ _tk_cast_loc_line = 514; _tk_cast_loc_col = 26; tk_to_u64_s(teko_teko__process__cstr_addr(path)); }), ({ _tk_cast_loc_line = 514; _tk_cast_loc_col = 50; tk_to_i32_s(oflags); }), ({ _tk_cast_loc_line = 514; _tk_cast_loc_col = 65; tk_to_i32_s(tk_const_teko__sys__OPEN_MODE_644); }))));
+    int64_t fd = ((int64_t)(open(({ _tk_cast_loc_line = 475; _tk_cast_loc_col = 42; tk_to_u64_s(teko_teko__process__cstr_addr(path)); }), ({ _tk_cast_loc_line = 475; _tk_cast_loc_col = 66; tk_to_i32_s(oflags); }), ({ _tk_cast_loc_line = 475; _tk_cast_loc_col = 81; tk_to_i32_s(tk_const_teko__sys__OPEN_MODE_644); }))));
     return (tk_t_teko__process__RedirectFd){ .fd = fd, .owned = true };
 }
 
@@ -189631,7 +189601,7 @@ tk_t_teko__process__RedirectFd teko_teko__process__mac_child_lift(tk_t_teko__pro
     if (((((r.fd)) > ((int64_t)2ULL)))) {
         return r;
     }
-    int64_t hi = ((int64_t)(fcntl(({ _tk_cast_loc_line = 522; _tk_cast_loc_col = 29; tk_to_i32_s(((r.fd))); }), ((int32_t)0ULL), ((int32_t)3ULL))));
+    int64_t hi = ((int64_t)(fcntl(({ _tk_cast_loc_line = 483; _tk_cast_loc_col = 45; tk_to_i32_s(((r.fd))); }), ((int32_t)0ULL), ((int32_t)3ULL))));
     if (((hi < ((int64_t)0ULL)))) {
         return r;
     }
@@ -189647,7 +189617,7 @@ void teko_teko__process__mac_child_drop(int64_t fd, int64_t already_a, int64_t a
     if ((((fd == already_a)) || ((fd == already_b)))) {
         return;
     }
-    (void)(close(({ _tk_cast_loc_line = 531; _tk_cast_loc_col = 22; tk_to_i32_s(fd); })));
+    (void)(close(({ _tk_cast_loc_line = 492; _tk_cast_loc_col = 38; tk_to_i32_s(fd); })));
 }
 
 #endif
@@ -189661,17 +189631,17 @@ void teko_teko__process__mac_child_bind_all(tk_t_teko__process__RedirectFd in_r,
     tk_t_teko__process__RedirectFd c = teko_teko__process__mac_child_lift(err_r);
     if (((((a.fd)) >= ((int64_t)0ULL)))) {
         tk_region *_tkbr45788 = TK_ARENA_region_new(_tkfr);
-        (void)(dup2(({ _tk_cast_loc_line = 539; _tk_cast_loc_col = 36; tk_to_i32_s(((a.fd))); }), ((int32_t)0ULL)));
+        (void)(dup2(({ _tk_cast_loc_line = 500; _tk_cast_loc_col = 52; tk_to_i32_s(((a.fd))); }), ((int32_t)0ULL)));
         TK_ARENA_region_drop(_tkbr45788); _tkbr45788 = NULL;
     }
     if (((((b.fd)) >= ((int64_t)0ULL)))) {
         tk_region *_tkbr45789 = TK_ARENA_region_new(_tkfr);
-        (void)(dup2(({ _tk_cast_loc_line = 540; _tk_cast_loc_col = 36; tk_to_i32_s(((b.fd))); }), ((int32_t)1ULL)));
+        (void)(dup2(({ _tk_cast_loc_line = 501; _tk_cast_loc_col = 52; tk_to_i32_s(((b.fd))); }), ((int32_t)1ULL)));
         TK_ARENA_region_drop(_tkbr45789); _tkbr45789 = NULL;
     }
     if (((((c.fd)) >= ((int64_t)0ULL)))) {
         tk_region *_tkbr45790 = TK_ARENA_region_new(_tkfr);
-        (void)(dup2(({ _tk_cast_loc_line = 541; _tk_cast_loc_col = 36; tk_to_i32_s(((c.fd))); }), ((int32_t)2ULL)));
+        (void)(dup2(({ _tk_cast_loc_line = 502; _tk_cast_loc_col = 52; tk_to_i32_s(((c.fd))); }), ((int32_t)2ULL)));
         TK_ARENA_region_drop(_tkbr45790); _tkbr45790 = NULL;
     }
     if (((((a.fd)) >= ((int64_t)0ULL)))) {
@@ -189697,7 +189667,7 @@ void teko_teko__process__mac_child_bind_all(tk_t_teko__process__RedirectFd in_r,
 #if defined(__APPLE__)
 void teko_teko__process__mac_parent_release(tk_t_teko__process__RedirectFd r) {
     if ((((r.owned)) && ((((r.fd)) >= ((int64_t)0ULL))))) {
-        (void)(close(({ _tk_cast_loc_line = 549; _tk_cast_loc_col = 48; tk_to_i32_s(((r.fd))); })));
+        (void)(close(({ _tk_cast_loc_line = 510; _tk_cast_loc_col = 64; tk_to_i32_s(((r.fd))); })));
     }
 }
 
@@ -189721,10 +189691,10 @@ int64_t teko_teko__process__os_spawn__ov_Sstr_str_Sstr_str_str_str_i64_i64_i64_n
     }
     if (((pid == ((int64_t)0ULL)))) {
         teko_teko__process__mac_child_bind_all(in_r, out_r, err_r);
-        if (((!teko_teko__process__dir_is_here(dir)) && ((chdir(({ _tk_cast_loc_line = 569; _tk_cast_loc_col = 46; tk_to_u64_s(teko_teko__process__cstr_addr(dir)); })) != ((int32_t)0ULL))))) {
+        if (((!teko_teko__process__dir_is_here(dir)) && ((chdir(({ _tk_cast_loc_line = 530; _tk_cast_loc_col = 62; tk_to_u64_s(teko_teko__process__cstr_addr(dir)); })) != ((int32_t)0ULL))))) {
             teko_teko__process__mac_child_fail();
         }
-        teko_teko__process__mac_exec_resolved(({ tk_str const *_ls45794 = (argv).ptr; uint64_t _li45795 = (uint64_t)(((int64_t)0ULL)); _li45795 < (argv).len ? _ls45794[_li45795] : (tk_panic_oob_at(570, 27), (tk_str){0}); }), argvp, envp);
+        teko_teko__process__mac_exec_resolved(({ tk_str const *_ls45794 = (argv).ptr; uint64_t _li45795 = (uint64_t)(((int64_t)0ULL)); _li45795 < (argv).len ? _ls45794[_li45795] : (tk_panic_oob_at(531, 27), (tk_str){0}); }), argvp, envp);
         teko_teko__process__mac_child_fail();
     }
     teko_teko__process__mac_parent_release(in_r);
@@ -189745,19 +189715,19 @@ int32_t teko_teko__process__os_wait_one__ov_i64_nm_raw(int64_t raw) {
 #endif
 #if defined(__APPLE__)
 void teko_teko__process__mac_set_cloexec(int64_t fd) {
-    (void)(fcntl(({ _tk_cast_loc_line = 587; _tk_cast_loc_col = 24; tk_to_i32_s(fd); }), ((int32_t)2ULL), ((int32_t)1ULL)));
+    (void)(fcntl(({ _tk_cast_loc_line = 548; _tk_cast_loc_col = 40; tk_to_i32_s(fd); }), ((int32_t)2ULL), ((int32_t)1ULL)));
 }
 
 #endif
 #if defined(__APPLE__)
 int64_t teko_teko__process__os_pipe__ov_nm(void) {
     int64_t fds = ((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)8ULL)))));
-    if (((pipe(({ _tk_cast_loc_line = 593; _tk_cast_loc_col = 21; tk_to_u64_s(fds); })) != ((int32_t)0ULL)))) {
+    if (((pipe(({ _tk_cast_loc_line = 554; _tk_cast_loc_col = 37; tk_to_u64_s(fds); })) != ((int32_t)0ULL)))) {
         return ((int64_t)-(1ULL));
     }
-    uint64_t pair = ((uint64_t)*(volatile uint64_t *)(uintptr_t)(({ _tk_cast_loc_line = 594; _tk_cast_loc_col = 36; tk_to_u64_s(fds); })));
-    int64_t read_fd = ({ _tk_cast_loc_line = 595; _tk_cast_loc_col = 19; tk_to_i64_u((pair & ((uint64_t)4294967295ULL))); });
-    int64_t write_fd = ({ _tk_cast_loc_line = 596; _tk_cast_loc_col = 20; tk_to_i64_u((tk_shr_u64(pair, ((uint64_t)32ULL)) & ((uint64_t)4294967295ULL))); });
+    uint64_t pair = ((uint64_t)*(volatile uint64_t *)(uintptr_t)(({ _tk_cast_loc_line = 555; _tk_cast_loc_col = 36; tk_to_u64_s(fds); })));
+    int64_t read_fd = ({ _tk_cast_loc_line = 556; _tk_cast_loc_col = 19; tk_to_i64_u((pair & ((uint64_t)4294967295ULL))); });
+    int64_t write_fd = ({ _tk_cast_loc_line = 557; _tk_cast_loc_col = 20; tk_to_i64_u((tk_shr_u64(pair, ((uint64_t)32ULL)) & ((uint64_t)4294967295ULL))); });
     teko_teko__process__mac_set_cloexec(read_fd);
     teko_teko__process__mac_set_cloexec(write_fd);
     return teko_teko__process__pack_pipe(read_fd, write_fd);
@@ -189769,7 +189739,7 @@ int32_t teko_teko__process__os_close_fd__ov_i64_nm_fd(int64_t fd) {
     if (((fd < ((int64_t)0ULL)))) {
         return ((int32_t)-(1ULL));
     }
-    if (((close(({ _tk_cast_loc_line = 605; _tk_cast_loc_col = 21; tk_to_i32_s(fd); })) == ((int32_t)0ULL)))) {
+    if (((close(({ _tk_cast_loc_line = 566; _tk_cast_loc_col = 37; tk_to_i32_s(fd); })) == ((int32_t)0ULL)))) {
         return ((int64_t)0ULL);
     }
     return ((int32_t)-(1ULL));
@@ -189782,15 +189752,15 @@ int32_t teko_teko__process__os_fd_wait_readable__ov_i64_i64_nm_fd_timeout_ms(int
         return ((int32_t)-(1ULL));
     }
     int64_t pfd = ((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)8ULL)))));
-    (*(volatile uint64_t *)(uintptr_t)(({ _tk_cast_loc_line = 613; _tk_cast_loc_col = 26; tk_to_u64_s(pfd); })) = (uint64_t)((({ _tk_cast_loc_line = 613; _tk_cast_loc_col = 39; tk_to_u64_s(fd); }) | ((uint64_t)4294967296ULL))));
-    int32_t r = poll(({ _tk_cast_loc_line = 614; _tk_cast_loc_col = 25; tk_to_u64_s(pfd); }), ((uint32_t)1ULL), ({ _tk_cast_loc_line = 614; _tk_cast_loc_col = 40; tk_to_i32_s(timeout_ms); }));
+    (*(volatile uint64_t *)(uintptr_t)(({ _tk_cast_loc_line = 574; _tk_cast_loc_col = 26; tk_to_u64_s(pfd); })) = (uint64_t)((({ _tk_cast_loc_line = 574; _tk_cast_loc_col = 39; tk_to_u64_s(fd); }) | ((uint64_t)4294967296ULL))));
+    int32_t r = poll(({ _tk_cast_loc_line = 575; _tk_cast_loc_col = 41; tk_to_u64_s(pfd); }), ((uint32_t)1ULL), ({ _tk_cast_loc_line = 575; _tk_cast_loc_col = 56; tk_to_i32_s(timeout_ms); }));
     if (((r < ((int32_t)0ULL)))) {
         return ((int32_t)-(1ULL));
     }
     if (((r == ((int32_t)0ULL)))) {
         return ((int32_t)0ULL);
     }
-    uint64_t revents = (tk_shr_u64(((uint64_t)*(volatile uint64_t *)(uintptr_t)(({ _tk_cast_loc_line = 617; _tk_cast_loc_col = 40; tk_to_u64_s(pfd); }))), ((uint64_t)48ULL)) & ((uint64_t)65535ULL));
+    uint64_t revents = (tk_shr_u64(((uint64_t)*(volatile uint64_t *)(uintptr_t)(({ _tk_cast_loc_line = 578; _tk_cast_loc_col = 40; tk_to_u64_s(pfd); }))), ((uint64_t)48ULL)) & ((uint64_t)65535ULL));
     if ((((revents & ((uint64_t)17ULL)) != ((uint64_t)0ULL)))) {
         return ((int32_t)1ULL);
     }
@@ -189813,11 +189783,11 @@ int64_t teko_teko__process__os_fd_fill__ov_i64_i64_nm_fd_timeout_ms(int64_t fd, 
     if (((ready != ((int32_t)1ULL)))) {
         return ((int64_t)-(2ULL));
     }
-    int64_t got = read(({ _tk_cast_loc_line = 631; _tk_cast_loc_col = 27; tk_to_i32_s(fd); }), ((uint64_t)(tk_add_u64(stg, ((uint64_t)16ULL)))), ((uint64_t)65536ULL));
+    int64_t got = read(({ _tk_cast_loc_line = 592; _tk_cast_loc_col = 43; tk_to_i32_s(fd); }), ((uint64_t)(tk_add_u64(stg, ((uint64_t)16ULL)))), ((uint64_t)65536ULL));
     if (((got < ((int64_t)0ULL)))) {
         return ((int64_t)-(2ULL));
     }
-    (*(volatile uint64_t *)(uintptr_t)(tk_add_u64(stg, ((uint64_t)0ULL))) = (uint64_t)(({ _tk_cast_loc_line = 633; _tk_cast_loc_col = 50; tk_to_u64_s(got); })));
+    (*(volatile uint64_t *)(uintptr_t)(tk_add_u64(stg, ((uint64_t)0ULL))) = (uint64_t)(({ _tk_cast_loc_line = 594; _tk_cast_loc_col = 50; tk_to_u64_s(got); })));
     return got;
 }
 
@@ -189830,7 +189800,7 @@ tk_str teko_teko__process__count_prefixed_list(tk_slice_str items) {
         if (((k >= (items.len)))) {
             break;
         }
-        out = ({ tk_slice_str _cs45796 = ({ tk_str *_arr45799 = (tk_str *)TK_ARENA_region_alloc(TK_ARENA_region_current(), 3 * sizeof(tk_str)); _arr45799[0] = out; _arr45799[1] = (tk_str){ (const tk_byte *)"\000", 1 }; _arr45799[2] = ({ tk_str const *_ls45800 = (items).ptr; uint64_t _li45801 = (uint64_t)(k); _li45801 < (items).len ? _ls45800[_li45801] : (tk_panic_oob_at(751, 33), (tk_str){0}); }); (tk_slice_str){ .ptr = _arr45799, .len = 3, .cap = 3 }; }); tk_str _ca45798 = (tk_str){0,0}; for (uint64_t _ci45797 = 0; _ci45797 < _cs45796.len; _ci45797++) { _ca45798 = tk_str_concat(_ca45798, _cs45796.ptr[_ci45797]); } _ca45798; });
+        out = ({ tk_slice_str _cs45796 = ({ tk_str *_arr45799 = (tk_str *)TK_ARENA_region_alloc(TK_ARENA_region_current(), 3 * sizeof(tk_str)); _arr45799[0] = out; _arr45799[1] = (tk_str){ (const tk_byte *)"\000", 1 }; _arr45799[2] = ({ tk_str const *_ls45800 = (items).ptr; uint64_t _li45801 = (uint64_t)(k); _li45801 < (items).len ? _ls45800[_li45801] : (tk_panic_oob_at(694, 33), (tk_str){0}); }); (tk_slice_str){ .ptr = _arr45799, .len = 3, .cap = 3 }; }); tk_str _ca45798 = (tk_str){0,0}; for (uint64_t _ci45797 = 0; _ci45797 < _cs45796.len; _ci45797++) { _ca45798 = tk_str_concat(_ca45798, _cs45796.ptr[_ci45797]); } _ca45798; });
         k = tk_add_u64(k, ((uint64_t)1ULL));
     }
     return out;
@@ -189910,7 +189880,7 @@ bool teko_teko__process__arg_needs_quote(tk_str a) {
         if (((i >= ((a.len))))) {
             break;
         }
-        uint64_t c = ((uint64_t)(({ tk_str _s45822 = a; uint64_t _i45823 = (uint64_t)(i); _i45823 < _s45822.len ? _s45822.ptr[_i45823] : (tk_panic_oob_at(813, 17), (tk_byte)0); })));
+        uint64_t c = ((uint64_t)(({ tk_str _s45822 = a; uint64_t _i45823 = (uint64_t)(i); _i45823 < _s45822.len ? _s45822.ptr[_i45823] : (tk_panic_oob_at(756, 17), (tk_byte)0); })));
         if (((((c == ((uint64_t)32ULL))) || ((c == ((uint64_t)9ULL)))) || ((c == ((uint64_t)34ULL))))) {
             return true;
         }
@@ -189933,7 +189903,7 @@ tk_str teko_teko__process__quote_arg(tk_str a) {
         }
         uint64_t bs = ((uint64_t)0ULL);
         while (1) {
-            if ((((i >= ((a.len)))) || ((((uint64_t)(({ tk_str _s45824 = a; uint64_t _i45825 = (uint64_t)(i); _i45825 < _s45824.len ? _s45824.ptr[_i45825] : (tk_panic_oob_at(829, 31), (tk_byte)0); }))) != ((uint64_t)92ULL))))) {
+            if ((((i >= ((a.len)))) || ((((uint64_t)(({ tk_str _s45824 = a; uint64_t _i45825 = (uint64_t)(i); _i45825 < _s45824.len ? _s45824.ptr[_i45825] : (tk_panic_oob_at(772, 31), (tk_byte)0); }))) != ((uint64_t)92ULL))))) {
                 break;
             }
             bs = tk_add_u64(bs, ((uint64_t)1ULL));
@@ -189943,7 +189913,7 @@ tk_str teko_teko__process__quote_arg(tk_str a) {
             out = ({ tk_slice_str _cs45826 = ({ tk_str *_arr45829 = (tk_str *)TK_ARENA_region_alloc(TK_ARENA_region_current(), 2 * sizeof(tk_str)); _arr45829[0] = out; _arr45829[1] = teko_teko__process__backslashes(tk_mul_u64(bs, ((uint64_t)2ULL))); (tk_slice_str){ .ptr = _arr45829, .len = 2, .cap = 2 }; }); tk_str _ca45828 = (tk_str){0,0}; for (uint64_t _ci45827 = 0; _ci45827 < _cs45826.len; _ci45827++) { _ca45828 = tk_str_concat(_ca45828, _cs45826.ptr[_ci45827]); } _ca45828; });
             break;
         }
-        if (((((uint64_t)(({ tk_str _s45830 = a; uint64_t _i45831 = (uint64_t)(i); _i45831 < _s45830.len ? _s45830.ptr[_i45831] : (tk_panic_oob_at(837, 13), (tk_byte)0); }))) == ((uint64_t)34ULL)))) {
+        if (((((uint64_t)(({ tk_str _s45830 = a; uint64_t _i45831 = (uint64_t)(i); _i45831 < _s45830.len ? _s45830.ptr[_i45831] : (tk_panic_oob_at(780, 13), (tk_byte)0); }))) == ((uint64_t)34ULL)))) {
             out = ({ tk_slice_str _cs45832 = ({ tk_str *_arr45835 = (tk_str *)TK_ARENA_region_alloc(TK_ARENA_region_current(), 3 * sizeof(tk_str)); _arr45835[0] = out; _arr45835[1] = teko_teko__process__backslashes(tk_add_u64(tk_mul_u64(bs, ((uint64_t)2ULL)), ((uint64_t)1ULL))); _arr45835[2] = (tk_str){ (const tk_byte *)"\"", 1 }; (tk_slice_str){ .ptr = _arr45835, .len = 3, .cap = 3 }; }); tk_str _ca45834 = (tk_str){0,0}; for (uint64_t _ci45833 = 0; _ci45833 < _cs45832.len; _ci45833++) { _ca45834 = tk_str_concat(_ca45834, _cs45832.ptr[_ci45833]); } _ca45834; });
         } else {
             out = ({ tk_slice_str _cs45836 = ({ tk_str *_arr45839 = (tk_str *)TK_ARENA_region_alloc(TK_ARENA_region_current(), 3 * sizeof(tk_str)); _arr45839[0] = out; _arr45839[1] = teko_teko__process__backslashes(bs); _arr45839[2] = tk_str_slice(a, i, tk_add_u64(i, ((uint64_t)1ULL))); (tk_slice_str){ .ptr = _arr45839, .len = 3, .cap = 3 }; }); tk_str _ca45838 = (tk_str){0,0}; for (uint64_t _ci45837 = 0; _ci45837 < _cs45836.len; _ci45837++) { _ca45838 = tk_str_concat(_ca45838, _cs45836.ptr[_ci45837]); } _ca45838; });
@@ -189965,7 +189935,7 @@ tk_str teko_teko__process__build_cmdline(tk_slice_str args) {
         if (((i > ((uint64_t)0ULL)))) {
             out = ({ tk_slice_str _cs45844 = ({ tk_str *_arr45847 = (tk_str *)TK_ARENA_region_alloc(TK_ARENA_region_current(), 2 * sizeof(tk_str)); _arr45847[0] = out; _arr45847[1] = (tk_str){ (const tk_byte *)" ", 1 }; (tk_slice_str){ .ptr = _arr45847, .len = 2, .cap = 2 }; }); tk_str _ca45846 = (tk_str){0,0}; for (uint64_t _ci45845 = 0; _ci45845 < _cs45844.len; _ci45845++) { _ca45846 = tk_str_concat(_ca45846, _cs45844.ptr[_ci45845]); } _ca45846; });
         }
-        out = ({ tk_slice_str _cs45848 = ({ tk_str *_arr45851 = (tk_str *)TK_ARENA_region_alloc(TK_ARENA_region_current(), 2 * sizeof(tk_str)); _arr45851[0] = out; _arr45851[1] = teko_teko__process__quote_arg(({ tk_str const *_ls45852 = (args).ptr; uint64_t _li45853 = (uint64_t)(i); _li45853 < (args).len ? _ls45852[_li45853] : (tk_panic_oob_at(854, 31), (tk_str){0}); })); (tk_slice_str){ .ptr = _arr45851, .len = 2, .cap = 2 }; }); tk_str _ca45850 = (tk_str){0,0}; for (uint64_t _ci45849 = 0; _ci45849 < _cs45848.len; _ci45849++) { _ca45850 = tk_str_concat(_ca45850, _cs45848.ptr[_ci45849]); } _ca45850; });
+        out = ({ tk_slice_str _cs45848 = ({ tk_str *_arr45851 = (tk_str *)TK_ARENA_region_alloc(TK_ARENA_region_current(), 2 * sizeof(tk_str)); _arr45851[0] = out; _arr45851[1] = teko_teko__process__quote_arg(({ tk_str const *_ls45852 = (args).ptr; uint64_t _li45853 = (uint64_t)(i); _li45853 < (args).len ? _ls45852[_li45853] : (tk_panic_oob_at(797, 31), (tk_str){0}); })); (tk_slice_str){ .ptr = _arr45851, .len = 2, .cap = 2 }; }); tk_str _ca45850 = (tk_str){0,0}; for (uint64_t _ci45849 = 0; _ci45849 < _cs45848.len; _ci45849++) { _ca45850 = tk_str_concat(_ca45850, _cs45848.ptr[_ci45849]); } _ca45850; });
         i = tk_add_u64(i, ((uint64_t)1ULL));
     }
     return out;
@@ -189974,7 +189944,7 @@ tk_str teko_teko__process__build_cmdline(tk_slice_str args) {
 #endif
 #if defined(_WIN32)
 uint64_t teko_teko__process__win_open_nul(void) {
-    uint64_t sa = ({ _tk_cast_loc_line = 862; _tk_cast_loc_col = 14; tk_to_u64_s(((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)24ULL)))))); });
+    uint64_t sa = ({ _tk_cast_loc_line = 805; _tk_cast_loc_col = 14; tk_to_u64_s(((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)24ULL)))))); });
     teko_teko__process__zero_bytes(sa, ((uint64_t)24ULL));
     teko_teko__process__store_u32_at(tk_add_u64(sa, ((uint64_t)0ULL)), ((uint32_t)24ULL));
     teko_teko__process__store_u32_at(tk_add_u64(sa, ((uint64_t)16ULL)), ((uint32_t)1ULL));
@@ -189984,7 +189954,7 @@ uint64_t teko_teko__process__win_open_nul(void) {
 #endif
 #if defined(_WIN32)
 uint64_t teko_teko__process__win_startup_info(bool quiet, uint64_t nul) {
-    uint64_t startup = ({ _tk_cast_loc_line = 871; _tk_cast_loc_col = 19; tk_to_u64_s(((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)104ULL)))))); });
+    uint64_t startup = ({ _tk_cast_loc_line = 814; _tk_cast_loc_col = 19; tk_to_u64_s(((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)104ULL)))))); });
     teko_teko__process__zero_bytes(startup, ((uint64_t)104ULL));
     (*(volatile uint64_t *)(uintptr_t)(tk_add_u64(startup, ((uint64_t)0ULL))) = (uint64_t)(((uint64_t)104ULL)));
     if (quiet) {
@@ -190000,13 +189970,13 @@ uint64_t teko_teko__process__win_startup_info(bool quiet, uint64_t nul) {
 #if defined(_WIN32)
 int32_t teko_teko__process__win_process_exit(uint64_t hproc) {
     (void)(WaitForSingleObject(hproc, ((uint32_t)4294967295ULL)));
-    uint64_t codebuf = ({ _tk_cast_loc_line = 886; _tk_cast_loc_col = 19; tk_to_u64_s(((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)8ULL)))))); });
+    uint64_t codebuf = ({ _tk_cast_loc_line = 829; _tk_cast_loc_col = 19; tk_to_u64_s(((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)8ULL)))))); });
     (*(volatile uint64_t *)(uintptr_t)(codebuf) = (uint64_t)(((uint64_t)0ULL)));
     int32_t got = GetExitCodeProcess(hproc, codebuf);
     if (((got == ((int32_t)0ULL)))) {
         return ((int32_t)-(1ULL));
     }
-    return ({ _tk_cast_loc_line = 890; _tk_cast_loc_col = 5; tk_to_i32_u((((uint64_t)*(volatile uint64_t *)(uintptr_t)(codebuf)) & ((uint64_t)4294967295ULL))); });
+    return ({ _tk_cast_loc_line = 833; _tk_cast_loc_col = 5; tk_to_i32_u((((uint64_t)*(volatile uint64_t *)(uintptr_t)(codebuf)) & ((uint64_t)4294967295ULL))); });
 }
 
 #endif
@@ -190023,7 +189993,7 @@ int32_t teko_teko__process__os_run__ov_Sstr_bool_nm_args_quiet(tk_slice_str args
         }
     }
     uint64_t startup = teko_teko__process__win_startup_info(quiet, nul);
-    uint64_t pinfo = ({ _tk_cast_loc_line = 902; _tk_cast_loc_col = 17; tk_to_u64_s(((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)24ULL)))))); });
+    uint64_t pinfo = ({ _tk_cast_loc_line = 845; _tk_cast_loc_col = 17; tk_to_u64_s(((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)24ULL)))))); });
     teko_teko__process__zero_bytes(pinfo, ((uint64_t)24ULL));
     int32_t inherit = ({ int32_t _tk45854; if (quiet) {
     _tk45854 = ((int32_t)1ULL);
@@ -190166,7 +190136,7 @@ tk_u_u64_error teko_teko__process__fd_fill(int64_t fd, int64_t timeout_ms) {
     if (((n == ((int64_t)-(2ULL))))) {
         return (tk_u_u64_error){ .tag = TK_TAG_U_U64_ERROR_ERROR, .as.error = tk_error_make((tk_str){ (const tk_byte *)"teko::process::fd_fill: the descriptor could not be read", 56 }) };
     }
-    return (tk_u_u64_error){ .tag = TK_TAG_U_U64_ERROR_U64, .as.u64 = ({ _tk_cast_loc_line = 1035; _tk_cast_loc_col = 5; tk_to_u64_s(n); }) };
+    return (tk_u_u64_error){ .tag = TK_TAG_U_U64_ERROR_U64, .as.u64 = ({ _tk_cast_loc_line = 978; _tk_cast_loc_col = 5; tk_to_u64_s(n); }) };
 }
 
 tk_slice_byte teko_teko__process__take_staged(tk_slice_byte acc, uint64_t n) {
@@ -190736,11 +190706,11 @@ void teko_teko__runtime__ar_store(uint64_t address, uint64_t value) {
 
 #if defined(__linux__)
 uint64_t teko_teko__runtime__ar_mmap__ov_u64_nm_length(uint64_t length) {
-    int64_t result = tk_syscall6(tk_const_teko__sys__SYS_MMAP, ((int64_t)0ULL), ({ _tk_cast_loc_line = 175; _tk_cast_loc_col = 62; tk_to_i64_u(length); }), ((int64_t)((tk_const_teko__sys__PROT_READ | tk_const_teko__sys__PROT_WRITE))), (((int64_t)(tk_const_teko__sys__MAP_PRIVATE)) | ((int64_t)32ULL)), ((int64_t)-(1ULL)), ((int64_t)0ULL));
+    int64_t result = tk_syscall6(tk_const_teko__sys__SYS_MMAP, ((int64_t)0ULL), ({ _tk_cast_loc_line = 157; _tk_cast_loc_col = 62; tk_to_i64_u(length); }), ((int64_t)((tk_const_teko__sys__PROT_READ | tk_const_teko__sys__PROT_WRITE))), (((int64_t)(tk_const_teko__sys__MAP_PRIVATE)) | ((int64_t)32ULL)), ((int64_t)-(1ULL)), ((int64_t)0ULL));
     if ((((result >= ((int64_t)-(4095ULL)))) && ((result <= ((int64_t)-(1ULL)))))) {
         return ((int64_t)0ULL);
     }
-    return ({ _tk_cast_loc_line = 179; _tk_cast_loc_col = 5; tk_to_u64_s(result); });
+    return ({ _tk_cast_loc_line = 161; _tk_cast_loc_col = 5; tk_to_u64_s(result); });
 }
 
 #endif
@@ -190762,7 +190732,7 @@ uint64_t teko_teko__runtime__ar_mmap__ov_u64_nm_length(uint64_t length) {
 #endif
 #if defined(__linux__)
 void teko_teko__runtime__ar_munmap__ov_u64_u64_nm_address_length(uint64_t address, uint64_t length) {
-    (void)(tk_syscall2(tk_const_teko__sys__SYS_MUNMAP, ({ _tk_cast_loc_line = 197; _tk_cast_loc_col = 52; tk_to_i64_u(address); }), ({ _tk_cast_loc_line = 197; _tk_cast_loc_col = 68; tk_to_i64_u(length); })));
+    (void)(tk_syscall2(tk_const_teko__sys__SYS_MUNMAP, ({ _tk_cast_loc_line = 179; _tk_cast_loc_col = 52; tk_to_i64_u(address); }), ({ _tk_cast_loc_line = 179; _tk_cast_loc_col = 68; tk_to_i64_u(length); })));
 }
 
 #endif
@@ -190805,13 +190775,13 @@ void teko_teko__runtime__rt_exit_os__ov_i64_nm_code(int64_t code) {
 #endif
 #if defined(__APPLE__)
 void teko_teko__runtime__rt_exit_os__ov_i64_nm_code(int64_t code) {
-    _exit(({ _tk_cast_loc_line = 233; _tk_cast_loc_col = 13; tk_to_i32_s(code); }));
+    _exit(({ _tk_cast_loc_line = 215; _tk_cast_loc_col = 29; tk_to_i32_s(code); }));
 }
 
 #endif
 #if defined(_WIN32)
 void teko_teko__runtime__rt_exit_os__ov_i64_nm_code(int64_t code) {
-    ExitProcess(({ _tk_cast_loc_line = 238; _tk_cast_loc_col = 17; tk_to_u32_s(code); }));
+    ExitProcess(({ _tk_cast_loc_line = 220; _tk_cast_loc_col = 33; tk_to_u32_s(code); }));
 }
 
 #endif
@@ -191422,8 +191392,8 @@ void teko_teko__runtime__ar_free_block(uint64_t control, uint64_t block, uint64_
 
 void * teko_teko__runtime__region_alloc(void * r, uint64_t n) {
     uint64_t control = teko_teko__runtime__ar_control();
-    uint64_t address = teko_teko__runtime__ar_region_alloc_w(control, ({ _tk_cast_loc_line = 734; _tk_cast_loc_col = 46; tk_to_u64_s(((int64_t)(uintptr_t)(r))); }), n);
-    return ((void *)(uintptr_t)(({ _tk_cast_loc_line = 735; _tk_cast_loc_col = 25; tk_to_i64_u(address); })));
+    uint64_t address = teko_teko__runtime__ar_region_alloc_w(control, ({ _tk_cast_loc_line = 716; _tk_cast_loc_col = 46; tk_to_u64_s(((int64_t)(uintptr_t)(r))); }), n);
+    return ((void *)(uintptr_t)(({ _tk_cast_loc_line = 717; _tk_cast_loc_col = 25; tk_to_i64_u(address); })));
 }
 
 void teko_teko__runtime__free_block(uint64_t addr, uint64_t n) {
@@ -191435,15 +191405,15 @@ void teko_teko__runtime__free_block(uint64_t addr, uint64_t n) {
 
 void * teko_teko__runtime__region_new(void * parent) {
     uint64_t control = teko_teko__runtime__ar_control();
-    return ((void *)(uintptr_t)(({ _tk_cast_loc_line = 745; _tk_cast_loc_col = 25; tk_to_i64_u(teko_teko__runtime__ar_region_new_w(control, ({ _tk_cast_loc_line = 745; _tk_cast_loc_col = 50; tk_to_u64_s(((int64_t)(uintptr_t)(parent))); }))); })));
+    return ((void *)(uintptr_t)(({ _tk_cast_loc_line = 727; _tk_cast_loc_col = 25; tk_to_i64_u(teko_teko__runtime__ar_region_new_w(control, ({ _tk_cast_loc_line = 727; _tk_cast_loc_col = 50; tk_to_u64_s(((int64_t)(uintptr_t)(parent))); }))); })));
 }
 
 void teko_teko__runtime__region_drop(void * r) {
-    teko_teko__runtime__ar_region_drop_w(teko_teko__runtime__ar_control(), ({ _tk_cast_loc_line = 749; _tk_cast_loc_col = 36; tk_to_u64_s(((int64_t)(uintptr_t)(r))); }));
+    teko_teko__runtime__ar_region_drop_w(teko_teko__runtime__ar_control(), ({ _tk_cast_loc_line = 731; _tk_cast_loc_col = 36; tk_to_u64_s(((int64_t)(uintptr_t)(r))); }));
 }
 
 void teko_teko__runtime__region_drop_subtree(void * r) {
-    teko_teko__runtime__ar_region_drop_subtree_w(teko_teko__runtime__ar_control(), ({ _tk_cast_loc_line = 753; _tk_cast_loc_col = 44; tk_to_u64_s(((int64_t)(uintptr_t)(r))); }));
+    teko_teko__runtime__ar_region_drop_subtree_w(teko_teko__runtime__ar_control(), ({ _tk_cast_loc_line = 735; _tk_cast_loc_col = 44; tk_to_u64_s(((int64_t)(uintptr_t)(r))); }));
 }
 
 void * teko_teko__runtime__chunk_node_link(void * r, void * prev_head, uint64_t payload) {
@@ -191451,20 +191421,20 @@ void * teko_teko__runtime__chunk_node_link(void * r, void * prev_head, uint64_t 
     if (((chunk == ((uint64_t)0ULL)))) {
         teko_teko__runtime__ar_oom__ov_nm();
     }
-    teko_teko__runtime__ar_chunk_set(chunk, ((uint64_t)0ULL), ({ _tk_cast_loc_line = 759; _tk_cast_loc_col = 37; tk_to_u64_s(((int64_t)(uintptr_t)(prev_head))); }));
-    return ((void *)(uintptr_t)(({ _tk_cast_loc_line = 760; _tk_cast_loc_col = 25; tk_to_i64_u(chunk); })));
+    teko_teko__runtime__ar_chunk_set(chunk, ((uint64_t)0ULL), ({ _tk_cast_loc_line = 741; _tk_cast_loc_col = 37; tk_to_u64_s(((int64_t)(uintptr_t)(prev_head))); }));
+    return ((void *)(uintptr_t)(({ _tk_cast_loc_line = 742; _tk_cast_loc_col = 25; tk_to_i64_u(chunk); })));
 }
 
 void * teko_teko__runtime__region_root(void) {
-    return ((void *)(uintptr_t)(({ _tk_cast_loc_line = 764; _tk_cast_loc_col = 25; tk_to_i64_u(teko_teko__runtime__ar_region_root_w(teko_teko__runtime__ar_control())); })));
+    return ((void *)(uintptr_t)(({ _tk_cast_loc_line = 746; _tk_cast_loc_col = 25; tk_to_i64_u(teko_teko__runtime__ar_region_root_w(teko_teko__runtime__ar_control())); })));
 }
 
 void * teko_teko__runtime__region_current(void) {
-    return ((void *)(uintptr_t)(({ _tk_cast_loc_line = 768; _tk_cast_loc_col = 25; tk_to_i64_u(teko_teko__runtime__ar_cur_current(teko_teko__runtime__ar_control())); })));
+    return ((void *)(uintptr_t)(({ _tk_cast_loc_line = 750; _tk_cast_loc_col = 25; tk_to_i64_u(teko_teko__runtime__ar_cur_current(teko_teko__runtime__ar_control())); })));
 }
 
 void teko_teko__runtime__region_enter(void * child) {
-    teko_teko__runtime__ar_cur_enter(teko_teko__runtime__ar_control(), ({ _tk_cast_loc_line = 772; _tk_cast_loc_col = 32; tk_to_u64_s(((int64_t)(uintptr_t)(child))); }));
+    teko_teko__runtime__ar_cur_enter(teko_teko__runtime__ar_control(), ({ _tk_cast_loc_line = 754; _tk_cast_loc_col = 32; tk_to_u64_s(((int64_t)(uintptr_t)(child))); }));
 }
 
 void teko_teko__runtime__region_leave(void) {
@@ -191473,11 +191443,11 @@ void teko_teko__runtime__region_leave(void) {
 
 void * teko_teko__runtime__alloc(uint64_t n) {
     uint64_t control = teko_teko__runtime__ar_control();
-    return ((void *)(uintptr_t)(({ _tk_cast_loc_line = 781; _tk_cast_loc_col = 25; tk_to_i64_u(teko_teko__runtime__ar_region_alloc_w(control, teko_teko__runtime__ar_cur_current(control), n)); })));
+    return ((void *)(uintptr_t)(({ _tk_cast_loc_line = 763; _tk_cast_loc_col = 25; tk_to_i64_u(teko_teko__runtime__ar_region_alloc_w(control, teko_teko__runtime__ar_cur_current(control), n)); })));
 }
 
 void * teko_teko__runtime__region_program(void) {
-    return ((void *)(uintptr_t)(({ _tk_cast_loc_line = 785; _tk_cast_loc_col = 25; tk_to_i64_u(teko_teko__runtime__ar_region_program_w(teko_teko__runtime__ar_control())); })));
+    return ((void *)(uintptr_t)(({ _tk_cast_loc_line = 767; _tk_cast_loc_col = 25; tk_to_i64_u(teko_teko__runtime__ar_region_program_w(teko_teko__runtime__ar_control())); })));
 }
 
 uint64_t teko_teko__runtime__environ_slot(void) {
@@ -191521,11 +191491,11 @@ void teko_teko__runtime__set_names_state_slot(uint64_t addr) {
 }
 
 void teko_teko__runtime__set_ret_dest(void * r) {
-    teko_teko__runtime__ar_ctrl_set(teko_teko__runtime__ar_control(), ((uint64_t)34472ULL), ({ _tk_cast_loc_line = 860; _tk_cast_loc_col = 46; tk_to_u64_s(((int64_t)(uintptr_t)(r))); }));
+    teko_teko__runtime__ar_ctrl_set(teko_teko__runtime__ar_control(), ((uint64_t)34472ULL), ({ _tk_cast_loc_line = 842; _tk_cast_loc_col = 46; tk_to_u64_s(((int64_t)(uintptr_t)(r))); }));
 }
 
 void * teko_teko__runtime__ret_dest(void) {
-    return ((void *)(uintptr_t)(({ _tk_cast_loc_line = 864; _tk_cast_loc_col = 25; tk_to_i64_u(teko_teko__runtime__ar_ctrl_get(teko_teko__runtime__ar_control(), ((uint64_t)34472ULL))); })));
+    return ((void *)(uintptr_t)(({ _tk_cast_loc_line = 846; _tk_cast_loc_col = 25; tk_to_i64_u(teko_teko__runtime__ar_ctrl_get(teko_teko__runtime__ar_control(), ((uint64_t)34472ULL))); })));
 }
 
 void teko_teko__runtime__arena_push(void) {
@@ -191541,11 +191511,11 @@ void teko_teko__runtime__arena_commit(void) {
 }
 
 void teko_teko__runtime__region_register(void * r, uint64_t tid, void * inst) {
-    teko_teko__runtime__ar_region_register_w(teko_teko__runtime__ar_control(), ({ _tk_cast_loc_line = 880; _tk_cast_loc_col = 40; tk_to_u64_s(((int64_t)(uintptr_t)(r))); }), tid, ({ _tk_cast_loc_line = 880; _tk_cast_loc_col = 76; tk_to_u64_s(((int64_t)(uintptr_t)(inst))); }));
+    teko_teko__runtime__ar_region_register_w(teko_teko__runtime__ar_control(), ({ _tk_cast_loc_line = 862; _tk_cast_loc_col = 40; tk_to_u64_s(((int64_t)(uintptr_t)(r))); }), tid, ({ _tk_cast_loc_line = 862; _tk_cast_loc_col = 76; tk_to_u64_s(((int64_t)(uintptr_t)(inst))); }));
 }
 
 void * teko_teko__runtime__region_lookup(void * r, uint64_t tid) {
-    return ((void *)(uintptr_t)(({ _tk_cast_loc_line = 884; _tk_cast_loc_col = 25; tk_to_i64_u(teko_teko__runtime__ar_region_lookup_w(({ _tk_cast_loc_line = 884; _tk_cast_loc_col = 44; tk_to_u64_s(((int64_t)(uintptr_t)(r))); }), tid)); })));
+    return ((void *)(uintptr_t)(({ _tk_cast_loc_line = 866; _tk_cast_loc_col = 25; tk_to_i64_u(teko_teko__runtime__ar_region_lookup_w(({ _tk_cast_loc_line = 866; _tk_cast_loc_col = 44; tk_to_u64_s(((int64_t)(uintptr_t)(r))); }), tid)); })));
 }
 
 uint64_t teko_teko__runtime__ar_wrap_table(uint64_t control) {
@@ -191624,7 +191594,7 @@ bool teko_teko__runtime__ar_wrap_dec(uint64_t control, uint64_t addr) {
 }
 
 void teko_teko__runtime__wrap_retain(void * obj) {
-    uint64_t addr = ({ _tk_cast_loc_line = 953; _tk_cast_loc_col = 16; tk_to_u64_s(((int64_t)(uintptr_t)(obj))); });
+    uint64_t addr = ({ _tk_cast_loc_line = 935; _tk_cast_loc_col = 16; tk_to_u64_s(((int64_t)(uintptr_t)(obj))); });
     if (((addr == ((uint64_t)0ULL)))) {
         return;
     }
@@ -191635,7 +191605,7 @@ void teko_teko__runtime__wrap_retain(void * obj) {
 }
 
 void teko_teko__runtime__wrap_release(void * obj) {
-    uint64_t addr = ({ _tk_cast_loc_line = 962; _tk_cast_loc_col = 16; tk_to_u64_s(((int64_t)(uintptr_t)(obj))); });
+    uint64_t addr = ({ _tk_cast_loc_line = 944; _tk_cast_loc_col = 16; tk_to_u64_s(((int64_t)(uintptr_t)(obj))); });
     if (((addr == ((uint64_t)0ULL)))) {
         return;
     }
@@ -191655,7 +191625,7 @@ bool teko_teko__runtime__ar_wrap_alive(uint64_t control, uint64_t addr) {
 }
 
 void * teko_teko__runtime__wrap_weak_get(void * obj) {
-    uint64_t addr = ({ _tk_cast_loc_line = 978; _tk_cast_loc_col = 16; tk_to_u64_s(((int64_t)(uintptr_t)(obj))); });
+    uint64_t addr = ({ _tk_cast_loc_line = 960; _tk_cast_loc_col = 16; tk_to_u64_s(((int64_t)(uintptr_t)(obj))); });
     if (((addr == ((uint64_t)0ULL)))) {
         return ((void *)(uintptr_t)(((int64_t)0ULL)));
     }
@@ -191677,7 +191647,7 @@ void teko_teko__runtime__copy(tk_slice_byte * dst, uint64_t at, tk_slice_byte sr
         if (((i >= (src.len)))) {
             break;
         }
-        { tk_slice_byte _ws46020 = ((*(dst))); uint64_t _wi46021 = (uint64_t)(tk_add_u64(at, i)); if (_wi46021 < _ws46020.len) { _ws46020.ptr[_wi46021] = ({ uint8_t const *_ls46022 = (src).ptr; uint64_t _li46023 = (uint64_t)(i); _li46023 < (src).len ? _ls46022[_li46023] : (tk_panic_oob_at(992, 23), (uint8_t){0}); }); } else { tk_panic_oob_at(992, 9); }
+        { tk_slice_byte _ws46020 = ((*(dst))); uint64_t _wi46021 = (uint64_t)(tk_add_u64(at, i)); if (_wi46021 < _ws46020.len) { _ws46020.ptr[_wi46021] = ({ uint8_t const *_ls46022 = (src).ptr; uint64_t _li46023 = (uint64_t)(i); _li46023 < (src).len ? _ls46022[_li46023] : (tk_panic_oob_at(974, 23), (uint8_t){0}); }); } else { tk_panic_oob_at(974, 9); }
  }
         i += ((uint64_t)1ULL);
     }
@@ -192742,27 +192712,27 @@ int64_t teko_teko__runtime__rtio_os_write__ov_i64_i64_i64_nm_fd_addr_count(int64
 #endif
 #if defined(__APPLE__)
 int64_t teko_teko__runtime__rtio_os_write__ov_i64_i64_i64_nm_fd_addr_count(int64_t fd, int64_t addr, int64_t count) {
-    return write(({ _tk_cast_loc_line = 17; _tk_cast_loc_col = 20; tk_to_i32_s(fd); }), ({ _tk_cast_loc_line = 17; _tk_cast_loc_col = 31; tk_to_u64_s(addr); }), ({ _tk_cast_loc_line = 17; _tk_cast_loc_col = 44; tk_to_u64_s(count); }));
+    return write(({ _tk_cast_loc_line = 8; _tk_cast_loc_col = 34; tk_to_i32_s(fd); }), ({ _tk_cast_loc_line = 8; _tk_cast_loc_col = 45; tk_to_u64_s(addr); }), ({ _tk_cast_loc_line = 8; _tk_cast_loc_col = 58; tk_to_u64_s(count); }));
 }
 
 #endif
 #if defined(_WIN32)
 uint64_t teko_teko__runtime__rtio_std_handle(int64_t fd) {
     if (((fd == ((int64_t)2ULL)))) {
-        return GetStdHandle(((int32_t)-(12ULL)));
+        return GetStdHandle(((uint32_t)4294967284ULL));
     }
-    return GetStdHandle(((int32_t)-(11ULL)));
+    return GetStdHandle(((uint32_t)4294967285ULL));
 }
 
 #endif
 #if defined(_WIN32)
 int64_t teko_teko__runtime__rtio_os_write__ov_i64_i64_i64_nm_fd_addr_count(int64_t fd, int64_t addr, int64_t count) {
-    uint64_t put = ({ _tk_cast_loc_line = 28; _tk_cast_loc_col = 15; tk_to_u64_s(((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)8ULL)))))); });
+    uint64_t put = ({ _tk_cast_loc_line = 19; _tk_cast_loc_col = 15; tk_to_u64_s(((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)8ULL)))))); });
     (*(volatile uint64_t *)(uintptr_t)(put) = (uint64_t)(((uint64_t)0ULL)));
-    if (((WriteFile(teko_teko__runtime__rtio_std_handle(fd), ({ _tk_cast_loc_line = 30; _tk_cast_loc_col = 39; tk_to_u64_s(addr); }), ({ _tk_cast_loc_line = 30; _tk_cast_loc_col = 52; tk_to_u32_s(count); }), put, ((uint64_t)0ULL)) == ((int32_t)0ULL)))) {
+    if (((WriteFile(teko_teko__runtime__rtio_std_handle(fd), ({ _tk_cast_loc_line = 21; _tk_cast_loc_col = 55; tk_to_u64_s(addr); }), ({ _tk_cast_loc_line = 21; _tk_cast_loc_col = 68; tk_to_u32_s(count); }), put, ((uint64_t)0ULL)) == ((int32_t)0ULL)))) {
         return ((int64_t)-(1ULL));
     }
-    return ({ _tk_cast_loc_line = 31; _tk_cast_loc_col = 5; tk_to_i64_u(((uint64_t)*(volatile uint64_t *)(uintptr_t)(put))); });
+    return ({ _tk_cast_loc_line = 22; _tk_cast_loc_col = 5; tk_to_i64_u(((uint64_t)*(volatile uint64_t *)(uintptr_t)(put))); });
 }
 
 #endif
@@ -192777,11 +192747,11 @@ void teko_teko__runtime__rtio_write_all(int64_t fd, tk_str s) {
             break;
         }
         int64_t addr = ((int64_t)(uintptr_t)(((void *)((bytes).ptr + (size_t)(off)))));
-        int64_t n = teko_teko__runtime__rtio_os_write__ov_i64_i64_i64_nm_fd_addr_count(fd, addr, ({ _tk_cast_loc_line = 41; _tk_cast_loc_col = 41; tk_to_i64_u(tk_sub_u64(((s.len)), off)); }));
+        int64_t n = teko_teko__runtime__rtio_os_write__ov_i64_i64_i64_nm_fd_addr_count(fd, addr, ({ _tk_cast_loc_line = 32; _tk_cast_loc_col = 41; tk_to_i64_u(tk_sub_u64(((s.len)), off)); }));
         if (((n <= ((int64_t)0ULL)))) {
             break;
         }
-        off = tk_add_u64(off, ({ _tk_cast_loc_line = 43; _tk_cast_loc_col = 22; tk_to_u64_s(n); }));
+        off = tk_add_u64(off, ({ _tk_cast_loc_line = 34; _tk_cast_loc_col = 22; tk_to_u64_s(n); }));
     }
 }
 
@@ -192823,7 +192793,7 @@ uint64_t teko_teko__runtime__peak_rss_impl__ov_nm(void) {
     if (((r < ((int64_t)0ULL)))) {
         return ((int64_t)0ULL);
     }
-    return tk_mul_u64(((uint64_t)*(volatile uint64_t *)(uintptr_t)(({ _tk_cast_loc_line = 77; _tk_cast_loc_col = 25; tk_to_u64_s(tk_add_i64(rbuf, ((int64_t)32ULL))); }))), ((uint64_t)1024ULL));
+    return tk_mul_u64(((uint64_t)*(volatile uint64_t *)(uintptr_t)(({ _tk_cast_loc_line = 68; _tk_cast_loc_col = 25; tk_to_u64_s(tk_add_i64(rbuf, ((int64_t)32ULL))); }))), ((uint64_t)1024ULL));
 }
 
 #endif
@@ -192833,7 +192803,7 @@ uint64_t teko_teko__runtime__peak_rss_impl__ov_nm(void) {
     if (((getrusage(((int32_t)0ULL), &ru) != ((int32_t)0ULL)))) {
         return ((int64_t)0ULL);
     }
-    return ({ _tk_cast_loc_line = 90; _tk_cast_loc_col = 5; tk_to_u64_s(((ru.ru_maxrss))); });
+    return ({ _tk_cast_loc_line = 75; _tk_cast_loc_col = 5; tk_to_u64_s(((ru.ru_maxrss))); });
 }
 
 #endif
@@ -192854,7 +192824,7 @@ uint64_t teko_teko__runtime__statm_resident_bytes(int64_t addr, uint64_t n) {
         if (((i >= n))) {
             return ((int64_t)0ULL);
         }
-        if (((((uint64_t)*(volatile uint8_t *)(uintptr_t)(({ _tk_cast_loc_line = 108; _tk_cast_loc_col = 31; tk_to_u64_s(tk_add_i64(addr, ({ _tk_cast_loc_line = 108; _tk_cast_loc_col = 40; tk_to_i64_u(i); }))); }))) == ((uint64_t)32ULL)))) {
+        if (((((uint64_t)*(volatile uint8_t *)(uintptr_t)(({ _tk_cast_loc_line = 93; _tk_cast_loc_col = 31; tk_to_u64_s(tk_add_i64(addr, ({ _tk_cast_loc_line = 93; _tk_cast_loc_col = 40; tk_to_i64_u(i); }))); }))) == ((uint64_t)32ULL)))) {
             break;
         }
         i = tk_add_u64(i, ((uint64_t)1ULL));
@@ -192863,7 +192833,7 @@ uint64_t teko_teko__runtime__statm_resident_bytes(int64_t addr, uint64_t n) {
         if (((i >= n))) {
             return ((int64_t)0ULL);
         }
-        if (((((uint64_t)*(volatile uint8_t *)(uintptr_t)(({ _tk_cast_loc_line = 113; _tk_cast_loc_col = 31; tk_to_u64_s(tk_add_i64(addr, ({ _tk_cast_loc_line = 113; _tk_cast_loc_col = 40; tk_to_i64_u(i); }))); }))) != ((uint64_t)32ULL)))) {
+        if (((((uint64_t)*(volatile uint8_t *)(uintptr_t)(({ _tk_cast_loc_line = 98; _tk_cast_loc_col = 31; tk_to_u64_s(tk_add_i64(addr, ({ _tk_cast_loc_line = 98; _tk_cast_loc_col = 40; tk_to_i64_u(i); }))); }))) != ((uint64_t)32ULL)))) {
             break;
         }
         i = tk_add_u64(i, ((uint64_t)1ULL));
@@ -192873,7 +192843,7 @@ uint64_t teko_teko__runtime__statm_resident_bytes(int64_t addr, uint64_t n) {
         if (((i >= n))) {
             break;
         }
-        uint64_t c = ((uint64_t)*(volatile uint8_t *)(uintptr_t)(({ _tk_cast_loc_line = 119; _tk_cast_loc_col = 36; tk_to_u64_s(tk_add_i64(addr, ({ _tk_cast_loc_line = 119; _tk_cast_loc_col = 45; tk_to_i64_u(i); }))); })));
+        uint64_t c = ((uint64_t)*(volatile uint8_t *)(uintptr_t)(({ _tk_cast_loc_line = 104; _tk_cast_loc_col = 36; tk_to_u64_s(tk_add_i64(addr, ({ _tk_cast_loc_line = 104; _tk_cast_loc_col = 45; tk_to_i64_u(i); }))); })));
         if ((((c < ((uint64_t)48ULL))) || ((c > ((uint64_t)57ULL))))) {
             break;
         }
@@ -192897,7 +192867,7 @@ uint64_t teko_teko__runtime__cur_rss_impl__ov_nm(void) {
     if (((got <= ((int64_t)0ULL)))) {
         return ((int64_t)0ULL);
     }
-    return teko_teko__runtime__statm_resident_bytes(buf, ({ _tk_cast_loc_line = 136; _tk_cast_loc_col = 31; tk_to_u64_s(got); }));
+    return teko_teko__runtime__statm_resident_bytes(buf, ({ _tk_cast_loc_line = 121; _tk_cast_loc_col = 31; tk_to_u64_s(got); }));
 }
 
 #endif
@@ -192919,27 +192889,27 @@ uint64_t teko_teko__runtime__cur_rss(void) {
 
 #if defined(__linux__)
 void teko_teko__runtime__futex_wait__ov_u64_i64_nm_addr_expected(uint64_t addr, int64_t expected) {
-    (void)(tk_syscall6(tk_const_teko__sys__SYS_FUTEX, ({ _tk_cast_loc_line = 23; _tk_cast_loc_col = 51; tk_to_i64_u(addr); }), ((int64_t)128ULL), expected, ((int64_t)0ULL), ((int64_t)0ULL), ((int64_t)0ULL)));
+    (void)(tk_syscall6(tk_const_teko__sys__SYS_FUTEX, ({ _tk_cast_loc_line = 14; _tk_cast_loc_col = 51; tk_to_i64_u(addr); }), ((int64_t)128ULL), expected, ((int64_t)0ULL), ((int64_t)0ULL), ((int64_t)0ULL)));
 }
 
 #endif
 #if defined(__APPLE__)
 void teko_teko__runtime__futex_wait__ov_u64_i64_nm_addr_expected(uint64_t addr, int64_t expected) {
-    (void)(os_sync_wait_on_address(addr, (({ _tk_cast_loc_line = 29; _tk_cast_loc_col = 40; tk_to_u64_s(expected); }) & ((uint64_t)4294967295ULL)), ((uint64_t)4ULL), ((uint32_t)0ULL)));
+    (void)(os_sync_wait_on_address(addr, (({ _tk_cast_loc_line = 20; _tk_cast_loc_col = 56; tk_to_u64_s(expected); }) & ((uint64_t)4294967295ULL)), ((uint64_t)4ULL), ((uint32_t)0ULL)));
 }
 
 #endif
 #if defined(_WIN32)
 void teko_teko__runtime__futex_wait__ov_u64_i64_nm_addr_expected(uint64_t addr, int64_t expected) {
-    uint64_t scratch = ({ _tk_cast_loc_line = 34; _tk_cast_loc_col = 19; tk_to_u64_s(((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)8ULL)))))); });
-    (*(volatile uint64_t *)(uintptr_t)(scratch) = (uint64_t)(({ _tk_cast_loc_line = 35; _tk_cast_loc_col = 35; tk_to_u64_s(expected); })));
+    uint64_t scratch = ({ _tk_cast_loc_line = 25; _tk_cast_loc_col = 19; tk_to_u64_s(((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)8ULL)))))); });
+    (*(volatile uint64_t *)(uintptr_t)(scratch) = (uint64_t)(({ _tk_cast_loc_line = 26; _tk_cast_loc_col = 35; tk_to_u64_s(expected); })));
     (void)(WaitOnAddress(addr, scratch, ((uint64_t)4ULL), ((uint32_t)4294967295ULL)));
 }
 
 #endif
 #if defined(__linux__)
 void teko_teko__runtime__futex_wake__ov_u64_i64_nm_addr_n(uint64_t addr, int64_t n) {
-    (void)(tk_syscall6(tk_const_teko__sys__SYS_FUTEX, ({ _tk_cast_loc_line = 41; _tk_cast_loc_col = 51; tk_to_i64_u(addr); }), ((int64_t)129ULL), n, ((int64_t)0ULL), ((int64_t)0ULL), ((int64_t)0ULL)));
+    (void)(tk_syscall6(tk_const_teko__sys__SYS_FUTEX, ({ _tk_cast_loc_line = 32; _tk_cast_loc_col = 51; tk_to_i64_u(addr); }), ((int64_t)129ULL), n, ((int64_t)0ULL), ((int64_t)0ULL), ((int64_t)0ULL)));
 }
 
 #endif
@@ -192964,42 +192934,42 @@ void teko_teko__runtime__futex_wake__ov_u64_i64_nm_addr_n(uint64_t addr, int64_t
 
 #endif
 void teko_teko__runtime__mtx_lock(uint64_t m) {
-    int64_t c = tk_atomic_cas_u32(({ _tk_cast_loc_line = 64; _tk_cast_loc_col = 39; tk_to_i64_u(m); }), ((int64_t)0ULL), ((int64_t)1ULL));
+    int64_t c = tk_atomic_cas_u32(({ _tk_cast_loc_line = 55; _tk_cast_loc_col = 39; tk_to_i64_u(m); }), ((int64_t)0ULL), ((int64_t)1ULL));
     if (((c == ((int64_t)0ULL)))) {
         return;
     }
     if (((c != ((int64_t)2ULL)))) {
-        c = tk_atomic_xchg_u32(({ _tk_cast_loc_line = 66; _tk_cast_loc_col = 48; tk_to_i64_u(m); }), ((int64_t)2ULL));
+        c = tk_atomic_xchg_u32(({ _tk_cast_loc_line = 57; _tk_cast_loc_col = 48; tk_to_i64_u(m); }), ((int64_t)2ULL));
     }
     while (1) {
         if (((c == ((int64_t)0ULL)))) {
             break;
         }
         teko_teko__runtime__futex_wait__ov_u64_i64_nm_addr_expected(m, ((int64_t)2ULL));
-        c = tk_atomic_xchg_u32(({ _tk_cast_loc_line = 70; _tk_cast_loc_col = 40; tk_to_i64_u(m); }), ((int64_t)2ULL));
+        c = tk_atomic_xchg_u32(({ _tk_cast_loc_line = 61; _tk_cast_loc_col = 40; tk_to_i64_u(m); }), ((int64_t)2ULL));
     }
 }
 
 void teko_teko__runtime__mtx_unlock(uint64_t m) {
-    if (((tk_atomic_xchg_u32(({ _tk_cast_loc_line = 75; _tk_cast_loc_col = 35; tk_to_i64_u(m); }), ((int64_t)0ULL)) == ((int64_t)2ULL)))) {
+    if (((tk_atomic_xchg_u32(({ _tk_cast_loc_line = 66; _tk_cast_loc_col = 35; tk_to_i64_u(m); }), ((int64_t)0ULL)) == ((int64_t)2ULL)))) {
         teko_teko__runtime__futex_wake__ov_u64_i64_nm_addr_n(m, ((int64_t)1ULL));
     }
 }
 
 void teko_teko__runtime__cv_wait(uint64_t seq, uint64_t m) {
-    int64_t s = tk_atomic_load_u32(({ _tk_cast_loc_line = 79; _tk_cast_loc_col = 40; tk_to_i64_u(seq); }));
+    int64_t s = tk_atomic_load_u32(({ _tk_cast_loc_line = 70; _tk_cast_loc_col = 40; tk_to_i64_u(seq); }));
     teko_teko__runtime__mtx_unlock(m);
     teko_teko__runtime__futex_wait__ov_u64_i64_nm_addr_expected(seq, s);
     teko_teko__runtime__mtx_lock(m);
 }
 
 void teko_teko__runtime__cv_signal(uint64_t seq) {
-    (void)(tk_atomic_add_u32(({ _tk_cast_loc_line = 86; _tk_cast_loc_col = 35; tk_to_i64_u(seq); }), ((int64_t)1ULL)));
+    (void)(tk_atomic_add_u32(({ _tk_cast_loc_line = 77; _tk_cast_loc_col = 35; tk_to_i64_u(seq); }), ((int64_t)1ULL)));
     teko_teko__runtime__futex_wake__ov_u64_i64_nm_addr_n(seq, ((int64_t)1ULL));
 }
 
 void teko_teko__runtime__cv_broadcast(uint64_t seq) {
-    (void)(tk_atomic_add_u32(({ _tk_cast_loc_line = 91; _tk_cast_loc_col = 35; tk_to_i64_u(seq); }), ((int64_t)1ULL)));
+    (void)(tk_atomic_add_u32(({ _tk_cast_loc_line = 82; _tk_cast_loc_col = 35; tk_to_i64_u(seq); }), ((int64_t)1ULL)));
     teko_teko__runtime__futex_wake__ov_u64_i64_nm_addr_n(seq, ((int64_t)2147483647ULL));
 }
 
@@ -193632,11 +193602,11 @@ uint64_t teko_teko__runtime__names_generation_of(uint64_t name) {
 
 #if defined(__linux__)
 uint64_t teko_teko__runtime__thr_mmap__ov_u64_nm_length(uint64_t length) {
-    int64_t result = tk_syscall6(tk_const_teko__sys__SYS_MMAP, ((int64_t)0ULL), ({ _tk_cast_loc_line = 13; _tk_cast_loc_col = 62; tk_to_i64_u(length); }), ((int64_t)((tk_const_teko__sys__PROT_READ | tk_const_teko__sys__PROT_WRITE))), (((int64_t)(tk_const_teko__sys__MAP_PRIVATE)) | ((int64_t)32ULL)), ((int64_t)-(1ULL)), ((int64_t)0ULL));
+    int64_t result = tk_syscall6(tk_const_teko__sys__SYS_MMAP, ((int64_t)0ULL), ({ _tk_cast_loc_line = 7; _tk_cast_loc_col = 62; tk_to_i64_u(length); }), ((int64_t)((tk_const_teko__sys__PROT_READ | tk_const_teko__sys__PROT_WRITE))), (((int64_t)(tk_const_teko__sys__MAP_PRIVATE)) | ((int64_t)32ULL)), ((int64_t)-(1ULL)), ((int64_t)0ULL));
     if ((((result >= ((int64_t)-(4095ULL)))) && ((result <= ((int64_t)-(1ULL)))))) {
         return ((int64_t)0ULL);
     }
-    return ({ _tk_cast_loc_line = 17; _tk_cast_loc_col = 5; tk_to_u64_s(result); });
+    return ({ _tk_cast_loc_line = 11; _tk_cast_loc_col = 5; tk_to_u64_s(result); });
 }
 
 #endif
@@ -193658,7 +193628,7 @@ uint64_t teko_teko__runtime__thr_mmap__ov_u64_nm_length(uint64_t length) {
 #endif
 #if defined(__linux__)
 void teko_teko__runtime__thr_guard__ov_u64_nm_low(uint64_t low) {
-    (void)(tk_syscall3(tk_const_teko__sys__SYS_MPROTECT, ({ _tk_cast_loc_line = 35; _tk_cast_loc_col = 54; tk_to_i64_u(low); }), ((int64_t)4096ULL), ((int64_t)(tk_const_teko__sys__PROT_NONE))));
+    (void)(tk_syscall3(tk_const_teko__sys__SYS_MPROTECT, ({ _tk_cast_loc_line = 29; _tk_cast_loc_col = 54; tk_to_i64_u(low); }), ((int64_t)4096ULL), ((int64_t)(tk_const_teko__sys__PROT_NONE))));
 }
 
 #endif
@@ -193670,14 +193640,14 @@ void teko_teko__runtime__thr_guard__ov_u64_nm_low(uint64_t low) {
 #endif
 #if defined(_WIN32)
 void teko_teko__runtime__thr_guard__ov_u64_nm_low(uint64_t low) {
-    uint64_t old = ({ _tk_cast_loc_line = 46; _tk_cast_loc_col = 15; tk_to_u64_s(((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)8ULL)))))); });
+    uint64_t old = ({ _tk_cast_loc_line = 40; _tk_cast_loc_col = 15; tk_to_u64_s(((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)8ULL)))))); });
     (void)(VirtualProtect(low, ((uint64_t)4096ULL), ((uint32_t)1ULL), old));
 }
 
 #endif
 #if defined(__linux__)
 void teko_teko__runtime__thread_stack_free__ov_u64_nm_stack_top(uint64_t stack_top) {
-    (void)(tk_syscall2(tk_const_teko__sys__SYS_MUNMAP, ({ _tk_cast_loc_line = 52; _tk_cast_loc_col = 52; tk_to_i64_u(tk_sub_u64(stack_top, ((uint64_t)2097152ULL))); }), ((int64_t)2097152ULL)));
+    (void)(tk_syscall2(tk_const_teko__sys__SYS_MUNMAP, ({ _tk_cast_loc_line = 46; _tk_cast_loc_col = 52; tk_to_i64_u(tk_sub_u64(stack_top, ((uint64_t)2097152ULL))); }), ((int64_t)2097152ULL)));
 }
 
 #endif
@@ -195152,8 +195122,8 @@ int64_t teko_teko__time__mono_now_ns__ov_nm(void) {
 #if defined(__APPLE__)
 int64_t teko_teko__time__clock_read_ns__ov_i32(int32_t clockid) {
     int64_t ts = ((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)16ULL)))));
-    (void)(clock_gettime(clockid, ({ _tk_cast_loc_line = 72; _tk_cast_loc_col = 35; tk_to_u64_s(ts); })));
-    return tk_add_i64(tk_mul_i64(({ _tk_cast_loc_line = 73; _tk_cast_loc_col = 6; tk_to_i64_u(((uint64_t)*(volatile uint64_t *)(uintptr_t)(({ _tk_cast_loc_line = 73; _tk_cast_loc_col = 26; tk_to_u64_s(ts); })))); }), ((int64_t)1000000000ULL)), ({ _tk_cast_loc_line = 73; _tk_cast_loc_col = 61; tk_to_i64_u(((uint64_t)*(volatile uint64_t *)(uintptr_t)(({ _tk_cast_loc_line = 73; _tk_cast_loc_col = 81; tk_to_u64_s(tk_add_i64(ts, ((int64_t)8ULL))); })))); }));
+    (void)(clock_gettime(clockid, ({ _tk_cast_loc_line = 69; _tk_cast_loc_col = 51; tk_to_u64_s(ts); })));
+    return tk_add_i64(tk_mul_i64(({ _tk_cast_loc_line = 70; _tk_cast_loc_col = 6; tk_to_i64_u(((uint64_t)*(volatile uint64_t *)(uintptr_t)(({ _tk_cast_loc_line = 70; _tk_cast_loc_col = 26; tk_to_u64_s(ts); })))); }), ((int64_t)1000000000ULL)), ({ _tk_cast_loc_line = 70; _tk_cast_loc_col = 61; tk_to_i64_u(((uint64_t)*(volatile uint64_t *)(uintptr_t)(({ _tk_cast_loc_line = 70; _tk_cast_loc_col = 81; tk_to_u64_s(tk_add_i64(ts, ((int64_t)8ULL))); })))); }));
 }
 
 #endif
@@ -195172,8 +195142,8 @@ int64_t teko_teko__time__mono_now_ns__ov_nm(void) {
 #if defined(_WIN32)
 int64_t teko_teko__time__wall_now_ns__ov_nm(void) {
     int64_t ft = ((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)8ULL)))));
-    GetSystemTimePreciseAsFileTime(({ _tk_cast_loc_line = 98; _tk_cast_loc_col = 36; tk_to_u64_s(ft); }));
-    int64_t ticks = ({ _tk_cast_loc_line = 99; _tk_cast_loc_col = 17; tk_to_i64_u(((uint64_t)*(volatile uint64_t *)(uintptr_t)(({ _tk_cast_loc_line = 99; _tk_cast_loc_col = 37; tk_to_u64_s(ft); })))); });
+    GetSystemTimePreciseAsFileTime(({ _tk_cast_loc_line = 86; _tk_cast_loc_col = 52; tk_to_u64_s(ft); }));
+    int64_t ticks = ({ _tk_cast_loc_line = 87; _tk_cast_loc_col = 17; tk_to_i64_u(((uint64_t)*(volatile uint64_t *)(uintptr_t)(({ _tk_cast_loc_line = 87; _tk_cast_loc_col = 37; tk_to_u64_s(ft); })))); });
     return tk_mul_i64(tk_sub_i64(ticks, ((int64_t)116444736000000000ULL)), ((int64_t)100ULL));
 }
 
@@ -195182,10 +195152,10 @@ int64_t teko_teko__time__wall_now_ns__ov_nm(void) {
 int64_t teko_teko__time__mono_now_ns__ov_nm(void) {
     int64_t f = ((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)8ULL)))));
     int64_t c = ((int64_t)(uintptr_t)((uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), (size_t)(((uint64_t)8ULL)))));
-    (void)(QueryPerformanceFrequency(({ _tk_cast_loc_line = 107; _tk_cast_loc_col = 35; tk_to_u64_s(f); })));
-    (void)(QueryPerformanceCounter(({ _tk_cast_loc_line = 108; _tk_cast_loc_col = 33; tk_to_u64_s(c); })));
-    int64_t freq = ({ _tk_cast_loc_line = 109; _tk_cast_loc_col = 16; tk_to_i64_u(((uint64_t)*(volatile uint64_t *)(uintptr_t)(({ _tk_cast_loc_line = 109; _tk_cast_loc_col = 36; tk_to_u64_s(f); })))); });
-    int64_t cnt = ({ _tk_cast_loc_line = 110; _tk_cast_loc_col = 15; tk_to_i64_u(((uint64_t)*(volatile uint64_t *)(uintptr_t)(({ _tk_cast_loc_line = 110; _tk_cast_loc_col = 35; tk_to_u64_s(c); })))); });
+    (void)(QueryPerformanceFrequency(({ _tk_cast_loc_line = 95; _tk_cast_loc_col = 51; tk_to_u64_s(f); })));
+    (void)(QueryPerformanceCounter(({ _tk_cast_loc_line = 96; _tk_cast_loc_col = 49; tk_to_u64_s(c); })));
+    int64_t freq = ({ _tk_cast_loc_line = 97; _tk_cast_loc_col = 16; tk_to_i64_u(((uint64_t)*(volatile uint64_t *)(uintptr_t)(({ _tk_cast_loc_line = 97; _tk_cast_loc_col = 36; tk_to_u64_s(f); })))); });
+    int64_t cnt = ({ _tk_cast_loc_line = 98; _tk_cast_loc_col = 15; tk_to_i64_u(((uint64_t)*(volatile uint64_t *)(uintptr_t)(({ _tk_cast_loc_line = 98; _tk_cast_loc_col = 35; tk_to_u64_s(c); })))); });
     if (((freq == ((int64_t)0ULL)))) {
         return ((int64_t)0ULL);
     }
@@ -195196,9 +195166,9 @@ int64_t teko_teko__time__mono_now_ns__ov_nm(void) {
 int32_t teko_teko__time__wall_days(void) {
     int64_t secs = tk_div_i64(teko_teko__time__wall_now_ns__ov_nm(), ((int64_t)1000000000ULL));
     if (((secs >= ((int64_t)0ULL)))) {
-        return ({ _tk_cast_loc_line = 119; _tk_cast_loc_col = 27; tk_to_i32_s(tk_div_i64(secs, ((int64_t)86400ULL))); });
+        return ({ _tk_cast_loc_line = 107; _tk_cast_loc_col = 27; tk_to_i32_s(tk_div_i64(secs, ((int64_t)86400ULL))); });
     }
-    return ({ _tk_cast_loc_line = 120; _tk_cast_loc_col = 5; tk_to_i32_s(tk_div_i64(tk_sub_i64(secs, ((int64_t)86399ULL)), ((int64_t)86400ULL))); });
+    return ({ _tk_cast_loc_line = 108; _tk_cast_loc_col = 5; tk_to_i32_s(tk_div_i64(tk_sub_i64(secs, ((int64_t)86399ULL)), ((int64_t)86400ULL))); });
 }
 
 uint64_t teko_teko__time__wall_ns_of_day(void) {
@@ -195208,7 +195178,7 @@ uint64_t teko_teko__time__wall_ns_of_day(void) {
     if (((rem < ((int64_t)0ULL)))) {
         rem = tk_add_i64(rem, day_ns);
     }
-    return ({ _tk_cast_loc_line = 128; _tk_cast_loc_col = 5; tk_to_u64_s(rem); });
+    return ({ _tk_cast_loc_line = 116; _tk_cast_loc_col = 5; tk_to_u64_s(rem); });
 }
 
 int64_t teko_teko__time__monotonic_ns(void) {
@@ -195273,17 +195243,17 @@ int32_t teko_teko__time__date_days_checked(int64_t days) {
     if ((((days > ((int64_t)2147483647ULL))) || ((days < ((int64_t)-(2147483648ULL)))))) {
         teko_teko__runtime__panic((tk_str){ (const tk_byte *)"teko::time: date out of range (a `date` holds +-5.88M years, the i32 day carrier)", 81 });
     }
-    return ({ _tk_cast_loc_line = 200; _tk_cast_loc_col = 5; tk_to_i32_s(days); });
+    return ({ _tk_cast_loc_line = 188; _tk_cast_loc_col = 5; tk_to_i32_s(days); });
 }
 
 tk_t_teko__time__datetime teko_teko__time__datetime_add(tk_t_teko__time__datetime dt, tk_t_teko__time__span sp) {
-    if (((((sp.ticks)) > tk_sub_i64(((int64_t)9223372036854775807ULL), ({ _tk_cast_loc_line = 207; _tk_cast_loc_col = 31; tk_to_i64_u(((dt.ticks))); }))))) {
+    if (((((sp.ticks)) > tk_sub_i64(((int64_t)9223372036854775807ULL), ({ _tk_cast_loc_line = 195; _tk_cast_loc_col = 31; tk_to_i64_u(((dt.ticks))); }))))) {
         teko_teko__runtime__panic((tk_str){ (const tk_byte *)"teko::time: datetime_add overflows the ns span domain (+-292 years)", 67 });
     }
-    int64_t combined = tk_add_i64(({ _tk_cast_loc_line = 210; _tk_cast_loc_col = 21; tk_to_i64_u(((dt.ticks))); }), ((sp.ticks)));
+    int64_t combined = tk_add_i64(({ _tk_cast_loc_line = 198; _tk_cast_loc_col = 21; tk_to_i64_u(((dt.ticks))); }), ((sp.ticks)));
     int64_t day_delta = teko_teko__time__floor_div(combined, ((int64_t)86400000000000ULL));
     int64_t new_ticks = tk_sub_i64(combined, tk_mul_i64(day_delta, ((int64_t)86400000000000ULL)));
-    return (tk_t_teko__time__datetime){ .days = teko_teko__time__date_days_checked(tk_add_i64(((int64_t)(((dt.days)))), day_delta)), .ticks = ({ _tk_cast_loc_line = 213; _tk_cast_loc_col = 71; tk_to_u64_s(new_ticks); }) };
+    return (tk_t_teko__time__datetime){ .days = teko_teko__time__date_days_checked(tk_add_i64(((int64_t)(((dt.days)))), day_delta)), .ticks = ({ _tk_cast_loc_line = 201; _tk_cast_loc_col = 71; tk_to_u64_s(new_ticks); }) };
 }
 
 tk_t_teko__time__datetime teko_teko__time__datetime_sub(tk_t_teko__time__datetime dt, tk_t_teko__time__span sp) {
@@ -195298,7 +195268,7 @@ tk_t_teko__time__span teko_teko__time__datetime_diff(tk_t_teko__time__datetime a
     if ((((day_diff > ((int64_t)106750ULL))) || ((day_diff < ((int64_t)-(106750ULL)))))) {
         teko_teko__runtime__panic((tk_str){ (const tk_byte *)"teko::time: datetime_diff exceeds the span domain (+-292 years)", 63 });
     }
-    int64_t tick_diff = tk_sub_i64(({ _tk_cast_loc_line = 232; _tk_cast_loc_col = 22; tk_to_i64_u(((a.ticks))); }), ({ _tk_cast_loc_line = 232; _tk_cast_loc_col = 41; tk_to_i64_u(((b.ticks))); }));
+    int64_t tick_diff = tk_sub_i64(({ _tk_cast_loc_line = 220; _tk_cast_loc_col = 22; tk_to_i64_u(((a.ticks))); }), ({ _tk_cast_loc_line = 220; _tk_cast_loc_col = 41; tk_to_i64_u(((b.ticks))); }));
     return (tk_t_teko__time__span){ .ticks = tk_add_i64(tk_mul_i64(day_diff, ((int64_t)86400000000000ULL)), tick_diff) };
 }
 
@@ -195331,13 +195301,13 @@ int32_t teko_teko__time__date_diff_days(tk_t_teko__time__date a, tk_t_teko__time
 }
 
 int64_t teko_teko__time__timestamp_from_datetime(tk_t_teko__time__datetime dt) {
-    return tk_add_i64(tk_mul_i64(((int64_t)(((dt.days)))), ((int64_t)86400ULL)), ({ _tk_cast_loc_line = 275; _tk_cast_loc_col = 33; tk_to_i64_u(tk_div_u64(((dt.ticks)), ((uint64_t)1000000000ULL))); }));
+    return tk_add_i64(tk_mul_i64(((int64_t)(((dt.days)))), ((int64_t)86400ULL)), ({ _tk_cast_loc_line = 263; _tk_cast_loc_col = 33; tk_to_i64_u(tk_div_u64(((dt.ticks)), ((uint64_t)1000000000ULL))); }));
 }
 
 tk_t_teko__time__datetime teko_teko__time__timestamp_to_datetime(int64_t ts) {
     int64_t days = teko_teko__time__floor_div(ts, ((int64_t)86400ULL));
     int64_t secs_of_day = tk_sub_i64(ts, tk_mul_i64(days, ((int64_t)86400ULL)));
-    return (tk_t_teko__time__datetime){ .days = ({ _tk_cast_loc_line = 283; _tk_cast_loc_col = 23; tk_to_i32_s(days); }), .ticks = tk_mul_u64(({ _tk_cast_loc_line = 283; _tk_cast_loc_col = 45; tk_to_u64_s(secs_of_day); }), ((uint64_t)1000000000ULL)) };
+    return (tk_t_teko__time__datetime){ .days = ({ _tk_cast_loc_line = 271; _tk_cast_loc_col = 23; tk_to_i32_s(days); }), .ticks = tk_mul_u64(({ _tk_cast_loc_line = 271; _tk_cast_loc_col = 45; tk_to_u64_s(secs_of_day); }), ((uint64_t)1000000000ULL)) };
 }
 
 tk_t_teko__time__CivilDate teko_teko__time__civil_from_days(int64_t days) {
@@ -195356,13 +195326,13 @@ tk_str teko_teko__time__pad_zeros(int64_t v, int64_t width) {
     if (((v < ((int64_t)0ULL)))) {
         return ({ tk_slice_str _cs46909 = ({ tk_str *_arr46912 = (tk_str *)TK_ARENA_region_alloc(TK_ARENA_region_current(), 2 * sizeof(tk_str)); _arr46912[0] = (tk_str){ (const tk_byte *)"-", 1 }; _arr46912[1] = teko_teko__time__pad_zeros_magnitude(teko_teko__time__magnitude_of(v), width); (tk_slice_str){ .ptr = _arr46912, .len = 2, .cap = 2 }; }); tk_str _ca46911 = (tk_str){0,0}; for (uint64_t _ci46910 = 0; _ci46910 < _cs46909.len; _ci46910++) { _ca46911 = tk_str_concat(_ca46911, _cs46909.ptr[_ci46910]); } _ca46911; });
     }
-    return teko_teko__time__pad_zeros_magnitude(({ _tk_cast_loc_line = 306; _tk_cast_loc_col = 25; tk_to_u64_s(v); }), width);
+    return teko_teko__time__pad_zeros_magnitude(({ _tk_cast_loc_line = 294; _tk_cast_loc_col = 25; tk_to_u64_s(v); }), width);
 }
 
 tk_str teko_teko__time__pad_zeros_magnitude(uint64_t mag, int64_t width) {
     tk_str s = teko_teko__time__digits_of_magnitude(mag);
     while (1) {
-        if (((({ _tk_cast_loc_line = 312; _tk_cast_loc_col = 12; tk_to_i64_u(((s.len))); }) >= width))) {
+        if (((({ _tk_cast_loc_line = 300; _tk_cast_loc_col = 12; tk_to_i64_u(((s.len))); }) >= width))) {
             break;
         }
         s = ({ tk_slice_str _cs46913 = ({ tk_str *_arr46916 = (tk_str *)TK_ARENA_region_alloc(TK_ARENA_region_current(), 2 * sizeof(tk_str)); _arr46916[0] = (tk_str){ (const tk_byte *)"0", 1 }; _arr46916[1] = s; (tk_slice_str){ .ptr = _arr46916, .len = 2, .cap = 2 }; }); tk_str _ca46915 = (tk_str){0,0}; for (uint64_t _ci46914 = 0; _ci46914 < _cs46913.len; _ci46914++) { _ca46915 = tk_str_concat(_ca46915, _cs46913.ptr[_ci46914]); } _ca46915; });
@@ -195374,14 +195344,14 @@ tk_str teko_teko__time__digits_of(int64_t v) {
     if (((v < ((int64_t)0ULL)))) {
         return ({ tk_slice_str _cs46917 = ({ tk_str *_arr46920 = (tk_str *)TK_ARENA_region_alloc(TK_ARENA_region_current(), 2 * sizeof(tk_str)); _arr46920[0] = (tk_str){ (const tk_byte *)"-", 1 }; _arr46920[1] = teko_teko__time__digits_of_magnitude(teko_teko__time__magnitude_of(v)); (tk_slice_str){ .ptr = _arr46920, .len = 2, .cap = 2 }; }); tk_str _ca46919 = (tk_str){0,0}; for (uint64_t _ci46918 = 0; _ci46918 < _cs46917.len; _ci46918++) { _ca46919 = tk_str_concat(_ca46919, _cs46917.ptr[_ci46918]); } _ca46919; });
     }
-    return teko_teko__time__digits_of_magnitude(({ _tk_cast_loc_line = 320; _tk_cast_loc_col = 25; tk_to_u64_s(v); }));
+    return teko_teko__time__digits_of_magnitude(({ _tk_cast_loc_line = 308; _tk_cast_loc_col = 25; tk_to_u64_s(v); }));
 }
 
 uint64_t teko_teko__time__magnitude_of(int64_t v) {
     if (((v >= ((int64_t)0ULL)))) {
-        return ({ _tk_cast_loc_line = 324; _tk_cast_loc_col = 24; tk_to_u64_s(v); });
+        return ({ _tk_cast_loc_line = 312; _tk_cast_loc_col = 24; tk_to_u64_s(v); });
     }
-    return tk_add_u64(({ _tk_cast_loc_line = 325; _tk_cast_loc_col = 6; tk_to_u64_s(tk_sub_i64(((int64_t)0ULL), tk_add_i64(v, ((int64_t)1ULL)))); }), ((uint64_t)1ULL));
+    return tk_add_u64(({ _tk_cast_loc_line = 313; _tk_cast_loc_col = 6; tk_to_u64_s(tk_sub_i64(((int64_t)0ULL), tk_add_i64(v, ((int64_t)1ULL)))); }), ((uint64_t)1ULL));
 }
 
 tk_str teko_teko__time__digits_of_magnitude(uint64_t mag) {
@@ -195404,19 +195374,19 @@ tk_str teko_teko__time__digits_of_magnitude(uint64_t mag) {
             break;
         }
         k = tk_sub_u64(k, ((uint64_t)1ULL));
-        xs = ({ tk_slice_byte _ssub46922_0 = xs; uint8_t _sitm46922_1 = ({ uint8_t const *_ls46923 = (digits).ptr; uint64_t _li46924 = (uint64_t)(k); _li46924 < (digits).len ? _ls46923[_li46924] : (tk_panic_oob_at(339, 56), (uint8_t){0}); }); uint64_t _stot46922 = 1 + _ssub46922_0.len; uint8_t *_sacc46922 = (uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), _stot46922 * sizeof(uint8_t)); uint64_t _spos46922 = 0; for (uint64_t _sj46922_0 = 0; _sj46922_0 < _ssub46922_0.len; _sj46922_0++) { _sacc46922[_spos46922++] = _ssub46922_0.ptr[_sj46922_0]; } _sacc46922[_spos46922++] = _sitm46922_1; (tk_slice_byte){ .ptr = _sacc46922, .len = _stot46922 }; });
+        xs = ({ tk_slice_byte _ssub46922_0 = xs; uint8_t _sitm46922_1 = ({ uint8_t const *_ls46923 = (digits).ptr; uint64_t _li46924 = (uint64_t)(k); _li46924 < (digits).len ? _ls46923[_li46924] : (tk_panic_oob_at(327, 56), (uint8_t){0}); }); uint64_t _stot46922 = 1 + _ssub46922_0.len; uint8_t *_sacc46922 = (uint8_t *)TK_ARENA_region_alloc(TK_ARENA_region_current(), _stot46922 * sizeof(uint8_t)); uint64_t _spos46922 = 0; for (uint64_t _sj46922_0 = 0; _sj46922_0 < _ssub46922_0.len; _sj46922_0++) { _sacc46922[_spos46922++] = _ssub46922_0.ptr[_sj46922_0]; } _sacc46922[_spos46922++] = _sitm46922_1; (tk_slice_byte){ .ptr = _sacc46922, .len = _stot46922 }; });
     }
     return ({ tk_slice_byte _sb46925 = xs; tk_str_of_bytes((tk_str){ (const tk_byte *)_sb46925.ptr, _sb46925.len }); });
 }
 
 uint64_t teko_teko__time__run_length(tk_str pattern, uint64_t i) {
-    uint8_t c = ({ tk_str _s46926 = pattern; uint64_t _i46927 = (uint64_t)(i); _i46927 < _s46926.len ? _s46926.ptr[_i46927] : (tk_panic_oob_at(344, 13), (tk_byte)0); });
+    uint8_t c = ({ tk_str _s46926 = pattern; uint64_t _i46927 = (uint64_t)(i); _i46927 < _s46926.len ? _s46926.ptr[_i46927] : (tk_panic_oob_at(332, 13), (tk_byte)0); });
     uint64_t j = i;
     while (1) {
         if (((j >= ((pattern.len))))) {
             break;
         }
-        if (((({ tk_str _s46928 = pattern; uint64_t _i46929 = (uint64_t)(j); _i46929 < _s46928.len ? _s46928.ptr[_i46929] : (tk_panic_oob_at(346, 46), (tk_byte)0); }) != c))) {
+        if (((({ tk_str _s46928 = pattern; uint64_t _i46929 = (uint64_t)(j); _i46929 < _s46928.len ? _s46928.ptr[_i46929] : (tk_panic_oob_at(334, 46), (tk_byte)0); }) != c))) {
             break;
         }
         j += ((uint64_t)1ULL);
@@ -195442,7 +195412,7 @@ tk_str teko_teko__time__date_to_string(tk_t_teko__time__date d, tk_str pattern) 
             break;
         }
         TK_ARENA_region_enter(_tkrr);
-        uint8_t c = ({ tk_str _s46931 = pattern; uint64_t _i46932 = (uint64_t)(i); _i46932 < _s46931.len ? _s46931.ptr[_i46932] : (tk_panic_oob_at(358, 17), (tk_byte)0); });
+        uint8_t c = ({ tk_str _s46931 = pattern; uint64_t _i46932 = (uint64_t)(i); _i46932 < _s46931.len ? _s46931.ptr[_i46932] : (tk_panic_oob_at(346, 17), (tk_byte)0); });
         TK_ARENA_region_leave();
         TK_ARENA_region_enter(_tkrr);
         if (((c == 121))) {
@@ -195496,7 +195466,7 @@ tk_str teko_teko__time__date_to_string(tk_t_teko__time__date d, tk_str pattern) 
 }
 
 tk_str teko_teko__time__time_to_string(tk_t_teko__time__time t, tk_str pattern) {
-    int64_t secs = ({ _tk_cast_loc_line = 385; _tk_cast_loc_col = 16; tk_to_i64_u(tk_div_u64(((t.ticks)), ((uint64_t)1000000000ULL))); });
+    int64_t secs = ({ _tk_cast_loc_line = 373; _tk_cast_loc_col = 16; tk_to_i64_u(tk_div_u64(((t.ticks)), ((uint64_t)1000000000ULL))); });
     int64_t hour = tk_div_i64(secs, ((int64_t)3600ULL));
     int64_t minute = tk_div_i64(tk_mod_i64(secs, ((int64_t)3600ULL)), ((int64_t)60ULL));
     int64_t second = tk_mod_i64(secs, ((int64_t)60ULL));
@@ -195506,7 +195476,7 @@ tk_str teko_teko__time__time_to_string(tk_t_teko__time__time t, tk_str pattern) 
         if (((i >= ((pattern.len))))) {
             break;
         }
-        uint8_t c = ({ tk_str _s46966 = pattern; uint64_t _i46967 = (uint64_t)(i); _i46967 < _s46966.len ? _s46966.ptr[_i46967] : (tk_panic_oob_at(393, 17), (tk_byte)0); });
+        uint8_t c = ({ tk_str _s46966 = pattern; uint64_t _i46967 = (uint64_t)(i); _i46967 < _s46966.len ? _s46966.ptr[_i46967] : (tk_panic_oob_at(381, 17), (tk_byte)0); });
         if (((c == 72))) {
             uint64_t n = teko_teko__time__run_length(pattern, i);
             if (((n >= ((uint64_t)2ULL)))) {

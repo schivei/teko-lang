@@ -1,5 +1,34 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
+# RESEED (hand-harvest, isolated worktree, forward-only) — D108 REFACTOR ABI NAMESPACE
+# (expurgo/abi-namespace, D90/D102/D107/D108). Consolidou TODOS os externs de ABI-do-SO (from
+# "System"/"kernel32") num namespace único teko::sys::abi, cada símbolo declarado UMA vez — encerra
+# a classe de bug "mesmo símbolo declarado em 2+ módulos com sig divergente".
+#   - ESTRUTURA: src/sys/abi/mac.tks (#os macos por decl; 31 fn + `extern type Rusage from "rusage"`
+#     = 32 decls) e src/sys/abi/windows.tks (#os windows; 29 fn). SEM linux.tks (Linux usa syscall
+#     cru, zero externs de SO). 69 externs from "System"/"kernel32" em 9 arquivos -> 60 fn únicos
+#     (mac 37->31, win 32->29) + Rusage 2->1.
+#   - DUPLICADOS RESOLVIDOS (mesmo símbolo C, agora 1 decl): open/read/close (file_stream+process),
+#     write (os_write_raw de file_stream + rtio_write_raw de rtio -> os_write_raw), chdir
+#     (process+env), _exit (os_underscore_exit de process + os_exit de arena -> os_exit, void),
+#     CloseHandle (file_stream+process), WriteFile (file_stream+rtio); type Rusage (rtio+process).
+#   - SIG DIVERGENTE (o bug-alvo): GetStdHandle era u32 (process) E i32 (rtio) na MESMA TU -> agora
+#     UMA decl u32 (DWORD); rtio passa 0xFFFFFFF4/0xFFFFFFF5 to u32 (STD_ERROR/STD_OUTPUT_HANDLE).
+#   - SIGS CASADAS COM O SDK (ref/from "tag", D102/D107): getrusage(int32_t, struct rusage *),
+#     wait4(int32_t, int32_t *, int32_t, struct rusage *), _exit(int32_t)->void, GetStdHandle(uint32_t).
+#   - CALL-SITES: os 9 arquivos qualificados p/ teko::sys::abi::<nome>, incl. refs cross-file no
+#     mesmo namespace teko::runtime (thread.tks usava os_mmap/os_munmap/VirtualAlloc/VirtualFree
+#     declarados em arena.tks). FORA DE ESCOPO, mantidos onde estavam: from "synchronization"
+#     (WaitOnAddress/WakeByAddress*), from "teko_rt", from "rusage".
+#   - NAO EDITEI teko_rt.c/.h (método D90). Linux INALTERADO na lógica: diff base->reseed, após
+#     normalizar nºs de linha/coluna de diagnóstico, só contém blocos extern #if __APPLE__/_WIN32 +
+#     os 4 call-sites GetStdHandle (dentro de #if _WIN32). O único delta no emit Linux é nº de linha
+#     embutido (removi linhas físicas de decl acima de código).
+#   - PROVA de símbolos (bootstrap/teko.c reseedado): getrusage/wait4/_exit/GetStdHandle +
+#     open/read/close/write/chdir/WriteFile/CloseHandle -> 1 decl cada.
+#   - FIXPOINT: gen2.c == gen3.c byte-idêntico (rota C, Linux), 20744807 bytes; gen1.c==gen2.c==gen3.c.
+#   - MEM_PARANOID=1: build seco exit 0. Pico RSS (rota C, gen3): 1133.7 MB.
+#
 # RESEED (hand-harvest, isolated worktree, forward-only) — §16 RT-L5 INTERNING + NAMES
 # (expurgo/rt-l5-interning-task, D90/D100). Migrou duas das quatro familias L5 do teko_rt.c para
 # Teko sobre a arena L1 (metodo D90: teko_rt.c/.h INTOCADOS; os wrappers C viram mortos, morrem no F9):
