@@ -18,6 +18,12 @@ sources:
 > Close the L3 layer: file-system, environment, and time/date reach the host via leaf `extern fn` syscalls
 > per-target — killing the fs half of `win32_compat.h`.
 
+> **ENV SUPERSEDED (D99, 2026-08-25):** this crumb's env recipe (`_getenv`/`_setenv` via per-target `extern
+> fn getenv/setenv`, D-TS1) ACCEPTED libc and is REJECTED by D85/D99. Env now migrates via the entry-point
+> `envp` capture + a program-resident Teko overlay in **`0124` (RT-L4-ENV)**, co-landing with `0062`'s
+> `execve`. Ignore the `getenv`/`setenv` items below; take the fs (`chdir`/`getcwd`/`opendir`) and time/date
+> items only. `cwd`/`chdir` land with `0124` under D99.
+
 ## Goal
 
 L3 is the first OS-touching layer: **fs/env + time/date**, reached by leaf syscalls (`migracao…` §2.1). The
