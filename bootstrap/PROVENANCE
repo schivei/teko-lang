@@ -1,32 +1,38 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, isolated worktree, forward-only) — §16-FASE5 ASSERT (expurgo/f5-assert-teko,
-# D90). Fecha a família teko::assert como Teko puro sobre o panic migrado (S16-IO/FASE2), zerando o
-# uso do seed C assert.c: nenhum caminho referencia os símbolos teko__assert__* do assert.c.
-#   1. CALL LOWERING -> corpo Teko (src/codegen/codegen.tks cg_assert_symbol; src/lir/lower.tks
-#      assert_seed_symbol): uma chamada a teko::assert::<name> baixa para o símbolo do objeto Teko
-#      (mangle teko_teko__assert__<name>, via cb_fn_name_str / mangle_fn_symbol) em vez do símbolo C
-#      do seed (teko__assert__<name>). Como o corpo compare+panic ja vive em src/assert/assert.tks
-#      (is_true/eq_i64/ne_i64/lt/le/gt/ge_i64/eq_u64/eq_f64/eq_str/ne_str/str_contains/str_absent/
-#      str_starts_with/str_ends_with/len_eq/bytes_eq/is_present/is_absent/is_ok/is_error/scenario_*),
-#      a família passa a ser servida pelo objeto Teko. Os hooks de scenario-name (scenario_prefix_rt/
-#      scenario_set_rt/scenario_ok_rt) seguem extern a teko_rt (estado de process/task; migram com
-#      RT-L5/L6 — parcial honesto).
-#   2. PRELUDE INJECTION (src/build/project.tks rt_inject_namespaces/rt_prelude_paths_for): teko::assert
-#      entra no prelude injetado (ao lado de teko::runtime e teko::sys), então um programa que CHAMA
-#      teko::assert mas não o DEFINE compila os corpos Teko no próprio objeto — o papel dual do seed
-#      (fill-in) passa a ser servido pelo objeto Teko, como as 11 símbolos runtime já provaram. O
-#      rt_already_present garante single-def: o build do próprio compilador (corpus já tem assert.tks)
-#      pula a injeção -> cada teko_teko__assert__* definido EXATAMENTE UMA vez (sem double-def).
-#   3. assert.c/.h ficam MORTOS-mas-PRESENTES (F9 SWEEP os deleta). PROVA DE DEADNESS: o binário da
-#      fixture relinca e roda SEM assert.c (clang teko.c + teko_rt.c, exit 0); nm mostra
-#      T teko_teko__assert__* (corpo Teko forte, vivo) e W teko__assert__* (seed C fraco, não
-#      referenciado). NÃO editei assert.c/teko_rt.c/.h (método D90).
-#   - FIXPOINT: gen2.c == gen3.c byte-idêntico; reprodução gen0(bootstrap)->gen1.c == bootstrap/teko.c.
-#   - MEM_PARANOID=1: build exit 0. Pico RSS (build seco C-route): 1120.9 MB (baseline gen2 clean =
-#     1120.7 MB; +0.2 MB, nível de ruído — flag do padrão-expurgo D95).
-#   - Fixture (examples/regressions/assert_migrated): bateria passa (exit 0), eq_i64/bytes_eq
-#     divergentes panicam (traps + stderr "assertion failed: …") — rota C.
+# RESEED (hand-harvest, isolated worktree, forward-only) — CONFLITO getrusage macOS
+# (fix/macos-getrusage-conflict, D90). Corrige o build vermelho do macOS: o braço #os("macos") de
+# teko::runtime::peak_rss emitia `extern int32_t getrusage(int32_t, uint64_t)`, cujo `uint64_t`
+# colide com o `int getrusage(int, struct rusage *)` do SDK (puxado por <sys/resource.h> via
+# <stdlib.h> -> <sys/wait.h>). No Linux é SYS_GETRUSAGE (sem símbolo, sem conflito); por isso só o
+# macOS quebrava.
+#   1. CODEGEN — extern struct type nativo provido por header: um `extern type T = struct { … }
+#      from "tag"` passa a emitir `struct <tag>` nas referências e NÃO emite typedef próprio (o
+#      header do SO define o struct). ExternStructBody ganha o campo `c_tag`; parser aceita
+#      `from "tag"` após o corpo (espelha o `from "lib"` dos extern fn); tkb serializa. As demais
+#      extern structs (sem `from`, ex.: Statx) seguem tk_t_… inalteradas -> o Linux não muda.
+#      emit_type/emit_type_str unificados numa única resolução cg_find_decl (byte-idêntico p/
+#      não-extern, provado pelo fixpoint).
+#   2. rtio.tks (macOS): `extern type Rusage = struct { ru_maxrss: i64 } from "rusage"` +
+#      `os_getrusage(who: i32, ref rbuf: Rusage)` emite `getrusage(int32_t, struct rusage *)` —
+#      idêntico ao SDK (int32_t == int no macOS), sem redeclaração conflitante. peak_rss lê
+#      `ru.ru_maxrss` (BYTES no Darwin — sem o *1024 do Linux). Braços Linux/Windows intocados.
+#      NÃO editei teko_rt.c/.h (método D90).
+#   - EMIT (bootstrap/teko.c, braço #if __APPLE__): ANTES `extern int32_t getrusage(int32_t who,
+#     uint64_t rbuf);` -> DEPOIS `extern int32_t getrusage(int32_t who, struct rusage * rbuf);`;
+#     corpo `struct rusage ru = (struct rusage){ .ru_maxrss = 0 }; getrusage(0, &ru);
+#     return (uint64_t)(ru.ru_maxrss);`. Nenhum typedef tk_t_…rusage emitido.
+#   - RESEED STAGED (from "tag" é token novo): teach (seed atual compila o código que IMPLEMENTA o
+#     token, rtio antigo) -> reseed A local -> use (rtio com from "rusage") -> reseed B (este).
+#   - FIXPOINT: gen2.c == gen3.c byte-idêntico (rota C, Linux); gen1.c == gen2.c == gen3.c;
+#     reprodução gen0(bootstrap)->gen1.c == bootstrap/teko.c (out_mp/teko.c idêntico).
+#   - MEM_PARANOID=1: build seco exit 0. Pico RSS (rota C): 1122.2 MB.
+#
+# HISTÓRICO — §16-FASE5 ASSERT (expurgo/f5-assert-teko, D90). Fechou a família teko::assert como
+# Teko puro sobre o panic migrado (S16-IO/FASE2), zerando o uso do seed C assert.c: nenhum caminho
+# referencia os símbolos teko__assert__* do assert.c. Call lowering -> corpo Teko (cg_assert_symbol/
+# assert_seed_symbol), prelude injection (teko::assert no prelude injetado), assert.c/.h
+# mortos-mas-presentes (F9 SWEEP os deleta). NÃO editou assert.c/teko_rt.c/.h (método D90).
 #
 # HISTÓRICO — §16-FASE4 FS + TIME + RUSAGE (expurgo/f4-fs-env-time-random, D90): migrou as pernas de
 # filesystem, relógio e pico de RSS do teko.c emitido do FFI teko_rt.c para syscall intrínseco (Linux)
