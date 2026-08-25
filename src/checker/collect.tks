@@ -3,6 +3,15 @@ use teko::parser
 
 type Collected = struct { types: TypeTable; env: Env }
 
+fn tt_regs_concat(a: []TypeReg, b: []TypeReg): []TypeReg {
+    var out: [a.len + b.len]TypeReg = []
+    var i: u64 = 0
+    loop { if i >= a.len { break }; out[i] = a[i]; i++ }
+    var j: u64 = 0
+    loop { if j >= b.len { break }; out[a.len + j] = b[j]; j++ }
+    out
+}
+
 fn self_type_expr(): @TypeExpr() {
     parser::NamedType { path = parser::Path { segments = [parser::Segment { name = "self" }] }; args = [] }
 }
@@ -1729,7 +1738,7 @@ fn seed_from_dep(dep: TProgram, table: TypeTable, env: Env): Collected | error {
         }
         i++
     }
-    var t = tt_freeze(TypeTable { regs = [..table.regs, ..regs]; by_last = nidx_empty(); comptimes = table.comptimes })
+    var t = tt_freeze(TypeTable { regs = tt_regs_concat(table.regs, regs); by_last = nidx_empty(); comptimes = table.comptimes })
     var j: u64 = 0
     loop {
         if j >= dep.items.len { break }
@@ -1738,7 +1747,8 @@ fn seed_from_dep(dep: TProgram, table: TypeTable, env: Env): Collected | error {
                 var dtbl = type_param_table(f.type_params, f.type_constraints, "", t)
                 var params: [f.params.len]@Type() = []
                 var param_names: [f.params.len]str = []
-                var defaults: []parser::Expr = []
+                var defaults: [f.params.len]parser::Expr = []
+                var ndef: u64 = 0
                 var n_required: u64 = f.params.len
                 var pi: u64 = 0
                 loop {
@@ -1748,12 +1758,13 @@ fn seed_from_dep(dep: TProgram, table: TypeTable, env: Env): Collected | error {
                     param_names[pi] = f.params[pi].name
                     if f.params[pi].has_default {
                         if n_required == f.params.len { n_required = pi }
-                        defaults = [..defaults, f.params[pi].default_expr]
+                        defaults[ndef] = f.params[pi].default_expr
+                        ndef++
                     }
                     pi++
                 }
                 var is_variadic = f.params.len > 0 && f.params[f.params.len - 1].is_params
-                var ft = Func { params = params; ret = f.return_type; variadic = is_variadic; param_names = param_names; n_required = n_required; defaults = defaults; ret_extra = [] }
+                var ft = Func { params = params; ret = f.return_type; variadic = is_variadic; param_names = param_names; n_required = n_required; defaults = teko::collections::arr_slice(defaults, 0, ndef); ret_extra = [] }
                 e = define_fn(e, f.name, ft, f.namespace, false)
             }
             _ => { }
