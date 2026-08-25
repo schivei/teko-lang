@@ -500,9 +500,10 @@ pub fn synthesize_mret_structs(program: parser::Program): parser::Program {
         t = t + 1
     }
     if !has_any { return program }
-    var out: []parser::Item = []
-    var made_keys: []str = []
-    var new_structs: []parser::Item = []
+    var out_items: [program.items.len]parser::Item = []
+    var made_keys: [program.items.len]str = []
+    var new_structs: [program.items.len]parser::Item = []
+    var nstructs: u64 = 0
     var i: u64 = 0
     loop {
         if i >= program.items.len { break }
@@ -513,22 +514,26 @@ pub fn synthesize_mret_structs(program: parser::Program): parser::Program {
                     var mangle = mret_mangle(f.ret_types)
                     var key = it.namespace ~ "#" ~ mangle
                     if !mret_key_seen(made_keys, key) {
-                        made_keys = [..made_keys, key]
-                        new_structs = [..new_structs, mret_struct_item(it.namespace, it.file, mangle, f.ret_types)]
+                        made_keys[nstructs] = key
+                        new_structs[nstructs] = mret_struct_item(it.namespace, it.file, mangle, f.ret_types)
+                        nstructs++
                     }
-                    out = [..out, parser::Item { content = mret_rewrite_fn(f, mangle); namespace = it.namespace; file = it.file; guard = it.guard }]
+                    out_items[i] = parser::Item { content = mret_rewrite_fn(f, mangle); namespace = it.namespace; file = it.file; guard = it.guard }
                 } else {
-                    out = [..out, it]
+                    out_items[i] = it
                 }
             }
-            _ => { out = [..out, it] }
+            _ => { out_items[i] = it }
         }
         i = i + 1
     }
+    var out: [program.items.len + nstructs]parser::Item = []
+    var w: u64 = 0
+    loop { if w >= program.items.len { break }; out[w] = out_items[w]; w = w + 1 }
     var k: u64 = 0
     loop {
-        if k >= new_structs.len { break }
-        out = [..out, new_structs[k]]
+        if k >= nstructs { break }
+        out[program.items.len + k] = new_structs[k]
         k = k + 1
     }
     parser::Program { items = out }
@@ -634,9 +639,11 @@ pub fn effective_class_fields(cb: parser::ClassBody, table: TypeTable): []parser
         var base_cb = match find_class_body(cb.base_name, table) { parser::ClassBody as b => b; error as e => return e }
         inherited = match effective_class_fields(base_cb, table) { []parser::Field as f => f; error as e => return e }
     }
-    var out: []parser::Field = inherited
-    var i = 0
-    loop { if i >= cb.fields.len { break }; out = [..out, cb.fields[i]]; i++ }
+    var out: [inherited.len + cb.fields.len]parser::Field = []
+    var i: u64 = 0
+    loop { if i >= inherited.len { break }; out[i] = inherited[i]; i++ }
+    var j: u64 = 0
+    loop { if j >= cb.fields.len { break }; out[inherited.len + j] = cb.fields[j]; j++ }
     out
 }
 
