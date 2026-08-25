@@ -1,5 +1,29 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
+# RESEED (hand-harvest, isolated worktree, forward-only) — §16-FASE6 PROCESS/EXEC POSIX
+# (expurgo/f6-process-exec, D90/D99/D101). Migrou a metade POSIX da família teko::process
+# (run/run_quiet/spawn_redirected/wait_one/pipe/close_fd/fd_wait_readable/fd_fill/fd_take_byte) do
+# FFI teko_rt.c para Teko:
+#   - LINUX (syscall cru): fork = clone(SIGCHLD,0,0,0,0); exec = execve + resolvedor de PATH em Teko
+#     (substitui o execvp da libc: '/' em argv[0] -> execve direto, senão varre teko::env::var("PATH")
+#     por ':'); wait4 (decode WIFEXITED/(status>>8)&0xff, WIFSIGNALED 128+signo); pipe2(O_CLOEXEC);
+#     dup3 para stdin/out/err + fcntl(F_DUPFD) lift; ppoll para fd_wait_readable; read/close.
+#     SYS consts #arch-split (execve 59/221, wait4 61/260, pipe2 293/59, dup3 292/24, ppoll 271/73,
+#     fcntl 72/25) + SIGCHLD/O_CLOEXEC/POLLIN/POLLHUP. Fork com clone(SIGCHLD) e args 0 é
+#     arch-agnóstico (a ordem parent_tid/child_tid/tls varia por arch, mas todos 0 aqui).
+#   - PROPAGAÇÃO (D99): envp montado por teko::env::env_snapshot() (overlay -> char** KEY=VALUE em
+#     region_program) ANTES do fork -> o filho herda os set_var do pai via execve.
+#   - macOS (libSystem, D101): fork/execve/wait4/pipe/dup2/poll/read/close/open/chdir/fcntl como
+#     extern fn from "System". Windows: fica no extern C (tk_rt_run/…) aguardando o import-lib
+#     linker (Fase E) — braço kernel32/CreateProcess adiado, reportado ao backend.
+#   - fd staging (Linux/macOS) num slot novo da arena (CTRL_FD_STAGE); teko_rt.c INTOCADO (os
+#     wrappers POSIX tk_rt_run/… ficam mortos-mas-presentes, morrem no F9-SWEEP; os
+#     fork/execvp/waitpid/pipe/poll/dup2 que nm -u ainda lista vêm SÓ deles).
+#   - FIXPOINT: gen2.c == gen3.c byte-idêntico (rota C, Linux) — o cc-spawn de cada geração roda
+#     pelo process::run migrado (clone/execve/PATH), validando o exec funcionalmente.
+#   - MEM_PARANOID=1: build seco exit 0. Pico RSS (rota C, gen2): 1128.0 MB (base 1123.9; +4.1 MB
+#     proporcional ao código migrado, D100). NÃO editei teko_rt.c/.h (método D90).
+#
 # RESEED (hand-harvest, isolated worktree, forward-only) — CONFLITO getrusage macOS
 # (fix/macos-getrusage-conflict, D90). Corrige o build vermelho do macOS: o braço #os("macos") de
 # teko::runtime::peak_rss emitia `extern int32_t getrusage(int32_t, uint64_t)`, cujo `uint64_t`
