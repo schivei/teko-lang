@@ -4,9 +4,10 @@ crumb-id: RT-L4
 milestone: M2
 gate: "[RITUAL]"
 reseed-class: "fixpoint-rebuild"
-deps: [RT-L3, RT-L4-ENV]
+deps: [RT-L3, RT-ENTRY, RT-L4-ENV]
 sources:
-  - "DECISION_LOG.md:963-969"                                       # D99 — the law: exec becomes Teko execve(path,argv,envp_teko); env+exec close zero-libc together; POSIX first
+  - "DECISION_LOG.md:963-969"                                       # D99 — the law: exec becomes Teko execve(path,argv,envp_teko); env+exec close together; POSIX first
+  - "DECISION_LOG.md:976-985"                                       # D101 — zero-libc = zero C-RUNTIME; per-OS sanctioned ABI (Linux raw / macOS libSystem / Windows kernel32); per-OS nm gate
   - "DECISION_LOG.md:944-951"                                       # D97 — the env↔exec coupling (propagation was the heart of the block)
   - "DECISION_LOG.md:857-863"                                       # D86 — fork #2 dissolved: use the platform's own linker/ABI; M-linker is endgame-native only
   - "DECISION_LOG.md:884-889"                                       # D90 — method: write Teko + reflect in codegen; NEVER edit teko_rt.c
@@ -24,17 +25,25 @@ sources:
 > CreateProcess (Win32) — passing the Teko-managed `envp` to children (the D99 propagation), killing the
 > process half of `win32_compat.h`; the §16-FASE6 gate. **POSIX lands first; Win32 waits for Fase E.**
 
-## D99 refresh (2026-08-25)
+## D99 / D101 refresh (2026-08-25)
 
-D97's fork (env↔exec) is resolved BY LAW (D99): the exec is no longer a passive `execvp` — it becomes a
-Teko `execve(path, argv, envp_teko)` that PROPAGATES the Teko-managed environment (`0124`) to children.
-This crumb's POSIX half CO-LANDS with `0124` (the env overlay + `env_snapshot` builder) as the third reseed
-of the RT-L4 wave. Two consequences vs the original design below: (1) the POSIX exec is `execve` + a
-Teko-side PATH resolver (not libc `execvp`), reading `PATH` via the zero-libc `env::var`; (2) the child's
-environment is `env_snapshot()` (built from the overlay BEFORE fork), so a parent `set_var` reaches the
-child — the propagation D97 could not close over libc. The Win32 half is UNCHANGED (still blocked on the
-Fase E import-lib linker). The rest of this doc's POSIX recipe stands, amended by the "POSIX exec via
-execve + envp_teko" section under How.
+D97's fork (env↔exec) is resolved BY LAW (D99): exec is no longer a passive `execvp` — it becomes a Teko
+`execve(path, argv, envp_teko)` that PROPAGATES the Teko-managed environment (`0124`) to children. **D101**
+refines the reach: "zero-libc" = zero **C-RUNTIME**, NOT zero-OS-ABI, and the gate is per-OS. So the exec is
+per-OS via the sanctioned ABI the platform LINKER resolves (native-compatible):
+
+- **Linux** — raw: `clone`(SIGCHLD)/`execve`/`wait4`/`pipe2`/`dup3`/`ppoll` syscalls (no ABI lib exists).
+- **macOS** — the sanctioned libSystem ABI via ld64: `fork`/`execve`/`posix_spawn`/`waitpid`/`pipe`/`poll`
+  as `extern fn … from "System"` (D101 — these are the OS ABI, NOT the forbidden C-runtime `system`/`popen`).
+- **Windows** — `CreateProcessW`/`WaitForSingleObject`/`CreatePipe` kernel32 via link.exe import-lib (Fase E).
+
+This crumb's POSIX half CO-LANDS with `0125` (the per-OS entry) + `0124` (the env overlay + `env_snapshot`)
+as RESEED C of the RT-L4 wave. Two consequences vs the original design below: (1) exec resolves PATH in Teko
+(reading `PATH` via `0124`'s zero-C-runtime `env::var`) — no C-runtime `execvp`; (2) the child's environment
+is `env_snapshot()` (built from the overlay BEFORE fork), so a parent `set_var` reaches the child. The per-OS
+`nm` gate (D101): Linux no process libc; macOS libSystem ABI allowed, no C-runtime `system`/`popen`; Windows
+kernel32, no msvcrt. The Win32 half stays blocked on the Fase E import-lib linker. The rest of this doc's
+POSIX recipe stands, amended by the "POSIX exec via execve + envp_teko" section under How.
 
 ## Goal
 
@@ -179,8 +188,9 @@ converges. This is the **§16-FASE6 (POSIX) gate**. **Reseed-class:** `fixpoint-
 
 ## Deps
 
-`RT-L3` (`0061` — the target-guarded `extern fn` mechanism the process half reuses) and `RT-L4-ENV`
-(`0124` — the env overlay + `env_snapshot` the `execve` propagation consumes; co-lands in the same wave).
+`RT-L3` (`0061` — the target-guarded `extern fn` mechanism the process half reuses), `RT-ENTRY` (`0125` —
+the per-OS entry that captures argc/argv/envp; RESEED A of the wave) and `RT-L4-ENV` (`0124` — the env
+overlay + `env_snapshot` the `execve` propagation consumes; RESEED B). This crumb is RESEED C, co-landing.
 
 ## Done when
 
