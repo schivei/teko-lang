@@ -4,7 +4,7 @@ crumb-id: RT-L4-ENV
 milestone: M2
 gate: "[RITUAL]"
 reseed-class: "fixpoint-rebuild"
-deps: [S16-FS]        # 0055 landed the fs/time/rusage half; env was the deferred straggler (D95)
+deps: [S16-FS, RT-ENTRY]  # 0055 fs/time half + 0125 the `_start` that captures argc/argv/envp from the OS ABI
 sources:
   - "DECISION_LOG.md:963-969"                                       # D99 — the law: build the infra, env+exec close zero-libc together, no libc crutch
   - "DECISION_LOG.md:944-951"                                       # D97 — the env↔exec coupling that D99 resolves
