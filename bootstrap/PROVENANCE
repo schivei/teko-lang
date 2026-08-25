@@ -1,322 +1,37 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, isolated worktree, forward-only) — §16-FASE2 EXIT/WRITE/FLOAT
-# (expurgo/f2-exit-write-ftoa, D90). Migra o leg I/O + exit + float-bottom do teko.c emitido pra
-# zero-libc <stdio.h>/<stdlib.h>-exit:
-#   1. EXIT -> SYS_exit_group: o builtin `exit(code)` e o `panic` baixam pra teko::runtime::rt_exit
-#      (arena.tks, decl unica -> mangle sem sufixo de overload; despacha pra rt_exit_os #os: Linux
-#      syscall1(SYS_EXIT_GROUP), macOS _exit, Windows ExitProcess). O codegen reflete (codegen.tks:
-#      shortcut de `exit` -> cb_fn_name_str("teko::runtime","rt_exit")). Sai o `abort()` libc do
-#      teko.c (o unico call libc que restava no leg).
-#   2. STDOUT/STDERR -> SYS_write (SEM buffering, write direto): novo modulo-prelude
-#      src/runtime/rtio.tks (teko::runtime) com print/println/write/ewrite/eprint/eprintln +
-#      panic sobre rtio_write_all -> rtio_os_write (#os: Linux syscall3(SYS_WRITE), macOS write,
-#      Windows GetStdHandle+WriteFile). Seam str->(ptr,len): teko::sys::ptr_word(byte_ptr(bytes,off))
-#      + s.len; short-write faz loop no resto; retorno <0 (=-errno) encerra (sinal checado). O codegen
-#      roteia os shortcuts print/write/... -> teko::runtime::* (rtio, no prelude, alcanca TODO
-#      programa; nao so o self-build). rtio.tks injetado no rt_prelude_paths_for (project.tks).
-#      teko_rt.tks perde os externs de print/write/ewrite/... + rt_abort + panic (migrados p/ rtio).
-#   3. FLOAT-BOTTOM %.17g: JA landado no FLOAT/FMT EXPURGO (numfmt.tks, teko::runtime::f64_g17/ftoa)
-#      — este bite CONFIRMA o round-trip com o oraculo f64_g17_roundtrip (bateria de 16 doubles:
-#      +-0, 0.1, pi, max, min normal/subnormal, +-inf, nan; parse(f64_g17(x))==x bit-a-bit).
-#   - PROVA ZERO-LIBC: nm -u do objeto do teko.c emitido (clang -std=c2x -c) NAO lista fwrite/fputc/
-#     fputs/snprintf/vsnprintf/exit/_Exit/abort/puts/printf indefinidos; teko_teko__runtime__print/
-#     write/ewrite/println/panic/rt_exit definidos (T). Os tokens abort/snprintf/tk_* remanescentes
-#     no teko.c sao string-literals (dados do codegen/lower), nao chamadas.
-#   - gen0 linkado do bootstrap/teko.c ANTERIOR (73ef54f6...) constroi gen1 contra a source pos-bite;
-#     gen1->gen2->gen3, gen2.c == gen3.c byte-identico (20 592 213 bytes, os bytes deste arquivo,
-#     sha256 4e23b800...). Reharvest: bootstrap/teko.c = gen2.c convergido.
-#   - 3 fixtures (examples/regressions): sys_exit_group (exit 42), sys_write_stdout ("hi", exit 0),
-#     f64_g17_roundtrip ("roundtrip ok", exit 0). Todas verdes com gen2.
-#   - Pico RSS C-route (TEKO_BACKEND=c, TEKO_CC=clang): gen2 1116.5 MB / gen3 1116.9 MB (baseline
-#     mem* 1116.4 MB -> flat dentro do jitter run-a-run ~1-2 MB; o leg I/O+exit+panic saindo do C
-#     pro Teko nao cresce o piso). TEKO_MEM_PARANOID=1 dry build exit 0, pico 1116.8 MB. Sob o guard
-#     ulimit -v 4718592.
-#   - O DEGRAU (bootstrap/DEGRAU) permanece declarado; o seed forcado agora = este compilador.
+# RESEED (hand-harvest, isolated worktree, forward-only) — §16-FASE4 FS + TIME + RUSAGE
+# (expurgo/f4-fs-env-time-random, D90). Migra as pernas de filesystem, relógio e pico de RSS do
+# teko.c emitido do FFI teko_rt.c para syscall intrínseco (Linux) / extern fn por-target
+# (macOS libSystem, Windows kernel32), zerando o libc dessas pernas no objeto do teko.c:
+#   1. FS -> syscall (src/fs/fs.tks, por #os): list_dir sobre SYS_getdents64 (buffer + parse dos
+#      registros linux_dirent64 por offset em Teko, ordenacao byte-lexicografica out-of-place para
+#      um walk reproduzivel), mkdir sobre SYS_mkdirat, remove_file sobre SYS_unlinkat, is_dir/stat
+#      sobre SYS_statx. macOS: libSystem opendir/readdir/closedir/mkdir/unlink/stat. Windows:
+#      kernel32 FindFirstFileA/FindNextFileA/FindClose/CreateDirectoryA/DeleteFileA/
+#      GetFileAttributesA (buffer WIN32_FIND_DATAA cru, cFileName no offset 44). O codegen perde os
+#      shortcuts host-ffi de list_dir/mkdir/remove_file (agora fns Teko user-declared).
+#   2. TIME -> SYS_clock_gettime (src/time/time.tks, por #os): wall_days/wall_ns_of_day/monotonic_ns
+#      sobre CLOCK_REALTIME/CLOCK_MONOTONIC (Linux syscall2; macOS clock_gettime libSystem; Windows
+#      GetSystemTimePreciseAsFileTime + QueryPerformanceCounter/Frequency). localtime segue
+#      civil_from_days puro (ja em Teko). journal.tks e project.tks passam a chamar
+#      teko::time::monotonic_ns (saem os externs tk_rt_monotonic_ns). wall_offset_minutes (offset de
+#      fuso = base de dados TZ) fica em teko_rt.c — fora do escopo civil-calendar deste bite.
+#   3. RUSAGE -> SYS_getrusage (src/runtime/rtio.tks): peak_rss le ru_maxrss (offset 32) via
+#      getrusage (Linux syscall2; macOS getrusage libSystem; Windows 0); cur_rss le /proc/self/statm
+#      por SYS_openat/SYS_read/SYS_close. O intrinseco `peak_rss` do codegen/lower e o extern cur_rss
+#      (codegen.tks, project.tks) reroteiam para teko::runtime::peak_rss/cur_rss (saem tk_peak_rss/
+#      tk_cur_rss do emit do C-backend; o native leg mantem os simbolos C ate o SWEEP).
+#   4. SYS consts (src/sys/sys.tks): numeros de syscall #arch-split (getdents64/mkdirat/unlinkat/
+#      getrusage/chdir/getcwd, x86_64 + arm64) + O_DIRECTORY/STATX_BASIC_STATS/S_IF*/RUSAGE_SELF +
+#      extern type Statx por-#os (R3, layout de statx fixado pela fixture sys_stat_size via ref_word).
+#   - PROVA ZERO-LIBC: nm -u do objeto do teko.c emitido (clang -std=c2x -c) NAO lista open/openat/
+#     stat/statx/mkdir/opendir/readdir/closedir/getrusage/fopen/getcwd/chdir/unlink indefinidos; os
+#     externs tk_rt_list_dir/mkdir/remove_file/wall_days/wall_ns_of_day/monotonic e tk_peak_rss/
+#     tk_cur_rss sairam do emit. Restam tk_rt_getenv/setenv/getcwd/chdir (env: deferido) e
+#     tk_rt_wall_offset_minutes (TZ: deferido) — ambos ainda satisfeitos por teko_rt.c.
+#   - FIXPOINT: gen2.c == gen3.c byte-identico; reproducao gen0(bootstrap)->gen1.c == bootstrap/teko.c.
+#   - Fixtures (examples/regressions/): sys_openat_read, sys_getdents, sys_stat_size, localtime_civil,
+#     sys_getrusage_rss — todas exit 0 sob o gen2.
 #
-# RESEED (hand-harvest, isolated worktree, forward-only) — MEM* FREESTANDING (D89/D85/D90,
-# expurgo/mem-freestanding). O backend sintetiza chamadas a memcpy/memset/memmove/memcmp a partir de
-# struct-copy/aggregate-init (nem -ffreestanding/-fno-builtin removem); hoje elas resolviam a' libc,
-# ferindo o criterio zero-libc (D85). Este bite PROVE os NOSSOS simbolos freestanding com os nomes C
-# exatos, implementados em Teko (src/runtime/mem.tks, namespace teko::runtime, folha — loops sobre
-# palavra/byte via teko::mem::load_u8/store_u8 volateis) e refletidos pelo codegen (D90 — sem tocar
-# teko_rt.c). Duas camadas:
-#   1. SUPERFICIE (staged seed): novos builtins teko::mem::load_u8/store_u8 (par byte dos load_u64/
-#      store_u64 ja existentes) — checker/scope.tks (assinaturas), codegen.tks (emit_load_u8/
-#      emit_store_u8 = *(volatile uint8_t*)addr, + dispatch), lir/lower.tks (lower_load_u8_call/
-#      lower_store_u8_call, LType::I8, + routing). Fundacao tambem do backend native.
-#   2. PROVEDOR: src/runtime/mem.tks define rt_memcpy/rt_memset/rt_memmove/rt_memcmp (word-at-a-time
-#      quando dst/src compartilham alinhamento mod 8, senao byte; memmove trata sobreposicao copiando
-#      backward quando dst>src; memcmp retorna <0/0/>0). cg_emit_libc_free_intrinsics (codegen.tks)
-#      emite defs C NAO-static com os nomes EXATOS memcpy/memset/memmove/memcmp delegando aos simbolos
-#      Teko teko_teko__runtime__rt_* — como a arena-provider-ladder. Injetado no prelude de runtime
-#      (project.tks rt_prelude_paths_for) p/ todo programa Teko, alem do self-build. As leituras/
-#      escritas VOLATEIS impedem o LoopIdiomRecognize do clang de reconverter o loop em memcpy (sem
-#      auto-recursao); word-at-a-time mantem o gen0 -O0 tolerable (byte-a-byte volatil explodia p/ +23min).
-#   - PROVA ZERO-LIBC (o ponto do bite): nm do objeto do teko.c emitido (clang -std=c2x -c) mostra
-#     `T memcpy`, `T memset`, `T memmove`, `T memcmp` (NOSSOS, definidos) e `nm -u` NAO lista nenhum
-#     mem*/str* libc indefinido. Zero dependencia de libc para mem*.
-#   - gen0 (staged: gen0-do-bootstrap-anterior ensinado load_u8 -> gen2 staging) linka o provider;
-#     staging -> gen1 -> gen2 -> gen3, gen2.c == gen3.c byte-identico (20 578 xxx bytes, os bytes
-#     deste arquivo, sha256 73ef54f6...). Reharvest: bootstrap/teko.c = gen2.c convergido. VALIDADO:
-#     gen0' = clang(bootstrap) reconstroi a arvore -> gen1'.c == bootstrap/teko.c byte-identico (o
-#     DEGRAU se auto-reproduz pela rota C).
-#   - Pico RSS C-route (TEKO_BACKEND=c, TEKO_CC=clang), gen2 apples-to-apples: baseline 1115.2 MB ->
-#     1116.4 MB (+1.2 MB = custo-por-linha do provider Teko + par de builtins, proporcional; << +20.4
-#     MB da familia FLOAT/FMT aceita pelo dono; NAO e' regressao de copy-grow/push). TEKO_MEM_PARANOID=1
-#     dry build exit 0. Sob o guard ulimit -v 4718592.
-#   - O DEGRAU (bootstrap/DEGRAU) permanece declarado; o seed forcado agora = este compilador.
-#
-# ----------------------------------------------------------------------------------------------------
-# RESEED (hand-harvest, isolated worktree, forward-only) — F3 BITE "O GANHO" (D91,
-# expurgo/f3-bite-ganho). Os 4 sitios do codegen que emitiam tk_region_alloc(tk_region_current(), N)
-# como C LITERAL caiam na root-C do arena-C (nunca reclamada) e vazavam. Passam a emitir pelo provider
-# da tabela de arena: TK_ARENA_region_alloc(TK_ARENA_region_current(), N), via cb_arena_sym(RegionAlloc)
-# + cb_arena_sym(RegionCurrent), igual ao box-alloc ja escopado. Sitios (src/codegen/codegen.tks):
-# emit_str_from_c (cstr->str), emit_array_lit ramo sem-spread, cg_array_lit_alloc ramo com-spread,
-# emit_as_r slice-copy por conversao de elemento. A conversao TROCA SO O BACKEND do arena (tk_region_*
-# em C -> TK_ARENA_region_* no provider Teko) preservando region_current() como a regiao — o lifetime
-# runtime e' identico ao anterior, so muda que o arena Teko RECLAMA (o arena-C root nunca reclamava).
-# Sem UAF: usar TK_ARENA_region_current() (nao o frame de bloco interno) mantem a vida-util exata; os
-# 4 valores que podem escapar (retorno) caem na regiao corrente pos-drop, como antes.
-#   - gen0 linkado do bootstrap/teko.c ANTERIOR (sha256 b7f0bd64..., 20 517 687 bytes) constroi gen1
-#     contra a source pos-bite; gen1->gen2->gen3, gen2.c == gen3.c byte-identico (20 557 203 bytes, os
-#     bytes deste arquivo, sha256 8658b19b...). Reharvest: bootstrap/teko.c = gen2.c convergido.
-#   - Pico RSS C-route (TEKO_BACKEND=c, TEKO_CC=clang): a reclamacao aparece no gen3 (quando o
-#     compilador com o novo emit RODA): baseline gen3 1183.4 MB -> gen3 1114.8 MB (-68.6 MB). O gen2
-#     (construido pelo gen1, ainda de emit antigo) fica flat (1183.4 -> 1183.5 MB). TEKO_MEM_PARANOID=1
-#     dry build (gen2 reconstroi a source) exit 0, pico 1114.8 MB (poison-on-free, sem UAF/double-free).
-#     Sob o guard ulimit -v 4718592.
-#   - O DEGRAU (bootstrap/DEGRAU) permanece declarado; o seed forcado agora = este compilador.
-#
-# RESEED (hand-harvest, isolated worktree, forward-only) — FULL `teko build .` HABILITADO + GATE
-# ROTA-C (fix/full-build-and-tests). O `teko build .` completo (projeto INTEIRO + gate de testes,
-# regua D76) rodava so pela via NATIVE (backend deferido, D52), que estoura de memoria (>11 GB) e
-# para no degrau `syscall6`/`ar_mmap` — logo o full build nunca fechava. Correcoes em
-# src/build/project.tks: (1) `append_items` deixava de ser O(a*b) (o gate copiava ~9k itens por item
-# do harness = explosao de ~10 GB na arena append-only) e vira O(a+b) por pre-alocacao+indice;
-# `native_gate_drop_statements`/`native_gate_test_refs` viram FILTRO (pre-aloca+count+trim) e
-# `native_gate_harness_src` vira BUFFER de bytes em duas passadas — todos NO-PUSH; (2) o gate de
-# testes passa a HONRAR o backend: `run_gate`/`test_stage_build` roteiam pela via C
-# (`tk_emit_c_test_file` + `run_cc`, novos `c_gate_build`/`run_c_gate`/`test_gate_build`) quando
-# `TEKO_BACKEND=c`, evitando o native deferido — o native segue intocado (so deixa de ser exigido);
-# (3) `self_stage_argv` regrediu no expurgo de push (`[exe, ..args]` duplicava argv[0], quebrando o
-# re-exec de `teko test .` com "cannot enter project directory") — restaurado para `[exe, ..args[1..]]`.
-# So .tkt: dois fixtures de teste com sintaxe/dado invalidos (nunca exercitados porque o gate native
-# dava OOM antes de rodar) — `symbols_test.tkt` usava `fn len(self)` (self e receptor sintetico,
-# rejeitado) e `jsonrpc_test.tkt` declarava Content-Length: 34 para um corpo de 30 bytes.
-#   - gen0 linkado do bootstrap/teko.c ANTERIOR (sha256 4378fda0..., 20 549 707 bytes) constroi gen1
-#     contra a source pos-correcoes; gen1->gen2->gen3, gen2.c == gen3.c byte-identico (20 569 448
-#     bytes, os bytes deste arquivo, sha256 73aab480...). Reharvest: bootstrap/teko.c = gen2.c
-#     convergido. VALIDADO: gen0' linkado do NOVO bootstrap reconstroi a arvore -> gen1'.c ==
-#     bootstrap/teko.c byte-identico (o DEGRAU se auto-reproduz pela rota C).
-#   - `teko build .` FULL (via C, gate ligado): VERDE, 35/35 testes .tkt passam, binario construido;
-#     pico self-reported 3712.8 MB (NOVO BASELINE da regua D76). Build seco C-route: 1983 MB.
-#     `teko test .` excede o cap de 4,5 GB (OOM no build-stage ~4124 MB RSS; pico real sob cap de
-#     12 GB = 6016 MB) e a camada de REGRESSAO tem 12 falhas PRE-EXISTENTES (own_native/s16/s17 =
-#     native-deferido; "unknown When entry verb" = harness tkr; probe/refbind), fora do escopo.
-#   - O DEGRAU (bootstrap/DEGRAU) permanece declarado; o seed forcado agora = este compilador.
-#
-# ----------------------------------------------------------------------------------------------------
-# RESEED (hand-harvest, isolated worktree, forward-only) — EXPURGO DO ALOCADOR C, FASE 0
-# (perf/codegen-arena-malloc). O codegen deixa de emitir malloc: os arrays/copias de slice/cstr que
-# eram malloc(N) passam a tk_region_alloc(tk_region_current(), N) — a MESMA regiao de escopo que o
-# ramo com-spread do array-literal ja usava (cai no scope-exit, sem UAF). Tres sitios em
-# src/codegen/codegen.tks: emit_array_lit (ramo sem-spread), emit_str_from_c (cstr_from_ptr) e
-# emit_as_r_in (slice-copy por conversao de elemento). O teko.c EMITIDO fica com ZERO malloc real (o
-# unico token `malloc` remanescente vive DENTRO de um literal de string — o codegen do blob de spawn,
-# que o compilador nunca dispara ao se compilar). O blob de spawn (emit_spawn_thunk_one) NAO foi
-# roteado: ele escapa cross-thread e o trampolim faz free(_raw), incompativel com memoria de regiao —
-# fica como fork reportado ao integrador.
-#   - gen0 linkado do bootstrap/teko.c ANTERIOR (sha256 ebf0842f..., 20 449 040 bytes) constroi gen1
-#     contra a source pos-FASE-0; gen1->gen2->gen3, gen2.c == gen3.c byte-identico (20 549 707 bytes,
-#     os bytes deste arquivo, sha256 4378fda0...). Reharvest: bootstrap/teko.c = gen2.c convergido.
-#     VALIDADO pos-reseed: gen0' linkado do NOVO bootstrap/teko.c reconstroi a arvore -> gen1'.c ==
-#     bootstrap/teko.c byte-identico (o DEGRAU se auto-reproduz pela rota C).
-#   - Pico RSS C-route (TEKO_BACKEND=c, TEKO_CC=clang), std gen2 apples-to-apples: baseline malloc
-#     3644.3 MB -> arena 3642.9 MB (-1.4 MB; rotear malloc-que-vaza para arena-que-dropa BAIXOU o
-#     pico). TEKO_MEM_PARANOID=1 dry build exit 0. Sob o guard ulimit -v 4718592.
-#   - O DEGRAU (bootstrap/DEGRAU) permanece declarado; o seed forcado agora = este compilador.
-#
-# ----------------------------------------------------------------------------------------------------
-# RESEED (hand-harvest, isolated worktree, forward-only) — FLOAT/FMT EXPURGO
-# (feat/issue-c-purge-io-exit-panic-float). The snprintf-based float/format family in teko_rt.c
-# (tk_ftoa / tk_fmt_f|e|g|d|x_upper|x_lower|b|p|n_f|n_i / tk_fmt_dyn_* / tk_f64_g17 + their _len
-# twins + fmt_from_buf / fmt_alloc_vsnprintf / fmt_parse_prec) is REPLACED by a self-contained
-# pure-Teko implementation in src/runtime/numfmt.tks (prelude-injected teko::runtime): exact-rational
-# bignum digit generation (round-half-even) drives f64_g17/ftoa (%.17g), fmt_f/e/g/n_f/p, and the
-# integer fmt_d/x/b/n_i/dyn dispatchers. Codegen interpolation + float-literal emission and the native
-# lir _len-twin symbols reroute to teko::runtime (Teko _len twins carry the native out-parameter ABI).
-# assert.c's eq_f64 renders its message with an inline snprintf("%.17g") instead of tk_ftoa.
-#   - gen0 linked from the PREVIOUS bootstrap/teko.c constructs gen1 against the post-family source;
-#     gen1->gen2->gen3, gen2.c == gen3.c byte-identical (20 449 040 bytes, sha256 ebf0842f...).
-#     Reharvest: bootstrap/teko.c = gen2.c converged.
-#   - SWEEP: the dead C family + <stdarg.h> removed from teko_rt.c/.h (<stdio.h> kept — snprintf is
-#     still used by tsym/verdict/loc paths and fwrite by io/print, peca 1). VALIDADO pos-sweep:
-#     gen0' linked from bootstrap/teko.c + swept teko_rt.c reconstructs the tree -> gen1'.c ==
-#     bootstrap/teko.c byte-identical (self-reproduces), gen2'.c == gen3'.c byte-identical.
-#   - Pico RSS C-route (TEKO_BACKEND=c, TEKO_CC=clang): gen2 3635.3 MB / gen3 3635.6 MB (base
-#     pre-familia 3614.9 MB; +20.4 MB = custo-por-linha da familia float em Teko, aceito pelo dono).
-#
-# ----------------------------------------------------------------------------------------------------
-# RESEED (hand-harvest, isolated worktree, forward-only) — INTEGRACAO drena feat/expurgo-runtime-c
-# sobre fix/retirement fresca (integ/drenar-expurgo-runtime-c). Merge 3-way preservando os dois
-# lados: o codegen FileStream (void+panic, streaming do .tkh) + tsym/class-cleanup guards da
-# retirement, e o expurgo push/empty + arena-por-escopo + s16-emit (typedefs proprios, __builtin_nan/
-# __builtin_inf, sem <stdint.h>/<stdbool.h>/<math.h>/<string.h>) do expurgo. codegen.tks reconciliado
-# combinando arquitetura FileStream + conteudo s16 + escopos de arena; tkh.tks = FileStream streaming
-# adaptado a API Wb do serializer; typer.tks = type_top_level_item extraido.
-#   - gen0 linkado do bootstrap/teko.c da retirement (sha256 d5d18fdb..., no-push, com os guards de
-#     codegen) constroi gen1 contra a source integrada; gen1->gen2->gen3, gen2.c == gen3.c
-#     byte-identico (20 392 951 bytes, os bytes deste arquivo). Reharvest: bootstrap/teko.c = gen2.c
-#     convergido. VALIDADO: cc(bootstrap) -> gen0' e gen0' reconstroi a arvore -> gen1'.c ==
-#     bootstrap/teko.c byte-identico (o DEGRAU se auto-reproduz pela rota C).
-#   - Picos RSS C-route (TEKO_BACKEND=c, TEKO_CC=clang): gen1->gen2 3614.1 MB, gen2->gen3 3614.2 MB
-#     (baseline pre-integracao 3889 local / 3811.9 CI — a integracao BAIXOU o pico ~275 MB ao combinar
-#     FileStream streaming com arena-por-escopo). teko_rt.c = versao no-push da retirement (sem
-#     tk_slice_push*); o gen2.c colhido nao referencia tk_slice_push.
-#   - O DEGRAU (bootstrap/DEGRAU) permanece declarado; o seed forcado agora = este compilador.
-#
-# ----------------------------------------------------------------------------------------------------
-# RESEED (hand-harvest, isolated worktree, forward-only) — S16-EMIT (expurgo do runtime C, onda 4,
-# feat/expurgo-runtime-c). FASE1 do §16: o codegen emite seus PROPRIOS typedefs de largura fixa
-# (typedef __UINT8_TYPE__ uint8_t; ...) e grafa NaN/Inf via __builtin_nan/__builtin_inf, e o `floor`
-# builtin passa a lowerar como __builtin_floor. Com isso o teko.c EMITIDO larga os includes
-# <stdint.h>/<stdbool.h>/<math.h>/<string.h> (memset/memcpy resolvem de libc sem <string.h>). Nada de
-# novo em teko_rt.c. Um unico arquivo tocado: src/codegen/codegen.tks.
-#   - gen0 linkado do bootstrap/teko.c ANTERIOR (sha256 44b06a61..., 24 976 589 bytes) constroi gen1
-#     contra a source pos-S16-EMIT; gen1->gen2->gen3, gen2.c == gen3.c byte-identico (21 805 426 bytes,
-#     os bytes deste arquivo). Reharvest: bootstrap/teko.c = gen2.c convergido (reflete as linhas da
-#     source committada). VALIDADO: cc(bootstrap) -> gen0' e gen0' reconstroi a arvore -> gen1'.c ==
-#     bootstrap/teko.c byte-identico (o DEGRAU se auto-reproduz pela rota C).
-#   - Picos RSS C-route (TEKO_BACKEND=c, TEKO_CC=clang): gen1->gen2 4356.9 MB, gen2->gen3 3891.6 MB
-#     (baseline pre-S16-EMIT: 3889.2 MB — sem crescimento significativo; o piso ~3,9 GB e pre-existente,
-#     alvo da campanha de memoria, fora do escopo do expurgo).
-#   - Emitted teko.c preamble: SEM <stdint.h>/<stdbool.h>/<math.h>/<string.h>; typedefs proprios no lugar.
-#   - O DEGRAU (bootstrap/DEGRAU) permanece declarado; o seed forcado agora = este compilador.
-#
-# ----------------------------------------------------------------------------------------------------
-# RESEED (hand-harvest, isolated worktree, forward-only) — MEMORY-CAMPAIGN CHECKPOINT (expurgo de
-# arrays dinamicos, perf/expurgo-total-mecanico). The self-compile accumulators that grew via
-# `[..l,x]`-em-loop (copy-grow O(n^2), vazando cada copia na arena append-only) foram convertidos:
-#   * pre-alocacao + indice para os MAP/FILTER de tamanho conhecido (checker: collect_types,
-#     table_with_project_types, collect_signatures em duas passadas eliminando o Env define_fn
-#     copy-grow, drop_comptime_items, type_array_lit, retype_*, normalize_table_instances;
-#     consteval: fold_program/propagate_locals/fold_block/lp_block/lp_exprs/fold_exprs/collect_const_keys;
-#     monomorph: kept/nparams; parser: parse_module; codegen: cg_zeros/cg_blanks -> of_len,
-#     cg_index_of, cg_lift_lambdas);
-#   * backing FIXO pre-alocado com escrita por indice (shared-backing, mesmo mecanismo ja provado do
-#     Cb de emissao) para o set de reachability (NameSet), cuja cota e segura (nomes coletados sao
-#     sempre simbolos declarados => <= prog.items.len + builtins);
-#   * correcao de bug latente do expurgo: scope.tks syscallN_signature perdera o parametro do numero
-#     da syscall na conversao para `[arity]` (era arity+1) — restaurado.
-# O self-compile passou de OOM ainda no checker sob 4 GiB para FIXPOINT COMPLETO. Pico ainda acima
-# de 4 GiB: os SETs de tamanho a priori desconhecido do codegen (CgTypeSet/cg_emit_types_ordered,
-# lambda-lift acc.fns/lams em cg_lift_expr) e os parsers recursivos (walk_stmts/parse_type/walk_types/
-# parse_block) permanecem em copy-grow e sao o piso remanescente (~classe A/B, alvo do backing
-# mremap/chunk-chain da onda seguinte). Este reseed e o CHECKPOINT VERDE no ESCAPE de 10 GB (lei do
-# dono para o agente da campanha de memoria combinada), critério gen2 < 6 GB SATISFEITO.
-#
-# GATE: SELF-REPRODUCE — CLEAN FIXPOINT (gen2 == gen3), backend C, sob `ulimit -v 10485760` (10 GB,
-# ESCAPE da campanha; NAO sob 4 GiB — o piso classe A/B remanescente ainda estoura 4 GiB).
-#   - gen0 linkado do bootstrap/teko.c ANTERIOR (sha256
-#     ca80407d7dbbdb1d75d99fbe5cd9dacef756dbf89878e485f517a787fb262141, 23 604 884 bytes, o DEGRAU
-#     pre-expurgo) constroi gen1 contra a source pos-expurgo; gen1 constroi gen2, gen2 constroi gen3;
-#     gen1.c == gen2.c == gen3.c byte-identico (24 976 589 bytes, os bytes deste arquivo). Picos
-#     C-route: gen1 5751.6 MB, gen2 5746.6 MB, gen3 5747.2 MB (TEKO_BACKEND=c, TEKO_CC=clang).
-#   - RESEED: bootstrap/teko.c substituido pelo gen2.c colhido acima.
-#   - O DEGRAU (bootstrap/DEGRAU) permanece declarado — o release publicado ainda nao reconhece esta
-#     arvore; e o seed forcado, agora = este compilador. A onda mremap/chunk-chain reseedara sob 4 GiB.
-#
-# ----------------------------------------------------------------------------------------------------
-# PROVENANCE ANTERIOR (mantida abaixo, nao apagada):
-#
-# RESEED (hand-harvest, isolated worktree, forward-only): the native lowering of the grouped-bind
-# match pattern `(A | B) as v` (src/lir/lower.tks — lower_pattern_test/lower_pattern_binds gain a
-# GroupBindPattern arm, replacing the honest-stop), reflecting the C codegen reference
-# (src/codegen/codegen.tks emit_pat_test/emit_pat_binds/cg_group_case_key). A compiler-source
-# change to the corpus the self-build exercises, so it alters the emitted teko.c and the seed is
-# re-harvested per CLAUDE.md ("Reseed de bootstrap/teko.c quando mudanca de compilador altera o C
-# emitido: harvest local (fixpoint gen2==gen3), sem gate de provenance"). Validated ONLY via the
-# C-route self-host (native backend untouched at runtime — native is written but not yet run, per
-# the standing native-deferral law); no `teko_rt` dependency was hit or rewritten (grouped-bind is
-# pure tag-test control flow over the existing variant-wrapper layout).
-#
-# GATE: SELF-REPRODUCE — CLEAN FIXPOINT (gen2 == gen3), backend C, run TWICE (pre- and post-reseed).
-#   - PRE-RESEED: gen0 linked straight from the PREVIOUS bootstrap/teko.c (sha256
-#     91d8593421ae9bd77f8c15872f190c76be184794415399e6f2caab010dfb8520, 23 570 757 bytes) builds
-#     gen2 against the post-change source; gen2 builds gen3; gen2.c == gen3.c byte-identical
-#     (23 595 940 bytes, this file's own bytes), gen2 == gen3 binaries byte-identical. Peaks: gen2
-#     3309.5 MB, gen3 3282.9 MB.
-#   - RESEED: bootstrap/teko.c replaced with the harvested gen2.c above.
-#   - POST-RESEED: gen0 relinked from the NEW bootstrap/teko.c builds gen2, gen2 builds gen3 —
-#     gen2.c == gen3.c == this file, byte-identical; gen2 == gen3 binaries byte-identical. Peaks:
-#     gen2 3311.7 MB, gen3 3282.5 MB.
-#   - EXTRA: a TEKO_MEM_PARANOID=1 dry build (backend C, gen0-from-new-seed rebuilding the source)
-#     exits 0, peak 3430.8 MB.
-#   - All builds stay under the 4 GiB `ulimit -v` guard.
-#
-# `run: hand-harvest` — LOCAL, isolated worktree, forward-only, resting on the clean fixpoint above.
-# `commit: pending drain` — the landing commit is written in this same change.
-#
-# SUPERSEDED PROVENANCE, RECORDED RATHER THAN DELETED — the let/mut retirement + §7 DI-completion
-# combined harvest this reseed supersedes covered TWO drained changes landed back to back —
-#   1. let/mut retirement (BindKind collapses to `enum { Var; Const }` — lexer/token.tks,
-#      parser/ast.tks, parser/parse_stmt.tks, parser/loop_head.tks, parser/parse_decl.tks,
-#      checker/typer.tks, checker/scope.tks, checker/comptime_fold.tks, lir/lower.tks, fmt/fmt.tks,
-#      lsp/nav.tks, build/regr_group.tks).
-#   2. the §7 DI-completion crumbs (docs/design/di-completion-crumb-plan.md) — CR-D
-#      (`req.is_static != impl_m.is_static` in `method_sig_matches`, src/checker/collect.tks), CR-C
-#      (the `IService` constraint atom now a predicate via `type_satisfies_iservice` in
-#      `constraint_atom_satisfied`, src/checker/monomorph.tks), and CR-A (`service_conflict_diags` —
-#      same-type-same-key service-registration conflict detection, hooked into
-#      `validate_type_decls`, src/checker/collect.tks).
-# Both are COMPILER changes to the corpus the self-build exercises, so they alter the emitted
-# teko.c and the seed is re-harvested per CLAUDE.md ("Reseed de bootstrap/teko.c quando mudanca de
-# compilador altera o C emitido: harvest local (fixpoint gen2==gen3), sem gate de provenance").
-# Neither adds an AST/wire field reachable before the seed could parse it — the previously committed
-# bootstrap/teko.c already compiled this tree directly (no DEGRAU capability gap crossed by this
-# reseed) and this harvest is a straight recompile-of-self after both sets of code edits above,
-# drained onto fix/retirement by cherry-pick (5d4db1db, 1876f010's source) and reharvested together.
-#
-# GATE: SELF-REPRODUCE — CLEAN FIXPOINT (gen2 == gen3), backend C.
-#   - gen0 linked straight from the PREVIOUS bootstrap/teko.c (pre-drain, sha256
-#     b3a45b4478dea0ef9e9f4a7f2bbfd0ae53fec4b53da8343b5ff75de6b38d27f2) builds gen1 against the
-#     combined post-drain source (this file); gen1 builds gen2, gen2 builds gen3; gen1.c == gen2.c
-#     == gen3.c byte-identical (23 570 757 bytes), and gen2's binary == gen3's binary byte-identical
-#     — the compiler built from this seed rebuilds the tip and re-emits this seed byte for byte.
-#   - MEMORY: gen1/gen2/gen3 C-route build peak 3307.7 / 3280.0 / 3283.6 MB (TEKO_BACKEND=c); a
-#     fourth build with TEKO_MEM_PARANOID=1 (gen2 rebuilding gen3's inputs) exits 0, peak 3403.0 MB.
-#     All four builds stay under the 4 GiB `ulimit -v` guard.
-#
-# `run: hand-harvest` — LOCAL on this lane, forward-only, resting on the clean fixpoint above.
-# `commit: pending drain` — the landing commit is written in this same change.
-#
-# Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh (DISABLED
-# per CLAUDE.md — the seed is accepted by force; these comments do not gate).
-c:       bootstrap/teko.c
-run:     hand-harvest
-commit:  pending drain
-sha256:  4e23b800a89044b5ecee5ffbf31f8a3061ef2639139c00fafcc229c50d0039b4
-since:   0.3.1.0
-legacy:  73ef54f6313dc8228da42b8def47a8560c91599e385a939dceff02e9a1665fc8 — the mem*-freestanding
-         harvest this §16-FASE2 exit/write/float reseed supersedes (self-reproducible on rebuild of
-         its own tip; superseded by this reseed, not cherry-picked); and
-         8658b19bb386b75e084335838b789b8245abc5b1e14f6174669341f961d1f919 — the F3-bite "o ganho"
-         harvest this mem*-freestanding reseed supersedes (self-reproducible on rebuild of its own
-         tip; superseded by this reseed, not cherry-picked); and
-         b7f0bd64ae683db6b47256c68e455c5ef97de696179f3bb1f16fbb5f0569bd0b — the arena-provider-ladder
-         (all-OS parity) harvest this F3-bite reseed supersedes (self-reproducible on rebuild of its
-         own tip; superseded by this reseed, not cherry-picked); and
-         4378fda0b949e5b7a05a540de5049f858f5af98737b959835def33cab7ad6f5d — the FASE-0 arena-malloc
-         harvest this FULL-BUILD/gate-C reseed supersedes (self-reproducible on rebuild of its own
-         tip; superseded by this reseed, not cherry-picked); and
-         ebf0842f65c48804135ce541a6b5e59fe5d16c16bea1d6bfce26e098bd1c59f6 — the FLOAT/FMT EXPURGO
-         harvest this FASE-0 arena-malloc reseed supersedes (self-reproducible on rebuild of its own
-         tip; superseded by this reseed, not cherry-picked); and
-         91d8593421ae9bd77f8c15872f190c76be184794415399e6f2caab010dfb8520 — the let/mut retirement +
-         §7 DI-completion combined harvest this reseed supersedes (self-reproducible on rebuild of
-         its own tip at the time; superseded by the grouped-bind native lowering above, not
-         cherry-picked); and 694a1b2d7cf8c40df1e3ae959f2cfbeffabe350b698a53666d7d5bcd88795aaf /
-         b3a45b4478dea0ef9e9f4a7f2bbfd0ae53fec4b53da8343b5ff75de6b38d27f2 — the two harvests it in
-         turn superseded.
+# O DEGRAU (bootstrap/DEGRAU) segue declarado: o release publicado nao compila esta arvore.
