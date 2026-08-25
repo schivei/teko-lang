@@ -1600,6 +1600,14 @@ fn receiver_is_immutable_target(recv: parser::Expr, rt: @Type(), env: Env, table
     }
 }
 
+fn args_prepend(x: parser::Expr, xs: []parser::Expr): []parser::Expr {
+    var out: [xs.len + 1]parser::Expr = []
+    out[0] = x
+    var i: u64 = 0
+    loop { if i >= xs.len { break }; out[i + 1] = xs[i]; i++ }
+    out
+}
+
 fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr | error {
     var recv_t = match type_expr(mc.receiver, env, table) { TExpr as te => te.type; error as e => return e }
     if is_flags_named(recv_t, table) && !flags_named_has_user_method(recv_t, mc.method, table) {
@@ -1613,7 +1621,7 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr |
         Named as rn => {
             if name_is_phantom_instance(rn.name, table) {
                 var psegs = method_dispatch_callee(rn.name, mc.method).segments
-                var pcargs: []parser::Expr = [mc.receiver, ..mc.args]
+                var pcargs: []parser::Expr = args_prepend(mc.receiver, mc.args)
                 return type_call(parser::Call { callee = parser::Path { segments = psegs }; args = pcargs; arg_names = method_call_arg_names(mc); owner_type_args = []; callee_type_args = mc.type_args }, env, table)
             }
         }
@@ -1672,7 +1680,7 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr |
                     u32 as bslot => {
                         var bft = match method_func_type(mfn, struct_name, table, env.cur_ns) { (@Type()) as t => t; error as e => return e }
                         var bf = match bft { Func as ff => ff; _ => return error { message = "internal: base method signature is not a function type" } }
-                        var bcargs: []parser::Expr = [mc.receiver, ..mc.args]
+                        var bcargs: []parser::Expr = args_prepend(mc.receiver, mc.args)
                         var bcnames: []str = method_call_arg_names(mc)
                         var bdargs = match resolve_call_args(bf, bcargs, bcnames, env, table) { []parser::Expr as x => x; error as e => return e }
                         if bdargs.len != bf.params.len { return error { message = "wrong number of arguments" } }
@@ -1697,7 +1705,7 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr |
         _ => { }
     }
     var segs = method_dispatch_callee(struct_name, mc.method).segments
-    var cargs: []parser::Expr = [mc.receiver, ..mc.args]
+    var cargs: []parser::Expr = args_prepend(mc.receiver, mc.args)
     var cnames: []str = method_call_arg_names(mc)
     type_call(parser::Call { callee = parser::Path { segments = segs }; args = cargs; arg_names = cnames; owner_type_args = []; callee_type_args = mc.type_args }, env, table)
 }
@@ -1714,7 +1722,7 @@ fn type_contract_dispatch(ib: parser::InterfaceBody, struct_name: str, mc: parse
     var slot = dispatch.slot
     var ift = match method_func_type(imfn, struct_name, table, env.cur_ns) { (@Type()) as t => t; error as e => return e }
     var f = match ift { Func as ff => ff; _ => return error { message = "internal: interface method signature is not a function type" } }
-    var icargs: []parser::Expr = [mc.receiver, ..mc.args]
+    var icargs: []parser::Expr = args_prepend(mc.receiver, mc.args)
     var icnames: []str = method_call_arg_names(mc)
     var dargs = match resolve_call_args(f, icargs, icnames, env, table) { []parser::Expr as x => x; error as e => return e }
     if dargs.len != f.params.len { return error { message = "wrong number of arguments" } }
