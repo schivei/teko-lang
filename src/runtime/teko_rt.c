@@ -17,7 +17,9 @@
 #include <stddef.h>   // max_align_t, offsetof — arena chunk alignment (S1; also via teko_rt.h)
 #include <inttypes.h> // PRId64, PRIx64, PRIX64 — format spec helpers
 #include <signal.h>   // signal — native crash backtraces (C1.9)
-#include <setjmp.h>   // setjmp/longjmp — the test-mode capture (§14). The ONLY user is tk_test_run.
+// (RT-L6 / R3) The test-mode panic capture rides the BACKEND non-local-capture intrinsic, realised
+// on the C leg as __builtin_setjmp / __builtin_longjmp (compiler builtins, NOT the <setjmp.h> shim
+// — owner ruling 2026-08-19, D45; migracao-runtime R3). No <setjmp.h> include survives here.
 // execinfo (backtrace) exists on macOS + glibc, but NOT musl (the Alpine/Linux pipeline). Guard it
 // so the runtime is musl-portable (C7.1f); without it the backtrace degrades to a one-line notice.
 #if defined(__APPLE__) || defined(__GLIBC__)
@@ -1037,6 +1039,10 @@ typedef struct tk_freenode { struct tk_freenode *next; size_t bytes; } tk_freeno
 // TK_TEST_CAPTURE_DEPTH_MAX — how deep the capture stack goes. Two is what exists (a harness run
 // and a guard's inner run); the slack costs a few hundred bytes and removes a cliff.
 #define TK_TEST_CAPTURE_DEPTH_MAX 4
+// tk_jmpbuf — the __builtin_setjmp / __builtin_longjmp save area. The GCC/Clang contract fixes it
+// at 5 words (return address, stack pointer, frame pointer + target-reserved slack); a plain
+// void *[5] is that buffer, with no <setjmp.h> jmp_buf type. (RT-L6 / R3 backend intrinsic, C leg.)
+typedef void *tk_jmpbuf[5];
 typedef struct { struct tk_chunk *chunk; size_t used; } tk_arena_mark;
 typedef struct { const void *ptr; uint64_t len, cap, esz; tk_region *region; uint64_t region_gen; } tk_push_slot_entry;
 
@@ -1056,7 +1062,7 @@ typedef struct tk_task {
     tk_region      *cur_regions[TK_REGION_STACK_MAX];   // (C1) current-region stack: tk_alloc bumps from the TOP
     int             cur_rsp;              // (C1) current-region stack pointer (may exceed the cap; see tk_region_enter)
     tk_push_slot_entry push_cache[TK_PUSH_HASH_SIZE];   // (#148) live-tail witnesses for in-place slice append
-    jmp_buf         test_jb[TK_TEST_CAPTURE_DEPTH_MAX];   // (§14) test-mode capture — a longjmp NEVER crosses tasks
+    tk_jmpbuf       test_jb[TK_TEST_CAPTURE_DEPTH_MAX];   // (§14) test-mode capture — a longjmp NEVER crosses tasks
     volatile sig_atomic_t test_depth;     // >0 = a captured body is running on THIS task
     volatile int32_t test_how[TK_TEST_CAPTURE_DEPTH_MAX];    // per-level outcome kind
     volatile int32_t test_code[TK_TEST_CAPTURE_DEPTH_MAX];   // per-level outcome code
@@ -2969,7 +2975,7 @@ _Noreturn static void tk_test_capture_leave(int32_t how, int32_t code) {
     tk_test_how[d] = how;
     tk_test_code[d] = code;
     tk_test_depth = d;
-    longjmp(tk_test_jb[d], 1);
+    __builtin_longjmp(tk_test_jb[d], 1);
 }
 
 // tk_test_capture_panic — the captured half of the panic chokepoints: the panic line goes into THIS
@@ -2996,7 +3002,7 @@ tk_test_outcome tk_test_run(void (* volatile body)(void)) {
     tk_test_how[d] = TK_TEST_OK;
     tk_test_code[d] = 0;
     tk_test_depth = d + 1;
-    if (setjmp(tk_test_jb[d]) == 0) body();
+    if (__builtin_setjmp(tk_test_jb[d]) == 0) body();
     tk_test_depth = d;
     return tk_test_outcome_at(d);
 }
