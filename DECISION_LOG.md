@@ -972,3 +972,13 @@ O dono, sobre o +3,9 MB da F4 (D95): **"Aceito."** Ratifica o padrão pra TODA a
 - **ACEITO:** adds de RSS **proporcionais, obrigatórios, C→Teko** durante o expurgo (cada fase adiciona fonte Teko que o compilador compila; o C substituído só some no F9 SWEEP, que reclama). Cobre retroativo mem* (+1.2 MB, D93) e F4 (+3.9 MB, D95), e prospectivo env/F6/F7/F8.
 - **NÃO relaxa o resto:** **copy-grow regression segue PROIBIDO** (o ratchet D68 governa isso); a meta **< 1 GB de RSS** e o norte native seguem de pé — o **F9 SWEEP TEM que reclamar de fato** (deletar teko_rt.c/assert.c/etc. → o RSS cai). A exceção é só pra o custo-por-linha da migração, não licença pra crescer à toa.
 - **Régua por fase daqui:** medir/reportar o delta; aceitar se for proporcional+obrigatório; flagar se for copy-grow ou desproporcional.
+
+### D101 · Refinamento do critério zero-libc (D85) — ABI do SO resolvido pelo LINKER ≠ dependência libc (dono 2026-08-25) ✅
+O dono: o que o **linker do SO** injeta obrigatoriamente (o ABI do SO, porque aquele sistema exige) **NÃO é dependência de C-runtime** e É **native-compatível** — o linker da plataforma roda no native também; só o COMPILADOR C (gcc/cc/clang) sai. Muito do que estávamos contorcendo pra evitar já está resolvido pelo linker via `extern`-ABI, sem adicionar dependência C.
+- **A LINHA (refina D85):** "zero-libc" = zero **C-RUNTIME** (`malloc`/`printf`/`free`/`getenv`-de-estado/`snprintf`/etc.), **NÃO** zero-OS-ABI. Usar o ABI do SO via `extern` resolvido pelo linker é sancionado.
+- **Por-SO (o que o linker injeta / é o ABI):**
+  - **Linux:** sem lib de ABI — o ABI é a instrução `syscall` (raw) + o loader; estático sem libc possível. (Já é o caminho.)
+  - **macOS:** `libSystem.dylib` OBRIGATÓRIA (Apple proíbe estático; syscall só via libSystem). Funções-ABI da libSystem (wrappers syscall, `mmap`, `getrusage`, `_NSGetEnviron`) via `extern`→`ld64` = SANCIONADO, não é a libc-C-runtime proibida.
+  - **Windows:** `kernel32.dll`/`ntdll.dll` via import-lib→`link.exe`/`lld-link` = ABI sancionado. Proibido = `msvcrt`/`ucrtbase` (C-runtime).
+- **GATE `nm` agora é POR-SO:** Linux = zero undefined libc; macOS = libSystem permitido (ABI), sem funções C-runtime altas; Windows = kernel32/ntdll permitido, sem msvcrt. Native usa o MESMO (linker da plataforma resolve o ABI; M-linker próprio é endgame, D86).
+- **CONSEQUÊNCIA prática:** getrusage/envp no mac/win NÃO precisam fugir da libSystem/kernel32 — só não conflitar/não usar o C-runtime. O `_start`-lê-pilha raw fica pra onde é genuinamente o caminho (Linux). Arquiteto refina o redesign do entry/envp com a distinção por-SO (ABI-extern onde é sancionado; raw onde é o caminho).
