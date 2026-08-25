@@ -21,11 +21,13 @@ fn parse_num_suffix_lit(tokens: []lexer::Token, pos: u64, txt: str): Parsed<Expr
 
 fn parse_call_args(tokens: []lexer::Token, pos: u64): ParsedCallArgs | error {
     var p = skip_seps(tokens, pos + 1)
-    var args: []Expr = []
-    var arg_names: []str = []
+    var cap = count_comma_items(tokens, pos + 1, lexer::TokenKind::RParen)
+    var args: [cap]Expr = []
+    var arg_names: [cap]str = []
+    var n: u64 = 0
     var seen_named = false
     if is_kind_at(tokens, p, lexer::TokenKind::RParen) {
-        return ParsedCallArgs { args = args; arg_names = arg_names; next = p + 1 }
+        return ParsedCallArgs { args = teko::collections::arr_slice(args, 0, 0); arg_names = teko::collections::arr_slice(arg_names, 0, 0); next = p + 1 }
     }
     loop {
         var is_named = is_kind_at(tokens, p, lexer::TokenKind::Ident) && is_kind_at(tokens, p + 1, lexer::TokenKind::Walrus)
@@ -39,8 +41,9 @@ fn parse_call_args(tokens: []lexer::Token, pos: u64): ParsedCallArgs | error {
             return err_at(tokens, p, "a named argument must be followed only by other named arguments (named args are trailing-only)")
         }
         var a = match parse_expr(tokens, ap) { Parsed<Expr> as x => x; error as e => return e }
-        args = [..args, a.node]
-        arg_names = [..arg_names, aname]
+        args[n] = a.node
+        arg_names[n] = aname
+        n++
         p = skip_seps(tokens, a.next)
         if !is_kind_at(tokens, p, lexer::TokenKind::Comma) { break }
         p = skip_seps(tokens, p + 1)
@@ -49,7 +52,7 @@ fn parse_call_args(tokens: []lexer::Token, pos: u64): ParsedCallArgs | error {
     if !is_kind_at(tokens, p, lexer::TokenKind::RParen) {
         return err_at(tokens, p, "expected ')' to close the argument list")
     }
-    ParsedCallArgs { args = args; arg_names = arg_names; next = p + 1 }
+    ParsedCallArgs { args = teko::collections::arr_slice(args, 0, n); arg_names = teko::collections::arr_slice(arg_names, 0, n); next = p + 1 }
 }
 
 fn parse_generic_static_call(tokens: []lexer::Token, at_colons: u64, head_path: Path, owner_type_args: []@TypeExpr(), origin: u64): Parsed<Expr> | error {
@@ -80,8 +83,10 @@ fn parse_struct_lit(tokens: []lexer::Token, pos: u64, type_path: Path, type_args
     if is_kind_at(tokens, p, lexer::TokenKind::RBrace) {
         return Parsed<Expr> { node = Expr { kind = StructLit { type_path = type_path; type_args = type_args; field_names = []; field_vals = [] }; line = tokens[pos].line; col = tokens[pos].col }; next = p + 1 }
     }
-    var names: []str = []
-    var vals: []Expr = []
+    var cap = count_block_stmts(tokens, p)
+    var names: [cap]str = []
+    var vals: [cap]Expr = []
+    var n: u64 = 0
     loop {
         if !is_name_at(tokens, p) {
             return err_at(tokens, p, "expected a field name in a struct literal")
@@ -91,8 +96,9 @@ fn parse_struct_lit(tokens: []lexer::Token, pos: u64, type_path: Path, type_args
             return err_at(tokens, p + 1, "expected '=' after a field name in a struct literal")
         }
         var v = match parse_expr(tokens, p + 2) { Parsed<Expr> as x => x; error as e => return e }
-        names = [..names, fname]
-        vals = [..vals, v.node]
+        names[n] = fname
+        vals[n] = v.node
+        n++
         p = v.next
         if is_kind_at(tokens, p, lexer::TokenKind::Comma) {
             return err_at(tokens, p, "struct literal fields are separated by ';', not ','")
@@ -105,7 +111,7 @@ fn parse_struct_lit(tokens: []lexer::Token, pos: u64, type_path: Path, type_args
         }
         if is_kind_at(tokens, p, lexer::TokenKind::RBrace) { break }
     }
-    Parsed<Expr> { node = Expr { kind = StructLit { type_path = type_path; type_args = type_args; field_names = names; field_vals = vals }; line = tokens[pos].line; col = tokens[pos].col }; next = p + 1 }
+    Parsed<Expr> { node = Expr { kind = StructLit { type_path = type_path; type_args = type_args; field_names = teko::collections::arr_slice(names, 0, n); field_vals = teko::collections::arr_slice(vals, 0, n) }; line = tokens[pos].line; col = tokens[pos].col }; next = p + 1 }
 }
 
 fn dot_sentinel_path(): Path {
@@ -552,10 +558,12 @@ fn parse_additive(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<
 
 fn parse_array_elems(tokens: []lexer::Token, pos: u64): ParsedList<ArrayElem> | error {
     var p = skip_seps(tokens, pos + 1)
-    var elems: []ArrayElem = []
+    var cap = count_comma_items(tokens, pos + 1, lexer::TokenKind::RBracket)
+    var elems: [cap]ArrayElem = []
     if is_kind_at(tokens, p, lexer::TokenKind::RBracket) {
-        return ParsedList<ArrayElem> { items = elems; next = p + 1 }
+        return ParsedList<ArrayElem> { items = teko::collections::arr_slice(elems, 0, 0); next = p + 1 }
     }
+    var n: u64 = 0
     loop {
         var is_spread = false
         if is_kind_at(tokens, p, lexer::TokenKind::DotDot) {
@@ -567,7 +575,8 @@ fn parse_array_elems(tokens: []lexer::Token, pos: u64): ParsedList<ArrayElem> | 
         } else {
             match parse_expr(tokens, p) { Parsed<Expr> as x => x; error as e => return e }
         }
-        elems = [..elems, ArrayElem { is_spread = is_spread; expr = a.node }]
+        elems[n] = ArrayElem { is_spread = is_spread; expr = a.node }
+        n++
         p = skip_seps(tokens, a.next)
         if !is_kind_at(tokens, p, lexer::TokenKind::Comma) { break }
         p = skip_seps(tokens, p + 1)
@@ -576,18 +585,21 @@ fn parse_array_elems(tokens: []lexer::Token, pos: u64): ParsedList<ArrayElem> | 
     if !is_kind_at(tokens, p, lexer::TokenKind::RBracket) {
         return err_at(tokens, p, "expected ']' to close the array literal")
     }
-    ParsedList<ArrayElem> { items = elems; next = p + 1 }
+    ParsedList<ArrayElem> { items = teko::collections::arr_slice(elems, 0, n); next = p + 1 }
 }
 
 fn parse_in_elems(tokens: []lexer::Token, pos: u64): ParsedList<Expr> | error {
     var p = skip_seps(tokens, pos + 1)
-    var elems: []Expr = []
+    var cap = count_comma_items(tokens, pos + 1, lexer::TokenKind::RBracket)
+    var elems: [cap]Expr = []
+    var n: u64 = 0
     if is_kind_at(tokens, p, lexer::TokenKind::RBracket) {
-        return ParsedList<Expr> { items = elems; next = p + 1 }
+        return ParsedList<Expr> { items = teko::collections::arr_slice(elems, 0, 0); next = p + 1 }
     }
     loop {
         var a = match parse_expr(tokens, p) { Parsed<Expr> as x => x; error as e => return e }
-        elems = [..elems, a.node]
+        elems[n] = a.node
+        n++
         p = skip_seps(tokens, a.next)
         if !is_kind_at(tokens, p, lexer::TokenKind::Comma) { break }
         p = skip_seps(tokens, p + 1)
@@ -596,7 +608,7 @@ fn parse_in_elems(tokens: []lexer::Token, pos: u64): ParsedList<Expr> | error {
     if !is_kind_at(tokens, p, lexer::TokenKind::RBracket) {
         return err_at(tokens, p, "expected ']' to close the `in` membership set")
     }
-    ParsedList<Expr> { items = elems; next = p + 1 }
+    ParsedList<Expr> { items = teko::collections::arr_slice(elems, 0, n); next = p + 1 }
 }
 
 fn parse_comparison(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr> | error {
