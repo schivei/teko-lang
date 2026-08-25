@@ -1,5 +1,35 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
+# RESEED (hand-harvest, isolated worktree, forward-only) — CROSS-PLATFORM F6 (fix/f6-crossplatform,
+# D90/D102). Conserta o CI vermelho de macOS E Windows aberto pela migração F6 process/exec (Linux
+# ficou verde só porque o reseed foi buildado no Linux). Só src/process/process.tks mudou; teko_rt.c/
+# .h/win32_compat.h INTOCADOS (método D90). Braços #os-guarded -> Linux byte-idêntico ao F6+getrusage.
+#   - macOS wait4 (D102): `os_wait4_raw(pid:i32, status:u64, options:i32, rusage:u64)` colidia com o
+#     SDK `pid_t wait4(pid_t, int*, int, struct rusage*)` (<sys/wait.h> puxado por <stdlib.h>). Agora
+#     `extern type Rusage = struct { ru_maxrss: i64 } from "rusage"` + `os_wait4_raw(pid: i32,
+#     ref status: i32, options: i32, ref rusage: Rusage)` -> emite `wait4(int32_t, int32_t*, int32_t,
+#     struct rusage*)`, redeclaração COMPATÍVEL (int32_t==int no macOS). mac_wait_status passa
+#     `&status`/`&rusage` (locais); decode lê `(status to u32) to u64`.
+#   - macOS _exit: `os_underscore_exit(code:i32):i32` (process.tks) divergia do `os_exit(status:i32)`
+#     void (arena.tks) — DUAS decls do mesmo símbolo `_exit`, i32 vs void, conflito na mesma TU.
+#     Unificado: os_underscore_exit agora é `void` (casa o SDK `void _exit(int)`); caller sem `_ =`.
+#   - Windows run/run_quiet MIGRADOS pra Teko-native kernel32 (removem a dep de tk_rt_run/
+#     tk_rt_run_quiet, que morrem): CreateProcessA + WaitForSingleObject + GetExitCodeProcess +
+#     CloseHandle; run_quiet redireciona stdout/stderr pro NUL via CreateFileA(SECURITY_ATTRIBUTES
+#     herdável) + STARTF_USESTDHANDLES. STARTUPINFOA/PROCESS_INFORMATION/SECURITY_ATTRIBUTES montados
+#     como buffers crus (buf_ptr + store_u64/store_u8 por offset x64) — NÃO via `from "tag"`, que
+#     exigiria <windows.h> na TU e colidiria com os protótipos kernel32 que o próprio Teko emite
+#     (mesmo mecanismo do conflito wait4). Command line construído com quoting MS (backslash/aspas).
+#     kernel32 já em [extern.libs.windows]; `#pragma comment(lib,"kernel32")` auto-emitido.
+#   - PRÓXIMO PASSO Windows-native (NÃO deferido pra Fase E): os_spawn/os_wait_one/os_pipe/
+#     os_close_fd/os_fd_wait_readable/os_fd_fill/os_fd_take_byte ainda em tk_rt_* (compilam, aridade
+#     OK — não quebravam o CI). Migram pra CreatePipe/ReadFile/PeekNamedPipe/WaitForSingleObject/
+#     TerminateProcess/SetHandleInformation no próximo lote; aí tk_rt_spawn_redirected/… morrem.
+#   - FIXPOINT: gen2.c == gen3.c byte-idêntico (rota C, Linux); gen1.c == gen2.c == gen3.c;
+#     genmp.c == gen2.c (reprodução).
+#   - MEM_PARANOID=1: build seco exit 0. Pico RSS (rota C, gen2): 1129.8 MB (+1.8 sobre o F6 1128.0;
+#     código Windows-native novo, a compensar quando os wrappers C do braço Windows saírem).
+#
 # RESEED (hand-harvest, isolated worktree, forward-only) — §16-FASE6 PROCESS/EXEC POSIX
 # (expurgo/f6-process-exec, D90/D99/D101). Migrou a metade POSIX da família teko::process
 # (run/run_quiet/spawn_redirected/wait_one/pipe/close_fd/fd_wait_readable/fd_fill/fd_take_byte) do
