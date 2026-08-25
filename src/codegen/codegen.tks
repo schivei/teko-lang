@@ -3197,6 +3197,61 @@ fn emit_store_u8(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall, esc
     buf.write("))")
 }
 
+fn emit_capture_invoke(buf: teko::io::FileStream, prog: CgProg, body_type: @Type(), bd: str) {
+    buf.write(bd)
+    buf.write(".env ? (void)((")
+    cg_emit_fnptr_sig_ex(buf, prog, body_type, true)
+    buf.write(")")
+    buf.write(bd)
+    buf.write(".fn)(")
+    buf.write(bd)
+    buf.write(".env) : (void)((")
+    cg_emit_fnptr_sig_ex(buf, prog, body_type, false)
+    buf.write(")")
+    buf.write(bd)
+    buf.write(".fn)()")
+}
+
+fn emit_capture_panic(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
+    var g = buf.gensym()
+    var jb = $"_tkcap_jb{g}"
+    var rv = $"_tkcap_r{g}"
+    var bd = $"_tkcap_b{g}"
+    buf.write("({ void *")
+    buf.write(jb)
+    buf.write("[5]; tk_str ")
+    buf.write(rv)
+    buf.write("; tk_closure ")
+    buf.write(bd)
+    buf.write(" = ")
+    emit_expr_ctx(buf, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx)
+    buf.write("; if (__builtin_setjmp(")
+    buf.write(jb)
+    buf.write(") == 0) { ")
+    cb_fn_name(buf, "teko::runtime", "capture_enter")
+    buf.write("((uint64_t)(uintptr_t)")
+    buf.write(jb)
+    buf.write("); ")
+    emit_capture_invoke(buf, prog, c.args[0].type, bd)
+    buf.write("; ")
+    cb_fn_name(buf, "teko::runtime", "capture_leave")
+    buf.write("(); ")
+    buf.write(rv)
+    buf.write(" = (tk_str){0}; } else { ")
+    buf.write(rv)
+    buf.write(" = ")
+    cb_fn_name(buf, "teko::runtime", "capture_msg")
+    buf.write("(); } ")
+    buf.write(rv)
+    buf.write("; })")
+}
+
+fn emit_capture_longjmp(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
+    buf.write("__builtin_longjmp((void *)(uintptr_t)(")
+    emit_expr_ctx(buf, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx)
+    buf.write("), 1)")
+}
+
 fn emit_iface_call(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
     var p = c.callee
     var f = match c.callee_type { checker::Func as ff => ff; _ => panic("codegen: malformed interface-dispatch node (internal)") }
@@ -3455,6 +3510,8 @@ fn emit_call_inner(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e
             if l == "store_u64" { return emit_store_u64(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "load_u8" { return emit_load_u8(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "store_u8" { return emit_store_u8(buf, prog, c, escaping, regions, fn_body, dctx) }
+            if l == "capture_panic" { return emit_capture_panic(buf, prog, c, escaping, regions, fn_body, dctx) }
+            if l == "capture_longjmp" { return emit_capture_longjmp(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "retain" { return emit_retain(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "release" { return emit_release(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "weak_get" { return emit_weak_get(buf, prog, e, c, escaping, regions, fn_body, dctx) }
