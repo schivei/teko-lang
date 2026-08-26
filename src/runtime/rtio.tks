@@ -97,6 +97,189 @@ exp fn exit(code: i64) {
     teko::runtime::rt_exit(code)
 }
 
+const STDIN_BUF_CAP: u64 = 1024
+
+const STDIN_BUF_PTR: u64 = 34712
+
+const STDIN_BUF_LEN: u64 = 34720
+
+const STDIN_BUF_POS: u64 = 34728
+
+const STDIN_EOF_FLAG: u64 = 34736
+
+#os("linux")
+fn rtio_os_read(fd: i64, addr: i64, count: i64): i64 {
+    teko::sys::syscall3(teko::sys::SYS_READ, fd, addr, count)
+}
+
+#os("macos")
+fn rtio_os_read(fd: i64, addr: i64, count: i64): i64 {
+    teko::sys::abi::os_read_raw(fd to i32, addr to u64, count to u64)
+}
+
+#os("windows")
+fn rtio_os_read(fd: i64, addr: i64, count: i64): i64 {
+    var put = teko::sys::ptr_word(teko::mem::buf_ptr(8)) to u64
+    teko::mem::store_u64(put, 0 to u64)
+    if teko::sys::abi::ReadFile(teko::sys::abi::GetStdHandle(0xFFFFFFF6 to u32), addr to u64, count to u32, put, 0) == 0 { return -1 }
+    teko::mem::load_u64(put) to i64
+}
+
+fn stdin_buf_addr(): u64 {
+    var p = teko::runtime::ctrl_get(STDIN_BUF_PTR)
+    if p != 0 { return p }
+    var fresh = teko::sys::ptr_word(teko::runtime::region_alloc(teko::runtime::region_program(), STDIN_BUF_CAP)) to u64
+    teko::runtime::ctrl_set(STDIN_BUF_PTR, fresh)
+    fresh
+}
+
+fn stdin_refill(): bool {
+    var n = rtio_os_read(0, stdin_buf_addr() to i64, STDIN_BUF_CAP to i64)
+    if n <= 0 {
+        teko::runtime::ctrl_set(STDIN_BUF_LEN, 0)
+        teko::runtime::ctrl_set(STDIN_BUF_POS, 0)
+        return false
+    }
+    teko::runtime::ctrl_set(STDIN_BUF_LEN, n to u64)
+    teko::runtime::ctrl_set(STDIN_BUF_POS, 0)
+    true
+}
+
+fn stdin_next_byte(): i64 {
+    if teko::runtime::ctrl_get(STDIN_BUF_POS) >= teko::runtime::ctrl_get(STDIN_BUF_LEN) {
+        if !stdin_refill() { return -1 }
+    }
+    var pos = teko::runtime::ctrl_get(STDIN_BUF_POS)
+    var b = teko::mem::load_u8(teko::runtime::ctrl_get(STDIN_BUF_PTR) + pos)
+    teko::runtime::ctrl_set(STDIN_BUF_POS, pos + 1)
+    b to i64
+}
+
+type StdinAcc = struct {
+    head: u64
+    tail: u64
+    total: u64
+}
+
+fn stdin_acc_new(): StdinAcc {
+    StdinAcc { head = 0, tail = 0, total = 0 }
+}
+
+fn stdin_chunk_new(): u64 {
+    var node = teko::sys::ptr_word(teko::runtime::region_alloc(teko::runtime::region_program(), CHUNK_DATA + STDIN_BUF_CAP)) to u64
+    teko::mem::store_u64(node + CHUNK_NEXT, 0)
+    teko::mem::store_u64(node + CHUNK_LEN, 0)
+    node
+}
+
+fn stdin_acc_push(acc: StdinAcc, b: i64): StdinAcc {
+    var head = acc.head
+    var tail = acc.tail
+    if tail == 0 || teko::mem::load_u64(tail + CHUNK_LEN) >= STDIN_BUF_CAP {
+        var node = stdin_chunk_new()
+        if tail == 0 { head = node } else { teko::mem::store_u64(tail + CHUNK_NEXT, node) }
+        tail = node
+    }
+    var len = teko::mem::load_u64(tail + CHUNK_LEN)
+    teko::mem::store_u8(tail + CHUNK_DATA + len, (b to u64) & 0xFF)
+    teko::mem::store_u64(tail + CHUNK_LEN, len + 1)
+    StdinAcc { head = head, tail = tail, total = acc.total + 1 }
+}
+
+fn stdin_acc_bytes(acc: StdinAcc, count: u64): []byte {
+    var out: [count]byte = []
+    var k: u64 = 0
+    var node = acc.head
+    loop {
+        if node == 0 || k >= count { break }
+        var len = teko::mem::load_u64(node + CHUNK_LEN)
+        var j: u64 = 0
+        loop {
+            if j >= len || k >= count { break }
+            out[k] = teko::mem::load_u8(node + CHUNK_DATA + j) to byte
+            k = k + 1
+            j = j + 1
+        }
+        node = teko::mem::load_u64(node + CHUNK_NEXT)
+    }
+    out
+}
+
+/**
+ * teko::runtime::read_line — one line from stdin (the trailing '\n' consumed and dropped, a trailing
+ * '\r' from a "\r\n" source stripped); "" at a genuine blank line or at EOF. Sets the EOF flag (read
+ * by stdin_eof) when zero bytes were seen before end of input, so a caller can tell EOF from a blank
+ * line.
+ *
+ * @return the line's bytes as text, or "" at a blank line / EOF
+ * @since 0.3.1
+ */
+exp fn read_line(): str {
+    var acc = stdin_acc_new()
+    var saw_any = false
+    var last: i64 = -1
+    loop {
+        var ch = stdin_next_byte()
+        if ch < 0 { break }
+        saw_any = true
+        if ch == (b'\n' to i64) { break }
+        acc = stdin_acc_push(acc, ch)
+        last = ch
+    }
+    teko::runtime::ctrl_set(STDIN_EOF_FLAG, if saw_any { 0 } else { 1 })
+    var count = acc.total
+    if count > 0 && last == (b'\r' to i64) { count = count - 1 }
+    str(stdin_acc_bytes(acc, count))
+}
+
+/**
+ * teko::runtime::stdin_eof — whether the last read_line hit real end of input (zero bytes before EOF),
+ * to tell EOF from a genuine blank line.
+ *
+ * @return true when the last read_line reached end of input with no bytes
+ * @since 0.3.1
+ */
+exp fn stdin_eof(): bool {
+    teko::runtime::ctrl_get(STDIN_EOF_FLAG) != 0
+}
+
+/**
+ * teko::runtime::read_stdin — all of stdin drained to EOF, over a reusable ≤1024-byte read buffer with
+ * no growing scratch.
+ *
+ * @return every byte read from stdin as text
+ * @since 0.3.1
+ */
+exp fn read_stdin(): str {
+    var acc = stdin_acc_new()
+    loop {
+        var ch = stdin_next_byte()
+        if ch < 0 { break }
+        acc = stdin_acc_push(acc, ch)
+    }
+    str(stdin_acc_bytes(acc, acc.total))
+}
+
+/**
+ * teko::runtime::read_stdin_n — exactly `n` bytes from stdin, or fewer when EOF arrives first.
+ *
+ * @param n  the number of bytes to read
+ * @return the bytes read, `n` long on a full read or shorter at EOF
+ * @since 0.3.1
+ */
+exp fn read_stdin_n(n: u64): []byte {
+    var out: [n]byte = []
+    var got: u64 = 0
+    loop {
+        if got >= n { break }
+        var ch = stdin_next_byte()
+        if ch < 0 { break }
+        out[got] = (ch to u64) to byte
+        got = got + 1
+    }
+    teko::collections::arr_slice(out, 0, got)
+}
+
 #os("linux")
 fn peak_rss_impl(): u64 {
     var rbuf = teko::sys::ptr_word(teko::mem::buf_ptr(256))
