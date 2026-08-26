@@ -3981,12 +3981,70 @@ fn lower_pattern_test(ctx: LowerCtx, subj: MatchSubj, pat: @Pattern(), line: u32
         parser::LiteralPattern as lp => lower_literal_pattern_test(ctx, subj, lp, line, col)
         parser::BindPattern as bp => lower_bind_pattern_test(ctx, subj, bp, line, col)
         parser::FieldPattern as fp => lower_field_pattern_test(ctx, subj, fp, line, col)
-        parser::RangePattern => error { message = "native backend N1: range match pattern not yet lowered (N2)" }
-        parser::AltPattern => error { message = "native backend N1: alternation (`|`) match pattern not yet lowered (N2)" }
+        parser::RangePattern as rp => lower_range_pattern_test(ctx, subj, rp, line, col)
+        parser::AltPattern as ap => lower_alt_pattern_test(ctx, subj, ap, line, col)
         parser::GroupBindPattern as gp => lower_group_bind_pattern_test(ctx, subj, gp, line, col)
         parser::NullPattern => lower_null_pattern_test(ctx, subj, line, col)
         parser::MacroPattern => error { message = "internal: an unexpanded @Type() macro reached native lowering — it should be expanded by the Family-A pre-pass" }
     }
+}
+
+fn pattern_bound_i64(e: parser::Expr): i64 | error {
+    match e.kind {
+        parser::Number as n => if n.is_float { error { message = "native backend N1: a float range match bound is not lowered (N2)" } } else { parser::numint_to_i64(n.value) }
+        parser::ByteLit as b => b.value to i64
+        _ => error { message = "native backend N1: unsupported range match bound (internal)" }
+    }
+}
+
+fn range_subject_signed(ty: @Type()): bool {
+    match ty {
+        checker::Prim as p => prim_is_signed_int(p.kind)
+        _ => false
+    }
+}
+
+fn lower_range_pattern_test(ctx: LowerCtx, subj: MatchSubj, rp: parser::RangePattern, line: u32, col: u32): PatternTest | error {
+    var lo = match pattern_bound_i64(rp.lo) { i64 as x => x; error as err => return err }
+    var hi = match pattern_bound_i64(rp.hi) { i64 as x => x; error as err => return err }
+    var signed = range_subject_signed(subj.ty)
+    var ge_op = if signed { LBinOp::ICmpGeS } else { LBinOp::ICmpGeU }
+    var le_op = if signed { LBinOp::ICmpLeS } else { LBinOp::ICmpLeU }
+    var lor = ctx_alloc(ctx)
+    var with_lo = ctx_append(lor.ctx, const_int_inst(lor.vreg, lo, line, col))
+    var ge = ctx_alloc(with_lo)
+    var with_ge = ctx_append(ge.ctx, bin_inst(ge.vreg, ge_op, subj.vreg, lor.vreg, line, col))
+    var hir = ctx_alloc(with_ge)
+    var with_hi = ctx_append(hir.ctx, const_int_inst(hir.vreg, hi, line, col))
+    var le = ctx_alloc(with_hi)
+    var with_le = ctx_append(le.ctx, bin_inst(le.vreg, le_op, subj.vreg, hir.vreg, line, col))
+    var anded = ctx_alloc(with_le)
+    var with_and = ctx_append(anded.ctx, bin_inst(anded.vreg, LBinOp::IAnd, ge.vreg, le.vreg, line, col))
+    PatternTest { ctx = with_and; always = false; vreg = anded.vreg }
+}
+
+fn lower_alt_pattern_test(ctx: LowerCtx, subj: MatchSubj, ap: parser::AltPattern, line: u32, col: u32): PatternTest | error {
+    if ap.options.len == 0 { return error { message = "native backend N1: an empty alternation match pattern (internal)" } }
+    var cur = ctx
+    var acc: u32 = 0
+    var have = false
+    var i: u64 = 0
+    loop {
+        if i >= ap.options.len { break }
+        var t = match lower_pattern_test(cur, subj, ap.options[i], line, col) { PatternTest as x => x; error as err => return err }
+        if t.always { return PatternTest { ctx = t.ctx; always = true; vreg = 0 } }
+        cur = t.ctx
+        if !have {
+            acc = t.vreg
+            have = true
+        } else {
+            var r = ctx_alloc(cur)
+            cur = ctx_append(r.ctx, bin_inst(r.vreg, LBinOp::IOr, acc, t.vreg, line, col))
+            acc = r.vreg
+        }
+        i++
+    }
+    PatternTest { ctx = cur; always = false; vreg = acc }
 }
 
 fn lower_literal_pattern_test(ctx: LowerCtx, subj: MatchSubj, lp: parser::LiteralPattern, line: u32, col: u32): PatternTest | error {
