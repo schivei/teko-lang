@@ -1130,6 +1130,11 @@ Eu reportei que o transporte de canais roda, mas a resolução por chave `svc<Rx
 - Emissão mudou → **reseed feito** (fixpoint gen2==gen3 byte-idêntico, 21011348 bytes). Pico 1049,3 MB (+~0,5% sub-percentual, D118-aceito — wiring novo no self-build). D90 vazio, sem fixtures, style-clean.
 - **Adjacente (não expandido):** o `guard`/`dsc_walk` reusa `push` (`out=[..out,...]`) pré-existente em `discover.tks` — candidato ao expurgo NO-PUSHES quando `discover.tks` for varrido.
 
+### D122 · CAST trap migrado (D119 cumprido) — shadow byte-idêntico (coordenador autônomo 2026-08-26) ✅
+`rt-cast-migrate @ 00879c4e` drenado ff. `teko::runtime::panic_cast_at(line,col)` + **22 `cast_check_*`** (check-only, divergem via sink de pânico do 0134); codegen emite `({T _cv=(expr); cast_check_...(_cv,line,col); (T)_cv;})` — posição por ARG **mata os globais `_tk_cast_loc_*`**; `panic_cast` roteado → mata `tk_panic_cast`. `lower.tks` espelho native. `tk_to_*`/`_tk_cast_loc_*`/`tk_panic_cast` = C MORTO até F9 (D90 intacto).
+- **SHADOW (D117, agora funcional) prova byte-idêntico:** cast-fail int+float rodados no BASE (gen1) e NOVO (gen2): linha `3:9: teko: deliberate panic: impossible conversion` + exit **134** IDÊNTICOS; única diferença = novo não imprime backtrace C (mesmo estado dos traps do 0134 — o fim pretendido do D119).
+- Fixpoint: gen3.c==gen4.c byte-idêntico (codegen novo se reproduz; gen2 difere só no ponto do cast, transitório esperado). Reseed do gen3. Pico gen4 **1047,5 MB** (flat/leve queda vs ~1049). D90 vazio, sem fixtures, zero `//`.
+
 Registro histórico do fork (contexto do ruling):
 ### D118-ctx · (surfado 2026-08-26)
 Cluster I/O/panic (`rt-io-panic-migrate @ c5c0689f`, base `bfd4d7a1`) landou verde no fixpoint (gen2==gen3 byte-idêntico, emitted-C 21001646 bytes; D90 limpo; sem fixtures). Crumbs: 0132 (flush→Teko / exit_status inline / ramos FS-host mortos removidos), 0133 (stdin sobre `SYS_READ` fd 0, buffer ≤1024 B reusável na region_program, acumulador chunk-list + cópia exata, ZERO push), 0134 (família trap → sinks Teko `panic_oob_at`/`div0`/`oob`/`overflow`/`null_deref_at` reusando `panic()` vivo; **a família de sinks JÁ estava pré-staged em `teko_rt.tks`** — só faltava `panic_null_deref_at`; `tk_nn`→ternário inline).
