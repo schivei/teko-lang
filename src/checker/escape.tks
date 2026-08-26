@@ -213,7 +213,7 @@ fn collect_frees_old_names(fn_body: []@TStatement(), body: []@TStatement(), ref 
 fn collect_frees_old_stmt(fn_body: []@TStatement(), s: @TStatement(), ref acc: []str) {
     match s {
         TAssign as a => {
-            if assign_is_self_append(a) && !str_set_has(acc.value, a.name) && assign_frees_old(fn_body, a) {
+            if (assign_is_self_append(a) || assign_is_self_concat(a)) && !str_set_has(acc.value, a.name) && assign_frees_old(fn_body, a) {
                 acc = str_set_add(acc.value, a.name)
             }
         }
@@ -284,6 +284,40 @@ pub fn assign_is_self_append(a: TAssign): bool {
     }
 }
 
+fn tcall_is_str_concat_callee(c: TCall): bool {
+    var segs = c.callee.segments
+    if segs.len == 0 { return false }
+    var last = segs[segs.len - 1].name
+    if last != "concat" && last != "str_concat" { return false }
+    if segs.len == 1 { return true }
+    segs[0].name == "teko"
+}
+
+fn concat_first_arg_is_var(c: TCall, name: str): bool {
+    if c.args.len < 1 { return false }
+    match c.args[0].kind {
+        TVar as v => v.name == name
+        TArrayLit as al => {
+            if al.elements.len < 1 { return false }
+            if al.elements[0].is_spread { return false }
+            match al.elements[0].expr.kind {
+                TVar as v => v.name == name
+                _ => false
+            }
+        }
+        _ => false
+    }
+}
+
+pub fn assign_is_self_concat(a: TAssign): bool {
+    match a.kind { parser::AssignKind::Simple => { }; _ => return false }
+    match a.bound { Str => { }; _ => return false }
+    match a.value.kind {
+        TCall as c => tcall_is_str_concat_callee(c) && concat_first_arg_is_var(c, a.name)
+        _ => false
+    }
+}
+
 fn mark_self_append_items(a: TAssign, ref acc: []str) {
     match a.value.kind {
         TCall as c => if c.args.len == 2 { mark_class_holder_escape(c.args[1], acc) } else { }
@@ -323,6 +357,13 @@ fn binding_value_is_list_empty(b: TBinding): bool {
             segs[segs.len - 1].name == "empty" && segs[segs.len - 2].name == "list"
         }
         TArrayLit as al => al.elements.len == 0
+        _ => false
+    }
+}
+
+fn binding_value_is_empty_str(b: TBinding): bool {
+    match b.value.kind {
+        TStrLit as s => s.text.len == 0
         _ => false
     }
 }
@@ -412,7 +453,7 @@ fn chain_stats_stmt(s: @TStatement(), name: str): ChainStats {
             match b.target {
                 parser::SimpleName as sn => {
                     if sn.name == name {
-                        if binding_value_is_list_empty(b) { st = cs_add(st, ChainStats { births_empty = 1; births_other = 0; other_writes = 0; self_appends = 0 }) }
+                        if binding_value_is_list_empty(b) || binding_value_is_empty_str(b) { st = cs_add(st, ChainStats { births_empty = 1; births_other = 0; other_writes = 0; self_appends = 0 }) }
                         else { st = cs_add(st, ChainStats { births_empty = 0; births_other = 1; other_writes = 0; self_appends = 0 }) }
                     }
                 }
@@ -424,7 +465,7 @@ fn chain_stats_stmt(s: @TStatement(), name: str): ChainStats {
             var st = chain_stats_expr(a.value, name)
             if parser::assign_has_target(a.kind) { st = cs_add(st, chain_stats_expr(a.target, name)) }
             if a.name == name {
-                if assign_is_self_append(a) { st = cs_add(st, ChainStats { births_empty = 0; births_other = 0; other_writes = 0; self_appends = 1 }) }
+                if assign_is_self_append(a) || assign_is_self_concat(a) { st = cs_add(st, ChainStats { births_empty = 0; births_other = 0; other_writes = 0; self_appends = 1 }) }
                 else { st = cs_add(st, ChainStats { births_empty = 0; births_other = 0; other_writes = 1; self_appends = 0 }) }
             }
             st
@@ -455,7 +496,7 @@ fn name_escapes_body(fn_body: []@TStatement(), name: str): bool {
 }
 
 pub fn assign_frees_old(fn_body: []@TStatement(), a: TAssign): bool {
-    if !assign_is_self_append(a) { return false }
+    if !assign_is_self_append(a) && !assign_is_self_concat(a) { return false }
     if name_escapes_body(fn_body, a.name) { return false }
     var st = chain_stats_block(fn_body, a.name)
     if st.births_empty != 1 { return false }
@@ -634,7 +675,7 @@ fn count_block_local_reads(body: []@TStatement(), name: str, is_value: bool): i6
         var is_last = i + 1 == body.len
         match body[i] {
             TAssign as a => {
-                if a.name == name && assign_is_self_append(a) { n = n + count_reads_expr(a.value, name) }
+                if a.name == name && (assign_is_self_append(a) || assign_is_self_concat(a)) { n = n + count_reads_expr(a.value, name) }
             }
             TExprStmt as es => {
                 if is_value && is_last { } else { n = n + count_reads_expr(es.expr, name) }
