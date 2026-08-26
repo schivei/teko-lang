@@ -1141,6 +1141,14 @@ Despachei o 0140 (binding `svc<>` dos canais) ANTES de migrar o transporte, inst
 - **ORDEM CERTA:** o transporte C→Teko (crumbs **0135-0138**: thread-create/waitgroup/memchan/oschan, sobre as primitivas de sync/thread que JÁ estão em Teno) vem PRIMEIRO — isso **remove** o `tk_memchan_*`/`tk_waitgroup`/`tk_thread_*` do teko_rt (mata as FFI existentes, não cria novas). SÓ DEPOIS o 0140 faz o binding `svc<>` sobre o transporte **Teko** (zero `from "teko_rt"`). Os honest-stops dos canais (D120) caem no 0140, mas só depois do transporte estar em Teko.
 - **Fila corrigida:** 0135→0136→0137→0138 (transporte→Teko) → 0140 (svc binding sobre Teko) → 0117 (DI Parte B).
 
+### D124 · GATE DE CERTIFICAÇÃO PRÉ-F9 (Opus) — prova que é seguro varrer ANTES do sweep (dono sugeriu 2026-08-26) ✅
+Antes de executar o F9 (deletar `teko_rt.c`/`assert.c`/`win32_compat.h` + remover os 3 `#include` + `-nostdlib`), um agente **Opus de certificação** roda e tem que dar VERDE em TODOS:
+1. **grep no `bootstrap/teko.c` emitido/reseedado:** ZERO chamada a `tk_*` VIVA, ZERO `#include`, ZERO símbolo libc/libm — só externs do linker do SO. Lista qualquer `tk_*` ainda referenciada (= não pode varrer).
+2. **toda `tk_*` em `teko_rt.c`/`assert.c` é CADÁVER** (definida, sem chamador) — inventário defended vs referências.
+3. **dry-run do sweep** num branch throwaway: aplica deleção + remoção dos includes + `-nostdlib`, prova que **linka e builda cross-SO** (Linux/mac/win via `#if`), fixpoint gen2==gen3 segura, e os **shadows** (I/O, cast, canais, panic, coverage) rodam standalone.
+4. Só com o veredito verde o F9 executa (e o F9 em si é outro agente).
+- **Estimativa de passos até lá (2026-08-26):** ~6-8 rodadas focadas restantes — transporte (▶), svc-binding 0140, coverage D113, test-harness residual, string residual, env residual, journal/signals (design-open), float_parse/secure_bytes/wall_offset (batch), DI-B 0117, e a **arena RM-C9/`tk_task` (terminal, também reclama memória)**. Re-censo real perto do fim pin o número exato (o census atual super-conta). F9 só quando ZERO `tk_*`/libc vivo.
+
 Registro histórico do fork (contexto do ruling):
 ### D118-ctx · (surfado 2026-08-26)
 Cluster I/O/panic (`rt-io-panic-migrate @ c5c0689f`, base `bfd4d7a1`) landou verde no fixpoint (gen2==gen3 byte-idêntico, emitted-C 21001646 bytes; D90 limpo; sem fixtures). Crumbs: 0132 (flush→Teko / exit_status inline / ramos FS-host mortos removidos), 0133 (stdin sobre `SYS_READ` fd 0, buffer ≤1024 B reusável na region_program, acumulador chunk-list + cópia exata, ZERO push), 0134 (família trap → sinks Teko `panic_oob_at`/`div0`/`oob`/`overflow`/`null_deref_at` reusando `panic()` vivo; **a família de sinks JÁ estava pré-staged em `teko_rt.tks`** — só faltava `panic_null_deref_at`; `tk_nn`→ternário inline).
