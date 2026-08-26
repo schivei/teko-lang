@@ -2625,22 +2625,23 @@ fn emit_runtime_eq_call(buf: teko::io::FileStream, prog: CgProg, rtfn: str, op: 
 pub type CgSliceEqPlan = struct {
     rtfn: str
     needs_size: bool
+    as_word: bool
 }
 
 fn cg_slice_eq_plan(elem: @Type()): CgSliceEqPlan | error {
     match elem {
-        checker::Char => CgSliceEqPlan { rtfn = "tk_slice_char_eq"; needs_size = false }
-        checker::Str => CgSliceEqPlan { rtfn = "tk_slice_str_eq"; needs_size = false }
-        checker::Byte => CgSliceEqPlan { rtfn = "tk_slice_eq_bytes"; needs_size = true }
+        checker::Char => CgSliceEqPlan { rtfn = "tk_slice_char_eq"; needs_size = false; as_word = false }
+        checker::Str => CgSliceEqPlan { rtfn = "tk_slice_str_eq"; needs_size = false; as_word = false }
+        checker::Byte => CgSliceEqPlan { rtfn = cb_fn_name_str("teko::runtime", "slice_eq_bytes"); needs_size = true; as_word = true }
         checker::Prim as p => cg_slice_eq_plan_prim(p.kind)
         _ => error { message = teko::str::concat("codegen: `[]T == []T` is not lowered yet for element type `", checker::type_render(elem), "` (only numeric/bool/byte/char/str elements compare by value)") }
     }
 }
 
 fn cg_slice_eq_plan_prim(k: checker::PrimKind): CgSliceEqPlan {
-    if k == checker::PrimKind::F32 { return CgSliceEqPlan { rtfn = "tk_slice_f32_eq"; needs_size = false } }
-    if k == checker::PrimKind::F64 { return CgSliceEqPlan { rtfn = "tk_slice_f64_eq"; needs_size = false } }
-    CgSliceEqPlan { rtfn = "tk_slice_eq_bytes"; needs_size = true }
+    if k == checker::PrimKind::F32 { return CgSliceEqPlan { rtfn = "tk_slice_f32_eq"; needs_size = false; as_word = false } }
+    if k == checker::PrimKind::F64 { return CgSliceEqPlan { rtfn = cb_fn_name_str("teko::runtime", "slice_f64_eq"); needs_size = false; as_word = true } }
+    CgSliceEqPlan { rtfn = cb_fn_name_str("teko::runtime", "slice_eq_bytes"); needs_size = true; as_word = true }
 }
 
 fn cg_slice_elem_of(t: @Type()): @Type() {
@@ -2668,12 +2669,12 @@ fn emit_slice_eq(buf: teko::io::FileStream, prog: CgProg, op: lexer::TokenKind, 
     buf.write("; ")
     buf.write(plan.rtfn)
     buf.write("(")
-    buf.write(t)
-    buf.write("a.ptr, ")
+    emit_slice_eq_ptr_arg(buf, t, "a", plan.as_word)
+    buf.write(", ")
     buf.write(t)
     buf.write("a.len, ")
-    buf.write(t)
-    buf.write("b.ptr, ")
+    emit_slice_eq_ptr_arg(buf, t, "b", plan.as_word)
+    buf.write(", ")
     buf.write(t)
     buf.write("b.len")
     if plan.needs_size {
@@ -2683,6 +2684,14 @@ fn emit_slice_eq(buf: teko::io::FileStream, prog: CgProg, op: lexer::TokenKind, 
     }
     buf.write("); })")
     buf.write(")")
+}
+
+fn emit_slice_eq_ptr_arg(buf: teko::io::FileStream, t: str, side: str, as_word: bool) {
+    if as_word { buf.write("(uint64_t)(uintptr_t)(") }
+    buf.write(t)
+    buf.write(side)
+    buf.write(".ptr")
+    if as_word { buf.write(")") }
 }
 
 fn cg_emit_variant_member_cmp(buf: teko::io::FileStream, prog: CgProg, cmp: CgVariantMemberCmp, eq: bool, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {

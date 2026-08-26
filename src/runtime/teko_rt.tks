@@ -163,6 +163,53 @@ exp fn is_space(c: char): bool {
     cp == 32 || cp == 9 || cp == 10 || cp == 13 || cp == 12 || cp == 11
 }
 
+/**
+ * teko::runtime::slice_eq_bytes — byte-for-byte equality of two POD `[]T` slices addressed by raw
+ * pointer words: same length AND identical bytes across `a_len * elem_size` bytes.
+ *
+ * @param a_ptr      the first slice's base address, as a word
+ * @param a_len      the first slice's element count
+ * @param b_ptr      the second slice's base address, as a word
+ * @param b_len      the second slice's element count
+ * @param elem_size  the element's byte width
+ * @return           true iff both slices hold the same length and bytes
+ */
+exp fn slice_eq_bytes(a_ptr: u64, a_len: u64, b_ptr: u64, b_len: u64, elem_size: u64): bool {
+    if a_len != b_len { return false }
+    var total = a_len * elem_size
+    var i: u64 = 0
+    loop {
+        if i >= total { break }
+        if teko::mem::load_u8(a_ptr + i) != teko::mem::load_u8(b_ptr + i) { return false }
+        i++
+    }
+    true
+}
+
+/**
+ * teko::runtime::slice_f64_eq — element-wise IEEE `==` equality of two `[]f64` slices addressed
+ * by raw pointer words: same length AND every element bit-identical-or-equal by native `f64`
+ * comparison (NOT memcmp — a float's bits are not its value equality).
+ *
+ * @param a_ptr  the first slice's base address, as a word
+ * @param a_len  the first slice's element count
+ * @param b_ptr  the second slice's base address, as a word
+ * @param b_len  the second slice's element count
+ * @return       true iff both slices hold the same length and every `f64` compares equal
+ */
+exp fn slice_f64_eq(a_ptr: u64, a_len: u64, b_ptr: u64, b_len: u64): bool {
+    if a_len != b_len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= a_len { break }
+        var av = teko::f64_from_bits(teko::mem::load_u64(a_ptr + i * 8))
+        var bv = teko::f64_from_bits(teko::mem::load_u64(b_ptr + i * 8))
+        if av != bv { return false }
+        i++
+    }
+    true
+}
+
 /** teko::runtime::panic_div0 — the division-by-zero panic. Diverges. */
 exp fn panic_div0() { panic("division by zero") }
 
