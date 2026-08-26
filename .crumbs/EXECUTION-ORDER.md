@@ -152,6 +152,8 @@
 | 0126 | 0126-NAT-B0-graceful-stop-capture.md | NAT-B0 | M2 | RT-L6 | [fixpoint] (write-only native + C fixpoint) | needs-impl:tail-§16 R#2 |
 | 0127 | 0127-NAT-B3-lowering-crash-invariant-sweep.md | NAT-B3 | M2 | NAT-A1 | [fixpoint] (write-only native + C fixpoint) | needs-impl:tail-§16 R#1/R#3 |
 | 0128 | 0128-NAT-B4-campaign-emission-native-mirror.md | NAT-B4 | M2 | RT-ENTRY | [fixpoint] (write-only native + C fixpoint) | needs-impl:tail-§16 R#1/R#4 |
+| 0139 | 0139-DI-FIX1-svc-fixtures-cert.md | DI-FIX1 | M5 | — | [fixpoint] | needs-impl:cert-only (Part A + CR-A/C/D landed; fixtures absent) |
+| 0140 | 0140-S10-CC5-svc-channel-by-key-di.md | S10-CC5 | M5 | S10-CC3, S10-CC4, DI-FIX1 | [fixpoint] | needs-impl:removes svc<> honest-stops in 0136/0137/0138 (D120) |
 
 ## Native lowering coverage re-sequencing (2026-08-26, D106 — `native-lowering-cobertura-zero-libc-0.3.1.md`)
 
