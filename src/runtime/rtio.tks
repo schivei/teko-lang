@@ -97,6 +97,56 @@ exp fn exit(code: i64) {
     teko::runtime::rt_exit(code)
 }
 
+fn write_pos(line: u32, col: u32) {
+    rtio_write_all(2, teko::str::concat(teko::str::u64_to_str(line to u64), ":", teko::str::u64_to_str(col to u64), ": "))
+}
+
+/**
+ * teko::runtime::panic_oob — the bounds-check trap with no source position: panic with
+ * "index out of bounds" through the shared panic sink.
+ * @since 0.3.1
+ */
+exp fn panic_oob() { panic("index out of bounds") }
+
+/**
+ * teko::runtime::panic_div0 — the divide-by-zero trap: panic with "division by zero".
+ * @since 0.3.1
+ */
+exp fn panic_div0() { panic("division by zero") }
+
+/**
+ * teko::runtime::panic_overflow — the integer-overflow trap: panic with "integer overflow".
+ * @since 0.3.1
+ */
+exp fn panic_overflow() { panic("integer overflow") }
+
+/**
+ * teko::runtime::panic_oob_at — the positioned bounds-check trap: write "L:C: " raw to stderr
+ * (out-of-band of any test channel, matching the C fputs), then panic with "index out of bounds"
+ * through the shared panic sink.
+ *
+ * @param line  the source line of the indexing site
+ * @param col   the source column of the indexing site
+ * @since 0.3.1
+ */
+exp fn panic_oob_at(line: u32, col: u32) {
+    write_pos(line, col)
+    panic("index out of bounds")
+}
+
+/**
+ * teko::runtime::panic_null_deref_at — the positioned null-dereference trap: write "L:C: " raw to
+ * stderr, then panic with "null reference dereference" through the shared panic sink.
+ *
+ * @param line  the source line of the dereference site
+ * @param col   the source column of the dereference site
+ * @since 0.3.1
+ */
+exp fn panic_null_deref_at(line: u32, col: u32) {
+    write_pos(line, col)
+    panic("null reference dereference")
+}
+
 const STDIN_BUF_CAP: u64 = 1024
 
 const STDIN_BUF_PTR: u64 = 34712
@@ -277,7 +327,14 @@ exp fn read_stdin_n(n: u64): []byte {
         out[got] = (ch to u64) to byte
         got = got + 1
     }
-    teko::collections::arr_slice(out, 0, got)
+    var res: [got]byte = []
+    var i: u64 = 0
+    loop {
+        if i >= got { break }
+        res[i] = out[i]
+        i = i + 1
+    }
+    res
 }
 
 #os("linux")

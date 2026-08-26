@@ -435,6 +435,12 @@ const CG_MAIN_RETURN_OPEN: str = "return (int)(("
 
 const CG_MAIN_RETURN_CLOSE: str = ") & 0xFF);\n"
 
+const CG_RT_PANIC: str = "teko_teko__runtime__panic"
+
+const CG_RT_PANIC_OOB_AT: str = "teko_teko__runtime__panic_oob_at"
+
+const CG_RT_PANIC_NULL_DEREF_AT: str = "teko_teko__runtime__panic_null_deref_at"
+
 type CgNameTable = struct {
     mask: u64
     hashes: []u64
@@ -3407,7 +3413,7 @@ fn emit_str_slice(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall, ki
     emit_str_slice_start(buf, prog, c, kind, escaping, regions, fn_body, dctx)
     buf.write($"); uint64_t {v}_b = (uint64_t)(")
     emit_str_slice_end(buf, prog, c, kind, v, escaping, regions, fn_body, dctx)
-    buf.write($"); if ({v}_a > {v}_b || {v}_b > {v}.len) tk_panic(\"string slice out of range\"); (tk_str){{ {v}.ptr + {v}_a, (size_t)({v}_b - {v}_a) }}; }})")
+    buf.write($"); if ({v}_a > {v}_b || {v}_b > {v}.len) {CG_RT_PANIC}((tk_str){{ (const tk_byte *)\"string slice out of range\", 25 }}); (tk_str){{ {v}.ptr + {v}_a, (size_t)({v}_b - {v}_a) }}; }})")
 }
 
 fn emit_region_buf(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
@@ -3829,10 +3835,10 @@ fn emit_call_inner(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e
             else if last == "intern_get" { builtin = cb_fn_name_str("teko::runtime", "intern_get"); has_builtin = true }
             else if last == "intern_put" { builtin = cb_fn_name_str("teko::runtime", "intern_put"); has_builtin = true }
             else if last == "intern_reset" { builtin = cb_fn_name_str("teko::runtime", "intern_reset"); has_builtin = true }
-            else if last == "panic_div0" { builtin = "tk_panic_div0"; has_builtin = true }
-            else if last == "panic_oob" { builtin = "tk_panic_oob"; has_builtin = true }
+            else if last == "panic_div0" { builtin = cb_fn_name_str("teko::runtime", "panic_div0"); has_builtin = true }
+            else if last == "panic_oob" { builtin = cb_fn_name_str("teko::runtime", "panic_oob"); has_builtin = true }
             else if last == "panic_cast" { builtin = "tk_panic_cast"; has_builtin = true }
-            else if last == "panic_overflow" { builtin = "tk_panic_overflow"; has_builtin = true }
+            else if last == "panic_overflow" { builtin = cb_fn_name_str("teko::runtime", "panic_overflow"); has_builtin = true }
             else if last == "one_byte" { builtin = "tk_one_byte"; has_builtin = true }
             else if last == "str_concat" { builtin = cb_fn_name_str("teko::runtime", "str_concat"); has_builtin = true }
             else if last == "str_hash" { builtin = cb_fn_name_str("teko::runtime", "str_hash"); has_builtin = true }
@@ -3950,15 +3956,16 @@ fn emit_call_inner(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e
 }
 
 fn cg_emit_nn_guard(buf: teko::io::FileStream, prog: CgProg, recv: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
-    buf.write("(")
+    var p = $"_p{buf.gensym()}"
+    buf.write("({ ")
     emit_type(buf, prog, recv.type)
-    buf.write(")tk_nn((void *)(")
+    buf.write($" {p} = (")
     emit_expr_ctx(buf, prog, checker::Void { }, recv, escaping, regions, fn_body, dctx)
-    buf.write("), ")
+    buf.write($"); {p} ? {p} : ({CG_RT_PANIC_NULL_DEREF_AT}(")
     cb_u64_digits(buf, recv.line to u64)
     buf.write(", ")
     cb_u64_digits(buf, recv.col to u64)
-    buf.write(")")
+    buf.write($"), {p}); }})")
 }
 
 fn emit_field_access(buf: teko::io::FileStream, prog: CgProg, fa: checker::TFieldAccess, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
@@ -4063,7 +4070,7 @@ fn emit_index(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, ix: ch
             buf.write("[")
             buf.write(litmp)
             buf.write("]")
-            buf.write(" : (tk_panic_oob_at(")
+            buf.write(teko::str::concat(" : (", CG_RT_PANIC_OOB_AT, "("))
             cb_u64_digits(buf, e.line to u64)
             buf.write(", ")
             cb_u64_digits(buf, e.col to u64)
@@ -4094,7 +4101,7 @@ fn emit_index(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, ix: ch
     buf.write(".ptr[")
     buf.write(itmp)
     buf.write("]")
-    buf.write(" : (tk_panic_oob_at(")
+    buf.write(teko::str::concat(" : (", CG_RT_PANIC_OOB_AT, "("))
     cb_u64_digits(buf, e.line to u64)
     buf.write(", ")
     cb_u64_digits(buf, e.col to u64)
@@ -7086,7 +7093,7 @@ fn emit_index_assign(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(),
     buf.write(wstmp)
     buf.write(".len) { ")
     emit_index_store_body(buf, prog, ret_type, a, wstmp, witmp, elem, escaping, regions, fn_body, dctx)
-    buf.write(" } else { tk_panic_oob_at(")
+    buf.write(teko::str::concat(" } else { ", CG_RT_PANIC_OOB_AT, "("))
     cb_u64_digits(buf, a.target.line to u64)
     buf.write(", ")
     cb_u64_digits(buf, a.target.col to u64)
@@ -7533,7 +7540,7 @@ fn emit_spawn_thunk_one(buf: teko::io::FileStream, prog: CgProg, sp: checker::TS
         }
         i = i + 1
     }
-    buf.write($"    char *_blk = (char *)malloc(_need ? _need : 1); if (!_blk) tk_panic(\"out of memory\");\n")
+    buf.write($"    char *_blk = (char *)malloc(_need ? _need : 1); if (!_blk) {CG_RT_PANIC}((tk_str){{ (const tk_byte *)\"out of memory\", 13 }});\n")
     buf.write($"    tk_spawn_ctx_{k} *_c = (tk_spawn_ctx_{k} *)_blk;\n")
     buf.write($"    char *_tail = _blk + sizeof(tk_spawn_ctx_{k}); (void)_tail;\n")
     i = 0
