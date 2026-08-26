@@ -592,7 +592,7 @@ fn cg_prog_maypanic(items: []@TItem(), uses_capture: bool): CgNameTable {
                 if !f.is_extern {
                     keys[k] = cg_fn_key(f.namespace, f.name)
                     callees[k] = cg_block_collect_keys(f.body, [])
-                    flag[k] = cg_block_calls_self(f.body, "teko::runtime", "panic")
+                    flag[k] = cg_fn_seeds_maypanic(f.body)
                     k++
                 }
             }
@@ -627,6 +627,13 @@ fn cg_prog_maypanic(items: []@TItem(), uses_capture: bool): CgNameTable {
     cg_table_build(fkeys, fslots)
 }
 
+fn cg_fn_seeds_maypanic(body: []@TStatement()): bool {
+    if cg_block_calls_self(body, "teko::runtime", "panic") { return true }
+    if cg_block_calls_self(body, "teko::runtime", "exit") { return true }
+    if cg_block_calls_self(body, "", "panic") { return true }
+    cg_block_calls_self(body, "", "exit")
+}
+
 fn cg_fn_index_slots(n: u64): []u64 {
     var out: [n]u64 = []
     var i: u64 = 0
@@ -645,12 +652,17 @@ fn cg_callees_hit_flag(callees: []str, index: CgNameTable, flag: []bool): bool {
     false
 }
 
+fn cg_key_is_terminator(k: str): bool {
+    teko::runtime::str_eq(k, "teko::runtime::panic") || teko::runtime::str_eq(k, "teko::runtime::exit") || teko::runtime::str_eq(k, "::panic") || teko::runtime::str_eq(k, "::exit")
+}
+
 fn cg_stmt_calls_maypanic(prog: CgProg, s: @TStatement()): bool {
     if prog.maypanic.slots.len == 0 { return false }
     var keys = cg_block_collect_keys([s], [])
     var i: u64 = 0
     loop {
         if i >= keys.len { break }
+        if cg_key_is_terminator(keys[i]) { return true }
         if cg_table_get(prog.maypanic, keys[i]) != 0 { return true }
         i++
     }
@@ -3729,7 +3741,7 @@ fn emit_call_inner(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e
             if last == "print" { builtin = cb_fn_name_str("teko::runtime", "print"); has_builtin = true }
             else if last == "println" { builtin = cb_fn_name_str("teko::runtime", "println"); has_builtin = true }
             else if last == "panic" { builtin = cb_fn_name_str("teko::runtime", "panic"); has_builtin = true }
-            else if last == "exit" { builtin = cb_fn_name_str("teko::runtime", "rt_exit"); has_builtin = true }
+            else if last == "exit" { builtin = cb_fn_name_str("teko::runtime", "exit"); has_builtin = true }
             else if last == "write" { builtin = cb_fn_name_str("teko::runtime", "write"); has_builtin = true }
             else if last == "ewrite" { builtin = cb_fn_name_str("teko::runtime", "ewrite"); has_builtin = true }
             else if last == "eprint" { builtin = cb_fn_name_str("teko::runtime", "eprint"); has_builtin = true }
