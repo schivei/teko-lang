@@ -233,16 +233,9 @@ fn copy_str_to(dst: u64, s: str) {
     _ = teko::runtime::rt_memcpy(dst, src, s.len)
 }
 
-fn str_from_addr(addr: u64, n: u64): str {
+fn str_at(addr: u64, n: u64): str {
     if n == 0 { return "" }
-    var xs: [n]byte = []
-    var i: u64 = 0
-    loop {
-        if i >= n { break }
-        xs[i] = teko::mem::load_u8(addr + i) to byte
-        i++
-    }
-    str(xs)
+    str(teko::mem::bytes_from_ptr(teko::sys::word_ptr(addr to i64), n))
 }
 
 fn chan_region_ptr(): ptr {
@@ -287,63 +280,44 @@ fn chan_total(head_field: u64): u64 {
     total
 }
 
-fn sub_str(src: []byte, a: u64, b: u64): str {
-    if b <= a { return "" }
-    var xs: [b - a]byte = []
-    var i = a
-    var k: u64 = 0
-    loop {
-        if i >= b { break }
-        xs[k] = src[i]
-        k++
-        i++
-    }
-    str(xs)
+fn emit_line_run(src0: u64, start: u64, stop: u64, prefix: str) {
+    rtio_write_all(1, prefix)
+    rtio_write_all(1, str_at(src0 + start, stop - start))
+    rtio_write_all(1, "\n")
 }
 
-fn emit_lines(content: []byte, prefix: str) {
+fn emit_lines_raw(src0: u64, total: u64, prefix: str) {
     var line_start: u64 = 0
     var i: u64 = 0
     loop {
-        if i >= content.len { break }
-        if content[i] == b'\n' {
-            rtio_write_all(1, prefix)
-            rtio_write_all(1, sub_str(content, line_start, i))
-            rtio_write_all(1, "\n")
+        if i >= total { break }
+        if teko::mem::load_u8(src0 + i) == (b'\n' to u64) {
+            emit_line_run(src0, line_start, i, prefix)
             line_start = i + 1
         }
         i++
     }
-    if line_start < content.len {
-        rtio_write_all(1, prefix)
-        rtio_write_all(1, sub_str(content, line_start, content.len))
-        rtio_write_all(1, "\n")
-    }
+    if line_start < total { emit_line_run(src0, line_start, total, prefix) }
 }
 
 fn emit_prefixed(head_field: u64, prefix: str) {
     var total = chan_total(head_field)
     if total == 0 { return }
-    var content: [total]byte = []
+    var src0 = chan_alloc(total)
     var k: u64 = 0
     var node = teko::runtime::ctrl_get(head_field)
     loop {
         if node == 0 { break }
         var len = teko::mem::load_u64(node + CHUNK_LEN)
-        var i: u64 = 0
-        loop {
-            if i >= len { break }
-            content[k] = teko::mem::load_u8(node + CHUNK_DATA + i) to byte
-            k++
-            i++
-        }
+        _ = teko::runtime::rt_memcpy(src0 + k, node + CHUNK_DATA, len)
+        k = k + len
         node = teko::mem::load_u64(node + CHUNK_NEXT)
     }
-    emit_lines(content, prefix)
+    emit_lines_raw(src0, total, prefix)
 }
 
 fn chan_label(): str {
-    str_from_addr(teko::runtime::ctrl_get(HARNESS_LABEL_PTR), teko::runtime::ctrl_get(HARNESS_LABEL_LEN))
+    str_at(teko::runtime::ctrl_get(HARNESS_LABEL_PTR), teko::runtime::ctrl_get(HARNESS_LABEL_LEN))
 }
 
 fn verdict_line(verdict: str) {
@@ -502,7 +476,7 @@ exp fn scenario_set(name: str) {
 exp fn scenario_prefix(): str {
     var n = teko::runtime::ctrl_get(HARNESS_SCEN_LEN)
     if n == 0 { return "" }
-    teko::str::concat(str_from_addr(teko::runtime::ctrl_get(HARNESS_SCEN_PTR), n), ": ")
+    teko::str::concat(str_at(teko::runtime::ctrl_get(HARNESS_SCEN_PTR), n), ": ")
 }
 
 /**
@@ -514,6 +488,6 @@ exp fn scenario_prefix(): str {
 exp fn scenario_ok() {
     var n = teko::runtime::ctrl_get(HARNESS_SCEN_LEN)
     if n == 0 { panic("assertion failed: scenario_ok — no scenario is named (scenario_begin was never called)") }
-    println(teko::str::concat("scenario ", str_from_addr(teko::runtime::ctrl_get(HARNESS_SCEN_PTR), n), ": ok"))
+    println(teko::str::concat("scenario ", str_at(teko::runtime::ctrl_get(HARNESS_SCEN_PTR), n), ": ok"))
     teko::runtime::ctrl_set(HARNESS_SCEN_LEN, 0)
 }
