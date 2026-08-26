@@ -1,18 +1,19 @@
 ---
 seq: 0114
 crumb-id: NAT-N2
-milestone: M4
+milestone: M2
 gate: "[fixpoint]"
 reseed-class: "fixpoint-rebuild"
 deps: [NAT-N1]
 sources:
+  - "docs/design/native-lowering-cobertura-zero-libc-0.3.1.md:0-260"  # campaign map — pull-forward + write-only native gate
   - "docs/design/recon-native-n1n2-gaps-strategy.md:66-116"          # families 2-4 + KNOWN-WRONG + completion-by-family
-  - "src/lir/lower.tks:239"                                          # integer/float/unary operator not yet lowered
-  - "src/lir/lower.tks:2174"                                         # fat-pointer interface-dispatch result
-  - "src/lir/lower.tks:2322"                                         # fat-pointer closure-call result
+  - "src/lir/lower.tks:239,255,290"                                  # float/integer/unary operator not yet lowered
+  - "src/lir/lower.tks:2187"                                         # fat-pointer interface-dispatch result
+  - "src/lir/lower.tks:2316"                                         # fat-pointer closure-call result
   - "src/lir/lower.tks:2376"                                         # mutable str/slice capture
-  - "src/lir/lower.tks:2102"                                         # `parse` float result KNOWN-WRONG (XMM0/D0 vs int reg)
-  - "src/lir/lower.tks:3918-4081"                                    # match-pattern residual (range/alt/group/float/slice/field)
+  - "src/lir/lower.tks:2112"                                         # `parse` float result KNOWN-WRONG (XMM0/D0 vs int reg)
+  - "src/lir/lower.tks:3976-4160"                                    # match-pattern residual (range/alt/group/float/slice/field)
   - "docs/design/plano-mestre-0.3.1-implementacao.md:282"          # M4 NAT-A1 row (this crumb extends it)
 ---
 
@@ -37,18 +38,18 @@ surface, `with_cap`/`push` which M3 `COL-F2` removes) and are tracked, not close
 
 - `src/lir/lower.tks:239` / `:255` / `:290` — float / integer / unary "operator not yet lowered (N2)":
   fill the residual `LBinOp`/`LUnOp` arms for the operators `src/` actually uses.
-- `src/lir/lower.tks:2174` / `:4267` / `:4273` — fat-pointer interface-dispatch result: a method
+- `src/lir/lower.tks:2187` / `:4353` — fat-pointer interface-dispatch result: a method
   returning a `str`/`[]T` through a vtable slot must thread the two-VReg `{ptr,len}` result.
-- `src/lir/lower.tks:2322` — fat-pointer closure-call result (same two-VReg threading through
+- `src/lir/lower.tks:2316` — fat-pointer closure-call result (same two-VReg threading through
   `LCallIndirect`).
 - `src/lir/lower.tks:2376` — capturing a MUTABLE `str`/`slice` local: the env slot must carry BOTH
   halves of the fat pair, not the frame-slot address.
-- `src/lir/lower.tks:2187` — dynamic dispatch through a polymorphic base class (a class instance
+- `src/lir/lower.tks:2200` — dynamic dispatch through a polymorphic base class (a class instance
   carries no vtable): give the class instance a vtable slot or route to the monomorphic call.
-- `src/lir/lower.tks:2807` — destructuring binding (`var [a, b] = arr`) native lowering.
-- `src/lir/lower.tks:2830` / `:2856` — fat-typed lambda return; diverging panic/exit inside a
+- `src/lir/lower.tks:2801` — destructuring binding (`var [a, b] = arr`) native lowering.
+- `src/lir/lower.tks:2824` / `:2859` — fat-typed lambda return; diverging panic/exit inside a
   fat-returning function.
-- `src/lir/lower.tks:3918-4081` — match-pattern residual: range pattern, alternation `|`, grouped bind
+- `src/lir/lower.tks:3976-4160` — match-pattern residual: range pattern, alternation `|`, grouped bind
   `(A | B) as v`, float pattern, slice pattern over a non-variant subject, field pattern over a
   non-variant subject.
 - `src/lir/lower.tks:2102` — the **KNOWN-WRONG** `parse` float-result register class: teach `LCall`
@@ -123,17 +124,22 @@ pin as a wrong VALUE (a stop the fixpoint catches; a wrong value it does not):
 
 ## Gate
 
-`[fixpoint]` — `gen2==gen3` byte-identity. "Green" = the compiler's own corpus lowers natively with no
-reachable KNOWN-STOP in families 2-4, every KNOWN-WRONG is PASS or a named honest-stop (never a silent
-wrong value), and the native rebuild is byte-identical. Reseed-class: `fixpoint-rebuild`.
+`[fixpoint]` — **C `gen2.c==gen3.c` byte-identity** (native-only lowering; the emitted C artifact does
+not change). The NATIVE metric is **write-only**: `gen1` emits gen2 native (`item N/TOTAL`) past
+families 2-4 once they lower — the `gen2==gen3` **native** rebuild is NOT a gate here (gen2 native does
+not run until post-F9; migration `0106`/RM-C16). "Green" = the compiler's own corpus lowers natively
+with no reachable KNOWN-STOP in families 2-4, every KNOWN-WRONG is PASS or a named honest-stop (never a
+silent wrong value), and the C rebuild is byte-identical. Reseed-class: `fixpoint-rebuild` (rides R#2,
+F8/RT-L6 — pulled forward from M4 per D106, `native-lowering-cobertura-zero-libc-0.3.1.md` §4).
 
 ## Deps
 
-`NAT-N1` (`0113`) — the union/nullable family lands first. **Logical predecessor of `RM-C15`
-(`0105`)** — see the flagged INDEX dep edit.
+`NAT-N1` (`0113`) — the union/nullable family lands first. **Re-sequenced (D106, campaign §4):** pulled
+forward from M4 to run in the tail-§16 R#2 reseed (F8/RT-L6) — it does NOT wait on the memory milestone
+nor `RM-C15`/`0105`; the native lowering is WRITE-ONLY and rides the phase reseed.
 
 ## Done when
 
 Families 2-4 of the native-lowering subset have no reachable honest-stop on `src/`, the 21 KNOWN-WRONG
-are resolved (PASS or named stop), and the `gen2==gen3` native rebuild is byte-identical; remaining
-BLOCKED items are recorded against their blocking leg.
+are resolved (PASS or named stop), `gen1` emits gen2 native past families 2-4 (write-only), and the C
+`gen2.c==gen3.c` rebuild is byte-identical; remaining BLOCKED items are recorded against their blocking leg.

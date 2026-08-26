@@ -1,14 +1,15 @@
 ---
 seq: 0113
 crumb-id: NAT-N1
-milestone: M4
+milestone: M2
 gate: "[fixpoint]"
 reseed-class: "fixpoint-rebuild"
 deps: [NAT-A1]
 sources:
+  - "docs/design/native-lowering-cobertura-zero-libc-0.3.1.md:0-260"  # campaign map — pull-forward + write-only native gate
   - "docs/design/recon-native-n1n2-gaps-strategy.md:72-85"            # the family taxonomy (union/nullable = LARGEST)
-  - "src/lir/lower.tks:925"                                           # `<type>` has no single PrimKind, asked by <site>
-  - "src/lir/lower.tks:1164"                                          # comparing a tagged union to a non-null non-numeric member
+  - "src/lir/lower.tks:909"                                           # `<type>` has no single PrimKind, asked by <site>
+  - "src/lir/lower.tks:1141"                                          # comparing a tagged union to a non-null non-numeric member
   - "docs/design/backend-a1-lir-lowering.md:46-238"                  # lowering frontier
   - "docs/design/plano-mestre-0.3.1-implementacao.md:282"           # M4 NAT-A1 row (this crumb extends it)
 ---
@@ -16,8 +17,8 @@ sources:
 # 0113 · NAT-N1 — union / nullable native-lowering family (the largest honest-stop cluster)
 
 > Close the single LARGEST native-lowering honest-stop family: `T | null` / `str | error` and every
-> tagged-union shape that today raises "has no single PrimKind" (`lower.tks:925`) or "comparing a
-> tagged union to a non-null, non-numeric member is not yet lowered" (`lower.tks:1164`) in cast /
+> tagged-union shape that today raises "has no single PrimKind" (`lower.tks:909`) or "comparing a
+> tagged union to a non-null, non-numeric member is not yet lowered" (`lower.tks:1141`) in cast /
 > field / match-subject / comparison position.
 
 ## Goal
@@ -35,10 +36,10 @@ already types these unions.
 
 ## Where
 
-- `src/lir/lower.tks:925` — the `has no single PrimKind` honest-stop (`msg = ... asked by the <site>`).
+- `src/lir/lower.tks:909` — the `has no single PrimKind` honest-stop (`msg = ... asked by the <site>`).
   Its callers in cast/field/comparison must route a union operand to the new union-lowering path
   instead of asking for a single PrimKind.
-- `src/lir/lower.tks:1164` — `lower_union_compare` honest-stop: extend the tagged-union comparison to
+- `src/lir/lower.tks:1141` — `lower_union_compare` honest-stop: extend the tagged-union comparison to
   cover non-null, non-numeric members (compare tag first, then dispatch the member compare on the
   active arm).
 - `src/lir/lower.tks` — new arms: `lower_union_value` (materialize `{tag, payload}`), `lower_union_cast`
@@ -85,7 +86,7 @@ exp fn union_layout_of(arms: []checker::Type, table: checker::TypeTable): LUnion
    header) projects at its offset within the active arm's payload; a field NOT common to all arms is a
    checker error, never reached here.
 
-5. **Comparison (`lower.tks:1164` extension).** `lower_union_compare` compares `tag` first; on equal
+5. **Comparison (`lower.tks:1141` extension).** `lower_union_compare` compares `tag` first; on equal
    tags it dispatches the member comparison for the active arm (numeric → `ICmp*`; `str`/`[]T` →
    the existing runtime compare; nested union → recurse). This removes the "non-null, non-numeric
    member" honest-stop.
@@ -94,7 +95,7 @@ exp fn union_layout_of(arms: []checker::Type, table: checker::TypeTable): LUnion
    once, builds the per-arm test chain against arm ordinals, and binds each arm's pattern variable to
    the payload read at that arm's machine type — reusing NAT-A1's per-arm merge for the result.
 
-7. **Confirm the two stops are unreachable** by a checker-produced node: `lower.tks:925` and `:1164`
+7. **Confirm the two stops are unreachable** by a checker-produced node: `lower.tks:909` and `:1141`
    remain only as internal-invariant guards. A final review, plus the self-build reaching further.
 
 ## Rulings & laws
@@ -126,23 +127,27 @@ The self-build fixpoint exercises MOST of this (the compiler's own `src/` is den
 |---|---|---|
 | `native_union_str_error_match` | native `match` on a `str \| error` subject binds both arms and returns | `0` |
 | `native_nullable_compare` | native `x == null` on a `T \| null` lowers to a tag test (no payload read) | `0` |
-| `native_union_ordered_member` | native comparison of a tagged union whose active arm is a non-numeric member lowers (was `:1164`) | `0` |
+| `native_union_ordered_member` | native comparison of a tagged union whose active arm is a non-numeric member lowers (was `:1141`) | `0` |
 
 ## Gate
 
-`[fixpoint]` — build gen2 + scoped regression + `gen2==gen3` byte-identity (native-only lowering; the
-emitted C artifact does not change). "Green" = neither `lower.tks:925` nor `:1164` is reachable by a
-checker-produced node, the full `src/` union/nullable surface lowers to LIR, and the rebuild is
-byte-identical. Reseed-class: `fixpoint-rebuild`.
+`[fixpoint]` — build gen2 (C route) + scoped regression + **C `gen2.c==gen3.c` byte-identity**
+(native-only lowering; the emitted C artifact does not change). The NATIVE metric is **write-only**:
+`gen1` emits gen2 native (`item N/TOTAL`) further into the corpus than the union/nullable frontier once
+this family lowers — the `gen2==gen3` **native** rebuild is NOT a gate here (gen2 native does not run
+until post-F9; that migration is `0106`/RM-C16). "Green" = neither `lower.tks:909` nor `:1141` is
+reachable by a checker-produced node, the full `src/` union/nullable surface lowers to LIR, and the C
+rebuild is byte-identical. Reseed-class: `fixpoint-rebuild` (rides R#1, F7a — pulled forward from M4 per
+D106, `native-lowering-cobertura-zero-libc-0.3.1.md` §4).
 
 ## Deps
 
-`NAT-A1` — verbatim from 000-INDEX. **Logical predecessor of `RM-C15` (`0105`)**: the terminal
-per-unit `.o` cannot emit the compiler's own corpus natively until this family lowers. Flagged as a
-targeted dep edit to `0105`/`0106` in the INDEX (see gap report).
+`NAT-A1` — verbatim from 000-INDEX. **Re-sequenced (D106, campaign §4):** pulled forward from M4 to run
+in the tail-§16 R#1 reseed (F7a) — it does NOT wait on the memory milestone nor `RM-C15`/`0105`; the
+native lowering is WRITE-ONLY and rides the phase reseed.
 
 ## Done when
 
 `T | null`, `str | error` and every tagged-union cast / field / comparison / match-subject in `src/`
-lowers to LIR with no reachable "has no single PrimKind" / "tagged union comparison" honest-stop, and
-the `gen2==gen3` native rebuild is byte-identical.
+lowers to LIR with no reachable "has no single PrimKind" / "tagged union comparison" honest-stop, `gen1`
+emits gen2 native past this frontier (write-only), and the C `gen2.c==gen3.c` rebuild is byte-identical.

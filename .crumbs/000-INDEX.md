@@ -164,6 +164,22 @@ index gives the serial spine it walks.
 | 0110 | 0110-D1-T3-arena-elision-proper.md | D1-T3 | M5 | arena elision proper (no region where nothing allocates; forwarders / const returns) | [fixpoint] | fixpoint-rebuild | SM-A4,RM-C16 |
 | 0111 | 0111-D1-T4-literal-dedup.md | D1-T4 | M5 | static literal/folded-constant dedup (emit once + reference → smaller binary) | [fixpoint] | fixpoint-rebuild | RM-C16 |
 | 0112 | 0112-D1-T5-push-copy-mitigation.md | D1-T5 | M5 | push/copy-grow mitigation via known-size arrays + `with_cap` pre-capacity (levers already exist) | [fixpoint] | fixpoint-rebuild | COL-F2 |
+| 0113 | 0113-NAT-N1-union-nullable-native-lowering.md | NAT-N1 | M2 | union / nullable native-lowering family (largest honest-stop cluster); PULLED FORWARD from M4 (D106) — gate = write-only native emit + C `gen2.c==gen3.c` | [fixpoint] | fixpoint-rebuild | NAT-A1 |
+| 0114 | 0114-NAT-N2-fatptr-dispatch-match-operator-residual.md | NAT-N2 | M2 | fat-pointer dispatch/closure + match-pattern + operator residual + KNOWN-WRONG; PULLED FORWARD from M4 (D106) | [fixpoint] | fixpoint-rebuild | NAT-N1 |
+| 0115 | 0115-S10-SURF-concurrency-surface-teaching.md | S10-SURF | M1 | §10 concurrency SURFACE teaching (spawn / chan / await→Intent accept) | [dry] | (folds R1) | — |
+| 0116 | 0116-S10-RT-threads-channels-intent-runtime.md | S10-RT | M2 | §10 runtime: threads + channel transports + Intent + region-per-thread | [fixpoint] | fixpoint-rebuild | S10-SURF, S16-SYNC |
+| 0117 | 0117-D1-DI-arena-lifetime-binding.md | D1-DI | M5 | DI Part B: bind service lifetimes to arena regions (`svc_scope_expr` seam) | [fixpoint] | fixpoint-rebuild | S10-RT, RM-C16 |
+| 0118 | 0118-STD-ENC-encoding-catalog-tail.md | STD-ENC | M2 | encoding/serialization catalog tail (csv·toml·ini·yaml·protobuf·asn1·fixed) | [dry] | none | — |
+| 0119 | 0119-STD-FFI-ffi-dependent-stdlib.md | STD-FFI | M2 | FFI-dependent stdlib (crypto::rand·openssl·gpg·net·db·odbc·rpc) | [dry] | none | RT-L3, S16-SWEEP |
+| 0120 | 0120-SM-V1-visibility-enforcement-activation.md | SM-V1 | M2 | activate `exp`/`pub`/private visibility enforcement (Doc-2 §11) | [fixpoint] | fixpoint-rebuild | RM-C17 |
+| 0121 | 0121-ERR-FACTORY-error-factory-builtins.md | ERR-FACTORY | M2 | `error::new(msg)` and `error::join(a,b)` factory builtins | [fixpoint] | fixpoint-rebuild | SM-G4 |
+| 0122 | 0122-S16-SYSCALL-PORTABLE-host-portability.md | S16-SYSCALL-PORTABLE | M2 | gate syscall C helpers to `__linux__` + portable stub fallback | [fixpoint] | fixpoint-rebuild | RM-C17 |
+| 0123 | 0123-COL-F0c2-wrap-table-redesign.md | COL-F0c2 | M1 | wrap-refcount table root redesign (O(1) shared hash + CAS + chunk-chain) | [dry] | (folds R1) | COL-F0c, COL-F0d |
+| 0124 | 0124-RT-L4-ENV-envp-capture-zerolibc.md | RT-L4-ENV | M2 | Teko-managed `environ` overlay + `var`/`set_var`/`cwd`/`chdir` (zero C-runtime) | [RITUAL] | fixpoint-rebuild | S16-FS, RT-ENTRY |
+| 0125 | 0125-RT-ENTRY-start-abi-per-os.md | RT-ENTRY | M2 | process entry per-OS: argc/argv/envp from the sanctioned OS ABI (linker-resolved) | [RITUAL] | fixpoint-rebuild | S16-FS |
+| 0126 | 0126-NAT-B0-graceful-stop-capture.md | NAT-B0 | M2 | capture/exit/cancel as GRACEFUL-STOP (panic-flag + return, defers/drops per frame; ELIMINATES setjmp/longjmp, unblocks macOS) — supersedes D105 C-leg | [fixpoint] | fixpoint-rebuild | RT-L6 |
+| 0127 | 0127-NAT-B3-lowering-crash-invariant-sweep.md | NAT-B3 | M2 | class-(b) crash sweep: aggregate/fat sret return per-ABI (x86@933 `[]byte`, arm64@90 struct, win64@1145 slice) + false-`(internal)` variant-member fix + frontier `(internal)` sweep | [fixpoint] | fixpoint-rebuild | NAT-A1 |
+| 0128 | 0128-NAT-B4-campaign-emission-native-mirror.md | NAT-B4 | M2 | native mirror of the campaign's own C emissions (clone aarch64 · `_start`/`stack_ptr` per-OS · spawn-mmap glue) | [fixpoint] | fixpoint-rebuild | RT-ENTRY |
 
 ## Footnotes
 

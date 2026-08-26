@@ -136,8 +136,8 @@
 | 0110 | 0110-D1-T3-arena-elision-proper.md | D1-T3 | M5 | SM-A4,RM-C16 | [fixpoint] | needs-impl |
 | 0111 | 0111-D1-T4-literal-dedup.md | D1-T4 | M5 | RM-C16 | [fixpoint] | needs-impl |
 | 0112 | 0112-D1-T5-push-copy-mitigation.md | D1-T5 | M5 | COL-F2 | [fixpoint] | needs-impl |
-| 0113 | 0113-NAT-N1-union-nullable-native-lowering.md | NAT-N1 | M4 | NAT-A1 | [fixpoint] · GATED(D52) | gated:D52 |
-| 0114 | 0114-NAT-N2-fatptr-dispatch-match-operator-residual.md | NAT-N2 | M4 | NAT-N1 | [fixpoint] · GATED(D52) | gated:D52 |
+| 0113 | 0113-NAT-N1-union-nullable-native-lowering.md | NAT-N1 | M2 | NAT-A1 | [fixpoint] (write-only native + C fixpoint) | re-seq:tail-§16 R#1 (D106) |
+| 0114 | 0114-NAT-N2-fatptr-dispatch-match-operator-residual.md | NAT-N2 | M2 | NAT-N1 | [fixpoint] (write-only native + C fixpoint) | re-seq:tail-§16 R#2 (D106) |
 | 0115 | 0115-S10-SURF-concurrency-surface-teaching.md | S10-SURF | M2 | — | [dry] | verify-and-wire |
 | 0116 | 0116-S10-RT-threads-channels-intent-runtime.md | S10-RT | M2 | S10-SURF | [fixpoint] | verify-and-wire |
 | 0117 | 0117-D1-DI-arena-lifetime-binding.md | D1-DI | M5 | S10-RT, RM-C16 | [fixpoint] | needs-impl |
@@ -147,11 +147,33 @@
 | 0121 | 0121-ERR-FACTORY-error-factory-builtins.md | ERR-FACTORY | M2 | SM-G4 | [fixpoint] | on-branch:origin/cargo/0.3.1.0-error-factory |
 | 0122 | 0122-S16-SYSCALL-PORTABLE-host-portability.md | S16-SYSCALL-PORTABLE | M2 | RM-C17 | [fixpoint] | on-branch:origin/feat/s16-syscall-portable |
 | 0123 | 0123-COL-F0c2-wrap-table-redesign.md | COL-F0c2 | M1 | COL-F0c,COL-F0d | [dry] | gated:FORK-ABERTO-1 |
+| 0124 | 0124-RT-L4-ENV-envp-capture-zerolibc.md | RT-L4-ENV | M2 | S16-FS, RT-ENTRY | [RITUAL] | needs-impl |
+| 0125 | 0125-RT-ENTRY-start-abi-per-os.md | RT-ENTRY | M2 | S16-FS | [RITUAL] | needs-impl |
+| 0126 | 0126-NAT-B0-graceful-stop-capture.md | NAT-B0 | M2 | RT-L6 | [fixpoint] (write-only native + C fixpoint) | needs-impl:tail-§16 R#2 |
+| 0127 | 0127-NAT-B3-lowering-crash-invariant-sweep.md | NAT-B3 | M2 | NAT-A1 | [fixpoint] (write-only native + C fixpoint) | needs-impl:tail-§16 R#1/R#3 |
+| 0128 | 0128-NAT-B4-campaign-emission-native-mirror.md | NAT-B4 | M2 | RT-ENTRY | [fixpoint] (write-only native + C fixpoint) | needs-impl:tail-§16 R#1/R#4 |
+
+## Native lowering coverage re-sequencing (2026-08-26, D106 — `native-lowering-cobertura-zero-libc-0.3.1.md`)
+
+- **Métrica corrigida.** Aderência native = `gen1` emite gen2 native COMPLETO por-arch (`item N/TOTAL`),
+  write-only. O gate `[fixpoint] gen2==gen3` **native** dos crumbs 0113/0114 era INALCANÇÁVEL (gen2 native
+  nem existe); trocado para **write-only native emit + C `gen2.c==gen3.c`** do reseed de fase. O `gen2==gen3`
+  native só vira gate pós-F9 (`0106`/RM-C16).
+- **Aderência REAL (CI #1135, `4f488589`):** x86_64-glibc morre em `item 933/9378` `emit_elf_shdr`
+  (`objfile_elf.tks:398`/`:425`, HANG/OOM); arm64-musl CRASH em `item 90/9378` `debug_info_locals`
+  (`dwarf.tks:508`, stack-smash sret AAPCS64); windows para em `item 1145/9367` `asm_module_items`
+  (`assemble.tks:28`, sret Win64); macOS nem compila (`__builtin_longjmp` não suportado). Aderência <12%.
+- **Pull-forward (D106):** 0113/0114 saem de `gated:D52`/M4 e rodam nos reseeds do tail-§16 (R#1/F7a e
+  R#2/F8) — write-only, NÃO esperam o marco de memória nem RM-C15.
+- **Graceful-stop (dono 2026-08-26):** capture/exit/cancel viram controle de fluxo por flag+return
+  (0126), SUPERSEDE o setjmp/longjmp de D105/0064 — elimina o mac-blocker.
+- **Crumbs novos:** 0126 (graceful-stop capture) · 0127 (classe-b crash/sret + invariante-variante sweep) ·
+  0128 (espelho native das emissões da campanha: clone-aarch64, `_start`/`stack_ptr`, spawn-mmap).
 
 ## Gap Crumbs Status Summary (0113–0120)
 
 **Appended 2026-08-19 per owner decisions (D53):**
-- **0113 NAT-N1 / 0114 NAT-N2** — native lowering (union/nullable family + residual operators, 21 KNOWN-WRONG) — **GATED(D52)** pending memory stabilization (dry build ≤1.5 GB, fixpoint gen2==gen3, green tests).
+- **0113 NAT-N1 / 0114 NAT-N2** — native lowering (union/nullable family + residual operators, 21 KNOWN-WRONG) — **RE-SEQUENCED (2026-08-26, D106):** no longer GATED(D52); pulled forward to tail-§16 R#1/R#2 (write-only native + C fixpoint), superseding the memory-milestone gate. See the "Native lowering coverage re-sequencing" section above.
 - **0115 S10-SURF / 0116 S10-RT** — §10 concurrency surface + runtime (spawn/chan/journal/threads/ref-guard/sync) — ~70-85% landed (verify-and-wire mode). Await suspension model: **OPTION (c) stackful coroutines** (per `plano-s10-await-opcao-c-crumbs.md`, supersedes D2 "thread-per-await").
 - **0117 D1-DI** — DI Part B (arena-lifetime service binding) — **active, not deferred** (s7-di-removal branch archived).
 - **0118 STD-ENC** — encoding catalog (15 modules) — **verify-only** (all present and functional; no fresh impl).
@@ -181,10 +203,11 @@
 | partial | 0 |
 | in-progress | 1 (0024) |
 | on-branch | 2 (0121, 0122) |
-| needs-impl | 18 (0002–0005, 0008, 0030, 0108–0112, 0117, 0119) |
+| needs-impl | 20 (0002–0005, 0008, 0030, 0108–0112, 0117, 0119, 0124, 0125) |
 | planned:verify-at-exec | 73 (0034–0090, 0092–0107) |
-| gated:D52 | 3 (0006, 0113, 0114) |
+| gated:D52 | 1 (0006) |
+| re-seq:tail-§16 (D106, write-only native) | 5 (0113, 0114, 0126, 0127, 0128) |
 | gated:owner | 2 (0011, 0012) |
 | gated:FORK-ABERTO-1 | 1 (0123) |
 | deferred | 0 (doc/lint tracked separately) |
-| **TOTAL** | **123** |
+| **TOTAL** | **128** |
