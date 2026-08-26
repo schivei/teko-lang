@@ -806,6 +806,21 @@ fn cg_prog_of(p: checker::TProgram): CgProg {
     CgProg { items = p.items; ix = cg_index_of(p.items); cond_consts = checker::cond_const_names(p.items); uses_capture = uc; maypanic = cg_prog_maypanic(p.items, uc) }
 }
 
+fn cg_mode_is_test(mode: CgMode): bool {
+    match mode {
+        CgMode::TestPlain => true
+        CgMode::TestCov => true
+        CgMode::TestAnalyze => true
+        _ => false
+    }
+}
+
+fn cg_prog_maybe_force_capture(prog: CgProg, mode: CgMode): CgProg {
+    if !cg_mode_is_test(mode) { return prog }
+    if prog.uses_capture { return prog }
+    CgProg { items = prog.items; ix = prog.ix; cond_consts = prog.cond_consts; uses_capture = true; maypanic = cg_prog_maypanic(prog.items, true) }
+}
+
 fn cg_prog_bare(p: checker::TProgram): CgProg {
     var empty: CgNameTable = CgNameTable {
         mask = 0 to u64
@@ -9981,7 +9996,7 @@ fn tk_emit_c_body(prog0: checker::TProgram, mode: CgMode, buf: teko::io::FileStr
     cg_report_phase_rss("emit-start")
     var prog_ag = match checker::inline_aggregate_consts(prog0) { checker::TProgram as p => p; error as e => panic(e.message) }
     var _lr = cg_lift_lambdas(cg_prog_of(prog_ag))
-    var prog = cg_prog_of(_lr.prog)
+    var prog = cg_prog_maybe_force_capture(cg_prog_of(_lr.prog), mode)
     var cap_lams = _lr.lams
     var spawn_sites = _lr.spawns
     cg_report_phase_rss("after-lift")
@@ -10203,10 +10218,14 @@ fn emit_test_main_analyze(buf: teko::io::FileStream, prog: CgProg) {
 }
 
 fn emit_test_main_close(buf: teko::io::FileStream) {
-    buf.write("    tk_test_summary();\n    ")
+    buf.write("    ")
+    cb_fn_name(buf, "teko::runtime", "test_summary")
+    buf.write("();\n    ")
     cb_fn_name(buf, "teko::journal", "note_test_end")
     buf.write("();\n")
-    buf.write("    return tk_test_any_failed() ? 1 : 0;\n")
+    buf.write("    return ")
+    cb_fn_name(buf, "teko::runtime", "test_any_failed")
+    buf.write("() ? 1 : 0;\n")
 }
 
 fn cb_journal_tkstr_lit(buf: teko::io::FileStream, label: str) {
@@ -10231,7 +10250,9 @@ fn cb_journal_call_exited(buf: teko::io::FileStream, label: str, code_expr: str)
 }
 
 fn emit_test_call(buf: teko::io::FileStream, f: checker::TFunction, idx: u64, cov: bool) {
-    buf.write("    if (tk_test_shard_take()) {\n")
+    buf.write("    if (")
+    cb_fn_name(buf, "teko::test", "shard_take")
+    buf.write("()) {\n")
     buf.write("    "); cb_arena_sym(buf, CgArenaSym::ArenaPush); buf.write("();\n")
     emit_test_channel_open(buf, f)
     if cov { buf.write("    tk_cov_enter("); cb_u64_digits(buf, idx); buf.write(");\n") }
@@ -10243,20 +10264,35 @@ fn emit_test_call(buf: teko::io::FileStream, f: checker::TFunction, idx: u64, co
 
 fn emit_test_captured_call(buf: teko::io::FileStream, f: checker::TFunction) {
     var label = test_label_of(f)
-    buf.write("    { tk_test_outcome teko_journal_rv = tk_test_run(&")
+    var how = $"_thow{buf.gensym()}"
+    var code = $"_tcode{buf.gensym()}"
+    buf.write("    ")
+    cb_fn_name(buf, "teko::runtime", "capture_arm")
+    buf.write("();\n    ")
     cb_fn_name(buf, f.namespace, f.name, f.overload_suffix)
-    buf.write(");\n    if (teko_journal_rv.how == TK_TEST_OK) { ")
+    buf.write("();\n")
+    buf.write($"    {{ int32_t {how} = ")
+    cb_fn_name(buf, "teko::runtime", "test_collect")
+    buf.write("();\n")
+    buf.write($"    int32_t {code} = ")
+    cb_fn_name(buf, "teko::runtime", "test_collect_code")
+    buf.write("();\n")
+    buf.write($"    if ({how} == 0) {{ ")
     cb_journal_call1(buf, "note_test_ok", label)
-    buf.write("    } else if (teko_journal_rv.how == TK_TEST_EXITED) { ")
-    cb_journal_call_exited(buf, label, "teko_journal_rv.code")
+    buf.write($"    }} else if ({how} == 2) {{ ")
+    cb_journal_call_exited(buf, label, code)
     buf.write("    } else { ")
     cb_journal_call1(buf, "note_test_panicked", label)
-    buf.write("    }\n    tk_test_report(teko_journal_rv);\n    }\n")
+    buf.write("    }\n    ")
+    cb_fn_name(buf, "teko::runtime", "test_report")
+    buf.write($"({how}, {code});\n    }}\n")
 }
 
 fn emit_test_channel_open(buf: teko::io::FileStream, f: checker::TFunction) {
     var label = test_label_of(f)
-    buf.write("    tk_test_begin((tk_str){ (const tk_byte *)\"")
+    buf.write("    ")
+    cb_fn_name(buf, "teko::runtime", "test_begin")
+    buf.write("((tk_str){ (const tk_byte *)\"")
     cb_cstr_escaped(buf, label)
     buf.write("\", ")
     cb_u64_digits(buf, label.len)

@@ -35,39 +35,61 @@ fn rtio_write_all(fd: i64, s: str) {
     }
 }
 
-/** teko::runtime::write — write `s` to stdout verbatim (no newline) via raw SYS_write, unbuffered. */
-exp fn write(s: str) { rtio_write_all(1, s) }
+/** teko::runtime::write — write `s` to stdout, or into the running test's captured stdout when a test
+ * channel is open, via raw SYS_write when it reaches the OS. */
+exp fn write(s: str) {
+    if chan_open() { chan_append(HARNESS_OUT_HEAD, HARNESS_OUT_TAIL, s); return }
+    rtio_write_all(1, s)
+}
 
-/** teko::runtime::print — write `s` to stdout via raw SYS_write, unbuffered. */
-exp fn print(s: str) { rtio_write_all(1, s) }
+/** teko::runtime::print — write `s` to stdout, or into the running test's captured stdout when a test
+ * channel is open. */
+exp fn print(s: str) { write(s) }
 
-/** teko::runtime::println — write `s` then a newline to stdout via raw SYS_write, unbuffered. */
-exp fn println(s: str) { rtio_write_all(1, s); rtio_write_all(1, "\n") }
+/** teko::runtime::println — write `s` then a newline to stdout, or into the running test's captured
+ * stdout when a test channel is open. */
+exp fn println(s: str) { write(s); write("\n") }
 
-/** teko::runtime::ewrite — write `s` to stderr verbatim (no newline) via raw SYS_write, unbuffered. */
-exp fn ewrite(s: str) { rtio_write_all(2, s) }
+/** teko::runtime::ewrite — write `s` to stderr, or into the running test's captured stderr when a test
+ * channel is open, via raw SYS_write when it reaches the OS. */
+exp fn ewrite(s: str) {
+    if chan_open() { chan_append(HARNESS_ERR_HEAD, HARNESS_ERR_TAIL, s); return }
+    rtio_write_all(2, s)
+}
 
-/** teko::runtime::eprint — write `s` to stderr via raw SYS_write, unbuffered. */
-exp fn eprint(s: str) { rtio_write_all(2, s) }
+/** teko::runtime::eprint — write `s` to stderr, or into the running test's captured stderr when a test
+ * channel is open. */
+exp fn eprint(s: str) { ewrite(s) }
 
-/** teko::runtime::eprintln — write `s` then a newline to stderr via raw SYS_write, unbuffered. */
-exp fn eprintln(s: str) { rtio_write_all(2, s); rtio_write_all(2, "\n") }
+/** teko::runtime::eprintln — write `s` then a newline to stderr, or into the running test's captured
+ * stderr when a test channel is open. */
+exp fn eprintln(s: str) { ewrite(s); ewrite("\n") }
 
 /** teko::runtime::panic — when an enclosing `capture` frame is armed, mark `msg` pending and return so
  * each frame runs its defers/drops on the way out (the harness guard that keeps one failing case from
  * killing the suite); otherwise write "teko: deliberate panic: <msg>" to stderr and terminate with
  * status 134. */
 exp fn panic(msg: str) {
-    if teko::runtime::capture_depth() > 0 { teko::runtime::capture_deliver(msg); return }
+    if teko::runtime::capture_depth() > 0 {
+        teko::runtime::ctrl_set(HARNESS_CAP_KIND, HARNESS_KIND_PANIC)
+        teko::runtime::capture_deliver(msg)
+        return
+    }
     ewrite(teko::str::concat("teko: deliberate panic: ", msg, "\n"))
     teko::runtime::rt_exit(134)
 }
 
 /** teko::runtime::exit — under an armed `capture` frame, mark the termination pending and return so each
- * frame runs its defers/drops on the way out (the same graceful-stop path as `panic`, recovered as the
- * message "exit"); otherwise terminate the whole process with status `code`. */
+ * frame runs its defers/drops on the way out (the same graceful-stop path as `panic`, recovered by the
+ * harness as an EXITED outcome carrying `code`); otherwise terminate the whole process with status
+ * `code`. */
 exp fn exit(code: i64) {
-    if teko::runtime::capture_depth() > 0 { teko::runtime::capture_deliver("exit"); return }
+    if teko::runtime::capture_depth() > 0 {
+        teko::runtime::ctrl_set(HARNESS_CAP_KIND, HARNESS_KIND_EXIT)
+        teko::runtime::ctrl_set(HARNESS_CAP_CODE, code to u64)
+        teko::runtime::capture_deliver("exit")
+        return
+    }
     teko::runtime::rt_exit(code)
 }
 
@@ -145,4 +167,353 @@ fn cur_rss_impl(): u64 {
 /** teko::runtime::cur_rss — this process's current resident set size in bytes (0 when unavailable). */
 exp fn cur_rss(): u64 {
     cur_rss_impl()
+}
+
+const HARNESS_CHAN_OPEN: u64 = 34552
+
+const HARNESS_OUT_HEAD: u64 = 34560
+
+const HARNESS_OUT_TAIL: u64 = 34568
+
+const HARNESS_ERR_HEAD: u64 = 34576
+
+const HARNESS_ERR_TAIL: u64 = 34584
+
+const HARNESS_REGION: u64 = 34592
+
+const HARNESS_LABEL_PTR: u64 = 34600
+
+const HARNESS_LABEL_LEN: u64 = 34608
+
+const HARNESS_RAN: u64 = 34616
+
+const HARNESS_PASSED: u64 = 34624
+
+const HARNESS_FAILED: u64 = 34632
+
+const HARNESS_EXITED: u64 = 34640
+
+const HARNESS_SCEN_PTR: u64 = 34648
+
+const HARNESS_SCEN_LEN: u64 = 34656
+
+const HARNESS_CAP_KIND: u64 = 34696
+
+const HARNESS_CAP_CODE: u64 = 34704
+
+const HARNESS_KIND_PANIC: u64 = 1
+
+const HARNESS_KIND_EXIT: u64 = 2
+
+const HARNESS_HOW_OK: i32 = 0
+
+const HARNESS_HOW_PANICKED: i32 = 1
+
+const HARNESS_HOW_EXITED: i32 = 2
+
+const CHUNK_NEXT: u64 = 0
+
+const CHUNK_LEN: u64 = 8
+
+const CHUNK_DATA: u64 = 16
+
+const PANIC_MARKER: str = "teko: deliberate panic: "
+
+const OUT_PREFIX: str = "     out| "
+
+const ERR_PREFIX: str = "     err| "
+
+fn chan_open(): bool {
+    teko::runtime::ctrl_get(HARNESS_CHAN_OPEN) != 0
+}
+
+fn copy_str_to(dst: u64, s: str) {
+    if s.len == 0 { return }
+    var src = teko::sys::ptr_word(teko::mem::byte_ptr(bytes_of_str(s), 0)) to u64
+    _ = teko::runtime::rt_memcpy(dst, src, s.len)
+}
+
+fn str_from_addr(addr: u64, n: u64): str {
+    if n == 0 { return "" }
+    var xs: [n]byte = []
+    var i: u64 = 0
+    loop {
+        if i >= n { break }
+        xs[i] = teko::mem::load_u8(addr + i) to byte
+        i++
+    }
+    str(xs)
+}
+
+fn chan_region_ptr(): ptr {
+    teko::sys::word_ptr(teko::runtime::ctrl_get(HARNESS_REGION) to i64)
+}
+
+fn chan_alloc(n: u64): u64 {
+    var size = if n == 0 { 1 } else { n }
+    teko::sys::ptr_word(teko::runtime::region_alloc(chan_region_ptr(), size)) to u64
+}
+
+fn chan_region_reset() {
+    var old = teko::runtime::ctrl_get(HARNESS_REGION)
+    if old != 0 { teko::runtime::region_drop(teko::sys::word_ptr(old to i64)) }
+    var fresh = teko::runtime::region_new(teko::runtime::region_program())
+    teko::runtime::ctrl_set(HARNESS_REGION, teko::sys::ptr_word(fresh) to u64)
+}
+
+fn chan_append(head_field: u64, tail_field: u64, s: str) {
+    if s.len == 0 { return }
+    var node = chan_alloc(CHUNK_DATA + s.len)
+    teko::mem::store_u64(node + CHUNK_NEXT, 0)
+    teko::mem::store_u64(node + CHUNK_LEN, s.len)
+    copy_str_to(node + CHUNK_DATA, s)
+    var tail = teko::runtime::ctrl_get(tail_field)
+    if tail == 0 {
+        teko::runtime::ctrl_set(head_field, node)
+    } else {
+        teko::mem::store_u64(tail + CHUNK_NEXT, node)
+    }
+    teko::runtime::ctrl_set(tail_field, node)
+}
+
+fn chan_total(head_field: u64): u64 {
+    var total: u64 = 0
+    var node = teko::runtime::ctrl_get(head_field)
+    loop {
+        if node == 0 { break }
+        total = total + teko::mem::load_u64(node + CHUNK_LEN)
+        node = teko::mem::load_u64(node + CHUNK_NEXT)
+    }
+    total
+}
+
+fn sub_str(src: []byte, a: u64, b: u64): str {
+    if b <= a { return "" }
+    var xs: [b - a]byte = []
+    var i = a
+    var k: u64 = 0
+    loop {
+        if i >= b { break }
+        xs[k] = src[i]
+        k++
+        i++
+    }
+    str(xs)
+}
+
+fn emit_lines(content: []byte, prefix: str) {
+    var line_start: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= content.len { break }
+        if content[i] == b'\n' {
+            rtio_write_all(1, prefix)
+            rtio_write_all(1, sub_str(content, line_start, i))
+            rtio_write_all(1, "\n")
+            line_start = i + 1
+        }
+        i++
+    }
+    if line_start < content.len {
+        rtio_write_all(1, prefix)
+        rtio_write_all(1, sub_str(content, line_start, content.len))
+        rtio_write_all(1, "\n")
+    }
+}
+
+fn emit_prefixed(head_field: u64, prefix: str) {
+    var total = chan_total(head_field)
+    if total == 0 { return }
+    var content: [total]byte = []
+    var k: u64 = 0
+    var node = teko::runtime::ctrl_get(head_field)
+    loop {
+        if node == 0 { break }
+        var len = teko::mem::load_u64(node + CHUNK_LEN)
+        var i: u64 = 0
+        loop {
+            if i >= len { break }
+            content[k] = teko::mem::load_u8(node + CHUNK_DATA + i) to byte
+            k++
+            i++
+        }
+        node = teko::mem::load_u64(node + CHUNK_NEXT)
+    }
+    emit_lines(content, prefix)
+}
+
+fn chan_label(): str {
+    str_from_addr(teko::runtime::ctrl_get(HARNESS_LABEL_PTR), teko::runtime::ctrl_get(HARNESS_LABEL_LEN))
+}
+
+fn verdict_line(verdict: str) {
+    rtio_write_all(1, teko::str::concat("test ", chan_label(), " ... ", verdict, "\n"))
+}
+
+fn emit_body() {
+    emit_prefixed(HARNESS_OUT_HEAD, OUT_PREFIX)
+    emit_prefixed(HARNESS_ERR_HEAD, ERR_PREFIX)
+}
+
+fn test_close(verdict: str) {
+    if teko::runtime::ctrl_get(HARNESS_CHAN_OPEN) == 0 { return }
+    teko::runtime::ctrl_set(HARNESS_CHAN_OPEN, 0)
+    verdict_line(verdict)
+    emit_body()
+}
+
+/**
+ * test_begin — open the per-test capture channel: reset the chunk buffers, remember `label` for the
+ * verdict line, and clear the pending-outcome slots so a prior test's exit code cannot leak in.
+ *
+ * @param label  the test's qualified name, shown on its `test <label> ... <verdict>` line
+ * @since 0.3.1
+ */
+exp fn test_begin(label: str) {
+    chan_region_reset()
+    teko::runtime::ctrl_set(HARNESS_OUT_HEAD, 0)
+    teko::runtime::ctrl_set(HARNESS_OUT_TAIL, 0)
+    teko::runtime::ctrl_set(HARNESS_ERR_HEAD, 0)
+    teko::runtime::ctrl_set(HARNESS_ERR_TAIL, 0)
+    teko::runtime::ctrl_set(HARNESS_CAP_KIND, 0)
+    teko::runtime::ctrl_set(HARNESS_CAP_CODE, 0)
+    var dst = chan_alloc(if label.len == 0 { 1 } else { label.len })
+    copy_str_to(dst, label)
+    teko::runtime::ctrl_set(HARNESS_LABEL_PTR, dst)
+    teko::runtime::ctrl_set(HARNESS_LABEL_LEN, label.len)
+    teko::runtime::ctrl_set(HARNESS_CHAN_OPEN, 1)
+}
+
+/**
+ * test_collect — read the outcome of the test body that just ran under an armed `capture` frame,
+ * consume any pending panic, disarm the frame, and classify the result. A panicking body has its
+ * panic line appended to the captured stderr so the failure report shows it.
+ *
+ * @return  `0` when the body returned, `1` when it panicked, `2` when it called `exit`
+ * @since 0.3.1
+ */
+exp fn test_collect(): i32 {
+    if !teko::runtime::panicking() {
+        teko::runtime::capture_disarm()
+        return HARNESS_HOW_OK
+    }
+    var kind = teko::runtime::ctrl_get(HARNESS_CAP_KIND)
+    var msg = teko::runtime::take_panic()
+    teko::runtime::capture_disarm()
+    if kind == HARNESS_KIND_EXIT { return HARNESS_HOW_EXITED }
+    chan_append(HARNESS_ERR_HEAD, HARNESS_ERR_TAIL, teko::str::concat(PANIC_MARKER, msg, "\n"))
+    HARNESS_HOW_PANICKED
+}
+
+/**
+ * test_collect_code — the exit code recovered from a test body that left by calling `exit`.
+ *
+ * @return  the `exit` status the captured body passed, or 0 when it did not exit
+ * @since 0.3.1
+ */
+exp fn test_collect_code(): i32 {
+    teko::runtime::ctrl_get(HARNESS_CAP_CODE) to i32
+}
+
+/**
+ * test_report — tally one finished test and close its channel with the right verdict: `ok` when it
+ * passed, `FAILED` when it panicked, or `FAILED (exit <code>)` when it left by exiting.
+ *
+ * @param how   the outcome from `test_collect` (0 ok, 1 panicked, 2 exited)
+ * @param code  the exit status when `how` is 2, ignored otherwise
+ * @since 0.3.1
+ */
+exp fn test_report(how: i32, code: i32) {
+    teko::runtime::ctrl_set(HARNESS_RAN, teko::runtime::ctrl_get(HARNESS_RAN) + 1)
+    if how == HARNESS_HOW_OK {
+        teko::runtime::ctrl_set(HARNESS_PASSED, teko::runtime::ctrl_get(HARNESS_PASSED) + 1)
+        test_close("ok")
+        return
+    }
+    teko::runtime::ctrl_set(HARNESS_FAILED, teko::runtime::ctrl_get(HARNESS_FAILED) + 1)
+    if how != HARNESS_HOW_EXITED {
+        test_close("FAILED")
+        return
+    }
+    teko::runtime::ctrl_set(HARNESS_EXITED, teko::runtime::ctrl_get(HARNESS_EXITED) + 1)
+    test_close(teko::str::concat("FAILED (exit ", teko::str::i64_to_str(code to i64), ")"))
+}
+
+/**
+ * test_summary — print the one-line suite verdict counting how many tests ran, passed, failed and
+ * exited, matching the shape a `.tkr` oracle greps for.
+ *
+ * @since 0.3.1
+ */
+exp fn test_summary() {
+    var failed = teko::runtime::ctrl_get(HARNESS_FAILED)
+    var verdict = if failed != 0 { "FAILED" } else { "ok" }
+    rtio_write_all(1, teko::str::concat("test result: ", verdict, ". ",
+        teko::str::u64_to_str(teko::runtime::ctrl_get(HARNESS_RAN)), " ran; ",
+        teko::str::u64_to_str(teko::runtime::ctrl_get(HARNESS_PASSED)), " passed; ",
+        teko::str::u64_to_str(failed), " failed; ",
+        teko::str::u64_to_str(teko::runtime::ctrl_get(HARNESS_EXITED)), " exited\n"))
+}
+
+/**
+ * test_any_failed — whether any test in the suite failed, the process exit predicate the emitted test
+ * `main` returns on.
+ *
+ * @return  true when at least one test failed or exited
+ * @since 0.3.1
+ */
+exp fn test_any_failed(): bool {
+    teko::runtime::ctrl_get(HARNESS_FAILED) != 0
+}
+
+/**
+ * test_label — the qualified name of the test whose channel is currently open, for a driver that needs
+ * to derive a per-test scope token from it.
+ *
+ * @return  the open test's label, or the empty string when no channel is open
+ * @since 0.3.1
+ */
+exp fn test_label(): str {
+    if teko::runtime::ctrl_get(HARNESS_CHAN_OPEN) == 0 { return "" }
+    chan_label()
+}
+
+/**
+ * scenario_set — name the assertion case that follows, so a later failure or `scenario_ok` can quote
+ * it. The name is copied into program-resident storage that outlives the test's arena.
+ *
+ * @param name  the case name
+ * @since 0.3.1
+ */
+exp fn scenario_set(name: str) {
+    var dst = teko::sys::ptr_word(teko::runtime::region_alloc(teko::runtime::region_program(), if name.len == 0 { 1 } else { name.len })) to u64
+    copy_str_to(dst, name)
+    teko::runtime::ctrl_set(HARNESS_SCEN_PTR, dst)
+    teko::runtime::ctrl_set(HARNESS_SCEN_LEN, name.len)
+}
+
+/**
+ * scenario_prefix — the `"<name>: "` prefix a failed assertion opens with, or the empty string when no
+ * case is named.
+ *
+ * @return  the scenario prefix, or "" when no scenario is named
+ * @since 0.3.1
+ */
+exp fn scenario_prefix(): str {
+    var n = teko::runtime::ctrl_get(HARNESS_SCEN_LEN)
+    if n == 0 { return "" }
+    teko::str::concat(str_from_addr(teko::runtime::ctrl_get(HARNESS_SCEN_PTR), n), ": ")
+}
+
+/**
+ * scenario_ok — announce that the named case passed (`scenario <name>: ok`) into the test channel, then
+ * clear the name. Panics when no case is named.
+ *
+ * @since 0.3.1
+ */
+exp fn scenario_ok() {
+    var n = teko::runtime::ctrl_get(HARNESS_SCEN_LEN)
+    if n == 0 { panic("assertion failed: scenario_ok — no scenario is named (scenario_begin was never called)") }
+    println(teko::str::concat("scenario ", str_from_addr(teko::runtime::ctrl_get(HARNESS_SCEN_PTR), n), ": ok"))
+    teko::runtime::ctrl_set(HARNESS_SCEN_LEN, 0)
 }
