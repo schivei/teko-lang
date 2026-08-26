@@ -43,11 +43,13 @@ entre C e Teko é invisível ao build seco (frio) e a corretude é validada no S
   `buf.write(cb_fn_name_str("teko::runtime", "cov_line_at")); buf.write("(")`; idem `cov_branch_at`.
   (O sufixo `ULL,`/args segue igual — os sinks Teko recebem `u64`/`u32` na mesma ordem.)
 - `src/codegen/codegen.tks:7915` — `buf.write("    tk_cov_mark(")` → mangled `cov_mark`.
-- `src/codegen/codegen.tks:10192-10193` (main de programa cov), `:10225-10227` (`emit_test_main`),
-  `:10241` (`cov_branches_on(false); cov_lines_on(false)`), `:10359-10360` (`emit_test_call_analyze`:
-  `cov_reset/branch_reset/line_reset` + `cov_enter`), `:10362` (`cov_leave`) — trocar cada literal
-  `tk_cov_<x>(` pelo mangled correspondente. (Os DUMPs `tk_cov_dump`/`getenv` NÃO são tocados aqui —
-  ficam para o 0147.)
+- `src/codegen/codegen.tks` — TODOS os literais `tk_cov_<sink>(` emitidos nos `main`/test-call de teste:
+  `:10192-10193`, `:10225-10227`, `:10241`, `:10252-10253` (variante ProgramCov `branches_on/lines_on(true)`),
+  `:10307` (`cov_enter`), `:10309` (`cov_leave`), `:10359-10360` (`emit_test_call_analyze`
+  `reset/branch_reset/line_reset`+`enter`), `:10362` (`cov_leave`) — trocar cada literal `tk_cov_<x>(`
+  pelo mangled. **REGRA (não só as linhas listadas):** o implementer faz `grep "tk_cov_"` no codegen APÓS
+  as trocas e garante que só sobram `tk_cov_dump`/`__tk_cov_atexit_dump` (0147); qualquer outro sink =
+  reroteado. (Os DUMPs `tk_cov_dump`/`getenv`/`atexit` NÃO são tocados aqui — ficam para o 0147.)
 - `src/lir/lower.tks:1984-1997` — `builtin_cov_symbol`: cada `return "tk_cov_<x>"` → `return
   "teko_teko__runtime__cov_<x>"` (espelho native, escrito-não-rodado; padrão `builtin_int_to_str_symbol`
   na linha 2036 que já retorna `teko_teko__runtime__i64_to_str_len`).
