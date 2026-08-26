@@ -108,9 +108,7 @@ const CTRL_CAPTURE_MSG_PTR: u64 = 34528
 
 const CTRL_CAPTURE_MSG_LEN: u64 = 34536
 
-const CTRL_CAPTURE_STACK: u64 = 34544
-
-const CAPTURE_STACK_SLOTS: u64 = 32
+const CTRL_PANIC_PENDING: u64 = 34544
 
 const CTRL_BYTES: u64 = 34800
 
@@ -849,35 +847,34 @@ pub fn set_names_state_slot(addr: u64) {
 }
 
 /**
- * Reports how many `capture_panic` frames are currently active on this task, i.e. the depth of the
- * setjmp save-area stack the panic path consults to decide whether a panic can be caught.
+ * capture_depth — how many `capture` frames are currently armed on this task, tested by `panic` to
+ * decide whether a raised panic is caught here or terminates the process.
  *
- * @return  the current capture nesting depth (0 when no `capture_panic` frame is active)
+ * @return  the current capture nesting depth (0 when no `capture` frame is armed)
+ * @since 0.3.1
  */
-pub fn capture_depth(): u64 {
+exp fn capture_depth(): u64 {
     ar_ctrl_get(ar_control(), CTRL_CAPTURE_SP)
 }
 
 /**
- * Records the address of a `capture_panic` frame's `__builtin_setjmp` save-area, pushing it onto the
- * per-task capture stack so a later panic can non-locally unwind back to it. Called from the code the
- * `capture_panic` intrinsic emits, immediately after its `__builtin_setjmp` initialises the save-area.
+ * capture_arm — mark that a `capture` frame is now active on this task, so a panic raised inside its
+ * body sets the pending flag and returns cooperatively rather than terminating the process.
  *
- * @param jb_addr  the address of the frame's `void*[5]` save-area
+ * @since 0.3.1
  */
-pub fn capture_enter(jb_addr: u64) {
+exp fn capture_arm() {
     var ctrl = ar_control()
-    var sp = ar_ctrl_get(ctrl, CTRL_CAPTURE_SP)
-    if sp < CAPTURE_STACK_SLOTS { ar_store(ctrl + CTRL_CAPTURE_STACK + sp * WORD, jb_addr) }
-    ar_ctrl_set(ctrl, CTRL_CAPTURE_SP, sp + 1)
+    ar_ctrl_set(ctrl, CTRL_CAPTURE_SP, ar_ctrl_get(ctrl, CTRL_CAPTURE_SP) + 1)
 }
 
 /**
- * Pops the innermost `capture_panic` frame from the per-task capture stack when its body completed
- * without panicking. The panic path pops on its own before unwinding, so this is the balancing pop for
- * the non-panicking case only.
+ * capture_disarm — retire the innermost `capture` frame once its body returns, whether or not a panic
+ * was caught. Balances a prior `capture_arm`.
+ *
+ * @since 0.3.1
  */
-pub fn capture_leave() {
+exp fn capture_disarm() {
     var ctrl = ar_control()
     var sp = ar_ctrl_get(ctrl, CTRL_CAPTURE_SP)
     if sp == 0 { return }
@@ -885,38 +882,48 @@ pub fn capture_leave() {
 }
 
 /**
- * Catches a panic on the innermost active `capture_panic` frame: copies `msg` into the program region
- * (so it outlives the panicking body's arena), records it for `capture_msg`, pops the frame, and
- * non-locally unwinds to that frame's save-area via `__builtin_longjmp`. Diverges when a frame is
- * available; returns (so the caller aborts the process) only when no frame can catch the panic.
+ * capture_deliver — copy `msg` into the program region (so it outlives the panicking body's arena),
+ * record it for `take_panic`, and raise the per-task pending-panic flag. The raising frame then runs
+ * its own defers/drops and returns its sentinel; no stack is unwound.
  *
- * @param msg  the panic message to hand back to the catching `capture_panic` frame
+ * @param msg  the panic message the enclosing `capture` frame will recover
+ * @since 0.3.1
  */
-pub fn capture_deliver(msg: str) {
+exp fn capture_deliver(msg: str) {
     var ctrl = ar_control()
-    var sp = ar_ctrl_get(ctrl, CTRL_CAPTURE_SP)
-    if sp == 0 { return }
-    var ndepth = sp - 1
-    ar_ctrl_set(ctrl, CTRL_CAPTURE_SP, ndepth)
-    if ndepth >= CAPTURE_STACK_SLOTS { return }
     var need = if msg.len == 0 { 1 } else { msg.len }
     var dst = ar_region_alloc_w(ctrl, ar_region_program_w(ctrl), need)
     if msg.len > 0 { _ = teko::runtime::rt_memcpy(dst, teko::sys::ptr_word(teko::str::as_ptr(msg)) to u64, msg.len) }
     ar_ctrl_set(ctrl, CTRL_CAPTURE_MSG_PTR, dst)
     ar_ctrl_set(ctrl, CTRL_CAPTURE_MSG_LEN, msg.len)
-    var jb = ar_load(ctrl + CTRL_CAPTURE_STACK + ndepth * WORD)
-    teko::runtime::capture_longjmp(jb)
+    teko::runtime::capture_longjmp(0 to u64)
+}
+
+pub fn panic_raise() {
+    ar_ctrl_set(ar_control(), CTRL_PANIC_PENDING, 1)
 }
 
 /**
- * Returns the panic message stashed by the most recent `capture_deliver`, as an independent copy that
- * does not view the program-region storage. The `capture_panic` intrinsic reads this on its unwound
- * (caught-a-panic) path to produce its `str` result.
+ * panicking — whether a panic is pending on this task, tested after every call that may panic so the
+ * frame can run its defers/drops and return its sentinel before the panic reaches its `capture`.
+ *
+ * @return  true if a panic is pending and unconsumed on the current task
+ * @since 0.3.1
+ */
+exp fn panicking(): bool {
+    ar_ctrl_get(ar_control(), CTRL_PANIC_PENDING) != 0
+}
+
+/**
+ * take_panic — consume the pending panic on the current task: clear the flag and return an independent
+ * copy of the stashed message. Read by the `capture` frame on its recovery arm.
  *
  * @return  the caught panic message
+ * @since 0.3.1
  */
-pub fn capture_msg(): str {
+exp fn take_panic(): str {
     var ctrl = ar_control()
+    ar_ctrl_set(ctrl, CTRL_PANIC_PENDING, 0)
     var n = ar_ctrl_get(ctrl, CTRL_CAPTURE_MSG_LEN)
     if n == 0 { return " " }
     var bytes = teko::mem::bytes_from_ptr(teko::sys::word_ptr(ar_ctrl_get(ctrl, CTRL_CAPTURE_MSG_PTR) to i64), n)

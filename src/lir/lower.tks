@@ -1214,9 +1214,21 @@ fn lower_compare(ctx: LowerCtx, e: checker::TExpr, cmp: checker::TCompare): Lowe
     Lowered { ctx = cur; vreg = acc }
 }
 
+fn is_capture_panic_call(callee: parser::Path): bool {
+    var segs = callee.segments
+    if segs.len == 0 { return false }
+    if segs[segs.len - 1].name != "capture_panic" { return false }
+    segs.len == 1 || segs[0].name == "teko"
+}
+
+fn lower_capture_frame(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | error {
+    error { message = "native backend N1: `capture` frame graceful-stop (arm the per-task capture slot, invoke the body, then `if panicking() { take_panic } else { null }`, mirrored by a per-call `if panicking() { run frame defers/drops; return sentinel }` guard) not yet lowered (N2) — the C route emits this control flow directly; the native mirror is the same flag test + cleanup + return, no unwind primitive" }
+}
+
 fn lower_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | error {
     if c.is_closure_call { return lower_closure_call(ctx, e, c) }
     if c.is_iface_dispatch { return lower_iface_call(ctx, e, c) }
+    if c.call_ns.len == 0 && is_capture_panic_call(c.callee) { return lower_capture_frame(ctx, e, c) }
     if is_fat_type(e.type) { return lower_call_fat_as_scalar(ctx, e, c) }
     if c.call_ns.len == 0 && is_last_index_of_call(c.callee) { return lower_last_index_of_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_str_from_utf8_call(c.callee) { return lower_str_from_utf8_call(ctx, e, c) }

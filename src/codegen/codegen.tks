@@ -451,6 +451,210 @@ type CgProg = struct {
     items: []@TItem()
     ix: CgIndex
     cond_consts: []checker::ConstQName
+    uses_capture: bool
+    maypanic: CgNameTable
+}
+
+fn cg_prog_uses_capture(items: []@TItem()): bool {
+    var i: u64 = 0
+    loop {
+        if i >= items.len { break }
+        match items[i] {
+            checker::TFunction as f => if !f.is_extern && cg_block_calls_self(f.body, "", "capture_panic") { return true }
+            _ => { }
+        }
+        i++
+    }
+    false
+}
+
+fn cg_expr_collect_keys(e: checker::TExpr, acc: []str): []str {
+    match e.kind {
+        checker::TCall as c => {
+            var a = acc
+            if !c.is_closure_call && !c.is_iface_dispatch {
+                var last = cg_path_last(c.callee)
+                if last.len > 0 { a = [..a, cg_fn_key(c.call_ns, last)] }
+            }
+            var i = 0
+            loop { if i >= c.args.len { break }; a = cg_expr_collect_keys(c.args[i], a); i++ }
+            a
+        }
+        checker::TBinary as b => cg_expr_collect_keys(b.right, cg_expr_collect_keys(b.left, acc))
+        checker::TUnary as u => cg_expr_collect_keys(u.operand, acc)
+        checker::TCompare as c => {
+            var a = cg_expr_collect_keys(c.first, acc)
+            var i = 0
+            loop { if i >= c.rest.len { break }; a = cg_expr_collect_keys(c.rest[i].operand, a); i++ }
+            a
+        }
+        checker::TIfExpr as f => cg_block_collect_keys(f.else_blk, cg_block_collect_keys(f.then_blk, cg_expr_collect_keys(f.cond, acc)))
+        checker::TMatchExpr as m => {
+            var a = cg_expr_collect_keys(m.subject, acc)
+            var i = 0
+            loop {
+                if i >= m.arms.len { break }
+                if m.arms[i].has_when { a = cg_expr_collect_keys(m.arms[i].guard, a) }
+                a = cg_block_collect_keys(m.arms[i].body, a)
+                i++
+            }
+            a
+        }
+        checker::TCast as c => cg_expr_collect_keys(c.expr, acc)
+        checker::TFieldAccess as fa => cg_expr_collect_keys(fa.receiver, acc)
+        checker::TStructInit as si => {
+            var a = acc
+            var i = 0
+            loop { if i >= si.field_vals.len { break }; a = cg_expr_collect_keys(si.field_vals[i], a); i++ }
+            a
+        }
+        checker::TIndex as ix => cg_expr_collect_keys(ix.index, cg_expr_collect_keys(ix.receiver, acc))
+        checker::TInterp as ip => {
+            var a = acc
+            var i = 0
+            loop {
+                if i >= ip.holes.len { break }
+                a = cg_expr_collect_keys(ip.holes[i], a)
+                if i < ip.specs.len {
+                    match ip.specs[i].kind {
+                        checker::TFSpecDynamic as fd => {
+                            var k = 0
+                            loop { if k >= fd.args.len { break }; a = cg_expr_collect_keys(fd.args[k], a); k++ }
+                        }
+                        _ => { }
+                    }
+                }
+                i++
+            }
+            a
+        }
+        checker::TInExpr as ie => {
+            var a = cg_expr_collect_keys(ie.lhs, acc)
+            var i = 0
+            loop { if i >= ie.elems.len { break }; a = cg_expr_collect_keys(ie.elems[i], a); i++ }
+            a
+        }
+        checker::TArrayLit as al => {
+            var a = acc
+            var i = 0
+            loop { if i >= al.elements.len { break }; a = cg_expr_collect_keys(al.elements[i].expr, a); i++ }
+            a
+        }
+        checker::TLambda as lam => cg_block_collect_keys(lam.body, acc)
+        checker::TBlockExpr as blk => cg_block_collect_keys(blk.body, acc)
+        _ => acc
+    }
+}
+
+fn cg_block_collect_keys(stmts: []@TStatement(), acc: []str): []str {
+    var a = acc
+    var i = 0
+    loop {
+        if i >= stmts.len { break }
+        match stmts[i] {
+            checker::TBinding as b => a = cg_expr_collect_keys(b.value, a)
+            checker::TAssign as asg => {
+                a = cg_expr_collect_keys(asg.value, a)
+                if parser::assign_has_target(asg.kind) { a = cg_expr_collect_keys(asg.target, a) }
+            }
+            checker::TReturn as r => if r.has_value { a = cg_expr_collect_keys(r.value, a) }
+            checker::TLoopStmt as l => { a = cg_block_collect_keys(l.init, a); a = cg_block_collect_keys(l.body, a) }
+            checker::TExprStmt as es => a = cg_expr_collect_keys(es.expr, a)
+            checker::TDeferStmt as d => a = cg_block_collect_keys(d.body, a)
+            checker::TAdoptStmt as ad => a = cg_block_collect_keys(ad.body, a)
+            checker::TBlockStmt as bs => a = cg_block_collect_keys(bs.body, a)
+            _ => { }
+        }
+        i++
+    }
+    a
+}
+
+fn cg_prog_maypanic(items: []@TItem(), uses_capture: bool): CgNameTable {
+    var empty: CgNameTable = CgNameTable { mask = 0 to u64; hashes = []; keys = []; slots = [] }
+    if !uses_capture { return empty }
+    var nfn: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= items.len { break }
+        match items[i] { checker::TFunction as f => if !f.is_extern { nfn++ }; _ => { } }
+        i++
+    }
+    var keys: [nfn]str = []
+    var callees: [nfn][]str = []
+    var flag: [nfn]bool = []
+    var k: u64 = 0
+    i = 0
+    loop {
+        if i >= items.len { break }
+        match items[i] {
+            checker::TFunction as f => {
+                if !f.is_extern {
+                    keys[k] = cg_fn_key(f.namespace, f.name)
+                    callees[k] = cg_block_collect_keys(f.body, [])
+                    flag[k] = cg_block_calls_self(f.body, "teko::runtime", "panic")
+                    k++
+                }
+            }
+            _ => { }
+        }
+        i++
+    }
+    var index = cg_table_build(keys, cg_fn_index_slots(nfn))
+    var changed = true
+    loop {
+        if !changed { break }
+        changed = false
+        var f2: u64 = 0
+        loop {
+            if f2 >= nfn { break }
+            if !flag[f2] && cg_callees_hit_flag(callees[f2], index, flag) { flag[f2] = true; changed = true }
+            f2++
+        }
+    }
+    var nflag: u64 = 0
+    var c: u64 = 0
+    loop { if c >= nfn { break }; if flag[c] { nflag++ }; c++ }
+    var fkeys: [nflag]str = []
+    var fslots: [nflag]u64 = []
+    var w: u64 = 0
+    c = 0
+    loop {
+        if c >= nfn { break }
+        if flag[c] { fkeys[w] = keys[c]; fslots[w] = 1; w++ }
+        c++
+    }
+    cg_table_build(fkeys, fslots)
+}
+
+fn cg_fn_index_slots(n: u64): []u64 {
+    var out: [n]u64 = []
+    var i: u64 = 0
+    loop { if i >= n { break }; out[i] = i + 1; i++ }
+    out
+}
+
+fn cg_callees_hit_flag(callees: []str, index: CgNameTable, flag: []bool): bool {
+    var i: u64 = 0
+    loop {
+        if i >= callees.len { break }
+        var slot = cg_table_get(index, callees[i])
+        if slot != 0 && flag[slot - 1] { return true }
+        i++
+    }
+    false
+}
+
+fn cg_stmt_calls_maypanic(prog: CgProg, s: @TStatement()): bool {
+    if prog.maypanic.slots.len == 0 { return false }
+    var keys = cg_block_collect_keys([s], [])
+    var i: u64 = 0
+    loop {
+        if i >= keys.len { break }
+        if cg_table_get(prog.maypanic, keys[i]) != 0 { return true }
+        i++
+    }
+    false
 }
 
 fn cg_table_cap(entries: u64): u64 {
@@ -586,7 +790,8 @@ fn cg_same_last_chain(items_len: u64, last_table: CgNameTable, last_k: []str, la
 fn cg_fn_key(ns: str, name: str): str { teko::str::concat(ns, "::", name) }
 
 fn cg_prog_of(p: checker::TProgram): CgProg {
-    CgProg { items = p.items; ix = cg_index_of(p.items); cond_consts = checker::cond_const_names(p.items) }
+    var uc = cg_prog_uses_capture(p.items)
+    CgProg { items = p.items; ix = cg_index_of(p.items); cond_consts = checker::cond_const_names(p.items); uses_capture = uc; maypanic = cg_prog_maypanic(p.items, uc) }
 }
 
 fn cg_prog_bare(p: checker::TProgram): CgProg {
@@ -597,7 +802,8 @@ fn cg_prog_bare(p: checker::TProgram): CgProg {
         slots = []
     }
     var ix = CgIndex { exact = empty; last = empty; fns = empty; same_last_next = [] }
-    CgProg { items = p.items; ix = ix; cond_consts = checker::cond_const_names(p.items) }
+    var uc = cg_prog_uses_capture(p.items)
+    CgProg { items = p.items; ix = ix; cond_consts = checker::cond_const_names(p.items); uses_capture = uc; maypanic = cg_prog_maypanic(p.items, uc) }
 }
 
 fn cg_type_table(prog: CgProg): checker::TypeTable {
@@ -3214,42 +3420,36 @@ fn emit_capture_invoke(buf: teko::io::FileStream, prog: CgProg, body_type: @Type
 
 fn emit_capture_panic(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
     var g = buf.gensym()
-    var jb = $"_tkcap_jb{g}"
     var rv = $"_tkcap_r{g}"
     var bd = $"_tkcap_b{g}"
-    buf.write("({ void *")
-    buf.write(jb)
-    buf.write("[5]; tk_str ")
+    buf.write("({ tk_str ")
     buf.write(rv)
     buf.write("; tk_closure ")
     buf.write(bd)
     buf.write(" = ")
     emit_expr_ctx(buf, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx)
-    buf.write("; if (__builtin_setjmp(")
-    buf.write(jb)
-    buf.write(") == 0) { ")
-    cb_fn_name(buf, "teko::runtime", "capture_enter")
-    buf.write("((uint64_t)(uintptr_t)")
-    buf.write(jb)
-    buf.write("); ")
-    emit_capture_invoke(buf, prog, c.args[0].type, bd)
     buf.write("; ")
-    cb_fn_name(buf, "teko::runtime", "capture_leave")
+    cb_fn_name(buf, "teko::runtime", "capture_arm")
     buf.write("(); ")
-    buf.write(rv)
-    buf.write(" = (tk_str){0}; } else { ")
+    emit_capture_invoke(buf, prog, c.args[0].type, bd)
+    buf.write("; if (")
+    cb_fn_name(buf, "teko::runtime", "panicking")
+    buf.write("()) { ")
     buf.write(rv)
     buf.write(" = ")
-    cb_fn_name(buf, "teko::runtime", "capture_msg")
-    buf.write("(); } ")
+    cb_fn_name(buf, "teko::runtime", "take_panic")
+    buf.write("(); } else { ")
+    buf.write(rv)
+    buf.write(" = (tk_str){0}; } ")
+    cb_fn_name(buf, "teko::runtime", "capture_disarm")
+    buf.write("(); ")
     buf.write(rv)
     buf.write("; })")
 }
 
 fn emit_capture_longjmp(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
-    buf.write("__builtin_longjmp((void *)(uintptr_t)(")
-    emit_expr_ctx(buf, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx)
-    buf.write("), 1)")
+    cb_fn_name(buf, "teko::runtime", "panic_raise")
+    buf.write("()")
 }
 
 fn emit_iface_call(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
@@ -7099,6 +7299,47 @@ fn emit_cov_lines(buf: teko::io::FileStream, ctx: CovCtx, lines: []u32, indent: 
 }
 
 fn emit_stmt(buf: teko::io::FileStream, s: @TStatement(), in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, cur_block: []@TStatement(), cur_block_is_value: bool) {
+    emit_stmt_body(buf, s, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx, cur_block, cur_block_is_value)
+    if prog.uses_capture && cg_stmt_needs_panic_guard(s) && cg_stmt_calls_maypanic(prog, s) {
+        emit_panic_guard(buf, prog, in_main, ret_type, indent, frame, escaping, regions, fn_body, dctx)
+    }
+}
+
+fn cg_stmt_needs_panic_guard(s: @TStatement()): bool {
+    match s {
+        checker::TReturn => false
+        checker::TBreakStmt => false
+        checker::TContinueStmt => false
+        checker::TDeferStmt => false
+        _ => true
+    }
+}
+
+fn emit_panic_sentinel_return(buf: teko::io::FileStream, prog: CgProg, in_main: bool, ret_type: @Type(), indent: str) {
+    buf.write(indent)
+    if in_main { buf.write("return 0;\n"); return }
+    if is_void_type(ret_type) { buf.write("return;\n"); return }
+    buf.write("return (")
+    emit_type(buf, prog, ret_type)
+    buf.write("){0};\n")
+}
+
+fn emit_panic_guard(buf: teko::io::FileStream, prog: CgProg, in_main: bool, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
+    buf.write(indent)
+    buf.write("if (")
+    cb_fn_name(buf, "teko::runtime", "panicking")
+    buf.write("()) {\n")
+    var inner = cb_indent_deeper(indent)
+    emit_defers(buf, dctx.defers, 0, prog, inner, escaping, fn_body)
+    cg_drop_all_regions(buf, inner, regions)
+    cg_emit_bracket_unwind(buf, inner, dctx.bracket_depth)
+    cg_return_frame_exit(buf, inner, frame, dctx)
+    emit_panic_sentinel_return(buf, prog, in_main, ret_type, inner)
+    buf.write(indent)
+    buf.write("}\n")
+}
+
+fn emit_stmt_body(buf: teko::io::FileStream, s: @TStatement(), in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, cur_block: []@TStatement(), cur_block_is_value: bool) {
     emit_cov_lines(buf, dctx.cov, stmt_cov_lines(s), indent)
     if dctx.rr.len > 0 && dctx.bracket_depth == 0 && cg_conveys_escape_deep(escaping, s) {
         buf.write(indent); cb_arena_sym(buf, CgArenaSym::RegionEnter); buf.write("("); buf.write(dctx.rr); buf.write(");\n")
