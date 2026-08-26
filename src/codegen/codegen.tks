@@ -2401,14 +2401,6 @@ fn prim_int_tag(k: checker::PrimKind): str | error {
     error { message = "codegen: cast to a non-integer type not yet supported" }
 }
 
-fn prim_float_tag(k: checker::PrimKind): str | error {
-    match k {
-        checker::PrimKind::F32 => "f32"
-        checker::PrimKind::F64 => "f64"
-        _ => error { message = "codegen: not a float source type" }
-    }
-}
-
 pub fn cast_may_lose(src: checker::PrimKind, dst: checker::PrimKind): bool {
     !checker::cast_is_lossless_widen(src, dst)
 }
@@ -2795,6 +2787,29 @@ fn cg_is_bytes_str_reinterpret(dst: @Type(), src: @Type()): bool {
     (cg_is_str_type(src) && cg_is_byte_slice_type(dst)) || (cg_is_byte_slice_type(src) && cg_is_str_type(dst))
 }
 
+fn emit_cast_checked(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, inner: checker::TExpr, tmp_ctype: str, check_suffix: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
+    var tmp = $"_cv{buf.gensym()}"
+    buf.write("({ ")
+    buf.write(tmp_ctype)
+    buf.write(" ")
+    buf.write(tmp)
+    buf.write(" = (")
+    emit_expr_ctx(buf, prog, checker::Void { }, inner, escaping, regions, fn_body, dctx)
+    buf.write("); teko_teko__runtime__cast_check_")
+    buf.write(check_suffix)
+    buf.write("(")
+    buf.write(tmp)
+    buf.write(", ")
+    cb_u64_digits(buf, e.line to u64)
+    buf.write(", ")
+    cb_u64_digits(buf, e.col to u64)
+    buf.write("); (")
+    emit_type(buf, prog, e.type)
+    buf.write(")")
+    buf.write(tmp)
+    buf.write("; })")
+}
+
 fn emit_cast(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, c: checker::TCast, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
     var inner = c.expr
     if cg_is_bytes_str_reinterpret(e.type, inner.type) { return emit_bytes_str_reinterpret(buf, prog, e, inner, escaping, regions, fn_body, dctx) }
@@ -2822,49 +2837,15 @@ fn emit_cast(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, c: chec
 
     if prim_both && cg_prim_is_float(src) && cg_prim_is_int(dst) {
         var dtag = match prim_int_tag(dst) { str as t => t; error as err => panic(err.message) }
-        var fsrc = match prim_float_tag(src) { str as t => t; error as err => panic(err.message) }
-        if e.line != 0 {
-            buf.write("({ _tk_cast_loc_line = ")
-            cb_u64_digits(buf, e.line to u64)
-            buf.write("; _tk_cast_loc_col = ")
-            cb_u64_digits(buf, e.col to u64)
-            buf.write("; tk_to_")
-            buf.write(dtag)
-            buf.write("_from_")
-            buf.write(fsrc)
-            buf.write("(")
-            emit_expr_ctx(buf, prog, checker::Void { }, inner, escaping, regions, fn_body, dctx)
-            buf.write("); })")
-            return
-        }
-        buf.write("tk_to_")
-        buf.write(dtag)
-        buf.write("_from_")
-        buf.write(fsrc)
-        buf.write("(")
-        emit_expr_ctx(buf, prog, checker::Void { }, inner, escaping, regions, fn_body, dctx)
-        buf.write(")")
+        emit_cast_checked(buf, prog, e, inner, "double", teko::str::concat(dtag, "_from_f64"), escaping, regions, fn_body, dctx)
         return
     }
     if prim_both && cg_prim_is_int(src) && cg_prim_is_int(dst) && cast_may_lose(src, dst) {
         var dtag = match prim_int_tag(dst) { str as t => t; error as err => panic(err.message) }
-        if e.line != 0 {
-            buf.write("({ _tk_cast_loc_line = ")
-            cb_u64_digits(buf, e.line to u64)
-            buf.write("; _tk_cast_loc_col = ")
-            cb_u64_digits(buf, e.col to u64)
-            buf.write("; tk_to_")
-            buf.write(dtag)
-            if cg_prim_is_signed_int(src) { buf.write("_s(") } else { buf.write("_u(") }
-            emit_expr_ctx(buf, prog, checker::Void { }, inner, escaping, regions, fn_body, dctx)
-            buf.write("); })")
-            return
-        }
-        buf.write("tk_to_")
-        buf.write(dtag)
-        if cg_prim_is_signed_int(src) { buf.write("_s(") } else { buf.write("_u(") }
-        emit_expr_ctx(buf, prog, checker::Void { }, inner, escaping, regions, fn_body, dctx)
-        buf.write(")")
+        var signed_src = cg_prim_is_signed_int(src)
+        var tmp_ctype = if signed_src { "int64_t" } else { "uint64_t" }
+        var suffix = if signed_src { teko::str::concat(dtag, "_s") } else { teko::str::concat(dtag, "_u") }
+        emit_cast_checked(buf, prog, e, inner, tmp_ctype, suffix, escaping, regions, fn_body, dctx)
         return
     }
     buf.write("((")
@@ -3837,7 +3818,7 @@ fn emit_call_inner(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e
             else if last == "intern_reset" { builtin = cb_fn_name_str("teko::runtime", "intern_reset"); has_builtin = true }
             else if last == "panic_div0" { builtin = cb_fn_name_str("teko::runtime", "panic_div0"); has_builtin = true }
             else if last == "panic_oob" { builtin = cb_fn_name_str("teko::runtime", "panic_oob"); has_builtin = true }
-            else if last == "panic_cast" { builtin = "tk_panic_cast"; has_builtin = true }
+            else if last == "panic_cast" { builtin = cb_fn_name_str("teko::runtime", "panic_cast"); has_builtin = true }
             else if last == "panic_overflow" { builtin = cb_fn_name_str("teko::runtime", "panic_overflow"); has_builtin = true }
             else if last == "one_byte" { builtin = "tk_one_byte"; has_builtin = true }
             else if last == "str_concat" { builtin = cb_fn_name_str("teko::runtime", "str_concat"); has_builtin = true }
