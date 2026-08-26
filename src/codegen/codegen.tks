@@ -3377,6 +3377,28 @@ fn emit_str_from_c(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall, e
     buf.write($", {v}_n ? {v}_n : 1); for (uint64_t {v}_i = 0; {v}_i < {v}_n; {v}_i++) {{ {v}_buf[{v}_i] = {v}_p[{v}_i]; }} (tk_str){{ {v}_buf, {v}_n }}; }})")
 }
 
+fn emit_str_slice_start(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall, kind: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
+    if kind == "slice_to" { buf.write("0"); return }
+    emit_expr_ctx(buf, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx)
+}
+
+fn emit_str_slice_end(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall, kind: str, v: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
+    if kind == "slice_from" { buf.write($"{v}.len"); return }
+    if kind == "slice_to" { emit_expr_ctx(buf, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx); return }
+    emit_expr_ctx(buf, prog, checker::Void { }, c.args[2], escaping, regions, fn_body, dctx)
+}
+
+fn emit_str_slice(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall, kind: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
+    var v = $"_ssl{buf.gensym()}"
+    buf.write($"({{ tk_str {v} = (")
+    emit_expr_ctx(buf, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx)
+    buf.write($"); uint64_t {v}_a = (uint64_t)(")
+    emit_str_slice_start(buf, prog, c, kind, escaping, regions, fn_body, dctx)
+    buf.write($"); uint64_t {v}_b = (uint64_t)(")
+    emit_str_slice_end(buf, prog, c, kind, v, escaping, regions, fn_body, dctx)
+    buf.write($"); if ({v}_a > {v}_b || {v}_b > {v}.len) tk_panic(\"string slice out of range\"); (tk_str){{ {v}.ptr + {v}_a, (size_t)({v}_b - {v}_a) }}; }})")
+}
+
 fn emit_region_buf(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
     var v = $"_rb{buf.gensym()}"
     buf.write($"({{ tk_region *{v}_r = (tk_region *)(")
@@ -3536,16 +3558,11 @@ fn cg_call_is_user_declared(prog: CgProg, c: checker::TCall): bool {
     }
 }
 
-fn emit_concat_fold(buf: teko::io::FileStream, prog: CgProg, arg: checker::TExpr, str_region: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
-    var cs = $"_cs{buf.gensym()}"
-    var ci = $"_ci{buf.gensym()}"
-    var ca = $"_ca{buf.gensym()}"
-    var step = if str_region.len > 0 { $"{ca} = tk_str_concat_r({str_region}, {ca}, {cs}.ptr[{ci}]);" } else { $"{ca} = tk_str_concat({ca}, {cs}.ptr[{ci}]);" }
-    buf.write("({ ")
-    emit_type(buf, prog, arg.type)
-    buf.write($" {cs} = ")
+fn emit_concat_fold(buf: teko::io::FileStream, prog: CgProg, arg: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
+    buf.write(cb_fn_name_str("teko::runtime", "concat"))
+    buf.write("(")
     emit_expr_ctx(buf, prog, checker::Void { }, arg, escaping, regions, fn_body, dctx)
-    buf.write($"; tk_str {ca} = (tk_str){{0,0}}; for (uint64_t {ci} = 0; {ci} < {cs}.len; {ci}++) {{ {step} }} {ca}; }})")
+    buf.write(")")
 }
 
 fn cg_is_concat_bridge(prog: CgProg, c: checker::TCall): bool {
@@ -3706,7 +3723,7 @@ fn emit_call_inner(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e
             return
         }
         if addr && pe == "concat" && c.args.len == 1 {
-            return emit_concat_fold(buf, prog, c.args[0], "", escaping, regions, fn_body, dctx)
+            return emit_concat_fold(buf, prog, c.args[0], escaping, regions, fn_body, dctx)
         }
     }
     if p.segments.len >= 1 {
@@ -3730,6 +3747,9 @@ fn emit_call_inner(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e
             if l == "byte_ptr" { return emit_byte_ptr(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "as_cstr" { return emit_as_cstr(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "str_from_c" { return emit_str_from_c(buf, prog, c, escaping, regions, fn_body, dctx) }
+            if l == "slice" { return emit_str_slice(buf, prog, c, "slice", escaping, regions, fn_body, dctx) }
+            if l == "slice_to" { return emit_str_slice(buf, prog, c, "slice_to", escaping, regions, fn_body, dctx) }
+            if l == "slice_from" { return emit_str_slice(buf, prog, c, "slice_from", escaping, regions, fn_body, dctx) }
             if l == "region_buf" { return emit_region_buf(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "ptr_word" { return emit_ptr_word(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "word_ptr" { return emit_word_ptr(buf, prog, c, escaping, regions, fn_body, dctx) }
@@ -3806,12 +3826,9 @@ fn emit_call_inner(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e
             else if last == "panic_cast" { builtin = "tk_panic_cast"; has_builtin = true }
             else if last == "panic_overflow" { builtin = "tk_panic_overflow"; has_builtin = true }
             else if last == "one_byte" { builtin = "tk_one_byte"; has_builtin = true }
-            else if last == "str_concat" { builtin = "tk_str_concat"; has_builtin = true }
+            else if last == "str_concat" { builtin = cb_fn_name_str("teko::runtime", "str_concat"); has_builtin = true }
             else if last == "str_hash" { builtin = cb_fn_name_str("teko::runtime", "str_hash"); has_builtin = true }
             else if last == "str_compare" { builtin = cb_fn_name_str("teko::runtime", "str_compare"); has_builtin = true }
-            else if last == "slice" { builtin = "tk_str_slice"; has_builtin = true }
-            else if last == "slice_to" { builtin = "tk_str_slice_to"; has_builtin = true }
-            else if last == "slice_from" { builtin = "tk_str_slice_from"; has_builtin = true }
             else if last == "len" { builtin = cb_fn_name_str("teko::runtime", "str_len"); has_builtin = true }
             else if last == "bytes_of_str" { builtin = "tk_bytes_of_str"; has_builtin = true }
             else if last == "chars" { builtin = "tk_str_chars"; has_builtin = true }
@@ -4308,23 +4325,46 @@ fn fmt_family_takes_prec(fc_low: byte, is_flt: bool): bool {
     if fc_low == 110 && !is_flt { return false }
     true
 }
-fn emit_interp(buf: teko::io::FileStream, prog: CgProg, in: checker::TInterp, str_region: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
+fn emit_interp(buf: teko::io::FileStream, prog: CgProg, in: checker::TInterp, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
     var nsegs = in.pieces.len + in.holes.len
-    var concat_open = if str_region.len > 0 { teko::str::concat("tk_str_concat_r(", str_region, ", ") } else { "tk_str_concat(" }
-    var s = 1
-    loop { if s >= nsegs { break }; buf.write(concat_open); s++ }
-    var k = 0
+    var v = $"_is{buf.gensym()}"
+    buf.write($"({{ tk_str *{v} = (tk_str *)")
+    cb_arena_sym(buf, CgArenaSym::RegionAlloc)
+    buf.write("("); cb_arena_sym(buf, CgArenaSym::RegionCurrent); buf.write("(), ")
+    cb_u64_digits(buf, nsegs)
+    buf.write(" * sizeof(tk_str)); ")
+    var k: u64 = 0
     loop {
         if k >= nsegs { break }
-        if k >= 1 { buf.write(", ") }
-        if k % 2 == 0 {
-            emit_piece_lit(buf, in.pieces[k / 2])
-        } else {
-            var hi = k / 2
-            var h = in.holes[hi]
-            if hi < in.specs.len {
-                var sp = in.specs[hi]
-                match sp.kind {
+        buf.write($"{v}[")
+        cb_u64_digits(buf, k)
+        buf.write("] = ")
+        emit_interp_seg(buf, prog, in, k, escaping, regions, fn_body, dctx)
+        buf.write("; ")
+        k++
+    }
+    buf.write(cb_fn_name_str("teko::runtime", "concat"))
+    buf.write("((")
+    cg_slice_typename(buf, checker::Str { })
+    buf.write("){ .ptr = ")
+    buf.write(v)
+    buf.write(", .len = ")
+    cb_u64_digits(buf, nsegs)
+    buf.write(", .cap = ")
+    cb_u64_digits(buf, nsegs)
+    buf.write(" }); })")
+}
+
+fn emit_interp_seg(buf: teko::io::FileStream, prog: CgProg, in: checker::TInterp, k: u64, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
+    if k % 2 == 0 {
+        emit_piece_lit(buf, in.pieces[k / 2])
+        return
+    }
+    var hi = k / 2
+    var h = in.holes[hi]
+    if hi < in.specs.len {
+        var sp = in.specs[hi]
+        match sp.kind {
                     checker::TFSpecStatic as fs => {
                         var spec = fs.s
                         var fc0 = if spec.len > 0 { spec[0] } else { 102 to byte }
@@ -4408,46 +4448,42 @@ fn emit_interp(buf: teko::io::FileStream, prog: CgProg, in: checker::TInterp, st
                             _ => panic("codegen: interpolation hole type not supported")
                         }
                     }
-                }
+        }
+        return
+    }
+    match h.type {
+        checker::Str => { emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) }
+        checker::Char => { emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) }
+        checker::Prim as p => {
+            if p.kind == checker::PrimKind::Bool {
+                buf.write("(")
+                emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx)
+                buf.write(" ? (tk_str){ (const tk_byte *)\"true\", 4 } : (tk_str){ (const tk_byte *)\"false\", 5 })")
+            } else if p.kind == checker::PrimKind::F32 || p.kind == checker::PrimKind::F64 {
+                cg_rt_fmt_open(buf, "ftoa", "double")
+                emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx)
+                buf.write("))")
+            } else if cg_prim_is_signed_int(p.kind) {
+                buf.write("tk_i64_to_str((int64_t)(")
+                emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx)
+                buf.write("))")
             } else {
-                match h.type {
-                    checker::Str => { emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) }
-                    checker::Char => { emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) }
-                    checker::Prim as p => {
-                        if p.kind == checker::PrimKind::Bool {
-                            buf.write("(")
-                            emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx)
-                            buf.write(" ? (tk_str){ (const tk_byte *)\"true\", 4 } : (tk_str){ (const tk_byte *)\"false\", 5 })")
-                        } else if p.kind == checker::PrimKind::F32 || p.kind == checker::PrimKind::F64 {
-                            cg_rt_fmt_open(buf, "ftoa", "double")
-                            emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx)
-                            buf.write("))")
-                        } else if cg_prim_is_signed_int(p.kind) {
-                            buf.write("tk_i64_to_str((int64_t)(")
-                            emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx)
-                            buf.write("))")
-                        } else {
-                            buf.write("tk_u64_to_str((uint64_t)(")
-                            emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx)
-                            buf.write("))")
-                        }
-                    }
-                    checker::Byte => {
-                        buf.write("tk_u64_to_str((uint64_t)(")
-                        emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx)
-                        buf.write("))")
-                    }
-                    checker::Error => {
-                        buf.write("(")
-                        emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx)
-                        buf.write(").message")
-                    }
-                    _ => panic("codegen: interpolation hole type not supported")
-                }
+                buf.write("tk_u64_to_str((uint64_t)(")
+                emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx)
+                buf.write("))")
             }
         }
-        if k >= 1 { buf.write(")") }
-        k++
+        checker::Byte => {
+            buf.write("tk_u64_to_str((uint64_t)(")
+            emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx)
+            buf.write("))")
+        }
+        checker::Error => {
+            buf.write("(")
+            emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx)
+            buf.write(").message")
+        }
+        _ => panic("codegen: interpolation hole type not supported")
     }
 }
 
@@ -6474,7 +6510,7 @@ fn emit_expr_ctx(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e: 
             _ => panic("codegen: a bare `null` needs a known optional type from context (use it where a `T?` is expected)")
         }
         checker::TIndex as ix => emit_index(buf, prog, e, ix, escaping, regions, fn_body, dctx)
-        checker::TInterp as in => emit_interp(buf, prog, in, "", escaping, regions, fn_body, dctx)
+        checker::TInterp as in => emit_interp(buf, prog, in, escaping, regions, fn_body, dctx)
         checker::TInExpr as ie => emit_in(buf, prog, ie, escaping, regions, fn_body, dctx)
         checker::TArrayLit as a => emit_array_lit(buf, prog, e, a, escaping, regions, fn_body, dctx)
         checker::TSliceOfLen as s => emit_slice_of_len(buf, prog, e, s, escaping, regions, fn_body, dctx)
@@ -6968,16 +7004,15 @@ fn emit_binding(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), b: c
         }
     }
     if regions.len > 0 && cur_block.len > 0 && cg_binding_routes_str_to_local_region(prog, b) && checker::binding_is_block_local(escaping, fn_body, cur_block, cur_block_is_value, b) {
-        var str_region = regions[regions.len - 1].name
         match b.value.kind {
             checker::TInterp as bin => {
-                emit_interp(buf, prog, bin, str_region, escaping, regions, fn_body, dctx)
+                emit_interp(buf, prog, bin, escaping, regions, fn_body, dctx)
                 buf.write(";\n")
                 return
             }
             checker::TCall as bc => {
                 if cg_is_concat_bridge(prog, bc) {
-                    emit_concat_fold(buf, prog, bc.args[0], str_region, escaping, regions, fn_body, dctx)
+                    emit_concat_fold(buf, prog, bc.args[0], escaping, regions, fn_body, dctx)
                     buf.write(";\n")
                     return
                 }
