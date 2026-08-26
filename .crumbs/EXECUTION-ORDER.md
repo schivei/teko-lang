@@ -186,6 +186,15 @@
 - **0121 ERR-FACTORY** — `error::new(msg)` / `error::join(a,b)` factory builtins. M2, recovery from `origin/cargo/0.3.1.0-error-factory`.
 - **0122 S16-SYSCALL-PORTABLE** — gate raw-syscall C helpers to `__linux__` + portable `-ENOSYS` stubs. M2, recovery from `origin/feat/s16-syscall-portable`. C-route host portability, not native backend.
 
+## IO/Panic cluster → Teko (pre-F9, arquiteto 2026-08-26)
+
+Sequência ordenada, cada `[fixpoint]` / `fixpoint-rebuild`, reseed pelo implementer ao fim. Design em
+`docs/design/io-panic-cluster-expurgo-0.3.1.md`. Nenhum bloqueado; independentes entre si.
+
+- `0132-IO-R1` — residuais: `flush` no-op Teko, `exit_status` inline `& 0xFF`, remover dead-routing FS.
+- `0133-IO-R2` — stdin em Teko sobre syscall (`read_line`/`stdin_eof`/`read_stdin`/`read_stdin_n`); frio, valida pós-F9.
+- `0134-IO-R3` — família panic/trap emitida → `teko::runtime::panic_*` (reusa sink `panic`); quente, mede pico flat.
+
 ## Deferred (post-native-fixpoint-green)
 
 **Not active crumbs; recorded for reference:**
