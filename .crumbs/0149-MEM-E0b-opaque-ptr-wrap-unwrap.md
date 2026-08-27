@@ -2,157 +2,150 @@
 seq: 0149
 crumb-id: MEM-E0b
 milestone: M5
-gate: "[dry]"
+gate: "[fixpoint]"
 reseed-class: "fixpoint-rebuild"
-deps: []
+deps: [MEM-E0a]
 sources:
   - ".crumbs/0011-SM-G5-marshall-opaque-ptr.md"                       # the recovered design (opaque ptr + wrap/unwrap)
   - "docs/design/lang-evolution-0.3.1-memory-and-surface.md:259-357"  # §6 Marshall opaque ptr
   - "DECISION_LOG.md:1166"                                            # D130 addendum — ptr/uptr opaque + wrap/unwrap
-  - "DECISION_LOG.md:680"                                             # old C-vs-Teko fork on region_alloc_tagged (now dead)
-  - "src/checker/type.tks:51-54"                                      # Ptr still GENERIC (inner); Uptr atomic
-  - "src/runtime/arena.tks:965"                                       # region_lookup already exists
+  - "src/parser/ast.tks:208"                                          # NewtypeBody { backing; methods } — the capability EXISTS
+  - "src/parser/parse_decl.tks:998"                                   # newtype parse (landed)
+  - "src/checker/typer.tks:5256-5318"                                 # scalar-newtype checking (landed)
+  - "src/emit/header.tks:73-74"                                       # GAP: value-type newtype header export errors
+  - "src/runtime/teko_rt.tks:64-69"                                   # str_of_bytes copy-loop (the flagship target)
   - "src/checker/di.tks:373"                                          # di_type_id (the one project hash)
-  - "src/runtime/teko_rt.tks:64-69"                                   # str_of_bytes — TODAY a copy-loop, the flagship target
-  - "docs/design/arena-escopada-stream-expurgo-0.3.1.md"              # the str<->[]byte same-rep cast the expurgo wants
-  - "DECISION_LOG.md:1166"                                            # D130 addendum — wrap/unwrap = safe pointer marshalling
 ---
 
-# 0149 · MEM-E0b — opaque `ptr`/`uptr` + `__wrap`/`__unwrap` (recover 0011; flagship = zero-copy str↔[]byte)
+# 0149 · MEM-E0b — `ptr`/`uptr` as Teko surface NEWTYPES over `isize`/`usize` + `wrap`/`unwrap`
 
-> Recover the deliberated Marshall design (`0011-SM-G5`): make `ptr`/`uptr` OPAQUE atomic types with two
-> methods — `__wrap<T>()` (FALLIBLE, arena-liveness+type-tag checked, safe re-entry) and `__unwrap<T>()`
-> (INFALLIBLE raw exposure). **The flagship use TODAY (owner):** the ZERO-COPY `str`↔`[]byte` interop — a
-> `str` IS `{ptr,len}` of bytes, so a `str`'s payload and a `[]byte` share the SAME rep; wrap/unwrap is
-> the SAFE mechanism (arena-liveness checked) that reinterprets one as the other WITHOUT copying. This is
-> the implicit same-rep cast the expurgo already wants (CLAUDE.md), and it kills the copy-loop that
-> `str_of_bytes` is TODAY (`teko_rt.tks:64-69`). The tag rides the arena header; `ptr`/`uptr` stay bare
-> words. The old C-vs-Teko fork (DECISION_LOG:680) is DEAD — arena is 100% Teko (D128). NOT new design.
+> Owner (D130, deepened): `ptr`/`uptr` are NOT compiler-hardcoded primitives — they are SURFACE newtypes
+> defined in Teko's own base:
+> ```
+> global exp type ptr  = isize { … wrap/unwrap }
+> global exp type uptr = usize { … wrap/unwrap }
+> ```
+> a newtype over a scalar base (the arch-word `isize`/`usize`, E0a) WITH a method block, like Go's
+> `type X Underlying` + methods. **VERIFIED: the capability EXISTS** — `NewtypeBody { backing; methods }`
+> is parsed (`parse_decl.tks:998`), checked (`typer.tks:5256-5318`, explicit scalar-newtype path),
+> collected, borrow-checked, tkb-serialized. So this is USE, not a new capability — the ONE prerequisite
+> gap is header-export of a value-type newtype (`emit/header.tks:73` errors), lifted here because
+> `ptr`/`uptr` are `global exp`. The flagship consumer is the ZERO-COPY `str`↔`[]byte` interop. Recover
+> 0011's design (opaque, no arithmetic, tag layer); the surface is the newtype, not `PrimKind`.
 
 ## Goal
 
-Replace the generic `Ptr<T>` family with a single OPAQUE non-generic `ptr`/`uptr`, plus the CANONICAL
-pair (owner, VERBATIM) on both families: **`ptr::unwrap<T>(ref T): ptr`** (STATIC — typed-ref → opaque
-pointer) and **`ptr.wrap<T>(): T`** (INSTANCE — opaque pointer → typed value). These are the DIRECT
-same-base conversion — zero-copy, zero-cast, no extra computation. The opaque pointer is STRUCTURALLY
-incapable of arithmetic (no element width) → kills `p+n`/`p[n]` by construction. The tag lives in the ARENA ALLOCATION HEADER (a `u64` header slot),
-not the pointer word — `ptr`/`uptr` remain bare machine words. **The concrete flagship consumer:** a
-`str` is `{ptr,len}` of bytes and a `[]byte` is `{ptr,len}` of bytes — SAME rep. So `str`→`[]byte` and
-`[]byte`→`str` (and an `[]str` payload viewed as its constituent bytes) are IDENTITY reinterprets, ZERO
-copy — but doing them raw could hand back a dangling slice; wrap/unwrap makes it SAFE by checking the
-address is still in a LIVE arena region. The checker accepts the same-rep `str`↔`[]byte` cast as implicit
-(the expurgo's ask), lowered through the identity reinterpret, with wrap/unwrap the safe general
-primitive under it (and for FFI / opaque↔typed). This eliminates the `str_of_bytes` copy-loop
-(`teko_rt.tks:64-69`) — it becomes an identity reinterpret. INERT/byte-identical until adopted; the FFI
-+ str/byte migration is the reball (`0091 SM-S4` / `MEM-W6`). **State (verified):** `type.tks:51 Ptr =
-struct { inner }` is STILL generic — this crumb makes it atomic; `Uptr` (`:54`) atomic; `region_lookup`
-(`arena.tks:965`), `di_type_id` (`di.tks:373`), `str_of_bytes`/`bytes_of_str` (`teko_rt.tks`) exist.
+Define `ptr`/`uptr` as `global exp` newtypes over `isize`/`usize` in the language base (a prelude-injected
+module), RETIRING the hardcoded `PrimKind::Ptr`/`Uptr` and the generic `Ptr{inner}` as the USER surface —
+the machine representation IS the backing arch-word, so lowering flows through the backing (byte-preserving
+on 64-bit: `ptr`/`uptr` == the word). Opacity comes from the newtype being NOMINAL over the word with NO
+arithmetic operators declared (so `p+n`/`p[n]` do not type-check — no element width). The two CANONICAL
+methods (owner, VERBATIM) live on the newtype, identical on both `ptr` and `uptr`:
+
+- **`ptr::unwrap<T>(ref T): ptr`** — STATIC: `ref T` → the opaque `ptr` of that reference.
+- **`ptr.wrap<T>(): T`** — INSTANCE: the opaque `ptr` → the `T` at it (reinterpret).
+
+These are the DIRECT same-base conversion — zero-copy, zero-cast, no extra computation. **Flagship:**
+`[]str` and `[]byte` share the `{ptr,len}`-of-bytes base, so `ptr::unwrap<[]str>(ref xs).wrap<[]byte>()`
+yields `[]byte` with zero copy — the implicit same-rep cast the expurgo wants (CLAUDE.md), which KILLS the
+`str_of_bytes` copy-loop (`teko_rt.tks:64-69`). Byte-preserving on 64-bit → `[fixpoint]`; the mass
+migration of raw `u64`/`i64` pointers → the newtype is the reball (`0091 SM-S4` / `MEM-W6`).
 
 ## Where
 
-- `src/checker/type.tks:51` — `Ptr` becomes ATOMIC (remove `inner`); `Uptr` unchanged; keep `:177`
-  `Uptr` same-kind-only equality; add the same for the atomic `Ptr`.
-- `src/checker/resolve.tks` — delete the `unsafe_carrying_at` `Ptr`-recurses-into-inner arm (an opaque
-  `ptr` carries no pointee). Reject `p+n`/`p[n]` with "opaque pointer has no arithmetic".
-- `src/checker/scope.tks` — the CANONICAL methods (owner, VERBATIM — do NOT invent a variation), for
-  BOTH `ptr` and `uptr`, `T` a REQUIRED explicit type argument:
-  - **`ptr::unwrap<T>(ref T): ptr`** — STATIC: takes a `ref T`, returns the opaque `ptr` of that
-    reference (typed-ref → opaque pointer).
-  - **`ptr.wrap<T>(): T`** — INSTANCE (on a `ptr` value): returns the `T` at that pointer (opaque pointer
-    → typed value, reinterpret).
-  - identical pair on `uptr`. This is the DIRECT same-base conversion — zero-copy, zero-cast, no extra
-    computation (`[]str` and `[]byte` share the `{ptr,len}`-of-bytes base → `unwrap` a `ref []str` to a
-    `ptr`, then `.wrap<[]byte>()` yields `[]byte`).
-- `src/lir/lower.tks` — `wrap<T>` and `unwrap<T>` lower to a BARE reinterpret (zero instructions beyond
-  the type change) — the same-base direct conversion. The OPTIONAL general-FFI checked re-entry (0011's
-  arena-liveness+tag, for foreign/dead-arena addresses) stays available via `region_lookup`/the header
-  tag, but the canonical same-base `wrap`/`unwrap` is direct and infallible.
-- `src/runtime/arena.tks` — ADDITIVE `region_alloc_tagged(r, n, tag): ptr` (Teko — the arena is Teko,
-  D128): the tag is a `u64` header slot alongside the existing `ar_region_alloc_w`. Inert until read.
-- `src/checker/di.tks:373` — REUSE `di_type_id` verbatim for `type_tag` (ONE hash project-wide).
-- `src/checker/typer.tks` — accept the same-rep `str`↔`[]byte` cast as IMPLICIT (identity reinterpret,
-  no copy) — the flagship; wrap/unwrap is the safe primitive beneath it.
-- `src/runtime/teko_rt.tks:64-69` — `str_of_bytes` (and `bytes_of_str`) become IDENTITY reinterprets
-  (delete the copy-loop) once the same-rep cast lands (adopted in the reball, not here — kept inert).
+- `src/emit/header.tks:73-74` — LIFT the "exporting a value-type newtype in the header is not yet
+  supported" error: emit the scalar-newtype (backing + method signatures) to the `.tkh` (the ONE
+  prerequisite — `ptr`/`uptr` are `global exp`, must reach the header).
+- a language-base module (prelude-injected, e.g. `src/sys/` or `src/runtime/`) — DEFINE
+  `global exp type ptr = isize { … }` and `global exp type uptr = usize { … }` with the two methods.
+- `src/checker/type.tks:51-54` — retire the user-facing `PrimKind::Ptr`/`Uptr` surface (the generic
+  `Ptr{inner}` goes; the machine-word backing is `isize`/`usize`). Keep an internal lowering target only
+  if the backend needs one; the newtype lowers via its backing.
+- `src/checker/scope.tks`/`src/lir/lower.tks` — `wrap`/`unwrap` as the newtype's methods; lower to a bare
+  reinterpret (zero instructions beyond the type change).
+- `src/checker/typer.tks` — accept the same-rep `str`↔`[]byte` cast as IMPLICIT (identity reinterpret).
+- `src/runtime/teko_rt.tks:64-69` — `str_of_bytes`/`bytes_of_str` become identity reinterprets (adopted
+  in the reball, kept inert here).
+- `src/checker/di.tks:373` — REUSE `di_type_id` for the OPTIONAL FFI-checked tag layer (one hash).
 
 ## How
 
-1. Make `ptr`/`uptr` atomic + opaque; delete the recurse-into-inner arm; the monomorph surface shrinks
-   (no `Ptr<T>` instantiations). Confirm arithmetic is rejected structurally.
-2. Add the tag to the arena header via `region_alloc_tagged` (Teko); `ptr`/`uptr` stay bare words.
-3. Add the methods (`T` explicit) — the CANONICAL owner signatures, VERBATIM, on both `ptr` and `uptr`:
+1. Lift the header-export gap for value-type newtypes (`header.tks:73`).
+2. Define the `ptr`/`uptr` newtypes over `isize`/`usize` with the two canonical methods:
 
 ```teko
 /**
- * unwrap — STATIC method on `ptr` (`ptr::unwrap<T>(ref T): ptr`): take a reference to a `T` and return
- * the OPAQUE pointer of that reference (typed-ref → opaque pointer). The OUT half of the direct
- * same-base conversion: hand a `ref []str` to get its opaque `ptr`, then `.wrap<[]byte>()` reinterprets
- * it as `[]byte` — zero copy, zero cast (`[]str` and `[]byte` share the `{ptr,len}`-of-bytes base). An
- * identical static method exists on `uptr`.
+ * unwrap — STATIC method on the `ptr` newtype (`ptr::unwrap<T>(ref T): ptr`): take a reference to a `T`
+ * and return the OPAQUE pointer of that reference (typed-ref → opaque pointer). The OUT half of the
+ * direct same-base conversion — hand a `ref []str` to get its opaque `ptr`, then `.wrap<[]byte>()`
+ * reinterprets it as `[]byte`, zero copy, zero cast. An identical static method lives on `uptr`.
  *
  * @param r  a reference to the typed value whose address is taken
  * @return   the opaque pointer of `r`
  * @since 0.3.1
  */
-fn unwrap<T>(r: ref T): ptr
+static fn unwrap<T>(r: ref T): ptr
 
 /**
  * wrap — INSTANCE method on a `ptr` value (`p.wrap<T>(): T`): return the `T` at that pointer — reinterpret
- * the opaque pointer AS a `T` (opaque pointer → typed value). The IN half of the direct same-base
- * conversion, zero-copy zero-cast, no extra computation (the value at the address is viewed as `T` when
- * `T` shares the pointee's base representation). An identical instance method exists on `uptr`.
+ * the opaque pointer AS a `T`. The IN half of the direct same-base conversion, zero-copy zero-cast, no
+ * extra computation (sound when `T` shares the pointee's base representation). Identical on `uptr`.
  *
  * @return  the `T` value at this opaque pointer
  * @since 0.3.1
  */
-fn wrap<T>(self: ptr): T
+fn wrap<T>(): T
 ```
 
-4. Lower them to a bare reinterpret (zero instructions beyond the type change). The opaque `ptr` forbids
-   arithmetic, and `wrap`/`unwrap` only bridge same-base types — the safety is compile-time (opaque + no
-   arithmetic + same-base), not a runtime tag read on the canonical path. (0011's tag/arena-liveness
-   remains the OPTIONAL checked layer for foreign/dead-arena FFI addresses, via `region_lookup`.)
-5. Service seam (§6.1a): user code CANNOT `__wrap`/`__unwrap` a service (the SM-G6 service-escape rule
-   already blocks a service reaching a Marshall operand — no new mechanism).
-6. Confirm byte-neutral: removing generic `Ptr<T>` changes bytes only for source that USES generic
-   pointers; the tag path is inert until a `__wrap` reads it; `src/` FFI still uses raw until the reball.
+3. Retire the hardcoded `PrimKind::Ptr`/`Uptr` user surface; the name `ptr`/`uptr` resolves to the
+   newtype; lowering flows through the backing arch-word (byte-preserving on 64-bit).
+4. Lower `wrap`/`unwrap` to a bare reinterpret; the opaque newtype forbids arithmetic; `wrap`/`unwrap`
+   bridge same-base types (compile-time safety). The 0011 arena-liveness+tag stays as the OPTIONAL
+   FFI-checked layer (foreign/dead-arena) via `region_lookup`/`di_type_id`.
+5. Accept `str`↔`[]byte` as an implicit same-rep cast; keep `str_of_bytes` adoption for the reball.
 
 ## Rulings & laws
 
-- **Teko-only + arena-is-Teko (D128):** the tag twin `region_alloc_tagged` lands in `arena.tks` (Teko) —
-  the old FORK "C-vs-Teko for `tk_region_alloc_tagged`" (DECISION_LOG:680) is RESOLVED (most-recent-wins):
-  NOT a `teko_rt.c` patch.
-- **Safe-by-arena, not by assertion (§6.1):** `__wrap`'s three checks surface `null`/`error`, never UB,
-  never an uncatchable panic — so `__wrap` needs no `unsafe`.
-- **ONE hash project-wide:** `type_tag` reuses `di_type_id` (`di.tks:373`).
-- **Byte-preserving until adopted (§9.1):** inert; does NOT drive the reseed alone — rides the reball.
+- **Teko-only, newtype-in-the-base:** `ptr`/`uptr` are `global exp` Teko newtypes over `isize`/`usize`,
+  NOT `PrimKind` — the capability (`NewtypeBody`) is landed; only header-export needed lifting.
+- **Recover 0011 signatures VERBATIM:** the two canonical methods; do NOT invent a variation.
+- **Opacity = nominal newtype + no arithmetic operators** (structural, not a keyword); same-base
+  `wrap`/`unwrap` is compile-time-safe; the tag layer is optional for FFI.
+- **`global` law (D129):** `global` on a TYPE decl (`global exp type`) is the module-type form the owner
+  specified — NOT a `global var` (which stays forbidden).
+- **Byte-preserving on 64-bit (§7b.5):** the newtype lowers as its arch-word backing → `gen2==gen3`.
+- **arena-is-Teko (D128):** the optional tag twin `region_alloc_tagged` lands in `arena.tks` (Teko) — the
+  old C-vs-Teko fork (DECISION_LOG:680) is DEAD.
 - **W15 full Javadoc; no `//`.** **Safety:** never `teko test .`; subshell `ulimit -v 4718592`.
 
 ## Fixtures
 
-The self-build does not yet call `__wrap`/`__unwrap` (FFI migrates in the reball) — isolated oracles per
-dynamic outcome (rejection oracle allowed):
+Isolated oracles (a rejection oracle allowed; the mass reball is later):
 
 | fixture | asserts | expected |
 |---|---|---|
-| `marshall_unwrap_wrap_roundtrip` | `ptr::unwrap<T>(ref x)` then `.wrap<T>()` yields the original value; the ptr is the SAME address (no copy) | 0 |
-| `marshall_str_bytes_zerocopy` | `ptr::unwrap<[]str>(ref xs).wrap<[]byte>()` shares the SAME base ptr (zero copy, zero cast) — the flagship | 0 |
+| `newtype_scalar_methods` | `type X = isize { fn m(): i64 }` type-checks + a method call works (the base capability) | 0 |
+| `newtype_header_export` | a `global exp` scalar newtype reaches the `.tkh` (the lifted gap) | 0 |
+| `marshall_unwrap_wrap_roundtrip` | `ptr::unwrap<T>(ref x)` then `.wrap<T>()` yields the original; SAME address (no copy) | 0 |
+| `marshall_str_bytes_zerocopy` | `ptr::unwrap<[]str>(ref xs).wrap<[]byte>()` shares the SAME base ptr — the flagship | 0 |
 | `marshall_uptr_wrap_unwrap` | the identical pair works on `uptr` | 0 |
-| `opaque_ptr_no_arithmetic` | `p + 1` / `p[0]` on an opaque `ptr` rejected | EXPECT_COMPILE_FAIL |
+| `opaque_ptr_no_arithmetic` | `p + 1` / `p[0]` on `ptr` rejected (no arithmetic operators) | EXPECT_COMPILE_FAIL |
 
 ## Gate
 
-`[dry]` — compile + the six oracles + fixpoint (byte-identical; tag path inert). "Green" = `ptr`/`uptr`
-atomic+opaque, `__wrap`/`__unwrap` type and lower, the four dynamic wrap outcomes correct, arithmetic
-rejected, `[dry]` byte-identical. Reseed-class: `fixpoint-rebuild` (folds into RESEED-1 of `MEM-E5`).
+`[fixpoint]` — compile + the oracles + `gen2==gen3` (the newtype lowers as its arch-word backing →
+byte-preserving on 64-bit; retiring the prim surface changes resolution deterministically). "Green" =
+`ptr`/`uptr` are Teko newtypes over `isize`/`usize`, `wrap`/`unwrap` type + lower to a bare reinterpret,
+the `str`↔`[]byte` flagship is zero-copy, header-export works, arithmetic rejected, `gen2==gen3`.
+Reseed-class: `fixpoint-rebuild` (folds into RESEED-1 of `MEM-E5`).
 
 ## Deps
 
-`—` (the service interaction relies on SM-G6 but is not a build dependency; batches with E0a/E1/E2/E3).
+`MEM-E0a` (the `isize`/`usize` backing types).
 
 ## Done when
 
-`ptr`/`uptr` are opaque atomic (no generic family, no arithmetic), `ptr::unwrap<T>(ref T): ptr` and
-`ptr.wrap<T>(): T` (and the `uptr` pair) are the canonical direct same-base conversion lowering to a bare
-reinterpret (zero-copy, zero-cast), the `str`↔`[]byte` flagship works zero-copy, the tag/arena-liveness
-stays as the optional FFI-checked layer, the oracles pass, and `[dry]` is byte-identical.
+`ptr`/`uptr` are `global exp` Teko newtypes over `isize`/`usize` (NOT `PrimKind`), the value-type-newtype
+header-export gap is lifted, `ptr::unwrap<T>(ref T): ptr` and `ptr.wrap<T>(): T` (and the `uptr` pair) are
+the canonical direct same-base conversion lowering to a bare reinterpret, the `str`↔`[]byte` flagship is
+zero-copy, arithmetic is rejected, and the `[fixpoint]` build is `gen2==gen3`.
