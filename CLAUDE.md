@@ -291,6 +291,15 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   reseed/dreno subsequente vira **rebuild inteiro à toa** (uma etapa a mais evitável). A decisão de
   landar/descartar é do integrador/dono, downstream; o artefato do agente já vem completo e reseedado.
   **PROIBIDO** ao coordenador condicionar o reseed ao objetivo no dispatch (meu erro, 2026-08-24).
+  - **AGENTE GARANTE reseed/fixpoint OU O TRABALHO É INACABADO (dono 2026-08-28 — D163/D164).** O trabalho de
+    um agente que toca compiler-core **não está terminado** enquanto ele não **GARANTIR (provar)** o reseed +
+    fixpoint: o gen0 construído a partir do `bootstrap/teko.c` que ELE commitou tem que **buildar o tip** e o
+    fixpoint **gen2==gen3 byte-idêntico** tem que fechar — de verdade, do seed novo, não sobre um gen0
+    cacheado. **Alegar "fixpoint fechado" sem essa prova = trabalho INACABADO**, não se drena. Duas camadas
+    obrigatórias: (1) o AGENTE prova (constrói a ladder inteira a partir do SEU seed, não de artefato antigo);
+    (2) o COORDENADOR **re-verifica por um VERIFICADOR INDEPENDENTE** antes de drenar — gen0-do-seed-commitado
+    builda o tip + gen2==gen3 confirmado — NUNCA na palavra do implementer. Sem o verde do verificador, não
+    drena. (Causa: 0183/0184 alegaram fixpoint falso — gen0 do seed crashava o tip — e eu drenei por relato.)
 - **Teko é um monólito e precisa cross-compilar.** A perna C emite **UM** `teko.c`
   que compila em toda arquitetura/SO via `#if` do C — tem que **emitir tudo**
   (todos os alvos), não podar para o host que emite. Só o backend **native** emite
