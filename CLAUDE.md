@@ -488,6 +488,26 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
     reseeds por staging). Próxima fase = **SWEEP** (crumbs 0156-0161, o FLIP onde a memória cai) carregando as
     3 escalações acima. SHADOW (0155, fixtures `mem_*` no scratchpad D117) vem DEPOIS do sweep (modelo não fica
     LIVE até o FLIP). Depois RESEED-FINAL. Ratchet D68 governa o sweep (tem que BAIXAR o pico, estrito).
+- **PADRÃO OPÇÃO-3 — CHÃO = ABI/SYSCALL/LINKER, ZERO libc, ZERO mágica (dono 2026-08-27 — D134).** O chão
+  aceitável do runtime é **ABI/syscall/linker-de-SO**. "Mágica" = intrínseco reconhecido-por-nome no backend
+  que não é superfície Teko. **Se uma migração dada-CONCLUÍDA ainda depende de libc ou mágica, foi feito ERRADO
+  → refaz.** (Auditoria 2026-08-27: o expurgo-feito está LIMPO — zero trapaça, refazer-scope vazio; a libc que
+  ainda linka é 100% subsistema PENDENTE + a muleta que o F9 deleta. Julga-se pelo RUNTIME, não pela muleta:
+  o codegen EMITIR C é OK transitório.)
+  - **INTRÍNSECOS → SUPERFÍCIE = AGORA, não endgame ("deixar pra depois é permanecer no erro" — dono).** O
+    intrínseco é dep-C da mesma classe do runtime. Onda PRÓPRIA na era do expurgo, **não tanglada** no
+    byte-mover de região, cada uma bisectável + baixando o ratchet. 3 naturezas: (1) chamada `tk_*` = dep-C →
+    expurga; (2) C-inline = magia-de-nome → superfície; (3) `syscall`/raw-emit = chão irredutível do SO → vira
+    **uma primitiva raw de superfície** (não some — o `syscall` é o único irredutível, e já é superfície).
+- **`#embed`/VFS = MECANISMO DE INJEÇÃO DO PRELÚDIO — binário SELF-CONTAINED (dono 2026-08-27 — D134).** O
+  prelúdio de hoje é **disco** (`inject_runtime_prelude`→`fs::list_dir` sobre `src/`) → exige o dev ter o
+  FONTE da Teko pra rodar o compilador — DEFEITO. O `#embed` (design PRONTO em `docs/design/embed-vfs.md`,
+  owner-ruled) embarca o prelúdio comprimido num VFS read-only no binário e injeta da **memória do próprio
+  binário** — M.0 self-contained, zero download de fonte. **PROIBIDO fazer o prelúdio-base por disco** (R2
+  retratado): tipos-base-como-superfície + runtime-em-Teko + provenance (D133) **TODOS cavalgam o VFS**, nunca
+  disco. O prelúdio-base (`str`/`[]byte`/`char` universais) injeta em **TODOS os artefatos** (incl. Package),
+  não só Binary/Tool; provenance barra redefinição. (Compressão já landou em `src/compress/*` — o VFS consome,
+  não reimplementa.) Supersede o "supérfluo por hora" (dono 2026-07-20) — agora é habilitador, construir.
 - **NÃO EXISTE C CONGELADO (dono 2026-08-18, REVOGA a lei "§16 C congelado" de 2026-08-17).**
   `src/runtime/teko_rt.c`, `teko_rt.h`, `src/win32_compat.h`, `src/assert/assert.c`, `assert.h`
   **PODEM ser editados** para bug de memória/correção em C. **PORÉM (dono 2026-08-18): o expurgo de
