@@ -204,6 +204,46 @@ real é o self-host sob `TEKO_MEM_PARANOID`/ASan. Zero `.tkr`/`.tkt` novo versio
 | **R8 — tipos (E0a/E0b) são recuperação, não invenção** | `PrimKind` já tem `Size/Usize`, `Ptr/Uptr` são kinds — as deltas são o rename `size→isize`, o target-param de `prim_width`, tornar `Ptr` opaco, e os métodos `wrap`/`unwrap`. Inerte/byte-idêntico até o reball (fixpoint-gated). O antigo FORK do `region_alloc_tagged` (C-vs-Teko) morreu com a arena-100%-Teko (D128). Sem HALT. |
 | **R9 — `size` como identificador em `src/`** | é exatamente por isso que renomeia para `isize` (não há sweep de type-name `size` porque `0015` deixou `usize`/`size` INERTES — `src/` nunca adotou; confirmar zero ocorrências de `: size` antes do rename). |
 
-**Tensão de lei que force HALT: NENHUMA.** Os refinamentos + as 4 docs + D90/D120/D111/D117/D68
-resolvem tudo. O único ponto derivado (alcance do control, §3) resolve-se law-first pelos refinamentos
-2+6; fica flagado como decisão confirmável, não bloqueio.
+**O ponto derivado (alcance do control, §3) resolve-se law-first pelos refinamentos 2+6** — decisão
+confirmável, não bloqueio.
+
+## 8. FORK REAL — o GATE de privilégio da capacidade newtype-ponteiro-cru (HALT)
+
+O dono impôs uma CONSTRAINT DURA: a capacidade newtype-sobre-escalar COM `wrap`/`unwrap` de reinterpret
+CRU é **PRIVILEGIADA** — o compilador só pode usá-la no PRÓPRIO código (compiler-base), NUNCA num programa
+de usuário; o checker deve BARRAR um user program de definir/usar essa capacidade crua; e conjeturou que
+`global` "provavelmente" marca a base privilegiada. **Verifiquei o código: o gate NÃO está deliberado em
+lugar nenhum, e a intenção conjeturada não bate com a semântica atual — é FORK REAL.** Evidência:
+
+1. **`global` hoje = NOME GLOBAL SEM-NAMESPACE, não "base privilegiada".** `check_modules.tks:174-232`:
+   um decl `global` é chamável sem qualificador de namespace, e o único check é colisão de assinatura
+   `global` entre namespaces. Não há semântica de privilégio/trust. Reusar `global` como marcador de
+   base-privilegiada é semântica NOVA (o dono só supôs).
+2. **NÃO existe fronteira compiler-base vs user-program no checker.** O compilador compila o `src/` (a si
+   mesmo) e um programa de usuário pela MESMA pipeline; nada marca um decl como "base confiável". Não há
+   flag/namespace-reservado que o checker use para distinguir os dois.
+3. **TENSIONA uma lei RATIFICADA — o §6 aposentar-`unsafe`** (`plano-secao6-aposentar-unsafe.md`): esse
+   design REMOVEU de propósito o split privilegiado/não-privilegiado — as intrínsecas cruas
+   (`buf_ptr`/`bytes_from_ptr`) são livremente chamáveis de um `pub fn` nu, **seguras-por-arena, SEM
+   gate** (fixture `mem_intrinsics_safe_callable`). Um gate de privilégio novo reintroduz exatamente o
+   trusted/untrusted que o §6 aposentou.
+
+**O crux (o que decide o gate):** o `wrap<T>` é seguro-por-construção quando o checker PROVA que `T`
+partilha a base-representação do ponteiro (mesma-base = reinterpret são). Se essa prova for airtight para
+todo `T`, NÃO precisa de gate de base — é seguro-por-construção, consistente com o §6. Se o checker NÃO
+consegue provar mesma-base para `T` arbitrário (um user faz `p.wrap<Qualquer>()` reinterpretando memória
+alheia), então a capacidade É insegura e precisa do gate base-only — NOVO e tensiona o §6.
+
+**As perguntas ao dono (o fork, curto):**
+- (a) O que MARCA a base privilegiada? Repropor `global` (semântica nova, reconciliar com o "nome
+  global"), um namespace reservado (`teko::`), um flag de módulo-confiável, ou outro?
+- (b) COMO o checker identifica "user program" vs "compiler-base"? Não existe essa fronteira hoje.
+- (c) Reconciliar com o §6 (seguro-por-arena, sem gate): o gate SUPERSEDE o §6 para o
+  newtype-ponteiro-cru especificamente, OU a segurança deve ser estrutural (opacidade + sem-aritmética +
+  `wrap` mesma-base provado pelo checker) em vez de base-only? (Se estrutural bastar, o gate some.)
+
+**DESIGN-AHEAD (D120) — o que segue SEM o fork:** a capacidade (newtype-sobre-escalar-com-métodos) JÁ
+EXISTE (`NewtypeBody`, verificado); os `ptr`/`uptr` newtypes + `wrap`/`unwrap` + o uso NO COMPILER-BASE
+(o modelo de memória) são VÁLIDOS sob QUALQUER resolução do fork (o compilador É a base). Logo `MEM-E0b`
+e todo o modelo AVANÇAM para o compiler-base agora; **o ÚNICO bloqueado é o mecanismo de PROIBIÇÃO ao
+user-program** — o gate de enforcement. Não bloqueia o modelo de memória (que é 100% compiler-base).
