@@ -1367,7 +1367,58 @@ fn parse_type_member_const(tokens: []lexer::Token, pos: u64, vis: Visibility, ha
     Parsed<ConstDecl> { node = cd; next = d.next }
 }
 
+fn embed_compression_atom(name: str): teko::embed::EmbedCompress | error {
+    if name == "None" { return teko::embed::EmbedCompress::None }
+    if name == "Deflate" { return teko::embed::EmbedCompress::Deflate }
+    if name == "Gzip" { return teko::embed::EmbedCompress::Gzip }
+    error { message = "#embed compression type must be one of None, Deflate, Gzip" }
+}
+
+/**
+ * parse_embed — parse a top-level `#embed(...)` at `pos` (the `#`), mirroring the `#os("…")` payload
+ * shape. Accepts form A `("pattern")` and form B `("pattern", TYPE, LEVEL)` (TYPE a bare None/Deflate/
+ * Gzip atom, LEVEL an Int). Purely syntactic — path/range validity are resolve-time concerns. Stamps the
+ * containing source-file path for later file-relative anchoring.
+ *
+ * @param tokens  the token stream
+ * @param pos     the index of the `#` beginning the directive
+ * @return        the parsed EmbedDecl and the index past the closing `)`
+ * @throws        a located error on a missing `(`, a non-string pattern, a malformed `, TYPE, LEVEL`
+ *                tail, or an unknown compression type
+ * @since 0.3.1
+ */
+fn parse_embed(tokens: []lexer::Token, pos: u64): Parsed<@Decl()> | error {
+    var line = tokens[pos].line
+    var col = tokens[pos].col
+    var src_path = tokens[pos].file
+    if !is_kind_at(tokens, pos + 2, lexer::TokenKind::LParen) { return err_at(tokens, pos + 2, "expected '(' after `#embed`") }
+    if !is_kind_at(tokens, pos + 3, lexer::TokenKind::Str) { return err_at(tokens, pos + 3, "expected a quoted pattern in `#embed(\"…\")`") }
+    var pattern = tokens[pos + 3].text
+    if is_kind_at(tokens, pos + 4, lexer::TokenKind::RParen) {
+        var node = EmbedDecl { pattern = pattern; has_compression = false; comp = teko::embed::EmbedCompress::None; level = 0; src_path = src_path; line = line; col = col }
+        return Parsed<@Decl()> { node = node; next = pos + 5 }
+    }
+    if !is_kind_at(tokens, pos + 4, lexer::TokenKind::Comma) { return err_at(tokens, pos + 4, "expected ',' or ')' after the `#embed` pattern") }
+    if !is_name_at(tokens, pos + 5) { return err_at(tokens, pos + 5, "expected a compression type (None, Deflate, Gzip) after the `#embed` pattern") }
+    var comp = match embed_compression_atom(tokens[pos + 5].text) { teko::embed::EmbedCompress as c => c; error as e => return err_at(tokens, pos + 5, e.message) }
+    if !is_kind_at(tokens, pos + 6, lexer::TokenKind::Comma) { return err_at(tokens, pos + 6, "expected ',' then a compression level in `#embed(\"…\", TYPE, LEVEL)`") }
+    if !is_kind_at(tokens, pos + 7, lexer::TokenKind::Number) { return err_at(tokens, pos + 7, "expected an integer compression level in `#embed(\"…\", TYPE, LEVEL)`") }
+    var lv = match lit_int(tokens[pos + 7].text) { NumInt as v => v; error as e => return err_at(tokens, pos + 7, e.message) }
+    if lv.neg { return err_at(tokens, pos + 7, "the `#embed` compression level must not be negative") }
+    if !is_kind_at(tokens, pos + 8, lexer::TokenKind::RParen) { return err_at(tokens, pos + 8, "expected ')' to close `#embed(…)`") }
+    var noded = EmbedDecl { pattern = pattern; has_compression = true; comp = comp; level = numint_to_i64(lv); src_path = src_path; line = line; col = col }
+    Parsed<@Decl()> { node = noded; next = pos + 9 }
+}
+
+fn is_embed_directive_at(tokens: []lexer::Token, pos: u64): bool {
+    is_kind_at(tokens, pos, lexer::TokenKind::Hash) && is_kind_at(tokens, pos + 1, lexer::TokenKind::Ident) && tokens[pos + 1].text == "embed"
+}
+
 fn parse_decl(tokens: []lexer::Token, pos: u64): ParsedDecl | error {
+    if is_embed_directive_at(tokens, pos) {
+        var ed = match parse_embed(tokens, pos) { Parsed<@Decl()> as x => x; error as e => return e }
+        return ParsedDecl { node = ed.node; guard = pred_true(); next = ed.next }
+    }
     var outer_doc = peel_leading_doc(tokens, pos)
     var attrs = match parse_decl_attributes(tokens, outer_doc.next) { ParsedAttributes as x => x; error as e => return e }
     var start = attrs.next
@@ -1498,7 +1549,8 @@ fn is_core_decl_keyword_at(tokens: []lexer::Token, pos: u64): bool {
     is_kind_at(tokens, pos, lexer::TokenKind::Flags) ||
     is_kind_at(tokens, pos, lexer::TokenKind::Const) ||
     is_kind_at(tokens, pos, lexer::TokenKind::Macro) ||
-    is_kind_at(tokens, pos, lexer::TokenKind::Comptime)
+    is_kind_at(tokens, pos, lexer::TokenKind::Comptime) ||
+    is_embed_directive_at(tokens, pos)
 }
 
 fn count_module_decls(tokens: []lexer::Token, start: u64): u64 {
