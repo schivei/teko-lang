@@ -101,7 +101,7 @@ fn cb_numint_str(v: parser::NumInt): str {
 }
 
 type CgArenaSym = enum {
-    RegionAlloc; RegionNew; RegionDrop; RegionDropSubtree; RegionRoot; RegionCurrent;
+    RegionAlloc; RegionNew; RegionNewSized; RegionDrop; RegionDropSubtree; RegionRoot; RegionCurrent;
     RegionEnter; RegionLeave; ArenaPush; ArenaPop; ArenaCommit; RegionRegister; RegionLookup; Alloc;
     RetDestSet; RetDestGet; FreeBlock
 }
@@ -119,6 +119,7 @@ fn cg_arena_kind_suffix(kind: CgArenaSym): str {
     match kind {
         CgArenaSym::RegionAlloc => "region_alloc"
         CgArenaSym::RegionNew => "region_new"
+        CgArenaSym::RegionNewSized => "region_new_sized"
         CgArenaSym::RegionDrop => "region_drop"
         CgArenaSym::RegionDropSubtree => "region_drop_subtree"
         CgArenaSym::RegionRoot => "region_root"
@@ -143,7 +144,7 @@ fn cg_arena_teko_sym(kind: CgArenaSym): str {
 
 fn cg_arena_all_kinds(): []CgArenaSym {
     [
-        CgArenaSym::RegionAlloc, CgArenaSym::RegionNew, CgArenaSym::RegionDrop,
+        CgArenaSym::RegionAlloc, CgArenaSym::RegionNew, CgArenaSym::RegionNewSized, CgArenaSym::RegionDrop,
         CgArenaSym::RegionDropSubtree, CgArenaSym::RegionRoot, CgArenaSym::RegionCurrent,
         CgArenaSym::RegionEnter, CgArenaSym::RegionLeave, CgArenaSym::ArenaPush,
         CgArenaSym::ArenaPop, CgArenaSym::ArenaCommit, CgArenaSym::RegionRegister,
@@ -4742,7 +4743,7 @@ fn emit_branch_value(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(),
     var defer_floor = dctx.defers.len
     var fall = cg_append_direct_defers(dctx.defers, body)
     var region = fresh_named("_tkbr", buf.gensym() to i64)
-    buf.write(indent); buf.write("tk_region *"); buf.write(region); buf.write(" = "); cb_arena_sym(buf, CgArenaSym::RegionNew); buf.write("("); buf.write(cg_enclosing_region_expr(regions)); buf.write(");\n")
+    buf.write(indent); buf.write("tk_region *"); buf.write(region); buf.write(" = "); cb_region_open(buf, cg_enclosing_region_expr(regions), body); buf.write(";\n")
     var regs2 = [..regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, body, true); bound_names = cg_block_bound_names(body) }]
     var cur = dctx
     var i = 0
@@ -6213,7 +6214,7 @@ fn emit_arm_value(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), ma
     var regs2 = if want_block { [..regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, body, true); bound_names = cg_block_bound_names(body) }] } else { regions }
     var cur_blk = if want_block { body } else { [] }
     if want_block {
-        buf.write(ci); buf.write("tk_region *"); buf.write(region); buf.write(" = "); cb_arena_sym(buf, CgArenaSym::RegionNew); buf.write("("); buf.write(cg_enclosing_region_expr(regions)); buf.write(");\n")
+        buf.write(ci); buf.write("tk_region *"); buf.write(region); buf.write(" = "); cb_region_open(buf, cg_enclosing_region_expr(regions), body); buf.write(";\n")
     }
     var cur = dctx
     var i = 0
@@ -6681,6 +6682,17 @@ fn cg_enclosing_region_expr(regions: []RegionFrame): str {
     teko::str::concat(cg_arena_sym(CgArenaSym::RegionCurrent), "()")
 }
 
+fn cb_region_open(buf: teko::io::FileStream, parent_expr: str, body: []@TStatement()) {
+    var floor = checker::region_slots(body)
+    if floor == 0 {
+        cb_arena_sym(buf, CgArenaSym::RegionNew)
+        buf.write("("); buf.write(parent_expr); buf.write(")")
+        return
+    }
+    cb_arena_sym(buf, CgArenaSym::RegionNewSized)
+    buf.write("("); buf.write(parent_expr); buf.write(", "); buf.write(teko::i64_to_str(floor to i64)); buf.write(")")
+}
+
 fn cg_enclosing_region_expr_framed(regions: []RegionFrame, frame: str): str {
     if regions.len > 0 { return regions[regions.len - 1].name }
     if frame != "" { return frame }
@@ -6857,7 +6869,7 @@ fn emit_block_region(buf: teko::io::FileStream, body: []@TStatement(), in_main: 
         return
     }
     var region = fresh_named("_tkbr", buf.gensym() to i64)
-    buf.write(indent); buf.write("tk_region *"); buf.write(region); buf.write(" = "); cb_arena_sym(buf, CgArenaSym::RegionNew); buf.write("("); buf.write(cg_enclosing_region_expr_framed(regions, frame)); buf.write(");\n")
+    buf.write(indent); buf.write("tk_region *"); buf.write(region); buf.write(" = "); cb_region_open(buf, cg_enclosing_region_expr_framed(regions, frame), body); buf.write(";\n")
     var regs2 = [..regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, body, false); bound_names = cg_block_bound_names(body) }]
     emit_block(buf, body, in_main, prog, ret_type, indent, escaping, regs2, fn_body, dctx, body, false)
     emit_defers(buf, fall, defer_floor, prog, indent, escaping, fn_body)
@@ -7236,7 +7248,7 @@ fn emit_loop_while(buf: teko::io::FileStream, l: checker::TLoopStmt, in_main: bo
     var region = if want_block { fresh_named("_tkbr", buf.gensym() to i64) } else { "" }
     var regs2 = regions
     if want_block {
-        buf.write(inner); buf.write("tk_region *"); buf.write(region); buf.write(" = "); cb_arena_sym(buf, CgArenaSym::RegionNew); buf.write("("); buf.write(cg_enclosing_region_expr_framed(regions, frame)); buf.write(");\n")
+        buf.write(inner); buf.write("tk_region *"); buf.write(region); buf.write(" = "); cb_region_open(buf, cg_enclosing_region_expr_framed(regions, frame), l.body); buf.write(";\n")
         regs2 = [..regions, RegionFrame { name = region; label = l.label; is_loop = true; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, l.body, false); bound_names = cg_block_bound_names(l.body) }]
     }
     var cur_blk = if want_block { l.body } else { [] }
@@ -7596,7 +7608,7 @@ fn emit_adopt(buf: teko::io::FileStream, a: checker::TAdoptStmt, in_main: bool, 
     var defer_floor = dctx.defers.len
     var fall = cg_append_direct_defers(dctx.defers, a.body)
     var region = fresh_named("_tkad", buf.gensym() to i64)
-    buf.write(indent); buf.write("tk_region *"); buf.write(region); buf.write(" = "); cb_arena_sym(buf, CgArenaSym::RegionNew); buf.write("("); buf.write(cg_enclosing_region_expr_framed(regions, frame)); buf.write(");\n")
+    buf.write(indent); buf.write("tk_region *"); buf.write(region); buf.write(" = "); cb_region_open(buf, cg_enclosing_region_expr_framed(regions, frame), a.body); buf.write(";\n")
     var regs2 = [..regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = []; bound_names = cg_block_bound_names(a.body) }]
     emit_block(buf, a.body, in_main, prog, ret_type, indent, escaping, regs2, fn_body, dctx, a.body, false)
     emit_defers(buf, fall, defer_floor, prog, indent, escaping, fn_body)
@@ -7791,16 +7803,16 @@ fn emit_function(buf: teko::io::FileStream, prog: CgProg, f: checker::TFunction)
 }
 
 fn cg_frame_region_parent_expr(f: checker::TFunction): str {
-    if f.has_arena_size { return "NULL" }
     teko::str::concat(cg_arena_sym(CgArenaSym::RegionRoot), "()")
 }
 
 fn cg_rr_init_expr(): str { teko::str::concat(cg_arena_sym(CgArenaSym::RegionCurrent), "()") }
 
 fn cg_tkfr_init_expr(f: checker::TFunction, use_rr: bool): str {
-    var region_new = cg_arena_sym(CgArenaSym::RegionNew)
-    if !use_rr { return teko::str::concat(region_new, "(", cg_frame_region_parent_expr(f), ")") }
-    teko::str::concat(region_new, "(_tkrr)")
+    var parent = if use_rr { "_tkrr" } else { cg_frame_region_parent_expr(f) }
+    var floor = checker::region_slots(f.body)
+    if floor == 0 { return teko::str::concat(cg_arena_sym(CgArenaSym::RegionNew), "(", parent, ")") }
+    teko::str::concat(cg_arena_sym(CgArenaSym::RegionNewSized), "(", parent, ", ", teko::i64_to_str(floor to i64), ")")
 }
 
 fn cg_tkfr_drop_active(entered: bool): bool { true }
@@ -7887,14 +7899,6 @@ fn cg_closure_env_region(dctx: DeferCtx): str {
     teko::str::concat(cg_arena_sym(CgArenaSym::RegionRoot), "()")
 }
 
-fn cg_emit_arena_presize(buf: teko::io::FileStream, n: u64) {
-    buf.write("    (void)")
-    cb_arena_sym(buf, CgArenaSym::RegionAlloc)
-    buf.write("(_tkfr, ")
-    cb_u64_digits(buf, n)
-    buf.write(");\n")
-}
-
 fn emit_function_cov(buf: teko::io::FileStream, prog: CgProg, f: checker::TFunction, cov_idx: i64) {
     emit_function_sig(buf, prog, f)
     buf.write(" {\n")
@@ -7902,16 +7906,15 @@ fn emit_function_cov(buf: teko::io::FileStream, prog: CgProg, f: checker::TFunct
     var fbody = f.body
     var cov = if cov_idx >= 0 { CovCtx { on = true; fn_idx = cov_idx to u64 } } else { cov_off() }
     var escaping = checker::fn_escaping_vars(f)
-    var want_frame = fn_body_has_frame_local(prog, escaping, fbody) || f.has_arena_size
+    var want_frame = fn_body_has_frame_local(prog, escaping, fbody)
     var frame: str = if want_frame { "_tkfr" } else { "" }
-    var use_rr = want_frame && !f.has_arena_size
+    var use_rr = want_frame
     var rr: str = if use_rr { "_tkrr" } else { "" }
     var dctx = DeferCtx { defers = []; loops = []; cov = cov; rr = rr; bracket_depth = 0 }
     if use_rr { buf.write("    tk_region *_tkrr = "); buf.write(cg_rr_init_expr()); buf.write(";\n") }
     if want_frame {
         buf.write("    tk_region *_tkfr = "); buf.write(cg_tkfr_init_expr(f, use_rr)); buf.write(";\n")
         if use_rr { buf.write("    "); cb_arena_sym(buf, CgArenaSym::RegionEnter); buf.write("(_tkfr);\n") }
-        if f.has_arena_size { cg_emit_arena_presize(buf, f.arena_size) }
     }
     emit_block_tail(buf, fbody, false, prog, f.return_type, "    ", frame, escaping, [], fbody, dctx)
     var tail_is_expr = if fbody.len > 0 { match fbody[fbody.len - 1] { checker::TExprStmt => true; _ => false } } else { false }
@@ -9055,7 +9058,7 @@ fn cg_lift_lambdas(prog: CgProg): LiftResult {
             checker::TFunction as f => {
                 if cg_block_has_lift(f.body) {
                     var nb = cg_lift_block(f.body, acc)
-                    mapped[i] = checker::TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = nb; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = f.ret_extra; guard = f.guard }
+                    mapped[i] = checker::TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = nb; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; ret_extra = f.ret_extra; guard = f.guard }
                 } else {
                     mapped[i] = prog.items[i]
                 }
@@ -9127,7 +9130,7 @@ fn cg_lift_expr(e: checker::TExpr, ref acc: StampAcc): checker::TExpr {
                 var ps: []parser::Param = []
                 var pi = 0
                 loop { if pi >= lam.params.len { break }; ps = [..ps, parser::Param { name = lam.params[pi].name; has_type = true; type_ann = checker::type_to_texpr(lam.params[pi].type); is_params = false; has_default = false; default_expr = parser::no_expr() }]; pi++ }
-                newfns = tfnvec_push(newfns, checker::TFunction { overload_suffix = ""; name = lam_fn_name(id); type_params = []; type_constraints = []; params = ps; return_type = lam.ret; body = nbody; vis = parser::Visibility::Private; has_doc = false; doc = parser::docspan_none(); namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64; ret_extra = []; guard = parser::pred_true() })
+                newfns = tfnvec_push(newfns, checker::TFunction { overload_suffix = ""; name = lam_fn_name(id); type_params = []; type_constraints = []; params = ps; return_type = lam.ret; body = nbody; vis = parser::Visibility::Private; has_doc = false; doc = parser::docspan_none(); namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; ret_extra = []; guard = parser::pred_true() })
             } else {
                 newlams = tlamvec_push(newlams, stamped)
             }

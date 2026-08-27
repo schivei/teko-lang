@@ -231,36 +231,24 @@ fn stmt_slot_count(s: @TStatement()): usize {
     }
 }
 
-/**
- * region_slots — the compile-time byte floor an arena for this scope is born at: the sum of the routable
- * slots and their widths. Under no-push allocation every slot is bound-exact, so this is a static fact —
- * the number the compiler fixes the arena to at initialization, retiring the manual `#arena_size`. A
- * runtime-sized slot contributes only its header; the chunk-list grows past the floor at runtime (never a
- * use-after-free, over-floor is leak-safe). So the value is the initial floor, not a hard cap.
- *
- * @param body   the scope's statement block
- * @param table  the checker type table (for slot widths)
- * @return       the byte floor (0 = the scope allocates nothing → elide)
- * @since 0.3.1
- */
-fn region_slots(body: []@TStatement(), table: TypeTable): usize {
+pub fn region_slots(body: []@TStatement()): usize {
     var total: usize = 0
     var i = 0
     loop {
         if i >= body.len { break }
-        total = total + stmt_slot_bytes(body[i], table)
+        total = total + stmt_slot_bytes(body[i])
         i++
     }
     total
 }
 
-fn stmt_slot_bytes(s: @TStatement(), table: TypeTable): usize {
+fn stmt_slot_bytes(s: @TStatement()): usize {
     match s {
         TBinding as b => slot_bytes(b.bound)
-        TLoopStmt as l => region_slots(l.init, table) + region_slots(l.body, table)
-        TDeferStmt as d => region_slots(d.body, table)
-        TAdoptStmt as a => region_slots(a.body, table)
-        TBlockStmt as b => region_slots(b.body, table)
+        TLoopStmt as l => region_slots(l.init) + region_slots(l.body)
+        TDeferStmt as d => region_slots(d.body)
+        TAdoptStmt as a => region_slots(a.body)
+        TBlockStmt as b => region_slots(b.body)
         _ => 0
     }
 }
