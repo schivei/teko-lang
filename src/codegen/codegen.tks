@@ -987,22 +987,17 @@ fn cg_expr_is_addressable(e: checker::TExpr): bool {
 }
 
 fn cg_emit_self_addr(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), recv: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
-    if cg_expr_is_addressable(recv) {
-        buf.write("&(")
-        emit_expr_ctx(buf, prog, ret_type, recv, escaping, regions, fn_body, dctx)
-        buf.write(")")
-        return
-    }
-    var tN = fresh_named("_rcv", buf.gensym() to i64)
-    buf.write("({ ")
-    emit_type(buf, prog, recv.type)
-    buf.write(" ")
-    buf.write(tN)
-    buf.write(" = ")
+    buf.write("&(")
     emit_expr_ctx(buf, prog, ret_type, recv, escaping, regions, fn_body, dctx)
-    buf.write("; &")
-    buf.write(tN)
-    buf.write("; })")
+    buf.write(")")
+}
+
+fn cg_call_needs_self_hoist(prog: CgProg, cf: checker::TFunction, c: checker::TCall): bool {
+    if cf.params.len == 0 { return false }
+    var is_self0 = match cg_struct_self_recv(prog, cf) { str => true; null => false }
+    if !is_self0 { return false }
+    if c.args.len == 0 { return false }
+    !cg_expr_is_addressable(c.args[0])
 }
 
 fn cg_var_is_struct_self(prog: CgProg, e: checker::TExpr, v: checker::TVar): bool {
@@ -3857,6 +3852,21 @@ fn emit_call_inner(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e
     } else {
         error { message = "codegen: no resolved namespace" }
     }
+    var self_hoist = match cf_res {
+        checker::TFunction as cf => cg_call_needs_self_hoist(prog, cf, c)
+        error => false
+    }
+    var self_hoist_name = ""
+    if self_hoist {
+        self_hoist_name = fresh_named("_rcv", buf.gensym() to i64)
+        buf.write("({ ")
+        emit_type(buf, prog, c.args[0].type)
+        buf.write(" ")
+        buf.write(self_hoist_name)
+        buf.write(" = ")
+        emit_expr_ctx(buf, prog, ret_type, c.args[0], escaping, regions, fn_body, dctx)
+        buf.write("; ")
+    }
     if has_builtin {
         buf.write(builtin)
     } else if c.call_ns.len != 0 {
@@ -3889,7 +3899,8 @@ fn emit_call_inner(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e
                         parser::NamedType as nt => {
                             var pn = nt.path.segments[nt.path.segments.len - 1].name
                             if is_self_recv {
-                                cg_emit_self_addr(buf, prog, ret_type, c.args[j], escaping, regions, fn_body, dctx)
+                                if self_hoist { buf.write("&"); buf.write(self_hoist_name) }
+                                else { cg_emit_self_addr(buf, prog, ret_type, c.args[j], escaping, regions, fn_body, dctx) }
                             } else if pn == "Ref" {
                                 var arg_is_ref = match c.args[j].type { checker::Reference => true; _ => false }
                                 if !arg_is_ref { buf.write("&") }
@@ -3921,6 +3932,7 @@ fn emit_call_inner(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e
         j++
     }
     buf.write(")")
+    if self_hoist { buf.write("; })") }
 }
 
 fn cg_emit_nn_guard(buf: teko::io::FileStream, prog: CgProg, recv: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
