@@ -499,6 +499,22 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
     byte-mover de região, cada uma bisectável + baixando o ratchet. 3 naturezas: (1) chamada `tk_*` = dep-C →
     expurga; (2) C-inline = magia-de-nome → superfície; (3) `syscall`/raw-emit = chão irredutível do SO → vira
     **uma primitiva raw de superfície** (não some — o `syscall` é o único irredutível, e já é superfície).
+  - **TODA FUNÇÃO TEM CÓDIGO PRÓPRIO — NENHUMA existe SÓ na lógica do pipeline (LEI DURA, dono 2026-08-28 — D161).**
+    O estrago do intrínseco/inline vai **além de anti-pattern ou uso-cruzado: é ACOPLAMENTO FORTE** — o codegen
+    embute conhecimento hardcoded (reconhece-por-nome, sintetiza inline) de uma função que não tem corpo de
+    superfície → **não dá pra evoluir o construto sem gambiarra** no pipeline. **"Uma função não pode existir
+    somente na lógica do pipeline, tem que ter código dela."** Correção = **EXPURGO**: cada helper hoje
+    reconhecido-por-nome / emitido-inline / sintetizado no codegen vira **fn de superfície com corpo real** e é
+    **CHAMADA pela emissão genérica** — nunca inline-synth nem name-detect que a desvia. **É o MESMO que se faz
+    com os tipos** (tipos = superfície com métodos, não builtin mágico — D145). Consequências: (a) o pipeline PODE
+    decidir ONDE inserir uma chamada (ex.: bounds-check no sítio de index = lowering semântico legítimo), mas a
+    FUNÇÃO chamada (`panic_oob_at`/`str_eq`/`concat`/`cast_check`/`u64_to_str`/…) tem que ser código de superfície
+    chamado, não corpo-C inline; (b) o único carve-out é a **primitiva irredutível DECLARADA como superfície**
+    (`syscall`; `wrap`/`unwrap` reinterpret em `ptr`/`uptr` — D131): tem identidade/assinatura de superfície, não
+    é name-detect escondido no codegen; (c) o surface-route dos alocantes do W4 (D160) é a **1ª fatia** deste
+    expurgo; o resto (não-alocantes inline: `str_eq`/`cast_check`/guards de panic + todo name-detect/inline-synth
+    do codegen) é onda dedicada, censo-primeiro, **fora do byte-mover de risco do W4** mas MANDADA. Benefício-raiz:
+    **desacoplar** o pipeline pra o compilador poder evoluir (é o que o acoplamento intrínseco impede hoje).
 - **ARENA/REGIÃO = TEKO + codegen(ABI/syscall/linker), ZERO adição de C (dono 2026-08-28 — D148).** Toda feature
   de arena/região se escreve **em Teko** (`arena.tks`, que já é 100% Teko/VIVA — D128) e reflete no **codegen**
   (rota-C emite a chamada Teko compilada; native `lower.tks` emite via ABI/syscall/linker). **PROIBIDO ADICIONAR
