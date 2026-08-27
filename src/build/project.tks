@@ -259,6 +259,7 @@ type ParsedFront = struct {
     parsed: parser::Program
     manifest: Manifest
     diags: []str
+    embeds: teko::embed::EmbedResult
 }
 
 type RtUnit = struct {
@@ -427,7 +428,10 @@ fn frontend_parse(include_tests: bool, quiet: bool, tty: bool): ParsedFront | er
 
     var asm = match assemble_sel(files, include_tests, !quiet, tty) { Assembled as a => a; error as e => return e }
 
-    ParsedFront { parsed = asm.program; manifest = m; diags = asm.diags }
+    var embed_result = teko::embed::run_embed_pass(asm.embeds, m.name, "")
+    var all_diags = append_diags(asm.diags, embed_result.diags)
+
+    ParsedFront { parsed = asm.program; manifest = m; diags = all_diags; embeds = embed_result }
 }
 
 fn frontend_check(pf: ParsedFront, quiet: bool, tty: bool, explicit: bool): Frontend | error {
@@ -2703,7 +2707,7 @@ fn native_gate_program(pf: ParsedFront, tty: bool): checker::TProgram | error {
         []parser::Item as items => items
         error as e => return e
     }
-    var pf2 = ParsedFront { parsed = parser::Program { items = append_items(kept, harness_items) }; manifest = pf.manifest; diags = pf.diags }
+    var pf2 = ParsedFront { parsed = parser::Program { items = append_items(kept, harness_items) }; manifest = pf.manifest; diags = pf.diags; embeds = pf.embeds }
     match frontend_check(pf2, false, tty, false) { Frontend as fe => native_gate_unmark_tests(fe.prog); error as e => e }
 }
 
@@ -2807,7 +2811,7 @@ fn cobertura_path_of(out_dir: str, gen_cov: bool): str {
 }
 
 fn release_build_of(dir: str, out_dir: str, opt: i32, tty: bool, start: i64, backend: Backend, pf: ParsedFront, debug: DebugInfo): i32 {
-    var pf_prod = ParsedFront { parsed = filter_tkt(pf.parsed); manifest = pf.manifest; diags = pf.diags }
+    var pf_prod = ParsedFront { parsed = filter_tkt(pf.parsed); manifest = pf.manifest; diags = pf.diags; embeds = pf.embeds }
     var rel = match frontend_check(pf_prod, false, tty, false) { Frontend as f => f; error as e => return fail(dir, e.message) }
     codegen_and_report(dir, out_dir, strip_tests(rel.prog), with_backend(rel.manifest, backend), opt, tty, start, debug)
 }
