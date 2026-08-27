@@ -455,7 +455,7 @@ pub type LowerCtx = struct {
     plan: checker::ResidencePlan
 }
 
-pub type NativeRegionFrame = struct { region_vreg: u32; decl_name: str; is_loop: bool }
+pub type NativeRegionFrame = struct { region_vreg: u32; decl_name: str; is_loop: bool; elided: bool }
 
 pub type Lowered = struct { ctx: LowerCtx; vreg: u32 }
 
@@ -598,7 +598,7 @@ fn open_frame_region(ctx: LowerCtx, line: u32, col: u32): LowerCtx {
     var fr = ctx_alloc(with_rr)
     var with_fr = ctx_append(fr.ctx, call_inst(fr.vreg, "tk_region_new_u", one_region_arg(rr.vreg), false, line, col))
     var entered = ctx_append(with_fr, void_call_inst("tk_region_enter_u", one_region_arg(fr.vreg), false, line, col))
-    ctx_with_regions(entered, [..entered.region_stack, NativeRegionFrame { region_vreg = fr.vreg; decl_name = ""; is_loop = false }])
+    ctx_with_regions(entered, [..entered.region_stack, NativeRegionFrame { region_vreg = fr.vreg; decl_name = ""; is_loop = false; elided = false }])
 }
 
 fn emit_region_leaves(ctx: LowerCtx, line: u32, col: u32): LowerCtx {
@@ -607,7 +607,9 @@ fn emit_region_leaves(ctx: LowerCtx, line: u32, col: u32): LowerCtx {
     loop {
         if i == 0 { break }
         i = i - 1
-        cur = ctx_append(cur, void_call_inst("tk_region_leave", [], false, line, col))
+        if !ctx.region_stack[i].elided {
+            cur = ctx_append(cur, void_call_inst("tk_region_leave", [], false, line, col))
+        }
     }
     cur
 }
@@ -617,7 +619,9 @@ fn emit_region_enters(ctx: LowerCtx, line: u32, col: u32): LowerCtx {
     var i: u64 = 0
     loop {
         if i >= ctx.region_stack.len { break }
-        cur = ctx_append(cur, void_call_inst("tk_region_enter_u", one_region_arg(ctx.region_stack[i].region_vreg), false, line, col))
+        if !ctx.region_stack[i].elided {
+            cur = ctx_append(cur, void_call_inst("tk_region_enter_u", one_region_arg(ctx.region_stack[i].region_vreg), false, line, col))
+        }
         i++
     }
     cur
@@ -629,7 +633,9 @@ fn emit_region_drops(ctx: LowerCtx, line: u32, col: u32): LowerCtx {
     loop {
         if i == 0 { break }
         i = i - 1
-        cur = ctx_append(cur, void_call_inst("tk_region_drop_u", one_region_arg(ctx.region_stack[i].region_vreg), false, line, col))
+        if !ctx.region_stack[i].elided {
+            cur = ctx_append(cur, void_call_inst("tk_region_drop_u", one_region_arg(ctx.region_stack[i].region_vreg), false, line, col))
+        }
     }
     cur
 }
@@ -647,7 +653,7 @@ fn region_stack_with_top_decl(stack: []NativeRegionFrame, name: str): []NativeRe
     if stack.len == 0 { return stack }
     var top = stack[stack.len - 1]
     var popped = pop_region_stack(stack)
-    [..popped, NativeRegionFrame { region_vreg = top.region_vreg; decl_name = name; is_loop = top.is_loop }]
+    [..popped, NativeRegionFrame { region_vreg = top.region_vreg; decl_name = name; is_loop = top.is_loop; elided = top.elided }]
 }
 
 fn register_scope_decl_name(ctx: LowerCtx, name: str): LowerCtx {
@@ -660,13 +666,17 @@ fn region_current_vreg(ctx: LowerCtx): Lowered {
     Lowered { ctx = ctx_append(r.ctx, call_inst(r.vreg, "tk_region_root_u", [], false, 0, 0)); vreg = r.vreg }
 }
 
-fn open_native_region(ctx: LowerCtx, decl_name: str, is_loop: bool, line: u32, col: u32): LowerCtx | error {
+fn open_native_region(ctx: LowerCtx, decl_name: str, is_loop: bool, elide: bool, line: u32, col: u32): LowerCtx | error {
     if ctx.bracket_depth > 0 { return ctx }
+    if elide {
+        var inherited = region_current_vreg(ctx)
+        return ctx_with_regions(inherited.ctx, [..inherited.ctx.region_stack, NativeRegionFrame { region_vreg = inherited.vreg; decl_name = decl_name; is_loop = is_loop; elided = true }])
+    }
     var cur = region_current_vreg(ctx)
     var bl = ctx_alloc(cur.ctx)
     var with_new = ctx_append(bl.ctx, call_inst(bl.vreg, "tk_region_new_u", one_region_arg(cur.vreg), false, line, col))
     var entered = ctx_append(with_new, void_call_inst("tk_region_enter_u", one_region_arg(bl.vreg), false, line, col))
-    ctx_with_regions(entered, [..entered.region_stack, NativeRegionFrame { region_vreg = bl.vreg; decl_name = decl_name; is_loop = is_loop }])
+    ctx_with_regions(entered, [..entered.region_stack, NativeRegionFrame { region_vreg = bl.vreg; decl_name = decl_name; is_loop = is_loop; elided = false }])
 }
 
 fn close_native_region(ctx: LowerCtx, line: u32, col: u32): LowerCtx | error {
@@ -675,6 +685,7 @@ fn close_native_region(ctx: LowerCtx, line: u32, col: u32): LowerCtx | error {
         return error { message = "native backend N1: close_native_region with no open region (internal invariant break)" }
     }
     var top = ctx.region_stack[ctx.region_stack.len - 1]
+    if top.elided { return ctx_with_regions(ctx, pop_region_stack(ctx.region_stack)) }
     var left = ctx_append(ctx, void_call_inst("tk_region_leave", [], false, line, col))
     var dropped = ctx_append(left, void_call_inst("tk_region_drop_u", one_region_arg(top.region_vreg), false, line, col))
     ctx_with_regions(dropped, pop_region_stack(ctx.region_stack))
@@ -3366,7 +3377,7 @@ fn lower_loop(ctx: LowerCtx, l: checker::TLoopStmt): LowerStmtOut | error {
     var defer_base = ictx.defers.len
     var target = LoopTargets { label = l.label; head = headb.block_id; exit = exitb.block_id; defer_base = defer_base; names = head_seed.names; region_base = ictx.region_stack.len }
     var body_seed = ctx_with_loops(ctx_with(ictx, entered, headb.block_id, head_seed.env), [..ictx.loop_targets, target])
-    var region_opened = match open_native_region(body_seed, "", true, 0, 0) { LowerCtx as c => c; error as err => return err }
+    var region_opened = match open_native_region(body_seed, "", true, checker::scope_slot_count(l.body) == 0, 0, 0) { LowerCtx as c => c; error as err => return err }
     var body_done = match lower_block(region_opened, l.body) { LowerCtx as c => c; error as err => return err }
     var closed = match close_loop_body(body_done, headb.block_id, head_seed.names, defer_base) { LowerCtx as c => c; error as err => return err }
     LowerStmtOut { ctx = close_loop(ictx, closed, exitb.block_id, exit_seed.env); terminated = false }
@@ -3476,11 +3487,11 @@ fn lower_if_stmt(ctx: LowerCtx, e: checker::TExpr, f: checker::TIfExpr, cond_vre
     var merged = add_merge_scalar_params(mergeblk.func, mergeblk.block_id, ctx.env, names)
     var br = branch_inst(cond_vreg, thenb.block_id, [], elseb.block_id, [], e.line, e.col)
     var ctx1 = ctx_append(ctx_with(ctx, merged.func, ctx.block_id, ctx.env), br)
-    var then_opened = match open_native_region(ctx_goto(ctx1, thenb.block_id), "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    var then_opened = match open_native_region(ctx_goto(ctx1, thenb.block_id), "", false, checker::scope_slot_count(f.then_blk) == 0, e.line, e.col) { LowerCtx as c => c; error as err => return err }
     var then_done = match lower_block(then_opened, f.then_blk) { LowerCtx as c => c; error as err => return err }
     var then_closed = match close_arm_replaying_defers(then_done, ctx1.defers, ctx1.region_stack, mergeblk.block_id, [], indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     var else_ctx = ctx_with(then_closed.ctx, then_closed.func, elseb.block_id, ctx.env)
-    var else_opened = match open_native_region(else_ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    var else_opened = match open_native_region(else_ctx, "", false, checker::scope_slot_count(f.else_blk) == 0, e.line, e.col) { LowerCtx as c => c; error as err => return err }
     var else_done = if f.has_else { match lower_block(else_opened, f.else_blk) { LowerCtx as c => c; error as err => return err } } else { else_opened }
     var else_closed = match close_arm_replaying_defers(else_done, ctx1.defers, ctx1.region_stack, mergeblk.block_id, [], indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     Lowered { ctx = ctx_with(else_closed.ctx, else_closed.func, mergeblk.block_id, merged.env); vreg = 0 }
@@ -3498,11 +3509,11 @@ fn lower_if_value(ctx: LowerCtx, e: checker::TExpr, f: checker::TIfExpr, cond_vr
     var br = branch_inst(cond_vreg, thenb.block_id, [], elseb.block_id, [], e.line, e.col)
     var ctx1 = ctx_append(ctx_with(ctx, merged.func, ctx.block_id, ctx.env), br)
     var result_ty = ltype_of(e.type, ctx.enums)
-    var then_opened = match open_native_region(ctx_goto(ctx1, thenb.block_id), "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    var then_opened = match open_native_region(ctx_goto(ctx1, thenb.block_id), "", false, checker::scope_slot_count(f.then_blk) == 0, e.line, e.col) { LowerCtx as c => c; error as err => return err }
     var then_val = match lower_block_value(then_opened, f.then_blk, result_ty, e.type) { LowerBlockValue as x => x; error as err => return err }
     var then_closed = match close_arm_replaying_defers(then_val.ctx, ctx1.defers, ctx1.region_stack, mergeblk.block_id, [then_val.vreg], indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     var else_ctx = ctx_with(then_closed.ctx, then_closed.func, elseb.block_id, ctx.env)
-    var else_opened = match open_native_region(else_ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    var else_opened = match open_native_region(else_ctx, "", false, checker::scope_slot_count(f.else_blk) == 0, e.line, e.col) { LowerCtx as c => c; error as err => return err }
     var else_val = match lower_block_value(else_opened, f.else_blk, result_ty, e.type) { LowerBlockValue as x => x; error as err => return err }
     var else_closed = match close_arm_replaying_defers(else_val.ctx, ctx1.defers, ctx1.region_stack, mergeblk.block_id, [else_val.vreg], indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     Lowered { ctx = ctx_with(else_closed.ctx, else_closed.func, mergeblk.block_id, merged.env); vreg = mp.vreg }
@@ -4310,7 +4321,7 @@ fn lower_match_guard(ctx: LowerCtx, arm: checker::TArm, next_block: u32): MatchA
 fn lower_match_arm_value(ctx: LowerCtx, e: checker::TExpr, arm: checker::TArm, subj: MatchSubj, merge_id: u32, names: []str): LowerCtx | error {
     var indices = merge_scalar_indices(ctx.env, names)
     var step = match lower_match_arm_entry(ctx, e, arm, subj) { MatchArmEntry as x => x; error as err => return err }
-    var opened = match open_native_region(step.ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    var opened = match open_native_region(step.ctx, "", false, checker::scope_slot_count(arm.body) == 0, e.line, e.col) { LowerCtx as c => c; error as err => return err }
     var bv = match lower_block_value(opened, arm.body, ltype_of(e.type, ctx.enums), e.type) { LowerBlockValue as x => x; error as err => return err }
     var closed = match close_arm_replaying_defers(bv.ctx, ctx.defers, step.ctx.region_stack, merge_id, [bv.vreg], indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     ctx_with(closed.ctx, closed.func, step.next_block, ctx.env)
@@ -4352,7 +4363,7 @@ fn lfallback_const(rt: LType): i64 {
 fn lower_match_arm_stmt(ctx: LowerCtx, e: checker::TExpr, arm: checker::TArm, subj: MatchSubj, merge_id: u32, names: []str): LowerCtx | error {
     var indices = merge_scalar_indices(ctx.env, names)
     var step = match lower_match_arm_entry(ctx, e, arm, subj) { MatchArmEntry as x => x; error as err => return err }
-    var opened = match open_native_region(step.ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    var opened = match open_native_region(step.ctx, "", false, checker::scope_slot_count(arm.body) == 0, e.line, e.col) { LowerCtx as c => c; error as err => return err }
     var done = match lower_block(opened, arm.body) { LowerCtx as c => c; error as err => return err }
     var closed = match close_arm_replaying_defers(done, ctx.defers, step.ctx.region_stack, merge_id, [], indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     ctx_with(closed.ctx, closed.func, step.next_block, ctx.env)
@@ -4776,11 +4787,11 @@ fn lower_if_fat(ctx: LowerCtx, e: checker::TExpr, f: checker::TIfExpr): LoweredF
     var merged = add_merge_scalar_params(mpl.func, mergeb.block_id, co.ctx.env, names)
     var br = branch_inst(co.vreg, thenb.block_id, [], elseb.block_id, [], e.line, e.col)
     var ctx1 = ctx_append(ctx_with(co.ctx, merged.func, co.ctx.block_id, co.ctx.env), br)
-    var then_opened = match open_native_region(ctx_goto(ctx1, thenb.block_id), "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    var then_opened = match open_native_region(ctx_goto(ctx1, thenb.block_id), "", false, checker::scope_slot_count(f.then_blk) == 0, e.line, e.col) { LowerCtx as c => c; error as err => return err }
     var then_fat = match lower_block_value_fat(then_opened, f.then_blk) { LowerBlockValueFat as x => x; error as err => return err }
     var then_closed = match close_arm_replaying_defers(then_fat.ctx, ctx1.defers, ctx1.region_stack, mergeb.block_id, merge_fat_value_args(then_fat.ptr, then_fat.len), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     var else_ctx = ctx_with(then_closed.ctx, then_closed.func, elseb.block_id, co.ctx.env)
-    var else_opened = match open_native_region(else_ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    var else_opened = match open_native_region(else_ctx, "", false, checker::scope_slot_count(f.else_blk) == 0, e.line, e.col) { LowerCtx as c => c; error as err => return err }
     var else_fat = match lower_block_value_fat(else_opened, f.else_blk) { LowerBlockValueFat as x => x; error as err => return err }
     var else_closed = match close_arm_replaying_defers(else_fat.ctx, ctx1.defers, ctx1.region_stack, mergeb.block_id, merge_fat_value_args(else_fat.ptr, else_fat.len), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     LoweredFat { ctx = ctx_with(else_closed.ctx, else_closed.func, mergeb.block_id, merged.env); ptr = mpp.vreg; len = mpl.vreg }
@@ -4824,7 +4835,7 @@ fn lower_match_arms_fat(ctx: LowerCtx, e: checker::TExpr, arms: []checker::TArm,
 fn lower_match_arm_fat(ctx: LowerCtx, e: checker::TExpr, arm: checker::TArm, subj: MatchSubj, merge_id: u32, names: []str): LowerCtx | error {
     var indices = merge_scalar_indices(ctx.env, names)
     var step = match lower_match_arm_entry(ctx, e, arm, subj) { MatchArmEntry as x => x; error as err => return err }
-    var opened = match open_native_region(step.ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    var opened = match open_native_region(step.ctx, "", false, checker::scope_slot_count(arm.body) == 0, e.line, e.col) { LowerCtx as c => c; error as err => return err }
     var bv = match lower_block_value_fat(opened, arm.body) { LowerBlockValueFat as x => x; error as err => return err }
     var closed = match close_arm_replaying_defers(bv.ctx, ctx.defers, step.ctx.region_stack, merge_id, merge_fat_value_args(bv.ptr, bv.len), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     ctx_with(closed.ctx, closed.func, step.next_block, ctx.env)
