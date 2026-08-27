@@ -257,3 +257,26 @@ ancoragem de path + reseed/ratchet). Rulings D130-D135. Ordem por dependência +
 **Pontos de reseed:** 0166, 0167(+seed-bump), 0169, 0170, 0174, 0161(RESEED-FINAL). **Fork genuíno
 remanescente:** nenhum (Tier-A resolvido §3; única escolha veto-open = nome `FILES` const-computado vs
 accessor `files()`, cosmética). Drifts achados: §7 do anexo.
+
+## Wave 0.3.1-M5 — fold-and-prune da AST por passo (D153, arquiteto 2026-08-28) — `fold-and-prune-por-passo-0.3.1.md`
+
+Vem DEPOIS do sweep de superfície (W1-W6) + migração arena-tipo (0184). É o maior lever pós-superfície
+pra aproximar do desejo `<1 GB` (D153; a régua é chegar o mais perto possível). Dois levers: jardinagem
+por-fase (project + drop de região via `Region.child_sized`/`drop_subtree`) + drena-por-unidade (drop do
+corpo pós-emit). Zero C (D148); reusa a arena-tipo.
+
+| seq | crumb-id | gate | o que faz |
+|---|---|---|---|
+| 0185 | FP-0 | [dry] | instrumenta retenção por-fase (árvore vs scaffold + fatia `line/col`) — baseline |
+| 0186 | FP-1 | [RITUAL] | `.tsym` opção A: `nid` na AST + tabela lateral; codegen resolve no emit → `teko.c` byte-idêntico |
+| 0187 | FP-2 | [RITUAL] | `Region.enter/leave` + `project_program`/`intern_str_into` como transformação-IDENTIDADE (rede R2, NÃO dropa) |
+| 0188 | FP-3 | [RITUAL] | `garden_phase` + drop pós-consteval (TypeTable + região do checker) — MAIOR queda |
+| 0189 | FP-4 | [RITUAL] | drop na fronteira mono (parse/checker-scaffolding antes de mono) |
+| 0190 | FP-5 | [fixpoint] | poda de campo confirmada (`doc`/`type_constraints`) — medir zero-leitor antes |
+| 0191 | FP-6 | [RITUAL] | drena-por-unidade: codegen por-namespace + drop do CORPO pós-emit (byte-preservante) |
+| 0192 | FP-7 | [RITUAL] | (opcional) `.tsym` opção B: emite `nid`, resolve em runtime — encolhe `teko.c`/binário |
+
+**Pontos de reseed:** 0186, 0187, 0188, 0189, 0190(se podar), 0191, (0192). **Fork genuíno:** um só — o
+bracket usa `Region.enter/leave` AMBIENTE (não threada região-param nas fases inteiras); recomendação
+law-first = passa (é o mesmo mecanismo do `open/close_native_region`, o veto D130 mira o thread-local de
+RUNTIME). HALT só se o dono exigir região-param nas fases (escala Eixo-C).
