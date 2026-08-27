@@ -81,10 +81,14 @@ verificado: **parte já landada** — `PrimKind` tem `Size; Usize` (`type.tks:7`
   (`usize==u64`, `isize==i64` bit-a-bit, §7b.5). `usize`/`isize` DISTINTOS de `ptr`/`uptr` (medida vs
   endereço); `usize↔u64` é `to`-cast, `uptr↔usize` é ponte Marshall NUNCA implícita (§7b.2).
 - **`ptr`/`uptr` opacos + `wrap`/`unwrap`** (`MEM-E0b`, ENSINO). Recupera `0011`. Torna `Ptr` ATÓMICO
-  opaco (remove `inner`; sem aritmética `p+n`/`p[n]` por construção). Adiciona os DOIS métodos: **`__wrap<T>(): T | error | null`** = re-entrada FALÍVEL checada (endereço 0→null; endereço em região VIVA
-  via `region_lookup`→senão error; `type_tag == di_type_id(T)`→senão error — tudo UB-free, SEM `unsafe`)
-  = **marshalling SEGURO** opaco↔tipado/FFI; **`__unwrap<T>(): T`** = exposição INFALÍVEL crua
-  (reinterpret puro). O tag vive no **header de alocação da arena** (não na palavra do ptr) → `ptr`/`uptr`
+  opaco (remove `inner`; sem aritmética `p+n`/`p[n]` por construção). Os DOIS métodos CANÔNICOS (dono,
+  VERBATIM, iguais para `ptr` E `uptr`): **`ptr::unwrap<T>(ref T): ptr`** (ESTÁTICO — ref-tipada → ptr
+  opaco) e **`ptr.wrap<T>(): T`** (INSTÂNCIA — ptr opaco → valor-tipado). É a **conversão DIRETA de
+  mesma-base — zero-cópia, zero-cast, sem cálculo extra** (`[]str` e `[]byte` partilham a base
+  `{ptr,len}`-de-bytes → `unwrap` de `ref []str` dá `ptr`, `.wrap<[]byte>()` devolve `[]byte`). Lower =
+  reinterpret nu; a segurança é compile-time (opaco + sem aritmética + mesma-base). O tag/arena-liveness
+  de `0011` fica como camada OPCIONAL checada para FFI/endereço estrangeiro. O tag (quando usado) vive no
+  **header de alocação da arena** (não na palavra do ptr) → `ptr`/`uptr`
   ficam palavra-nua, SEM fat pointer, SEM mudança de ABI. **USO FLAGSHIP HOJE (dono): interop
   ZERO-CÓPIA `str`↔`[]byte`** — um `str` É `{ptr,len}` de bytes, mesma rep que `[]byte`; o wrap/unwrap
   reinterpreta um como o outro SEM copiar, e a checagem de arena-viva torna-o SEGURO (um reinterpret cru
