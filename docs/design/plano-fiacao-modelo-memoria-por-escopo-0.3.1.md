@@ -85,7 +85,12 @@ verificado: **parte já landada** — `PrimKind` tem `Size; Usize` (`type.tks:7`
   via `region_lookup`→senão error; `type_tag == di_type_id(T)`→senão error — tudo UB-free, SEM `unsafe`)
   = **marshalling SEGURO** opaco↔tipado/FFI; **`__unwrap<T>(): T`** = exposição INFALÍVEL crua
   (reinterpret puro). O tag vive no **header de alocação da arena** (não na palavra do ptr) → `ptr`/`uptr`
-  ficam palavra-nua, SEM fat pointer, SEM mudança de ABI. Twin `region_alloc_tagged(r, n, tag)` em
+  ficam palavra-nua, SEM fat pointer, SEM mudança de ABI. **USO FLAGSHIP HOJE (dono): interop
+  ZERO-CÓPIA `str`↔`[]byte`** — um `str` É `{ptr,len}` de bytes, mesma rep que `[]byte`; o wrap/unwrap
+  reinterpreta um como o outro SEM copiar, e a checagem de arena-viva torna-o SEGURO (um reinterpret cru
+  poderia devolver slice pendente). É o cast implícito de mesma-rep que o expurgo já quer (CLAUDE.md) e
+  MATA o copy-loop que `str_of_bytes` é hoje (`teko_rt.tks:64-69`, byte-a-byte). Twin
+  `region_alloc_tagged(r, n, tag)` em
   **`arena.tks` (Teko)** — a arena é 100% Teko (D128), então o antigo FORK C-vs-Teko (DECISION_LOG:680)
   está RESOLVIDO (mais-recente-vence): NÃO é patch em C, é Teko. Reusa `di_type_id` (`di.tks:373`, UMA
   hash) e `region_lookup` (`arena.tks:965`, já existe). Inerte/byte-idêntico até um `__wrap` ler o tag.

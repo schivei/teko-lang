@@ -13,16 +13,21 @@ sources:
   - "src/checker/type.tks:51-54"                                      # Ptr still GENERIC (inner); Uptr atomic
   - "src/runtime/arena.tks:965"                                       # region_lookup already exists
   - "src/checker/di.tks:373"                                          # di_type_id (the one project hash)
+  - "src/runtime/teko_rt.tks:64-69"                                   # str_of_bytes — TODAY a copy-loop, the flagship target
+  - "docs/design/arena-escopada-stream-expurgo-0.3.1.md"              # the str<->[]byte same-rep cast the expurgo wants
+  - "DECISION_LOG.md:1166"                                            # D130 addendum — wrap/unwrap = safe pointer marshalling
 ---
 
-# 0149 · MEM-E0b — opaque `ptr`/`uptr` + `__wrap`/`__unwrap` (recover 0011; tag lands in Teko arena)
+# 0149 · MEM-E0b — opaque `ptr`/`uptr` + `__wrap`/`__unwrap` (recover 0011; flagship = zero-copy str↔[]byte)
 
 > Recover the deliberated Marshall design (`0011-SM-G5`): make `ptr`/`uptr` OPAQUE atomic types with two
 > methods — `__wrap<T>()` (FALLIBLE, arena-liveness+type-tag checked, safe re-entry) and `__unwrap<T>()`
-> (INFALLIBLE raw exposure) — the SAFE marshalling between pointer representations the owner named. The
-> tag rides the arena allocation header; `ptr`/`uptr` stay bare words (no fat pointer, no ABI change).
-> The old C-vs-Teko fork (DECISION_LOG:680) is DEAD — the arena is 100% Teko (D128), so
-> `region_alloc_tagged` lands in `arena.tks`, NOT a C patch. NOT new design — recovery.
+> (INFALLIBLE raw exposure). **The flagship use TODAY (owner):** the ZERO-COPY `str`↔`[]byte` interop — a
+> `str` IS `{ptr,len}` of bytes, so a `str`'s payload and a `[]byte` share the SAME rep; wrap/unwrap is
+> the SAFE mechanism (arena-liveness checked) that reinterprets one as the other WITHOUT copying. This is
+> the implicit same-rep cast the expurgo already wants (CLAUDE.md), and it kills the copy-loop that
+> `str_of_bytes` is TODAY (`teko_rt.tks:64-69`). The tag rides the arena header; `ptr`/`uptr` stay bare
+> words. The old C-vs-Teko fork (DECISION_LOG:680) is DEAD — arena is 100% Teko (D128). NOT new design.
 
 ## Goal
 
@@ -30,11 +35,17 @@ Replace the generic `Ptr<T>` family with a single OPAQUE non-generic `ptr`/`uptr
 `[u]ptr.__wrap<T>(): T | error | null` (checked cast IN, no `unsafe`) and `[u]ptr.__unwrap<T>(): T`
 (raw exposure OUT). The opaque pointer is STRUCTURALLY incapable of arithmetic (no element width) →
 kills `p+n`/`p[n]` by construction. The tag lives in the ARENA ALLOCATION HEADER (a `u64` header slot),
-not the pointer word — `ptr`/`uptr` remain bare machine words (C-repr `void*`/`uintptr_t`). INERT
-(byte-identical) until a `__wrap` reads the tag; `src/`'s FFI migration to opaque `ptr` is the reball
-(`0091 SM-S4` / `MEM-W6`). **State (verified):** `type.tks:51 Ptr = struct { inner }` is STILL generic —
-this crumb makes it atomic; `Uptr` (`:54`) is already atomic; `region_lookup` (`arena.tks:965`) and
-`di_type_id` (`di.tks:373`) already exist.
+not the pointer word — `ptr`/`uptr` remain bare machine words. **The concrete flagship consumer:** a
+`str` is `{ptr,len}` of bytes and a `[]byte` is `{ptr,len}` of bytes — SAME rep. So `str`→`[]byte` and
+`[]byte`→`str` (and an `[]str` payload viewed as its constituent bytes) are IDENTITY reinterprets, ZERO
+copy — but doing them raw could hand back a dangling slice; wrap/unwrap makes it SAFE by checking the
+address is still in a LIVE arena region. The checker accepts the same-rep `str`↔`[]byte` cast as implicit
+(the expurgo's ask), lowered through the identity reinterpret, with wrap/unwrap the safe general
+primitive under it (and for FFI / opaque↔typed). This eliminates the `str_of_bytes` copy-loop
+(`teko_rt.tks:64-69`) — it becomes an identity reinterpret. INERT/byte-identical until adopted; the FFI
++ str/byte migration is the reball (`0091 SM-S4` / `MEM-W6`). **State (verified):** `type.tks:51 Ptr =
+struct { inner }` is STILL generic — this crumb makes it atomic; `Uptr` (`:54`) atomic; `region_lookup`
+(`arena.tks:965`), `di_type_id` (`di.tks:373`), `str_of_bytes`/`bytes_of_str` (`teko_rt.tks`) exist.
 
 ## Where
 
@@ -50,6 +61,10 @@ this crumb makes it atomic; `Uptr` (`:54`) is already atomic; `region_lookup` (`
 - `src/runtime/arena.tks` — ADDITIVE `region_alloc_tagged(r, n, tag): ptr` (Teko — the arena is Teko,
   D128): the tag is a `u64` header slot alongside the existing `ar_region_alloc_w`. Inert until read.
 - `src/checker/di.tks:373` — REUSE `di_type_id` verbatim for `type_tag` (ONE hash project-wide).
+- `src/checker/typer.tks` — accept the same-rep `str`↔`[]byte` cast as IMPLICIT (identity reinterpret,
+  no copy) — the flagship; wrap/unwrap is the safe primitive beneath it.
+- `src/runtime/teko_rt.tks:64-69` — `str_of_bytes` (and `bytes_of_str`) become IDENTITY reinterprets
+  (delete the copy-loop) once the same-rep cast lands (adopted in the reball, not here — kept inert).
 
 ## How
 
@@ -116,6 +131,8 @@ dynamic outcome (rejection oracle allowed):
 | `marshall_wrap_dead_arena` | `__wrap` of a dropped-region address returns `error` | 0 (error branch) |
 | `marshall_wrap_null` | `__wrap` of address 0 returns `null` | 0 (null branch) |
 | `marshall_unwrap_infallible` | `p.__unwrap<T>()` exposes the value, no check | 0 |
+| `marshall_str_bytes_zerocopy` | a `str` reinterpreted as `[]byte` and back shares the SAME ptr (zero copy — the byte address is identical, not a duplicate) — the flagship | 0 |
+| `marshall_str_bytes_dead_arena` | reinterpreting a `str` whose arena was dropped, via `__wrap<[]byte>`, returns `error` (the safety wrap/unwrap adds over a raw reinterpret) | 0 (error branch) |
 | `opaque_ptr_no_arithmetic` | `p + 1` / `p[0]` on an opaque `ptr` rejected | EXPECT_COMPILE_FAIL |
 
 ## Gate
