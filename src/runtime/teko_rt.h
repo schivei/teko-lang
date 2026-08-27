@@ -1409,7 +1409,7 @@ double   tk_f64_from_bits(uint64_t bits);
 // that means the same thing on every platform.
 //
 // The line is `TK_PANIC_MARKER <msg>` and NOTHING else: no source position (a positioned
-// guard such as tk_panic_cast prints its own "line:col: " ahead of it) and no backtrace
+// guard prints its own "line:col: " ahead of it) and no backtrace
 // (that follows on its own lines, and degrades to a one-line notice where execinfo is
 // absent). So marker+reason always sit adjacent on one line, and a regressor pattern can
 // assert both at once without depending on either of the parts that move per platform.
@@ -1437,24 +1437,7 @@ _Noreturn void tk_panic_str(tk_str msg);
 int tk_exit_status(int32_t code);
 _Noreturn void tk_exit(int32_t code);
 _Noreturn void tk_panic_div0(void);       // "division by zero"
-_Noreturn void tk_panic_oob(void);        // "index out of bounds"
-_Noreturn void tk_panic_cast(void);       // "impossible conversion" (the `x to T` guard — B.36 / M.1)
 _Noreturn void tk_panic_overflow(void);   // "integer overflow"
-// (C1.7) positioned OOB panic — prefix "line:col: " then the canonical OOB panic. codegen passes
-// the offending index node's position (C1-POS) so a NATIVE index-out-of-bounds locates precisely.
-_Noreturn void tk_panic_oob_at(uint32_t line, uint32_t col);
-// positioned null-reference deref — same shape as tk_panic_oob_at. A zero-filled reference slot
-// (of_len leaves a class/reference slot null) deref'd via `x[i].field`/`.method()` traps here
-// instead of segfaulting.
-_Noreturn void tk_panic_null_deref_at(uint32_t line, uint32_t col);
-// tk_nn — return `p` if non-null, else trap via tk_panic_null_deref_at. codegen wraps a
-// class/reference-pointer deref in it so a null slot panics precisely rather than segfaulting.
-void *tk_nn(void *p, uint32_t line, uint32_t col);
-// (C1.7-CAST) positioned cast panic — same shape as tk_panic_oob_at. codegen wraps every
-// tk_to_* call in a statement-expression that sets these globals first; tk_panic_cast reads them.
-// When line==0 the plain "impossible conversion" message is emitted (position unknown).
-extern uint32_t _tk_cast_loc_line;
-extern uint32_t _tk_cast_loc_col;
 
 // teko::assert (the injected testing assertions) lives in its own C seed —
 // src/assert/assert.{c,h} (canonical: src/assert/assert.tks). Generated programs that
@@ -1595,70 +1578,5 @@ static inline double     tk_div_f64(double     a, double     b){ if (b == 0.0)  
 static inline float      tk_div_f32(float      a, float      b){ if (b == 0.0f)    tk_panic_div0(); return a / b; }
 static inline _Float16   tk_div_f16(_Float16   a, _Float16   b){ if (b == (_Float16)0) tk_panic_div0(); return a / b; }
 
-// --- checked narrowing integer conversion: panic if the value can't fit the target ---
-// The source value rides a 64-bit carrier picked by SOURCE signedness, which holds it WITHOUT
-// loss because the language's widest integer IS 64-bit (128-bit primitives are gone — owner
-// ruling 2026-07-30 — so no source needs a wider carrier): `int64_t` for a SIGNED source ("_s"),
-// `uint64_t` for an UNSIGNED source ("_u"). The range check then decides fit.
-// A signed source -> unsigned target rides "_s" (the negative check catches it); an
-// unsigned source -> signed target rides "_u" (the upper-bound check catches it).
-// There is no `_s` entry for i64 nor `_u` entry for u64: a same-signedness same-width cast never
-// narrows, so `codegen::cast_may_lose` never asks for one and the fit check would be vacuous.
-static inline uint8_t  tk_to_u8_s (int64_t v){ if (v < 0 || v > 0xFF)       tk_panic_cast(); return (uint8_t )v; }
-static inline uint16_t tk_to_u16_s(int64_t v){ if (v < 0 || v > 0xFFFF)     tk_panic_cast(); return (uint16_t)v; }
-static inline uint32_t tk_to_u32_s(int64_t v){ if (v < 0 || v > 0xFFFFFFFF) tk_panic_cast(); return (uint32_t)v; }
-static inline uint64_t tk_to_u64_s(int64_t v){ if (v < 0)                   tk_panic_cast(); return (uint64_t)v; }
-static inline uint8_t  tk_to_u8_u (uint64_t v){ if (v > 0xFF)                tk_panic_cast(); return (uint8_t )v; }
-static inline uint16_t tk_to_u16_u(uint64_t v){ if (v > 0xFFFF)             tk_panic_cast(); return (uint16_t)v; }
-static inline uint32_t tk_to_u32_u(uint64_t v){ if (v > 0xFFFFFFFF)         tk_panic_cast(); return (uint32_t)v; }
-
-static inline int8_t   tk_to_i8_s (int64_t v){ if (v < -128          || v > 127)        tk_panic_cast(); return (int8_t )v; }
-static inline int16_t  tk_to_i16_s(int64_t v){ if (v < -32768        || v > 32767)      tk_panic_cast(); return (int16_t)v; }
-static inline int32_t  tk_to_i32_s(int64_t v){ if (v < -2147483648LL || v > 2147483647LL) tk_panic_cast(); return (int32_t)v; }
-static inline int8_t   tk_to_i8_u (uint64_t v){ if (v > 127)                tk_panic_cast(); return (int8_t )v; }
-static inline int16_t  tk_to_i16_u(uint64_t v){ if (v > 32767)             tk_panic_cast(); return (int16_t)v; }
-static inline int32_t  tk_to_i32_u(uint64_t v){ if (v > 2147483647LL)      tk_panic_cast(); return (int32_t)v; }
-static inline int64_t  tk_to_i64_u(uint64_t v){ if (v > (uint64_t)0x7FFFFFFFFFFFFFFFULL) tk_panic_cast(); return (int64_t)v; }
-
-// --- checked float -> int conversion: ruling (§5) — `to` truncates toward zero;
-// NaN/inf or a value outside the target's range -> PANIC (parity with the int guard).
-// Truncation toward zero is C's float->int conversion semantics; we range-check the
-// SOURCE value in the float domain BEFORE converting. NaN fails every comparison, so a
-// negated `(lo <= x && x <= hi)` traps NaN AND ±inf AND out-of-range in one test.
-// Every f16/f32 value is exactly representable as a double, so the f32/f16 entry points
-// widen losslessly and route through the f64 checker (single-eval entry typing preserved).
-//
-// Bound choice: for an 8/16/32-bit target both bounds are exact doubles, so the inclusive
-// `[min, max]` compare is exact. For a 64-bit target the max integer is NOT an exact
-// double, so the unsigned/positive ceiling is the EXCLUSIVE 2^W (resp. 2^(W-1)) via `<`,
-// which is the exact double right above the representable range — any in-range value is
-// strictly below it. The signed lower bound -2^(W-1) IS an exact double, so it stays `>=`.
-static inline uint8_t  tk_to_u8_from_f64 (double x){ if(!(x>=0.0 && x<=255.0))             tk_panic_cast(); return (uint8_t )x; }
-static inline uint8_t  tk_to_u8_from_f32 (float  x){ return tk_to_u8_from_f64((double)x); }
-static inline uint8_t  tk_to_u8_from_f16 (_Float16 x){ return tk_to_u8_from_f64((double)x); }
-static inline uint16_t tk_to_u16_from_f64(double x){ if(!(x>=0.0 && x<=65535.0))           tk_panic_cast(); return (uint16_t)x; }
-static inline uint16_t tk_to_u16_from_f32(float  x){ return tk_to_u16_from_f64((double)x); }
-static inline uint16_t tk_to_u16_from_f16(_Float16 x){ return tk_to_u16_from_f64((double)x); }
-static inline uint32_t tk_to_u32_from_f64(double x){ if(!(x>=0.0 && x<=4294967295.0))      tk_panic_cast(); return (uint32_t)x; }
-static inline uint32_t tk_to_u32_from_f32(float  x){ return tk_to_u32_from_f64((double)x); }
-static inline uint32_t tk_to_u32_from_f16(_Float16 x){ return tk_to_u32_from_f64((double)x); }
-static inline uint64_t tk_to_u64_from_f64(double x){ if(!(x>=0.0 && x<18446744073709551616.0)) tk_panic_cast(); return (uint64_t)x; }
-static inline uint64_t tk_to_u64_from_f32(float  x){ return tk_to_u64_from_f64((double)x); }
-static inline uint64_t tk_to_u64_from_f16(_Float16 x){ return tk_to_u64_from_f64((double)x); }
-
-// Signed targets: valid x in [-2^(W-1), 2^(W-1) - 1]. For 8/16/32 the bounds are exact
-// doubles; for 64 the upper bound is bounded strictly below 2^(W-1).
-static inline int8_t   tk_to_i8_from_f64 (double x){ if(!(x>=-128.0 && x<=127.0))          tk_panic_cast(); return (int8_t )x; }
-static inline int8_t   tk_to_i8_from_f32 (float  x){ return tk_to_i8_from_f64((double)x); }
-static inline int8_t   tk_to_i8_from_f16 (_Float16 x){ return tk_to_i8_from_f64((double)x); }
-static inline int16_t  tk_to_i16_from_f64(double x){ if(!(x>=-32768.0 && x<=32767.0))      tk_panic_cast(); return (int16_t)x; }
-static inline int16_t  tk_to_i16_from_f32(float  x){ return tk_to_i16_from_f64((double)x); }
-static inline int16_t  tk_to_i16_from_f16(_Float16 x){ return tk_to_i16_from_f64((double)x); }
-static inline int32_t  tk_to_i32_from_f64(double x){ if(!(x>=-2147483648.0 && x<=2147483647.0)) tk_panic_cast(); return (int32_t)x; }
-static inline int32_t  tk_to_i32_from_f32(float  x){ return tk_to_i32_from_f64((double)x); }
-static inline int32_t  tk_to_i32_from_f16(_Float16 x){ return tk_to_i32_from_f64((double)x); }
-static inline int64_t  tk_to_i64_from_f64(double x){ if(!(x>=-9223372036854775808.0 && x<9223372036854775808.0)) tk_panic_cast(); return (int64_t)x; }
-static inline int64_t  tk_to_i64_from_f32(float  x){ return tk_to_i64_from_f64((double)x); }
-static inline int64_t  tk_to_i64_from_f16(_Float16 x){ return tk_to_i64_from_f64((double)x); }
 
 #endif // TEKO_RT_H

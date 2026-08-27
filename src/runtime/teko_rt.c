@@ -1225,13 +1225,12 @@ void tk_intern_reset(void) {
 // state: everything a `#test` can dirty that neither a later test nor the run summary is meant to
 // read back. Run at the entry of every `#test` (tk_test_begin) so a reshuffled order can expose no
 // residue, and folded into the full tk_task_reset so the two can never drift apart. It clears the
-// string-intern table, the two cast-diagnostic positions, the scope and scenario labels, the probe
+// string-intern table, the scope and scenario labels, the probe
 // code and the stdin/fd staging; it deliberately leaves the coverage sinks and the tally alone —
 // those ACCUMULATE across a lane's tests and are read AFTER the run, never between tests.
 static void tk_task_reset_transient(void) {
     tk_task *t = tk_task_current();
     tk_intern_reset();                                   // frees this task's cached entries; buckets stay
-    _tk_cast_loc_line = 0; _tk_cast_loc_col = 0;         // C-5 (process-global; written by emitted casts)
     t->scope_len = 0;                                    // C-8
     t->scen_len = 0;                                     // C-9
     t->test_probe_last_code = 0;                         // C-7
@@ -3278,43 +3277,7 @@ _Noreturn void tk_exit(int32_t code) {
 }
 
 _Noreturn void tk_panic_div0(void)     { tk_panic("division by zero"); }
-_Noreturn void tk_panic_oob(void)      { tk_panic("index out of bounds"); }
-// (C1.7-CAST) Global cast-location set by codegen just before every tk_to_* call.
-// line==0 means position unknown (position setter was skipped).
-uint32_t _tk_cast_loc_line = 0;
-uint32_t _tk_cast_loc_col  = 0;
-_Noreturn void tk_panic_cast(void) {
-    if (_tk_cast_loc_line) {
-        char buf[32];
-        snprintf(buf, sizeof buf, "%u:%u: ", (unsigned)_tk_cast_loc_line, (unsigned)_tk_cast_loc_col);
-        fputs(buf, stderr);
-    }
-    tk_panic("impossible conversion");
-}
 _Noreturn void tk_panic_overflow(void) { tk_panic("integer overflow"); }
-
-// (C1.7) positioned OOB — print "line:col: " then the canonical TK_PANIC_MARKER line for
-// "index out of bounds". The position goes BEFORE the marker on purpose: the marker and the
-// reason stay adjacent, so a regressor pattern can assert them together without ever naming
-// a line or column.
-_Noreturn void tk_panic_oob_at(uint32_t line, uint32_t col) {
-    char buf[32];
-    snprintf(buf, sizeof buf, "%u:%u: ", (unsigned)line, (unsigned)col);
-    fputs(buf, stderr);
-    tk_panic_oob();
-}
-
-_Noreturn void tk_panic_null_deref_at(uint32_t line, uint32_t col) {
-    char buf[32];
-    snprintf(buf, sizeof buf, "%u:%u: ", (unsigned)line, (unsigned)col);
-    fputs(buf, stderr);
-    tk_panic("null reference dereference");
-}
-
-void *tk_nn(void *p, uint32_t line, uint32_t col) {
-    if (!p) tk_panic_null_deref_at(line, col);
-    return p;
-}
 
 // =========================================================================
 // Host-FFI + arithmetic bottoms (the lifting seam — see teko_rt.h). The
