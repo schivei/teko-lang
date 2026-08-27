@@ -1035,7 +1035,6 @@ fn cg_prog_noreturn(items: []@TItem()): CgNameTable {
         i++
     }
     var keys: [nfn]str = []
-    var tails: [nfn]str = []
     var flag: [nfn]bool = []
     var k: u64 = 0
     i = 0
@@ -1045,7 +1044,6 @@ fn cg_prog_noreturn(items: []@TItem()): CgNameTable {
             checker::TFunction as f => {
                 if !f.is_extern {
                     keys[k] = cg_fn_key(f.namespace, f.name)
-                    tails[k] = cg_fn_tail_call_key(f)
                     var tn = cg_fn_tail_name(f)
                     flag[k] = teko::runtime::str_eq(tn, "panic") || teko::runtime::str_eq(tn, "exit") || teko::runtime::str_eq(f.name, "panic") || teko::runtime::str_eq(f.name, "exit")
                     k++
@@ -1053,6 +1051,15 @@ fn cg_prog_noreturn(items: []@TItem()): CgNameTable {
             }
             _ => { }
         }
+        i++
+    }
+    var scratch = cg_scope_begin()
+    var tails: [nfn]str = []
+    var kk: u64 = 0
+    i = 0
+    loop {
+        if i >= items.len { break }
+        match items[i] { checker::TFunction as f => if !f.is_extern { tails[kk] = cg_fn_tail_call_key(f); kk++ }; _ => { } }
         i++
     }
     var index = cg_table_build(keys, cg_fn_index_slots(nfn))
@@ -1070,6 +1077,7 @@ fn cg_prog_noreturn(items: []@TItem()): CgNameTable {
             f2++
         }
     }
+    cg_scope_end(scratch)
     cg_flag_table(keys, flag, nfn)
 }
 
@@ -1116,15 +1124,7 @@ fn cg_prog_needs_region(items: []@TItem(), noreturn: CgNameTable): CgNameTable {
         match items[i] { checker::TFunction as f => if !f.is_extern { nfn++ }; _ => { } }
         i++
     }
-    var fvset: []str = []
-    i = 0
-    loop {
-        if i >= items.len { break }
-        match items[i] { checker::TFunction as f => if !f.is_extern { fvset = cg_block_collect_funcvals(f.body, fvset) }; _ => { } }
-        i++
-    }
     var keys: [nfn]str = []
-    var callees: [nfn][]str = []
     var below: [nfn]bool = []
     var flag: [nfn]bool = []
     var k: u64 = 0
@@ -1136,16 +1136,35 @@ fn cg_prog_needs_region(items: []@TItem(), noreturn: CgNameTable): CgNameTable {
                 if !f.is_extern {
                     var key = cg_fn_key(f.namespace, f.name)
                     keys[k] = key
-                    callees[k] = cg_block_collect_keys(f.body, [])
                     below[k] = cg_fn_below_line_a(f) || cg_table_get(noreturn, key) != 0
-                    var is_funcval = str_list_has(fvset, key)
-                    flag[k] = is_funcval || (!below[k] && (cg_type_is_heap(f.return_type) || cg_block_allocs(f.body) || cg_block_indirect(f.body)))
-                    if is_funcval { below[k] = false }
+                    flag[k] = !below[k] && (cg_type_is_heap(f.return_type) || cg_block_allocs(f.body) || cg_block_indirect(f.body))
                     k++
                 }
             }
             _ => { }
         }
+        i++
+    }
+    var scratch = cg_scope_begin()
+    var fvset: []str = []
+    i = 0
+    loop {
+        if i >= items.len { break }
+        match items[i] { checker::TFunction as f => if !f.is_extern { fvset = cg_block_collect_funcvals(f.body, fvset) }; _ => { } }
+        i++
+    }
+    k = 0
+    loop {
+        if k >= nfn { break }
+        if str_list_has(fvset, keys[k]) { flag[k] = true; below[k] = false }
+        k++
+    }
+    var callees: [nfn][]str = []
+    var kk: u64 = 0
+    i = 0
+    loop {
+        if i >= items.len { break }
+        match items[i] { checker::TFunction as f => if !f.is_extern { callees[kk] = cg_block_collect_keys(f.body, []); kk++ }; _ => { } }
         i++
     }
     var index = cg_table_build(keys, cg_fn_index_slots(nfn))
@@ -1160,6 +1179,7 @@ fn cg_prog_needs_region(items: []@TItem(), noreturn: CgNameTable): CgNameTable {
             f2++
         }
     }
+    cg_scope_end(scratch)
     cg_flag_table(keys, flag, nfn)
 }
 
@@ -7251,35 +7271,35 @@ fn cg_binding_is_block_local_slice(escaping: []str, fn_body: []@TStatement(), bo
 
 /**
  * cg_alloc_region — the C expression naming the region that an allocation at the current emit point
- * bumps from: the innermost open per-scope region when one is live, otherwise the enclosing function's
- * base region (`_tkfr`/`_tkrgn` via `dctx.base`), falling back to the process root only at the rare
- * entry/extern boundary where no region was threaded in.
+ * bumps from: the innermost open per-scope region when one is live, then the region pinned by an
+ * escape/residence/return bracket (`dctx.cur`), otherwise the dynamic current region
+ * `region_current()`. The ambient is used for the general case because it correctly reflects both the
+ * enclosing frame AND any manual scratch region the running code entered (`cg_scope_begin`), which a
+ * static parameter cannot track.
  *
  * @param regions  the live per-scope region frame stack
- * @param dctx     the defer context carrying the function's base region
+ * @param dctx     the defer context carrying any bracket-pinned region
  * @return         the C region expression
  */
 fn cg_alloc_region(regions: []RegionFrame, dctx: DeferCtx): str {
     if regions.len > 0 { return regions[regions.len - 1].name }
     if dctx.cur.len > 0 { return dctx.cur }
-    if dctx.regbase.len > 0 { return dctx.regbase }
-    teko::str::concat(cg_arena_sym(CgArenaSym::RegionRoot), "()")
+    teko::str::concat(cg_arena_sym(CgArenaSym::RegionCurrent), "()")
 }
 
 /**
- * cg_frame_region — the enclosing function's frame region (`_tkfr` when it owns a frame, else its
- * `_tkrgn` parameter), IGNORING any open per-scope region. This is where a value that may outlive the
- * current lexical scope must live: call returns and escaping allocations (array literals, boxes,
- * interpolation, variant wraps). It reproduces exactly what the ambient `region_current()` named before
- * regions became parameters — per-scope regions are never entered, so the ambient was always the frame.
+ * cg_frame_region — the region a value that may outlive the current lexical scope must live in (call
+ * returns and escaping allocations: array literals, boxes, interpolation, variant wraps), IGNORING any
+ * open per-scope region. It is the bracket-pinned region (`dctx.cur`, e.g. the return region `_tkrr`)
+ * when set, else the dynamic current region `region_current()` — the enclosing frame, or the caller's
+ * region for a frameless helper.
  *
- * @param dctx  the defer context carrying the function's base region
+ * @param dctx  the defer context carrying any bracket-pinned region
  * @return      the C frame-region expression
  */
 fn cg_frame_region(dctx: DeferCtx): str {
     if dctx.cur.len > 0 { return dctx.cur }
-    if dctx.regbase.len > 0 { return dctx.regbase }
-    teko::str::concat(cg_arena_sym(CgArenaSym::RegionRoot), "()")
+    teko::str::concat(cg_arena_sym(CgArenaSym::RegionCurrent), "()")
 }
 
 fn cb_region_open(buf: teko::io::FileStream, parent_expr: str, body: []@TStatement()) {
@@ -7305,12 +7325,11 @@ type DeferCtx = struct {
     cov: CovCtx
     rr: str
     bracket_depth: u64
-    regbase: str
     cur: str
 }
 
 fn dctx_empty(): DeferCtx {
-    DeferCtx { defers = []; loops = []; cov = cov_off(); rr = ""; bracket_depth = 0; regbase = ""; cur = "" }
+    DeferCtx { defers = []; loops = []; cov = cov_off(); rr = ""; bracket_depth = 0; cur = "" }
 }
 
 fn emit_defers(buf: teko::io::FileStream, defers: []@TStatement(), defer_floor: u64, prog: CgProg, indent: str, escaping: []str, fn_body: []@TStatement()) {
@@ -7333,7 +7352,7 @@ fn emit_defers(buf: teko::io::FileStream, defers: []@TStatement(), defer_floor: 
 }
 
 fn dctx_register(dctx: DeferCtx, s: @TStatement()): DeferCtx {
-    DeferCtx { defers = [..dctx.defers, s]; loops = dctx.loops; cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth; regbase = dctx.regbase; cur = dctx.cur }
+    DeferCtx { defers = [..dctx.defers, s]; loops = dctx.loops; cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth; cur = dctx.cur }
 }
 
 fn cg_append_direct_defers(defers: []@TStatement(), body: []@TStatement()): []@TStatement() {
@@ -7827,7 +7846,7 @@ fn emit_return(buf: teko::io::FileStream, prog: CgProg, r: checker::TReturn, in_
  * @return        `dctx` with `cur = region`
  */
 fn cg_dctx_with_cur(dctx: DeferCtx, region: str): DeferCtx {
-    DeferCtx { defers = dctx.defers; loops = dctx.loops; cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth; regbase = dctx.regbase; cur = region }
+    DeferCtx { defers = dctx.defers; loops = dctx.loops; cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth; cur = region }
 }
 
 fn emit_loop(buf: teko::io::FileStream, l: checker::TLoopStmt, in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
@@ -7849,7 +7868,7 @@ fn emit_loop_while(buf: teko::io::FileStream, l: checker::TLoopStmt, in_main: bo
     if labeled { buf.write(inner); buf.write("tk_lbl_"); buf.write(l.label); buf.write("_cont: ;\n") }
     var defer_floor = dctx.defers.len
     var fall = cg_append_direct_defers(dctx.defers, l.body)
-    var dctx2 = DeferCtx { defers = dctx.defers; loops = [..dctx.loops, LoopDeferFrame { label = l.label; defer_base = defer_floor; region_base = regions.len }]; cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth; regbase = dctx.regbase; cur = dctx.cur }
+    var dctx2 = DeferCtx { defers = dctx.defers; loops = [..dctx.loops, LoopDeferFrame { label = l.label; defer_base = defer_floor; region_base = regions.len }]; cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth; cur = dctx.cur }
     var want_block = (cg_block_has_block_local(prog, escaping, fn_body, l.body, false) || (dctx.rr.len > 0 && cg_block_wants_region(l.body))) && regions.len < 64 && checker::scope_slot_count(l.body) > 0
     var region = if want_block { fresh_named("_tkbr", buf.gensym() to i64) } else { "" }
     var regs2 = regions
@@ -8468,7 +8487,7 @@ fn cg_target_name(t: @BindTarget()): str {
 }
 
 fn cg_dctx_bracket(dctx: DeferCtx): DeferCtx {
-    DeferCtx { defers = dctx.defers; loops = dctx.loops; cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth + 1; regbase = dctx.regbase; cur = dctx.cur }
+    DeferCtx { defers = dctx.defers; loops = dctx.loops; cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth + 1; cur = dctx.cur }
 }
 
 /**
@@ -8482,7 +8501,7 @@ fn cg_dctx_bracket(dctx: DeferCtx): DeferCtx {
  * @return        a defer context nested one bracket deeper with `cur` pinned to `region`
  */
 fn cg_dctx_bracket_cur(dctx: DeferCtx, region: str): DeferCtx {
-    DeferCtx { defers = dctx.defers; loops = dctx.loops; cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth + 1; regbase = dctx.regbase; cur = region }
+    DeferCtx { defers = dctx.defers; loops = dctx.loops; cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth + 1; cur = region }
 }
 
 fn cg_conveys_escape_deep(escaping: []str, s: @TStatement()): bool {
@@ -8564,8 +8583,7 @@ fn emit_function_cov(buf: teko::io::FileStream, prog: CgProg, f: checker::TFunct
     var frame: str = if want_frame { "_tkfr" } else { "" }
     var use_rr = want_frame
     var rr: str = if use_rr { "_tkrr" } else { "" }
-    var regbase: str = if want_frame { "_tkfr" } else { if wants_region { "_tkrgn" } else { "" } }
-    var dctx = DeferCtx { defers = []; loops = []; cov = cov; rr = rr; bracket_depth = 0; regbase = regbase; cur = "" }
+    var dctx = DeferCtx { defers = []; loops = []; cov = cov; rr = rr; bracket_depth = 0; cur = "" }
     if use_rr { buf.write("    tk_region *_tkrr = "); buf.write(cg_rr_init_expr(wants_region)); buf.write(";\n") }
     if want_frame {
         buf.write("    tk_region *_tkfr = "); buf.write(cg_tkfr_init_expr(f, use_rr)); buf.write(";\n")
@@ -9870,7 +9888,7 @@ fn cg_lift_expr(e: checker::TExpr, ref acc: StampAcc): checker::TExpr {
  * @return  the lambda body's defer context
  */
 fn cg_lambda_dctx(): DeferCtx {
-    DeferCtx { defers = []; loops = []; cov = cov_off(); rr = ""; bracket_depth = 0; regbase = "_tkrgn"; cur = "" }
+    DeferCtx { defers = []; loops = []; cov = cov_off(); rr = ""; bracket_depth = 0; cur = "" }
 }
 
 fn cg_emit_lambda_decls(buf: teko::io::FileStream, prog: CgProg, lams: []checker::TLambda, protos_only: bool) {
