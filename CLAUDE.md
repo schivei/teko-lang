@@ -300,6 +300,13 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
     (2) o COORDENADOR **re-verifica por um VERIFICADOR INDEPENDENTE** antes de drenar — gen0-do-seed-commitado
     builda o tip + gen2==gen3 confirmado — NUNCA na palavra do implementer. Sem o verde do verificador, não
     drena. (Causa: 0183/0184 alegaram fixpoint falso — gen0 do seed crashava o tip — e eu drenei por relato.)
+  - **GATE ASan+UBSan no compiler-core (dono 2026-08-28 — D166).** O fixpoint no sandbox NÃO pega UB que só
+    crasha sob certos toolchains (o `cg_emit_self_addr` escapava endereço de temp = stack-use-after-scope;
+    build seco "acertava por acidente", o `-O2` do runner GH crashava). Então o gate de verificador de
+    compiler-core passa a incluir um **build ASan+UBSan** (`clang -fsanitize=address,undefined
+    -fno-omit-frame-pointer -g`) do gen0 compilando o tip — limpo (zero stack-use-after-scope/UAF/OOB) —
+    ALÉM do fixpoint gen2==gen3. Barato, pega a classe de UB de memória que o build seco esconde. Vale pra
+    TODO conserto/feature de codegen/lir.
 - **Teko é um monólito e precisa cross-compilar.** A perna C emite **UM** `teko.c`
   que compila em toda arquitetura/SO via `#if` do C — tem que **emitir tudo**
   (todos os alvos), não podar para o host que emite. Só o backend **native** emite
