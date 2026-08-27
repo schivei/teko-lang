@@ -29,6 +29,10 @@ exp type FileStream = class Stream {
     /** The next fresh-name ordinal for the C function currently being emitted by the codegen
      * writer; unused by callers outside the codegen writer. */
     pub next_gensym: u64
+    /** The in-memory backing slice for a read-only rodata cursor; empty for an fd/HANDLE stream. */
+    pub mem: []byte
+    /** The read cursor into `mem` (memory-backed) — advanced by `stream_read`. */
+    pub rpos: u64
 
     /** open — open `path` for writing, truncating (creating when absent) — the write-stream
      * constructor for callers that want the buffered `Stream` interface.
@@ -39,7 +43,32 @@ exp type FileStream = class Stream {
      * buffer — the constructor `open_read`/`open_write`/`open_append` build on. */
     pub static fn of_handle(h: i64): FileStream {
         var sb: [CHUNK]byte = []
-        FileStream { handle = h; sbuf = sb; sfill = 0; written = 0; next_gensym = 0 }
+        FileStream { handle = h; sbuf = sb; sfill = 0; written = 0; next_gensym = 0; mem = []; rpos = 0 }
+    }
+
+    /** of_slice — a read-only, memory-backed FileStream over the byte slice `data` (e.g. a slice into
+     * embedded rodata). No OS handle is opened; `stream_read` pulls from `data` and advances an
+     * internal cursor. The write path is unused on such a stream.
+     * @param data  the backing bytes (borrowed; a rodata slice is zero-copy)
+     * @return a fresh read-only stream positioned at 0. */
+    pub static fn of_slice(data: []byte): FileStream {
+        FileStream { handle = -1; sbuf = []; sfill = 0; written = 0; next_gensym = 0; mem = data; rpos = 0 }
+    }
+
+    /** read_mem — copy up to `want` bytes from the memory backing into `into` (via its base pointer),
+     * advancing the read cursor; 0 at end of the backing slice.
+     * @param into  the reusable destination buffer, written in place through its base pointer
+     * @param want  the capped byte count to move
+     * @return the bytes copied (0 at the end of the backing). */
+    pub fn read_mem(into: []byte, want: u64): u64 {
+        var left = self.mem.len - self.rpos
+        if left == 0 { return 0 to u64 }
+        var take = if want < left { want } else { left }
+        var dst = buf_base(into, 0) to u64
+        var j: u64 = 0
+        loop { if j >= take { break }; teko::mem::store_u8(dst + j, self.mem[self.rpos + j] to u64); j = j + 1 }
+        self.rpos = self.rpos + take
+        take
     }
 
     /** write — buffer `s`, flushing to the file whenever the buffer fills. */
@@ -333,9 +362,18 @@ exp fn stream_read(s: FileStream, into: []byte): u64 | error {
     var want = into.len
     if want > CHUNK { want = CHUNK }
     if want == 0 { return 0 to u64 }
+    if s.handle < 0 { return s.read_mem(into, want) }
     var n = os_read(s.handle, buf_base(into, 0), want to i64)
     if is_os_error(n) { return error { message = "teko::io::stream_read: read failed" } }
     n to u64
+}
+
+/** teko::io::of_slice — a read-only, memory-backed FileStream over `data` (e.g. an embedded rodata
+ * slice). `stream_read` pulls chunks from `data` without touching the OS.
+ * @param data  the backing bytes (borrowed; a rodata slice is zero-copy)
+ * @return a fresh read-only stream positioned at 0. */
+exp fn of_slice(data: []byte): FileStream {
+    FileStream::of_slice(data)
 }
 
 /** stream_write — write all of `data` to the stream, slicing internally into chunks of at most

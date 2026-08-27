@@ -59,8 +59,8 @@ fn is_drive_absolute(pattern: str): bool {
 }
 
 /**
- * normalize_rel — collapse the `.`/`..`/`//` segments of a root-relative path. A `..` that would rise
- * above the root is an escape error.
+ * normalize_rel — collapse the `.`, `..`, and empty segments of a root-relative path. A `..` that would
+ * rise above the root is an escape error.
  *
  * @param joined  the anchor-joined root-relative path
  * @return        the normalized root-relative path, or an escape error
@@ -309,4 +309,105 @@ pub fn run_embed_pass(embeds: []parser::EmbedDecl, proj: str, root: str): EmbedR
         i = i + 1
     }
     EmbedResult { entries = teko::collections::arr_slice(entries, 0, ecount); diags = teko::collections::arr_slice(diags, 0, dcount) }
+}
+
+/**
+ * EMBED_RECORD_BYTES — the fixed width of one packed table record: six little-endian u64 fields
+ * (name_off, name_len, blob_off, blob_len, orig_len, comp_tag).
+ */
+pub const EMBED_RECORD_BYTES: u64 = 48
+
+/**
+ * comp_tag_of — the numeric codec tag stored in the table (0=None, 1=Deflate, 2=Gzip).
+ *
+ * @param comp  the codec
+ * @return      the tag byte value
+ */
+fn comp_tag_of(comp: EmbedCompress): u64 {
+    match comp {
+        EmbedCompress::None => 0
+        EmbedCompress::Deflate => 1
+        EmbedCompress::Gzip => 2
+    }
+}
+
+/**
+ * put_u64_le — write `v` as eight little-endian bytes into `out` starting at `at`.
+ *
+ * @param out  the destination buffer
+ * @param at   the start offset
+ * @param v    the value
+ * @return     the offset past the written eight bytes
+ */
+fn put_u64_le(ref out: []byte, at: u64, v: u64): u64 {
+    var j: u64 = 0
+    loop {
+        if j >= 8 { break }
+        out[at + j] = ((v >> (j * 8)) & 0xFF) to byte
+        j = j + 1
+    }
+    at + 8
+}
+
+/**
+ * EmbedHeaps — the four Tier-A heaps materialized from the resolved entries: the concatenated key heap,
+ * the concatenated content heap, the packed record table, and the entry count.
+ *
+ * @since 0.3.1
+ */
+pub type EmbedHeaps = struct {
+    /** The concatenated UTF-8 key heap. */
+    names: []byte
+    /** The concatenated (possibly compressed) content heap. */
+    blobs: []byte
+    /** The packed fixed-width record table. */
+    table: []byte
+    /** The entry count. */
+    count: u64
+}
+
+/**
+ * serialize_embed_heaps — flatten the resolved entries into the four Tier-A heaps (names, blobs, packed
+ * table, count) ready for rodata const materialization.
+ *
+ * @param result  the resolved embed entries
+ * @return        the four flattened heaps
+ */
+pub fn serialize_embed_heaps(result: EmbedResult): EmbedHeaps {
+    var n = result.entries.len
+    var names_len: u64 = 0
+    var blobs_len: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= n { break }
+        names_len = names_len + result.entries[i].key.len
+        blobs_len = blobs_len + result.entries[i].blob.len
+        i = i + 1
+    }
+    var names: [names_len]byte = []
+    var blobs: [blobs_len]byte = []
+    var table: [n * EMBED_RECORD_BYTES]byte = []
+    var noff: u64 = 0
+    var boff: u64 = 0
+    var toff: u64 = 0
+    i = 0
+    loop {
+        if i >= n { break }
+        var ent = result.entries[i]
+        var kb = bytes_of_str(ent.key)
+        var name_off = noff
+        var j: u64 = 0
+        loop { if j >= kb.len { break }; names[noff] = kb[j]; noff = noff + 1; j = j + 1 }
+        var blob_off = boff
+        var b: u64 = 0
+        loop { if b >= ent.blob.len { break }; blobs[boff] = ent.blob[b]; boff = boff + 1; b = b + 1 }
+        toff = put_u64_le(table, toff, name_off)
+        toff = put_u64_le(table, toff, kb.len)
+        toff = put_u64_le(table, toff, blob_off)
+        toff = put_u64_le(table, toff, ent.blob.len)
+        toff = put_u64_le(table, toff, ent.orig_len)
+        toff = put_u64_le(table, toff, comp_tag_of(ent.comp))
+        i = i + 1
+    }
+    EmbedHeaps { names = names; blobs = blobs; table = table; count = n }
 }

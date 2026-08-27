@@ -396,6 +396,46 @@ fn inject_runtime_prelude(files: []SourceFile): []SourceFile | error {
     dsc_append(prelude, files)
 }
 
+fn embed_bytes_expr(bytes: []byte): parser::Expr {
+    parser::Expr { kind = parser::ByteStrLit { text = str_of_bytes(bytes) }; line = 0; col = 0 }
+}
+
+fn embed_u64_expr(v: u64): parser::Expr {
+    parser::Expr { kind = parser::Number { is_float = false; value = parser::numint_of_u64(v); fval = 0.0 }; line = 0; col = 0 }
+}
+
+fn embed_reinit_const(cd: parser::ConstDecl, init: parser::Expr): parser::ConstDecl {
+    parser::ConstDecl { name = cd.name; ty = cd.ty; init = init; vis = cd.vis; has_doc = cd.has_doc; doc = cd.doc; line = cd.line; col = cd.col; is_global = cd.is_global }
+}
+
+fn embed_const_new_init(cd: parser::ConstDecl, heaps: teko::embed::EmbedHeaps): parser::ConstDecl {
+    if cd.name == "EMBED_NAMES" { return embed_reinit_const(cd, embed_bytes_expr(heaps.names)) }
+    if cd.name == "EMBED_BLOBS" { return embed_reinit_const(cd, embed_bytes_expr(heaps.blobs)) }
+    if cd.name == "EMBED_TABLE" { return embed_reinit_const(cd, embed_bytes_expr(heaps.table)) }
+    if cd.name == "EMBED_COUNT" { return embed_reinit_const(cd, embed_u64_expr(heaps.count)) }
+    cd
+}
+
+fn patch_embed_consts(program: parser::Program, heaps: teko::embed::EmbedHeaps): parser::Program {
+    var n = program.items.len
+    var out: [n]parser::Item = []
+    var i: u64 = 0
+    loop {
+        if i >= n { break }
+        var it = program.items[i]
+        var content = it.content
+        if it.namespace == "teko::embed" {
+            match it.content {
+                parser::ConstDecl as cd => content = embed_const_new_init(cd, heaps)
+                _ => { }
+            }
+        }
+        out[i] = parser::Item { content = content; namespace = it.namespace; file = it.file; guard = it.guard }
+        i = i + 1
+    }
+    parser::Program { items = out }
+}
+
 fn frontend_parse(include_tests: bool, quiet: bool, tty: bool): ParsedFront | error {
     var mname = match find_manifest() { str as n => n; error as e => return e }
     var mtext = match teko::io::read_file(mname) { str as s => s; error => return error { message = "cannot read .tkp manifest" } }
@@ -430,8 +470,12 @@ fn frontend_parse(include_tests: bool, quiet: bool, tty: bool): ParsedFront | er
 
     var embed_result = teko::embed::run_embed_pass(asm.embeds, m.name, "")
     var all_diags = append_diags(asm.diags, embed_result.diags)
+    var prog = asm.program
+    if embed_result.entries.len > 0 {
+        prog = patch_embed_consts(prog, teko::embed::serialize_embed_heaps(embed_result))
+    }
 
-    ParsedFront { parsed = asm.program; manifest = m; diags = all_diags; embeds = embed_result }
+    ParsedFront { parsed = prog; manifest = m; diags = all_diags; embeds = embed_result }
 }
 
 fn frontend_check(pf: ParsedFront, quiet: bool, tty: bool, explicit: bool): Frontend | error {
