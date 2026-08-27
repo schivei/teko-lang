@@ -222,3 +222,38 @@ Sequência ordenada, cada `[fixpoint]` / `fixpoint-rebuild`, reseed pelo impleme
 | gated:FORK-ABERTO-1 | 1 (0123) |
 | deferred | 0 (doc/lint tracked separately) |
 | **TOTAL** | **128** |
+
+---
+
+## Wave 0.3.1-M5 — #embed/VFS + prelúdio-VFS + tipos-base + provenance + intrínsecos + sweep de região (arquiteto 2026-08-27)
+
+Fiado em `docs/design/embed-vfs-sweep-integration-0.3.1.md` (superfícies exatas + resolução Tier-A +
+ancoragem de path + reseed/ratchet). Rulings D130-D135. Ordem por dependência + economia de reseed.
+**Fases A/B = ADITIVAS (piso NÃO-CRESCER); C/D = REDUÇÃO (ratchet BAIXAR estrito, D68).**
+
+| seq | crumb | gate | 1-linha |
+|---|---|---|---|
+| 0162 | EMB-C0 | [dry] | scaffold `teko::embed` (EmbedCompress/ReadableFS/FileSystem-classe/RoFile/files()), inert |
+| 0163 | EMB-C1 | [dry] | parser `EmbedDecl` + `parse_embed` (carrega src-path pra âncora file-relative) |
+| 0164 | EMB-C2 | [dry] | `resolve_embed_path`: nu=file-relative / `/`=project-root, escape/drive/conflito, chave `<proj>::/` |
+| 0165 | EMB-C3 | [fixpoint] | read-seam `read_file_bytes` (maintained-C) + compress build-time + level-range |
+| 0166 | EMB-C4 | [RITUAL] | const-mat Tier-A (4 heaps) + `files()` vista-fina + `deflate`/`inflate` pub→exp — reseed |
+| 0167 | EMB-C5 | [RITUAL] | `FileStream` mem-cursor (`of_slice`) + `get`/`exists`/`list`→RoFile + conforma ReadableFS — 🔑 SEED-BUMP |
+| 0168 | PRE-C1 | [fixpoint] | embarca o prelúdio-pequeno (~13 runtime/sys/abi/assert) no VFS (Deflate) |
+| 0169 | BT-C1 | [RITUAL] | consolida tipos-base reservados no prelúdio, injeta em TODO artefato incl. Package — reseed |
+| 0170 | PRE-C2 | [RITUAL] | `inject_runtime_prelude` lê do VFS (memória), remove o disk-walk — binário self-contained — reseed |
+| 0171 | PV-C1 | [fixpoint] | provenance Base-vs-User + gate redefinição de nome-reservado |
+| 0172 | INTR-C1 | [dry] | censo 3-naturezas + primitiva raw-syscall (chão) + confirma wrap/unwrap landado |
+| 0173 | INTR-C2 | [fixpoint] | expurga natureza-1 (`tk_*` dep-C) → superfície Teko (ratchet↓) |
+| 0174 | INTR-C3 | [RITUAL] | natureza-2 (C-inline magia) → primitivas de superfície; só resta o raw `syscall` (ratchet↓) |
+| 0155 | MEM-S1 | scaffold | fixtures `mem_*` no scratchpad (authoring ANTES de W1; pass pós-flip) |
+| 0156 | MEM-W1 | [RITUAL] | elisão `slots==0` (repassa a região-param do pai) |
+| 0157 | MEM-W2 | [RITUAL] | presize por `region_slots`; REMOVE `#arena_size`/`#arena_depth` |
+| 0158 | MEM-W3 | [RITUAL] | scope-residence + seletor N-níveis + array-fixo de filhas (PARANOID) |
+| 0159 | MEM-W4 | [RITUAL] | move-on-return via região-param; aposenta `ret_dest` ambiente (PARANOID) |
+| 0160 | MEM-W5 | [RITUAL] | objeto dono-da-arena no fat pointer |
+| 0161 | MEM-W6 | [RITUAL] | root nasce no `_start`→`main`; remove ambiente; reball (uso puro de wrap/unwrap) — RESEED-FINAL |
+
+**Pontos de reseed:** 0166, 0167(+seed-bump), 0169, 0170, 0174, 0161(RESEED-FINAL). **Fork genuíno
+remanescente:** nenhum (Tier-A resolvido §3; única escolha veto-open = nome `FILES` const-computado vs
+accessor `files()`, cosmética). Drifts achados: §7 do anexo.

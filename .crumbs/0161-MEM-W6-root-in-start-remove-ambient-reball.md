@@ -60,6 +60,12 @@ is `uptr` (MEM-W5), region params are `ptr`. Byte-preserving on 64-bit → fixpo
 
 ## Rulings & laws
 
+- **DRIFT reconciled (arquiteto 2026-08-27, `embed-vfs-sweep-integration-0.3.1.md §7`):** `wrap`/`unwrap`
+  are ALREADY landed as intrinsics (`typer.tks:888` `type_ptr_unwrap`, `:928` `type_ptr_wrap`); `ptr`/
+  `uptr` are ALREADY surface newtypes (`marshall.tks:8,16`). This crumb's reball is therefore pure USE
+  (mass migration of positions→`usize`, raw words→`ptr`/`uptr`, `str`↔`[]byte` via `wrap`/`unwrap`), NOT
+  teaching the intrinsics — supersedes the D132-escalation-1 "wrap/unwrap machinery is W6" expectation.
+  Provenance (PV-C1, `0171`) must land BEFORE this reball (it touches the reserved names str/[]byte/ptr).
 - **Teko-only + arena-is-Teko (D128):** `arena.tks`/`codegen.tks`/`lower.tks`/`_start`.
 - **D130 refinements 1 + 6:** root born in `_start`, region as param, ambient `_Thread_local` REMOVED —
   the tangle (global var, thread-local, tid-table, "arena-terminal RM-C9") DISSOLVED (the model IS the

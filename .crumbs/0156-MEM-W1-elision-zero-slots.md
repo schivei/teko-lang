@@ -68,7 +68,12 @@ forward the parent param, allocating scopes still open, `gen2==gen3`. Reseed-cla
 
 ## Deps
 
-`MEM-S1` (shadow-proven).
+`MEM-S1` (shadow-proven). **Reconciliation (arquiteto 2026-08-27, `embed-vfs-sweep-integration §7.5`):**
+D132 said "SHADOW (0155) after the sweep". Resolved: the `mem_*` shadow SCAFFOLD (0155 authoring) lands
+BEFORE W1 (each W crumb gates on a `mem_*` fixture), but its PASS criterion (reclaim/flat-peak) is only
+met progressively W1→W6 and fully at W6 — no contradiction. The whole sweep (Fase D) runs AFTER the
+#embed/VFS + prelude/base-types/provenance (Fases A/B) and the intrinsics wave (Fase C), because W6's
+reball touches the reserved type names that provenance (PV-C1) must already guard.
 
 ## Done when
 
