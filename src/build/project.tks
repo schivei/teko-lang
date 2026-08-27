@@ -262,90 +262,6 @@ type ParsedFront = struct {
     embeds: teko::embed::EmbedResult
 }
 
-type RtUnit = struct {
-    ns: str
-    paths: []str
-}
-
-fn rt_sibling_dir(rt: str, leaf: str): str {
-    var parent = match teko::str::last_index_of(rt, "/") {
-        u64 as i => teko::str::slice_to(rt, i)
-        error => "."
-    }
-    teko::str::concat(parent, leaf)
-}
-
-fn rt_dir_tks_paths(dir: str): []str | error {
-    var entries = match teko::fs::list_dir(dir) {
-        []str as e => e
-        error => return error { message = teko::str::concat("runtime prelude: cannot open directory ", dir) }
-    }
-    var out: [entries.len]str = []
-    var count: u64 = 0
-    var i: u64 = 0
-    loop {
-        if i >= entries.len { break }
-        if teko::str::ends_with(entries[i], ".tks") {
-            out[count] = teko::str::concat(dir, teko::str::concat("/", entries[i]))
-            count = count + 1
-        }
-        i = i + 1
-    }
-    teko::collections::arr_slice(out, 0, count)
-}
-
-fn rt_prelude_units(rt: str): []RtUnit | error {
-    var runtime_paths = match rt_dir_tks_paths(rt) { []str as p => p; error as e => return e }
-    var sys_paths = match rt_dir_tks_paths(rt_sibling_dir(rt, "/sys")) { []str as p => p; error as e => return e }
-    var abi_paths = match rt_dir_tks_paths(rt_sibling_dir(rt, "/sys/abi")) { []str as p => p; error as e => return e }
-    var assert_paths = match rt_dir_tks_paths(rt_sibling_dir(rt, "/assert")) { []str as p => p; error as e => return e }
-    [
-        RtUnit { ns = "teko::runtime"; paths = runtime_paths },
-        RtUnit { ns = "teko::sys"; paths = sys_paths },
-        RtUnit { ns = "teko::sys::abi"; paths = abi_paths },
-        RtUnit { ns = "teko::assert"; paths = assert_paths }
-    ]
-}
-
-fn rt_ns_covered(units: []RtUnit, ns: str): bool {
-    var i: u64 = 0
-    loop {
-        if i >= units.len { break }
-        if units[i].ns == ns { return true }
-        i = i + 1
-    }
-    false
-}
-
-fn rt_units_cover_all(units: []RtUnit, shipped: []SourceFile): error | null {
-    var j: u64 = 0
-    loop {
-        if j >= shipped.len { break }
-        if !rt_ns_covered(units, shipped[j].namespace) {
-            return error { message = teko::str::concat("runtime prelude: namespace ", teko::str::concat(shipped[j].namespace, " shipped by runtime tree but not injected")) }
-        }
-        j = j + 1
-    }
-    null
-}
-
-fn rt_prelude_guard(units: []RtUnit, rt: str): error | null {
-    var roots: []str = [rt, rt_sibling_dir(rt, "/sys"), rt_sibling_dir(rt, "/assert")]
-    var rootns: []str = ["teko::runtime", "teko::sys", "teko::assert"]
-    var r: u64 = 0
-    loop {
-        if r >= roots.len { break }
-        match dsc_walk(roots[r], rootns[r]) {
-            []SourceFile as shipped => {
-                match rt_units_cover_all(units, shipped) { error as e => return e; null => { } }
-            }
-            error => { }
-        }
-        r = r + 1
-    }
-    null
-}
-
 fn rt_already_present(files: []SourceFile, ns: str): bool {
     var i: u64 = 0
     loop {
@@ -356,7 +272,17 @@ fn rt_already_present(files: []SourceFile, ns: str): bool {
     false
 }
 
-fn artifact_wants_runtime_prelude(a: Artifact): bool {
+fn wants_base_prelude(a: Artifact): bool {
+    match a {
+        Artifact::Binary => true
+        Artifact::Static => true
+        Artifact::Shared => true
+        Artifact::Package => true
+        Artifact::Tool => true
+    }
+}
+
+fn wants_runtime_prelude(a: Artifact): bool {
     match a {
         Artifact::Binary => true
         Artifact::Tool => true
@@ -366,34 +292,73 @@ fn artifact_wants_runtime_prelude(a: Artifact): bool {
     }
 }
 
-fn inject_runtime_prelude(files: []SourceFile): []SourceFile | error {
-    var rt = rt_dir()
-    var units = match rt_prelude_units(rt) { []RtUnit as u => u; error as e => return e }
-    match rt_prelude_guard(units, rt) { error as e => return e; null => { } }
-    var prelude: []SourceFile = []
+fn key_has_prefix(key: str, prefix: str): bool {
+    if key.len < prefix.len { return false }
     var i: u64 = 0
     loop {
-        if i >= units.len { break }
-        var ns = units[i].ns
+        if i >= prefix.len { break }
+        if key[i] != prefix[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn ns_of_prelude_key(key: str): str | null {
+    if key_has_prefix(key, "teko::/src/base/") { return "teko::base" }
+    if key_has_prefix(key, "teko::/src/runtime/") { return "teko::runtime" }
+    if key_has_prefix(key, "teko::/src/sys/abi/") { return "teko::sys::abi" }
+    if key_has_prefix(key, "teko::/src/sys/") { return "teko::sys" }
+    if key_has_prefix(key, "teko::/src/assert/") { return "teko::assert" }
+    null
+}
+
+fn prelude_ns_wanted(ns: str, wants_runtime: bool): bool {
+    if ns == "teko::base" { return true }
+    wants_runtime
+}
+
+fn prelude_vfs_decode(rf: teko::embed::RoFile): str | error {
+    var comp = teko::io::stream_bytes(rf.content)
+    match rf.compress {
+        teko::embed::EmbedCompress::None => str_of_bytes(comp)
+        teko::embed::EmbedCompress::Deflate => match teko::compress::inflate(comp) { []byte as b => str_of_bytes(b); error as e => return e }
+        teko::embed::EmbedCompress::Gzip => match teko::compress::gzip_decompress(comp) { []byte as b => str_of_bytes(b); error as e => return e }
+    }
+}
+
+fn inject_runtime_prelude(files: []SourceFile, artifact: Artifact): []SourceFile | error {
+    var wants_runtime = wants_runtime_prelude(artifact)
+    var vfs = teko::embed::files()
+    var keys = vfs.list()
+    var pre: [keys.len]SourceFile = []
+    var count: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= keys.len { break }
+        var key = keys[i]
+        if !key_has_prefix(key, "teko::/src/") {
+            i = i + 1
+            continue
+        }
+        var ns = match ns_of_prelude_key(key) {
+            str as s => s
+            null => return error { message = $"runtime prelude: shipped file '{key}' maps to no prelude namespace" }
+        }
+        if !prelude_ns_wanted(ns, wants_runtime) {
+            i = i + 1
+            continue
+        }
         if rt_already_present(files, ns) {
             i = i + 1
             continue
         }
-        var paths = units[i].paths
-        var j: u64 = 0
-        loop {
-            if j >= paths.len { break }
-            var path = paths[j]
-            match teko::io::read_file(path) {
-                str => { }
-                error => return error { message = $"runtime prelude: cannot read shipped source '{path}' for namespace {ns}" }
-            }
-            prelude = [..prelude, SourceFile { path = path; namespace = ns }]
-            j = j + 1
-        }
+        var rf = match vfs.get(key) { teko::embed::RoFile as f => f; error as e => return e }
+        var content = match prelude_vfs_decode(rf) { str as s => s; error as e => return e }
+        pre[count] = SourceFile { path = key; namespace = ns; content = content }
+        count = count + 1
         i = i + 1
     }
-    dsc_append(prelude, files)
+    dsc_append(teko::collections::arr_slice(pre, 0, count), files)
 }
 
 fn embed_bytes_expr(bytes: []byte): parser::Expr {
@@ -444,12 +409,12 @@ fn frontend_parse(include_tests: bool, quiet: bool, tty: bool): ParsedFront | er
     var files = match discover(m.name, m.source) { []SourceFile as f => f; error as e => return e }
 
     match teko::io::read_file("main.tks") {
-        str => files = [..files, SourceFile { path = "main.tks"; namespace = m.name }]
+        str => files = [..files, SourceFile { path = "main.tks"; namespace = m.name; content = "" }]
         error => { }
     }
 
-    if artifact_wants_runtime_prelude(m.artifact) {
-        files = match inject_runtime_prelude(files) { []SourceFile as f => f; error as e => return e }
+    if wants_base_prelude(m.artifact) {
+        files = match inject_runtime_prelude(files, m.artifact) { []SourceFile as f => f; error as e => return e }
     }
 
     var has_main = false
