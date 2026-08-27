@@ -25,8 +25,26 @@ fn asm_main_items(mf: parser::MainFile): []parser::Item {
     items
 }
 
-fn asm_module_items(m: parser::Module): []parser::Item {
-    var items: [m.uses.len + m.decls.len]parser::Item = []
+pub type AsmUnit = struct {
+    items: []parser::Item
+    embeds: []parser::EmbedDecl
+}
+
+fn count_embed_decls(m: parser::Module): u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= m.decls.len { break }
+        match m.decls[i] { parser::EmbedDecl => n = n + 1; _ => { } }
+        i = i + 1
+    }
+    n
+}
+
+fn asm_module_items(m: parser::Module): AsmUnit {
+    var nembed = count_embed_decls(m)
+    var items: [m.uses.len + (m.decls.len - nembed)]parser::Item = []
+    var embeds: [nembed]parser::EmbedDecl = []
     var ui: u64 = 0
     loop {
         if ui >= m.uses.len { break }
@@ -34,19 +52,22 @@ fn asm_module_items(m: parser::Module): []parser::Item {
         ui = ui + 1
     }
     var di: u64 = 0
+    var oi: u64 = m.uses.len
+    var ei: u64 = 0
     loop {
         if di >= m.decls.len { break }
         var g = asm_decl_guard(m, di)
         match m.decls[di] {
-            parser::Function as f => items[m.uses.len + di] = parser::Item { content = f; namespace = ""; file = ""; guard = g }
-            parser::TypeDecl as t => items[m.uses.len + di] = parser::Item { content = t; namespace = ""; file = ""; guard = g }
-            parser::ConstDecl as c => items[m.uses.len + di] = parser::Item { content = c; namespace = ""; file = ""; guard = g }
-            parser::MacroDecl as md => items[m.uses.len + di] = parser::Item { content = md; namespace = ""; file = ""; guard = g }
-            parser::ComptimeDecl as cd => items[m.uses.len + di] = parser::Item { content = cd; namespace = ""; file = ""; guard = g }
+            parser::Function as f => { items[oi] = parser::Item { content = f; namespace = ""; file = ""; guard = g }; oi = oi + 1 }
+            parser::TypeDecl as t => { items[oi] = parser::Item { content = t; namespace = ""; file = ""; guard = g }; oi = oi + 1 }
+            parser::ConstDecl as c => { items[oi] = parser::Item { content = c; namespace = ""; file = ""; guard = g }; oi = oi + 1 }
+            parser::MacroDecl as md => { items[oi] = parser::Item { content = md; namespace = ""; file = ""; guard = g }; oi = oi + 1 }
+            parser::ComptimeDecl as cd => { items[oi] = parser::Item { content = cd; namespace = ""; file = ""; guard = g }; oi = oi + 1 }
+            parser::EmbedDecl as ed => { embeds[ei] = ed; ei = ei + 1 }
         }
         di = di + 1
     }
-    items
+    AsmUnit { items = items; embeds = embeds }
 }
 
 fn asm_decl_guard(m: parser::Module, di: u64): parser::Pred {
@@ -54,19 +75,19 @@ fn asm_decl_guard(m: parser::Module, di: u64): parser::Pred {
     parser::pred_true()
 }
 
-fn asm_parse(path: str, tokens: []lexer::Token): []parser::Item | error {
+fn asm_parse(path: str, tokens: []lexer::Token): AsmUnit | error {
     if asm_is_main(path) {
         var mf = match parser::parse_main_file(tokens, 0) { parser::Parsed<parser::MainFile> as x => x.node; error as e => return e }
-        asm_main_items(mf)
+        AsmUnit { items = asm_main_items(mf); embeds = [] }
     } else {
         var m = match parser::parse_module(tokens, 0) { parser::Parsed<parser::Module> as x => x.node; error as e => return e }
         asm_module_items(m)
     }
 }
 
-fn asm_lex_and_parse(path: str, src: str): []parser::Item | error {
+fn asm_lex_and_parse(path: str, src: str): AsmUnit | error {
     var tokens = match lexer::tokenize_file(src, path) { []lexer::Token as t => t; error as e => return e }
-    match asm_parse(path, tokens) { []parser::Item as items => items; error as e => return e }
+    match asm_parse(path, tokens) { AsmUnit as u => u; error as e => return e }
 }
 
 fn eligible_file_count(files: []SourceFile, include_tests: bool): u64 {
@@ -89,6 +110,7 @@ fn assemble(files: []SourceFile): parser::Program | error {
 pub type Assembled = struct {
     program: parser::Program
     diags: []str
+    embeds: []parser::EmbedDecl
 }
 
 pub fn join_diags(diags: []str): str {
@@ -105,6 +127,7 @@ pub fn join_diags(diags: []str): str {
 
 type AsmFileItems = struct {
     items: []parser::Item
+    embeds: []parser::EmbedDecl
     namespace: str
     path: str
 }
@@ -120,6 +143,7 @@ fn assemble_sel(files: []SourceFile, include_tests: bool, report: bool, tty: boo
     var per_file: [files.len]AsmFileItems = []
     var nfiles: u64 = 0
     var total_items: u64 = 0
+    var total_embeds: u64 = 0
     var i: u64 = 0
     loop {
         if i >= files.len { break }
@@ -130,9 +154,10 @@ fn assemble_sel(files: []SourceFile, include_tests: bool, report: bool, tty: boo
         }
         var src = match teko::io::read_file(sf.path) { str as s => s; error as e => return e }
         var one: []parser::Item = []
+        var one_embeds: []parser::EmbedDecl = []
         var ok = true
         match asm_lex_and_parse(sf.path, src) {
-            []parser::Item as items => { one = items }
+            AsmUnit as u => { one = u.items; one_embeds = u.embeds }
             error as e => {
                 diags = [..diags, teko::str::concat(sf.path, ":", e.message)]
                 ok = false
@@ -146,13 +171,16 @@ fn assemble_sel(files: []SourceFile, include_tests: bool, report: bool, tty: boo
         parsed = parsed + 1
         phase_tick(lex_phase, count_unit_text(lexed, total, "files"))
         phase_tick(parse_phase, count_unit_text(parsed, total, "files"))
-        per_file[nfiles] = AsmFileItems { items = one; namespace = sf.namespace; path = sf.path }
+        per_file[nfiles] = AsmFileItems { items = one; embeds = one_embeds; namespace = sf.namespace; path = sf.path }
         nfiles++
         total_items = total_items + one.len
+        total_embeds = total_embeds + one_embeds.len
         i = i + 1
     }
     var merged: [total_items]parser::Item = []
+    var embeds: [total_embeds]parser::EmbedDecl = []
     var mi: u64 = 0
+    var embi: u64 = 0
     var fi: u64 = 0
     loop {
         if fi >= nfiles { break }
@@ -164,16 +192,23 @@ fn assemble_sel(files: []SourceFile, include_tests: bool, report: bool, tty: boo
             mi++
             k++
         }
+        var e: u64 = 0
+        loop {
+            if e >= pf.embeds.len { break }
+            embeds[embi] = pf.embeds[e]
+            embi++
+            e++
+        }
         fi++
     }
     if diags.len > 0 {
         phase_end_fail(lex_phase, count_unit_text(lexed, total, "files"), diags[0])
         phase_end_fail(parse_phase, count_unit_text(parsed, total, "files"), diags[0])
-        return Assembled { program = parser::Program { items = merged }; diags = diags }
+        return Assembled { program = parser::Program { items = merged }; diags = diags; embeds = embeds }
     }
     phase_end_ok(lex_phase, count_unit_text(lexed, total, "files"))
     phase_end_ok(parse_phase, count_unit_text(parsed, total, "files"))
-    Assembled { program = parser::Program { items = merged }; diags = diags }
+    Assembled { program = parser::Program { items = merged }; diags = diags; embeds = embeds }
 }
 
 pub type FileOverride = struct {
@@ -223,10 +258,10 @@ pub fn assemble_with_overrides(files: []SourceFile, overrides: []FileOverride): 
         }
         var src = match read_source_with_overrides(sf.path, overrides) { str as s => s; error as e => return e }
         match asm_lex_and_parse(sf.path, src) {
-            []parser::Item as items => { merged = append_tagged_items(merged, items, sf) }
+            AsmUnit as u => { merged = append_tagged_items(merged, u.items, sf) }
             error as e => { diags = [..diags, teko::str::concat(sf.path, ":", e.message)] }
         }
         i = i + 1
     }
-    Assembled { program = parser::Program { items = merged }; diags = diags }
+    Assembled { program = parser::Program { items = merged }; diags = diags; embeds = [] }
 }
