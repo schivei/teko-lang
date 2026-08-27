@@ -46,12 +46,36 @@ pub fn residence_tier(is_singleton: bool, pt: @PointsTo(), escapes_frame: bool, 
     Frame { }
 }
 
-pub fn residence_plan(f: TFunction): ResidencePlan {
+pub fn residence_plan(f: TFunction, table: TypeTable): ResidencePlan {
     var sp = fn_spine(f)
     var escaping = fn_escaping_vars(f)
-    var bindings = plan_block_bindings(f.body, f.body, false, sp, escaping)
+    var bindings = plan_block_bindings(f.body, f.body, false, sp, escaping, table)
     var returns = plan_block_returns(f.body, sp)
     ResidencePlan { bindings = bindings; returns = returns }
+}
+
+/**
+ * binding_is_service_singleton — true when binding `b`'s declared type is a `service singleton`, the
+ * declarative root residence: such a binding must reside in `Root`, not the enclosing scope/frame. Reuses
+ * the landed `is_service_name`/`service_lifetime_of`, the same trail the service ctor routing already
+ * uses. A `service scoped`/`transient` binding is not root — it takes the ordinary scope/frame residence.
+ *
+ * @param b      the typed binding
+ * @param table  the checker type table (to resolve the type name to its service lifetime)
+ * @return       true iff `b`'s type is a `service singleton`
+ * @since 0.3.1
+ */
+fn binding_is_service_singleton(b: TBinding, table: TypeTable): bool {
+    match b.bound {
+        Named as nm => {
+            if !is_service_name(nm.name, table) { return false }
+            match service_lifetime_of(nm.name, table) {
+                parser::ServiceLifetime as lt => lifetime_eq(lt, parser::ServiceLifetime::Singleton)
+                null => false
+            }
+        }
+        _ => false
+    }
 }
 
 fn binding_name(b: TBinding): str {
@@ -78,9 +102,9 @@ fn binding_points_to(sp: Spine, name: str): @PointsTo() {
     sp.pt[idx to u32]
 }
 
-fn plan_binding(b: TBinding, fn_body: []@TStatement(), block_body: []@TStatement(), is_value: bool, sp: Spine, escaping: []str): BindingResidence {
+fn plan_binding(b: TBinding, fn_body: []@TStatement(), block_body: []@TStatement(), is_value: bool, sp: Spine, escaping: []str, table: TypeTable): BindingResidence {
     var name = binding_name(b)
-    var is_singleton = false
+    var is_singleton = binding_is_service_singleton(b, table)
     var pt = binding_points_to(sp, name)
     var escapes = residence_name_in_set(escaping, name)
     var blk_local = binding_is_block_local(escaping, fn_body, block_body, is_value, b)
@@ -98,27 +122,27 @@ fn append_residences(acc: []BindingResidence, more: []BindingResidence): []Bindi
     a
 }
 
-fn plan_block_bindings(block: []@TStatement(), fn_body: []@TStatement(), is_value: bool, sp: Spine, escaping: []str): []BindingResidence {
+fn plan_block_bindings(block: []@TStatement(), fn_body: []@TStatement(), is_value: bool, sp: Spine, escaping: []str, table: TypeTable): []BindingResidence {
     var acc: []BindingResidence = []
     var i = 0
     loop {
         if i >= block.len { break }
-        acc = plan_stmt_bindings(block[i], fn_body, block, is_value, sp, escaping, acc)
+        acc = plan_stmt_bindings(block[i], fn_body, block, is_value, sp, escaping, acc, table)
         i++
     }
     acc
 }
 
-fn plan_stmt_bindings(s: @TStatement(), fn_body: []@TStatement(), block: []@TStatement(), is_value: bool, sp: Spine, escaping: []str, acc: []BindingResidence): []BindingResidence {
+fn plan_stmt_bindings(s: @TStatement(), fn_body: []@TStatement(), block: []@TStatement(), is_value: bool, sp: Spine, escaping: []str, acc: []BindingResidence, table: TypeTable): []BindingResidence {
     match s {
-        TBinding as b => [..acc, plan_binding(b, fn_body, block, is_value, sp, escaping)]
+        TBinding as b => [..acc, plan_binding(b, fn_body, block, is_value, sp, escaping, table)]
         TLoopStmt as l => {
-            var with_init = append_residences(acc, plan_block_bindings(l.init, fn_body, false, sp, escaping))
-            append_residences(with_init, plan_block_bindings(l.body, fn_body, false, sp, escaping))
+            var with_init = append_residences(acc, plan_block_bindings(l.init, fn_body, false, sp, escaping, table))
+            append_residences(with_init, plan_block_bindings(l.body, fn_body, false, sp, escaping, table))
         }
-        TDeferStmt as d => append_residences(acc, plan_block_bindings(d.body, fn_body, false, sp, escaping))
-        TAdoptStmt as a => append_residences(acc, plan_block_bindings(a.body, fn_body, false, sp, escaping))
-        TBlockStmt as b => append_residences(acc, plan_block_bindings(b.body, fn_body, false, sp, escaping))
+        TDeferStmt as d => append_residences(acc, plan_block_bindings(d.body, fn_body, false, sp, escaping, table))
+        TAdoptStmt as a => append_residences(acc, plan_block_bindings(a.body, fn_body, false, sp, escaping, table))
+        TBlockStmt as b => append_residences(acc, plan_block_bindings(b.body, fn_body, false, sp, escaping, table))
         _ => acc
     }
 }
@@ -174,5 +198,80 @@ fn plan_stmt_returns(s: @TStatement(), sp: Spine, acc: []ReturnResidence): []Ret
         TAdoptStmt as a => append_returns(acc, plan_block_returns(a.body, sp))
         TBlockStmt as b => append_returns(acc, plan_block_returns(b.body, sp))
         _ => acc
+    }
+}
+
+fn slot_bytes(t: @Type()): usize {
+    match t {
+        Prim as p => (prim_width(p.kind, host_target()) / 8) to usize
+        Byte => 1
+        _ => 8
+    }
+}
+
+/**
+ * scope_slot_count — the count of routable allocation sites a scope makes (each binding is a potential
+ * routable slot). 0 means the scope touches no arena, so its region can be elided and the parent's region
+ * passes straight through. The posture is conservative: a doubtful site still counts, so a scope is never
+ * wrongly elided (a missed site routes to the enclosing region, never a use-after-free).
+ *
+ * @param body   the scope's statement block
+ * @param table  the checker type table
+ * @return       the number of routable allocation sites (0 = elidable)
+ * @since 0.3.1
+ */
+fn scope_slot_count(body: []@TStatement(), table: TypeTable): usize {
+    var total: usize = 0
+    var i = 0
+    loop {
+        if i >= body.len { break }
+        total = total + stmt_slot_count(body[i], table)
+        i++
+    }
+    total
+}
+
+fn stmt_slot_count(s: @TStatement(), table: TypeTable): usize {
+    match s {
+        TBinding => 1
+        TLoopStmt as l => scope_slot_count(l.init, table) + scope_slot_count(l.body, table)
+        TDeferStmt as d => scope_slot_count(d.body, table)
+        TAdoptStmt as a => scope_slot_count(a.body, table)
+        TBlockStmt as b => scope_slot_count(b.body, table)
+        _ => 0
+    }
+}
+
+/**
+ * region_slots — the compile-time byte floor an arena for this scope is born at: the sum of the routable
+ * slots and their widths. Under no-push allocation every slot is bound-exact, so this is a static fact —
+ * the number the compiler fixes the arena to at initialization, retiring the manual `#arena_size`. A
+ * runtime-sized slot contributes only its header; the chunk-list grows past the floor at runtime (never a
+ * use-after-free, over-floor is leak-safe). So the value is the initial floor, not a hard cap.
+ *
+ * @param body   the scope's statement block
+ * @param table  the checker type table (for slot widths)
+ * @return       the byte floor (0 = the scope allocates nothing → elide)
+ * @since 0.3.1
+ */
+fn region_slots(body: []@TStatement(), table: TypeTable): usize {
+    var total: usize = 0
+    var i = 0
+    loop {
+        if i >= body.len { break }
+        total = total + stmt_slot_bytes(body[i], table)
+        i++
+    }
+    total
+}
+
+fn stmt_slot_bytes(s: @TStatement(), table: TypeTable): usize {
+    match s {
+        TBinding as b => slot_bytes(b.bound)
+        TLoopStmt as l => region_slots(l.init, table) + region_slots(l.body, table)
+        TDeferStmt as d => region_slots(d.body, table)
+        TAdoptStmt as a => region_slots(a.body, table)
+        TBlockStmt as b => region_slots(b.body, table)
+        _ => 0
     }
 }
