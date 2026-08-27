@@ -499,6 +499,12 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
     byte-mover de região, cada uma bisectável + baixando o ratchet. 3 naturezas: (1) chamada `tk_*` = dep-C →
     expurga; (2) C-inline = magia-de-nome → superfície; (3) `syscall`/raw-emit = chão irredutível do SO → vira
     **uma primitiva raw de superfície** (não some — o `syscall` é o único irredutível, e já é superfície).
+- **ARENA/REGIÃO = TEKO + codegen(ABI/syscall/linker), ZERO adição de C (dono 2026-08-28 — D148).** Toda feature
+  de arena/região se escreve **em Teko** (`arena.tks`, que já é 100% Teko/VIVA — D128) e reflete no **codegen**
+  (rota-C emite a chamada Teko compilada; native `lower.tks` emite via ABI/syscall/linker). **PROIBIDO ADICIONAR
+  C** — nenhum `teko_rt.c`/`.h` novo, nenhum `tk_*` novo, nenhuma dep de libc, nenhuma dep dos C que o expurgo
+  está matando. A exceção-mantida do D90 é só o C region primitive que JÁ EXISTE (native-deferido) — **NÃO
+  autoriza ADICIONAR C** pra feature nova (ex.: o sized-region-new do W2 vai em `arena.tks`, não em `teko_rt.c`).
 - **`#embed`/VFS = MECANISMO DE INJEÇÃO DO PRELÚDIO — binário SELF-CONTAINED (dono 2026-08-27 — D134).** O
   prelúdio de hoje é **disco** (`inject_runtime_prelude`→`fs::list_dir` sobre `src/`) → exige o dev ter o
   FONTE da Teko pra rodar o compilador — DEFEITO. O `#embed` (design PRONTO em `docs/design/embed-vfs.md`,
