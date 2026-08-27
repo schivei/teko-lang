@@ -32,7 +32,13 @@ const REGION_ENTRIES_CAP: u64 = 40
 
 const REGION_GEN: u64 = 48
 
-const REGION_BYTES: u64 = 64
+const REGION_ROOT: u64 = 56
+
+const REGION_CHILDREN: u64 = 64
+
+const REGION_SIB_NEXT: u64 = 72
+
+const REGION_BYTES: u64 = 80
 
 const ENTRY_TYPE_ID: u64 = 0
 
@@ -367,6 +373,34 @@ fn ar_region_set(region: u64, field: u64, value: u64) {
     ar_store(region + field, value)
 }
 
+fn ar_region_child_link(parent: u64, region: u64) {
+    if parent == 0 {
+        ar_region_set(region, REGION_SIB_NEXT, 0)
+        return
+    }
+    ar_region_set(region, REGION_SIB_NEXT, ar_region_get(parent, REGION_CHILDREN))
+    ar_region_set(parent, REGION_CHILDREN, region)
+}
+
+fn ar_region_child_unlink(parent: u64, region: u64) {
+    if parent == 0 { return }
+    var head = ar_region_get(parent, REGION_CHILDREN)
+    if head == region {
+        ar_region_set(parent, REGION_CHILDREN, ar_region_get(region, REGION_SIB_NEXT))
+        return
+    }
+    var prev = head
+    loop {
+        if prev == 0 { break }
+        var next = ar_region_get(prev, REGION_SIB_NEXT)
+        if next == region {
+            ar_region_set(prev, REGION_SIB_NEXT, ar_region_get(region, REGION_SIB_NEXT))
+            break
+        }
+        prev = next
+    }
+}
+
 fn ar_region_new_w(control: u64, parent: u64): u64 {
     var region = ar_header_alloc(control)
     ar_region_set(region, REGION_HEAD, 0)
@@ -379,6 +413,9 @@ fn ar_region_new_w(control: u64, parent: u64): u64 {
     var generation = ar_ctrl_get(control, CTRL_GEN) + 1
     ar_ctrl_set(control, CTRL_GEN, generation)
     ar_region_set(region, REGION_GEN, generation)
+    ar_region_set(region, REGION_ROOT, if parent == 0 { region } else { ar_region_get(parent, REGION_ROOT) })
+    ar_region_set(region, REGION_CHILDREN, 0)
+    ar_region_child_link(parent, region)
     region
 }
 
@@ -498,6 +535,7 @@ fn ar_region_release(control: u64, region: u64) {
 fn ar_region_drop_w(control: u64, region: u64) {
     if region == 0 { return }
     ar_registry_unlink(control, region)
+    ar_region_child_unlink(ar_region_get(region, REGION_PARENT), region)
     ar_region_set(region, REGION_REG_NEXT, 0)
     ar_region_release(control, region)
 }
@@ -530,6 +568,7 @@ fn ar_subtree_collect(control: u64, root: u64): u64 {
 
 fn ar_region_drop_subtree_w(control: u64, root: u64) {
     if root == 0 { return }
+    ar_region_child_unlink(ar_region_get(root, REGION_PARENT), root)
     var doomed = ar_subtree_collect(control, root)
     loop {
         if doomed == 0 { break }
@@ -1106,5 +1145,126 @@ exp fn copy(dst: ref []byte, at: u64, src: []byte) {
         if i >= src.len { break }
         dst[at + i] = src[i]
         i++
+    }
+}
+
+fn region_to_ptr(a: uptr): ptr {
+    teko::sys::word_ptr(a to i64)
+}
+
+fn region_of_ptr(p: ptr): Region {
+    Region { addr = teko::sys::ptr_word(p) to uptr }
+}
+
+fn region_of_word(w: u64): Region {
+    Region { addr = w to uptr }
+}
+
+fn arena_of_ptr(p: ptr): Arena {
+    Arena { addr = teko::sys::ptr_word(p) to uptr }
+}
+
+/** Arena — the per-task control block: the checkpoint stack and the task-global slots. */
+exp type Arena = struct {
+    /** The address of the 64-bit control block in the arena's meta memory. */
+    addr: uptr
+
+    /** Arena::current — the current task's control block, allocated on first touch. */
+    static fn current(): Arena { Arena { addr = ar_control() to uptr } }
+
+    /** Arena::at — wrap a raw control-block address as a handle. */
+    static fn at(addr: uptr): Arena { Arena { addr = addr } }
+
+    /** root — the task's root region. */
+    fn root(): Region { region_of_ptr(region_root()) }
+
+    /** program — the program-lifetime region, outliving every task-local scope. */
+    fn program(): Region { region_of_ptr(region_program()) }
+
+    /** push — open an arena checkpoint over the root region. */
+    fn push() { arena_push() }
+
+    /** pop — release every allocation made since the innermost checkpoint. */
+    fn pop() { arena_pop() }
+
+    /** commit — retire the innermost checkpoint, keeping its allocations. */
+    fn commit() { arena_commit() }
+
+    /** environ — the recorded environ block address. */
+    fn environ(): uptr { environ_slot() to uptr }
+
+    /** set_environ — record the environ block address. */
+    fn set_environ(a: uptr) { set_environ_slot(a to u64) }
+
+    /** fd_stage — the recorded fd-staging block address. */
+    fn fd_stage(): uptr { fd_stage_slot() to uptr }
+
+    /** set_fd_stage — record the fd-staging block address. */
+    fn set_fd_stage(a: uptr) { set_fd_stage_slot(a to u64) }
+
+    /** intern_table — the string-interning bucket-table address. */
+    fn intern_table(): uptr { intern_table_slot() to uptr }
+
+    /** set_intern_table — record the string-interning bucket-table address. */
+    fn set_intern_table(a: uptr) { set_intern_table_slot(a to u64) }
+
+    /** intern_region — the region handle backing the interning table. */
+    fn intern_region(): uptr { intern_region_slot() to uptr }
+
+    /** set_intern_region — record the region handle backing the interning table. */
+    fn set_intern_region(a: uptr) { set_intern_region_slot(a to u64) }
+
+    /** names_state — the name-registry state block address. */
+    fn names_state(): uptr { names_state_slot() to uptr }
+
+    /** set_names_state — record the name-registry state block address. */
+    fn set_names_state(a: uptr) { set_names_state_slot(a to u64) }
+}
+
+/** Region — a per-scope / per-object allocator handle addressing a 64-byte region-control block. */
+exp type Region = struct {
+    /** The address of this region's control block in the arena's meta memory. */
+    addr: uptr
+
+    /** Region::at — wrap a raw region-control address as a handle. */
+    static fn at(addr: uptr): Region { Region { addr = addr } }
+
+    /** alloc — reserve `n` bytes from this region. */
+    fn alloc(n: usize): ptr { region_alloc(region_to_ptr(self.addr), n) }
+
+    /** child — open a fresh child region under this one. */
+    fn child(): Region { region_of_ptr(region_new(region_to_ptr(self.addr))) }
+
+    /** child_sized — open a child pre-seeded with a `floor`-byte first chunk. */
+    fn child_sized(floor: usize): Region {
+        region_of_ptr(region_new_sized(region_to_ptr(self.addr), floor))
+    }
+
+    /** drop — release this region and its storage. */
+    fn drop() { region_drop(region_to_ptr(self.addr)) }
+
+    /** drop_subtree — release this region together with all its descendants. */
+    fn drop_subtree() { region_drop_subtree(region_to_ptr(self.addr)) }
+
+    /** register — bind `inst` under `tid` in this region's registry. */
+    fn register(tid: u64, inst: ptr) { region_register(region_to_ptr(self.addr), tid, inst) }
+
+    /** lookup — resolve the instance bound to `tid`, walking up to the root. */
+    fn lookup(tid: u64): ptr { region_lookup(region_to_ptr(self.addr), tid) }
+
+    /** parent — this region's enclosing region. */
+    fn parent(): Region { region_of_word(ar_region_get(self.addr to u64, REGION_PARENT)) }
+
+    /** root — the root region of this region's tree. */
+    fn root(): Region { region_of_word(ar_region_get(self.addr to u64, REGION_ROOT)) }
+
+    /** control — the arena control block owning this region. */
+    fn control(): Arena { arena_of_ptr(region_control(region_to_ptr(self.addr))) }
+
+    /** free_block — return `n` bytes at `addr` to the arena's free list. */
+    fn free_block(addr: ptr, n: usize) {
+        var w = teko::sys::ptr_word(addr) to u64
+        if w == 0 { return }
+        ar_free_block(ar_control(), w, n to u64)
     }
 }
