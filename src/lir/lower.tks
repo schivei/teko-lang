@@ -451,6 +451,8 @@ pub type LowerCtx = struct {
     escaping: []str
     frees_old_names: []str
     bracket_depth: u32
+    region_param: u32
+    plan: checker::ResidencePlan
 }
 
 pub type NativeRegionFrame = struct { region_vreg: u32; decl_name: str; is_loop: bool }
@@ -469,6 +471,7 @@ fn ctx_with(ctx: LowerCtx, func: LFunc, block_id: u32, env: LEnv): LowerCtx {
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
         region_stack = ctx.region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
+        region_param = ctx.region_param; plan = ctx.plan
     }
 }
 
@@ -482,6 +485,7 @@ fn ctx_with_rodata(ctx: LowerCtx, rodata: []LRodata): LowerCtx {
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
         region_stack = ctx.region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
+        region_param = ctx.region_param; plan = ctx.plan
     }
 }
 
@@ -495,6 +499,7 @@ fn ctx_with_lifted(ctx: LowerCtx, lifted: []LFunc): LowerCtx {
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
         region_stack = ctx.region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
+        region_param = ctx.region_param; plan = ctx.plan
     }
 }
 
@@ -508,6 +513,7 @@ fn ctx_with_defers(ctx: LowerCtx, defers: []checker::TDeferStmt): LowerCtx {
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
         region_stack = ctx.region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
+        region_param = ctx.region_param; plan = ctx.plan
     }
 }
 
@@ -521,6 +527,7 @@ fn ctx_with_loops(ctx: LowerCtx, loop_targets: []LoopTargets): LowerCtx {
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
         region_stack = ctx.region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
+        region_param = ctx.region_param; plan = ctx.plan
     }
 }
 
@@ -559,7 +566,12 @@ fn ctx_with_regions(ctx: LowerCtx, region_stack: []NativeRegionFrame): LowerCtx 
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
         region_stack = region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
+        region_param = ctx.region_param; plan = ctx.plan
     }
+}
+
+fn region_from_param(ctx: LowerCtx): u32 {
+    ctx.region_param
 }
 
 fn ctx_with_bracket_depth(ctx: LowerCtx, bracket_depth: u32): LowerCtx {
@@ -572,6 +584,7 @@ fn ctx_with_bracket_depth(ctx: LowerCtx, bracket_depth: u32): LowerCtx {
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
         region_stack = ctx.region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = bracket_depth
+        region_param = ctx.region_param; plan = ctx.plan
     }
 }
 
@@ -2497,6 +2510,7 @@ fn build_lambda_lfunc(lam: checker::TLambda, env_layout: LStructLayout, ctx: Low
         has_ret_len_slot = fat_ret; ret_len_slot = if fat_ret { slot_reg } else { 0 }
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = collect_addr_taken_locals(lam.body, ctx.ref_fns, ctx.enums); table = ctx.table
         region_stack = []; escaping = []; frees_old_names = []; bracket_depth = 0
+        region_param = ctx.region_param; plan = ctx.plan
     }
     var with_captures = match bind_lambda_captures(ctx0, env_layout, lam.captures, line, col) { LowerCtx as c => c; error as err => return err }
     var done = match lower_fn_body(with_captures, lam.body, ltype_of(lam.ret, ctx.enums), line, col) { LowerCtx as c => c; error as err => return err }
@@ -3337,6 +3351,7 @@ fn close_loop(outer: LowerCtx, body_done: LowerCtx, exit_block: u32, exit_env: L
         has_ret_len_slot = body_done.has_ret_len_slot; ret_len_slot = body_done.ret_len_slot
         ref_fns = body_done.ref_fns; field_decls = body_done.field_decls; addr_taken = body_done.addr_taken; table = body_done.table
         region_stack = outer.region_stack; escaping = body_done.escaping; frees_old_names = body_done.frees_old_names; bracket_depth = body_done.bracket_depth
+        region_param = body_done.region_param; plan = body_done.plan
     }
 }
 
@@ -6164,6 +6179,7 @@ pub fn lower_function(f: checker::TFunction, table: checker::TypeTable, layouts:
         has_ret_len_slot = fat_ret; ret_len_slot = if fat_ret { slot_reg } else { 0 }
         ref_fns = ref_fns; field_decls = field_decls; addr_taken = collect_addr_taken_locals(f.body, ref_fns, enums); table = table
         region_stack = []; escaping = checker::fn_escaping_vars(f); frees_old_names = checker::fn_frees_old_vars(f); bracket_depth = 0
+        region_param = 0; plan = checker::residence_plan(f, table)
     }
     var framed = open_frame_region(ctx0, f.line, f.col)
     var done = match lower_fn_body(framed, f.body, ltype_of(f.return_type, enums), f.line, f.col) { LowerCtx as c => c; error as err => return stop_in_function(err, f) }
@@ -6702,6 +6718,7 @@ pub fn lower_virtual_main(loose: []@TStatement(), layouts: []LStructLayout, enum
         has_ret_len_slot = false; ret_len_slot = 0
         ref_fns = ref_fns; field_decls = field_decls; addr_taken = collect_addr_taken_locals(loose, ref_fns, enums); table = table
         region_stack = []; escaping = []; frees_old_names = []; bracket_depth = 0
+        region_param = 0; plan = checker::ResidencePlan { bindings = []; returns = [] }
     }
     var tail = match lower_main_tail(ctx0, loose) { LowerMainTail as x => x; error as err => return err }
     var closed = match close_virtual_main(tail) { LowerCtx as c => c; error as err => return err }
