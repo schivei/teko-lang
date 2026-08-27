@@ -158,7 +158,40 @@ fn check_modules(prog: parser::Program, table: TypeTable): []str {
         i++
     }
     diags = concat_diags(diags, check_global_signature_collisions(prog, table))
-    concat_diags(diags, check_global_type_collisions(prog))
+    diags = concat_diags(diags, check_global_type_collisions(prog))
+    concat_diags(diags, check_reserved_type_redefs(prog))
+}
+
+fn reserved_type_name(name: str): bool {
+    if name == "u8" || name == "u16" || name == "u32" || name == "u64" { return true }
+    if name == "i8" || name == "i16" || name == "i32" || name == "i64" { return true }
+    if name == "f32" || name == "f64" { return true }
+    if name == "bool" || name == "byte" || name == "char" || name == "str" { return true }
+    if name == "isize" || name == "usize" || name == "ptr" || name == "uptr" { return true }
+    false
+}
+
+fn ns_is_base_provenance(ns: str): bool {
+    if ns.len < 6 { return false }
+    ns[0] == b't' && ns[1] == b'e' && ns[2] == b'k' && ns[3] == b'o' && ns[4] == b':' && ns[5] == b':'
+}
+
+fn check_reserved_type_redefs(prog: parser::Program): []str {
+    var diags: []str = []
+    var i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i].content {
+            parser::TypeDecl as d => {
+                if reserved_type_name(d.name) && !ns_is_base_provenance(prog.items[i].namespace) {
+                    diags = concat_diags(diags, one_diag(located_diag(prog.items[i].file, d.line, d.col, error { message = $"type '{d.name}' is reserved" })))
+                }
+            }
+            _ => { }
+        }
+        i++
+    }
+    diags
 }
 
 fn global_fn_signature_key(f: parser::Function, table: TypeTable, ns: str): str | error {
