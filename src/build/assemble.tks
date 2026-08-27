@@ -152,7 +152,7 @@ fn assemble_sel(files: []SourceFile, include_tests: bool, report: bool, tty: boo
             i = i + 1
             continue
         }
-        var src = match teko::io::read_file(sf.path) { str as s => s; error as e => return e }
+        var src = match source_text_of(sf) { str as s => s; error as e => return e }
         var one: []parser::Item = []
         var one_embeds: []parser::EmbedDecl = []
         var ok = true
@@ -226,12 +226,17 @@ fn overridden_content(overrides: []FileOverride, path: str): str | null {
     null
 }
 
-fn read_source_with_overrides(path: str, overrides: []FileOverride): str | error {
-    match overridden_content(overrides, path) {
+fn source_text_of(sf: SourceFile): str | error {
+    if sf.content.len > 0 { return sf.content }
+    match teko::io::read_file(sf.path) { str as s => s; error as e => return e }
+}
+
+fn read_source_with_overrides(sf: SourceFile, overrides: []FileOverride): str | error {
+    match overridden_content(overrides, sf.path) {
         str as c => return c
         null => { }
     }
-    match teko::io::read_file(path) { str as s => s; error as e => return e }
+    source_text_of(sf)
 }
 
 fn append_tagged_items(merged: []parser::Item, items: []parser::Item, sf: SourceFile): []parser::Item {
@@ -256,7 +261,7 @@ pub fn assemble_with_overrides(files: []SourceFile, overrides: []FileOverride): 
             i = i + 1
             continue
         }
-        var src = match read_source_with_overrides(sf.path, overrides) { str as s => s; error as e => return e }
+        var src = match read_source_with_overrides(sf, overrides) { str as s => s; error as e => return e }
         match asm_lex_and_parse(sf.path, src) {
             AsmUnit as u => { merged = append_tagged_items(merged, u.items, sf) }
             error as e => { diags = [..diags, teko::str::concat(sf.path, ":", e.message)] }
