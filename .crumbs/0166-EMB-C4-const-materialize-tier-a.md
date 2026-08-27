@@ -36,6 +36,10 @@ consts are empty → byte-identical to pre-#embed (pay-per-use).
   existing string-literal→`LRodata` machine; confirm a top-level `const []byte` lowers to Tier-A rodata.
 - `src/embed/embed.tks` — `files()` reads the four (now populated) consts; NO const-aggregate of the
   struct is serialized.
+- `src/compress/deflate.tks:38` `deflate` + `src/compress/inflate.tks:405` `inflate` — promote `pub`→
+  `exp` (the dev must call `inflate` to decompress a `Deflate` embed per D135; `deflate` for symmetry with
+  the already-`exp` `gzip_*`/`zlib_*`). This changes the `.tkh`/ABI → it FOLDS INTO THIS crumb's reseed
+  (coordinator 2026-08-27), NOT a separate reseed.
 
 ## How
 
@@ -47,6 +51,8 @@ consts are empty → byte-identical to pre-#embed (pay-per-use).
    cannot lower a `const FileSystem` name to a runtime thin-constructor, KEEP `files()` accessor (annex
    §3.2 veto-open — cosmetic, NOT a fork). Do NOT emit a pointer-bearing `FileSystem` const.
 4. Empty corpus (compiler's own build has no `#embed` yet) → consts empty → emitted bytes unchanged.
+5. Promote `deflate`/`inflate` `pub`→`exp` (D135 dev-decompresses); the `.tkh`/ABI change rides THIS
+   crumb's reseed (coordinator 2026-08-27), not a separate one.
 
 ## Rulings & laws
 
