@@ -101,3 +101,13 @@ The root region is born in `_start` and passed to `main` as the region param, th
 reroutes to `region_control(<param>)`, the model's positions are `usize` and raw pointers are `ptr`/
 `uptr` with `str`↔`[]byte` zero-copy, RESEED-FINAL is `gen2==gen3` under MEM_PARANOID with the RSS peak
 down — the per-scope memory model is LIVE and the ambient tangle dissolved.
+
+## Region-type reconciliation (D149 / crumbs 0183-0184)
+
+Operates over the `Region`/`Arena` types (0183/0184). `_start` opens the root `Region` and passes it to `main`
+as the region param; the retired `ar_control()` first-touch is `Arena::current()` → replaced by
+`region.control()` (a `Region` method returning `Arena`); `region_enter`/`region_leave`/`ar_cur_*` are the
+`Arena` ambient current-stack, removed. The reball's arena slice (positions→`usize`, raw words→`ptr`/`uptr`,
+`str`↔`[]byte` zero-copy) is **already embodied** by the `Region`/`Arena` `addr: uptr` fields — adopting the
+types SUBSUMES that slice of the reball. Provenance (0171) still precedes the str/[]byte reball. See
+`docs/design/arena-region-tipo-com-metodos-0.3.1.md §4`.

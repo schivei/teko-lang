@@ -90,3 +90,11 @@ its own harvest per the expurgo iterative-reseed law).
 Every lexical scope drops its region at its edge (loop per-iteration), the N-level selector routes an
 accumulator to its declaring region, the live child regions are a fixed depth-array reused in loops
 (flat peak), the native route has the lifecycle, and the ritual gate is green under MEM_PARANOID/ASan.
+
+## Region-type reconciliation (D149 / crumbs 0183-0184)
+
+Operates over the `Region` type (0183). The fixed depth-array of live child regions is
+`[TK_REGION_STACK_CAP]Region` (was `[…]ptr`); `open_native_region`/`close_native_region` become
+`parent.child_sized(region_slots)` / `region.drop()`; `scope_region_of` / `native_scope_region_of` return a
+`Region`; the N-level selector routes an accumulator's growth to its declaring `Region`. No loose `region_*`
+over `u64`. See `docs/design/arena-region-tipo-com-metodos-0.3.1.md §4`.

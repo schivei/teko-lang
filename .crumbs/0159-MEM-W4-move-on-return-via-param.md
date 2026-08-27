@@ -82,3 +82,10 @@ surfaces a UAF).
 A `Caller`-tier return is constructed into the received region param (the caller's region), the callee's
 child region drops without stranding it, transitive N-frame returns bubble to the top consumer, the
 ambient `set_ret_dest`/`ret_dest` is retired, and the ritual gate is green under MEM_PARANOID/ASan.
+
+## Region-type reconciliation (D149 / crumbs 0183-0184)
+
+Operates over the `Region` type (0183). The region param is a `Region`; a `Caller`-tier / `is_move` return is
+built into `param.alloc(...)`; `region_from_param(ctx)` returns a `Region`. The retired
+`set_ret_dest`/`ret_dest` are the ambient slots of the `Arena` type — their retirement composes with the
+`Arena` migration (0184). See `docs/design/arena-region-tipo-com-metodos-0.3.1.md §4`.
