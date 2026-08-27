@@ -67,6 +67,37 @@ troca de mecanismo**, não implementação do zero.
 7. **Superfície de root = `service <lifetime>`** (`ServiceLifetime{Singleton;Scoped;Transient}`),
    NÃO `#singleton` de binding. → `MEM-E3`.
 
+### 2a. ADENDO (dono 2026-08-27, DECISION_LOG:1166) — os TIPOS que a máquina do modelo usa pesado
+
+Dois desenhos DELIBERADOS-mas-não-implementados. **Recuperar, NÃO inventar** (fontes: crumbs
+`0015-SM-G9`, `0011-SM-G5`; `lang-evolution-0.3.1-memory-and-surface.md` §6/§7b; D-#358). Estado
+verificado: **parte já landada** — `PrimKind` tem `Size; Usize` (`type.tks:7`) com predicados ligados;
+`Ptr`/`Uptr` são kinds (`type.tks:51,54`), MAS `Ptr` ainda é GENÉRICO (`struct { inner }`), não o opaco.
+
+- **`isize`/`usize`** (`MEM-E0a`, ENSINO). Recupera `0015`. DELTAS: (a) **RENOMEAR o signed `size`→
+  `isize`** — o dono flagrou colisão de `size` com identificador usado; `usize` fica. (b)
+  **Target-parametrizar `prim_width`** — hoje `64` fixo (`type.tks:37`); recuperar `prim_width(k, target)`
+  = largura da palavra do ALVO (a ÚNICA porta de target-dependência). Byte-idêntico em 64-bit
+  (`usize==u64`, `isize==i64` bit-a-bit, §7b.5). `usize`/`isize` DISTINTOS de `ptr`/`uptr` (medida vs
+  endereço); `usize↔u64` é `to`-cast, `uptr↔usize` é ponte Marshall NUNCA implícita (§7b.2).
+- **`ptr`/`uptr` opacos + `wrap`/`unwrap`** (`MEM-E0b`, ENSINO). Recupera `0011`. Torna `Ptr` ATÓMICO
+  opaco (remove `inner`; sem aritmética `p+n`/`p[n]` por construção). Adiciona os DOIS métodos: **`__wrap<T>(): T | error | null`** = re-entrada FALÍVEL checada (endereço 0→null; endereço em região VIVA
+  via `region_lookup`→senão error; `type_tag == di_type_id(T)`→senão error — tudo UB-free, SEM `unsafe`)
+  = **marshalling SEGURO** opaco↔tipado/FFI; **`__unwrap<T>(): T`** = exposição INFALÍVEL crua
+  (reinterpret puro). O tag vive no **header de alocação da arena** (não na palavra do ptr) → `ptr`/`uptr`
+  ficam palavra-nua, SEM fat pointer, SEM mudança de ABI. Twin `region_alloc_tagged(r, n, tag)` em
+  **`arena.tks` (Teko)** — a arena é 100% Teko (D128), então o antigo FORK C-vs-Teko (DECISION_LOG:680)
+  está RESOLVIDO (mais-recente-vence): NÃO é patch em C, é Teko. Reusa `di_type_id` (`di.tks:373`, UMA
+  hash) e `region_lookup` (`arena.tks:965`, já existe). Inerte/byte-idêntico até um `__wrap` ler o tag.
+
+**O USO (reball) entra JUNTO com o modelo** (byte-preservante em 64-bit → fixpoint-gated, §7b.5): o campo
+de arena no fat é `uptr` (não `u64`, `MEM-W5`); tamanhos de slot/array são `usize` (não `u64`,
+`MEM-E2`/`MEM-W2`); ponteiros de região/param são `ptr`/`uptr` opacos (`MEM-E4`/`MEM-W6`). O reball
+mecânico tree-wide das posições/ponteiros crus cavalga o sweep (crumbs `0034 SM-S6`/`0091 SM-S4` são o
+reball de massa; a fatia do modelo entra em `MEM-W6`). `MEM-E0a`/`MEM-E0b` compõem: o fat carrega a
+arena como `uptr` (valor do objeto); o ENDEREÇO do objeto é `ptr`/`uptr` opaco com tag no header — eixos
+distintos que compõem limpo.
+
 ## 3. A DECISÃO derivada load-bearing (alcance do control-block) — resolução law-first, NÃO um HALT
 
 Removido o `ar_control()` `_Thread_local`, as ~40 wrappers de `arena.tks` (region_program, panic,
@@ -82,22 +113,22 @@ preferir control threaded como parâmetro SEPARADO (não via região), é pivô 
 ## 4. A METODOLOGIA (as 5 etapas do dono — a espinha do plano)
 
 ```
-(1) ENSINAR (aditivo/byte-idêntico, SEM build entre passos)   MEM-E1 E2 E3 E4 E5
+(1) ENSINAR (aditivo/byte-idêntico, SEM build entre passos)   MEM-E0a E0b E1 E2 E3 E4 E5
         └─ agrupa todo o ensino → minimiza reseed
 (2) RESEED-1 (harvest do ensino; gate do MEM-E5)              [RITUAL]
-(3) SHADOW no scratchpad (os mem_* do §11, D117 não-versionados) + correções   MEM-S1  [sem reseed]
+(3) SHADOW no scratchpad (os mem_* do §6, D117 não-versionados) + correções   MEM-S1  [sem reseed]
         └─ prova CADA flip perigoso em isolado ANTES do sweep tree-wide
 (4) SWEEP + FLIP (byte-movers landam, ambiente morre)         MEM-W1 W2 W3 W4 W5 W6
         └─ ordenados por risco; cada um gate-ável contra os mem_* + gen2==gen3
 (5) RESEED-FINAL (gate do MEM-W6)                             [RITUAL]
 ```
 
-**Porque o ensino é byte-idêntico e batchável:** E1 (runtime) adiciona funções sem chamador
-(não-emitidas); E2 (análise de sizing) é função nova sem consumidor; E3 enriquece o plano
-(inconsumido); E4 thread o parâmetro de região **null-defaulted** (`null` → caminho ambiente de hoje =
-byte-idêntico, gen2==gen3 determinístico); E5 plumba o plano no ctx de emit sem rotear por ele. Escreve
-E1→E5 SEM build; um único build no RESEED-1. **O ambiente COEXISTE com o parâmetro durante o ensino** —
-só morre no SWEEP.
+**Porque o ensino é byte-idêntico e batchável:** E0a/E0b (tipos) são inertes até usados (`src/` segue
+`u64`, tag-path sem leitor); E1 (runtime) adiciona funções sem chamador (não-emitidas); E2 (análise de
+sizing) é função nova sem consumidor; E3 enriquece o plano (inconsumido); E4 thread o parâmetro de região
+**null-defaulted** (`null` → caminho ambiente de hoje = byte-idêntico, gen2==gen3 determinístico); E5
+plumba o plano no ctx de emit sem rotear por ele. Escreve E0a→E5 SEM build; um único build no RESEED-1.
+**O ambiente COEXISTE com o parâmetro durante o ensino** — só morre no SWEEP.
 
 **Porque os flips vivem no SWEEP:** cada W* é um byte-mover perigoso (residência/elisão/move). A SHADOW
 (3) de-risca-os em programas avulsos no scratchpad com o consumo ligado localmente; o SWEEP aplica-os
@@ -110,20 +141,22 @@ harvest próprio.
 
 | crumb | etapa | o que faz | gate |
 |---|---|---|---|
-| `0148 MEM-E1` | ENSINO | runtime: `region_control(r)` (alcança control pela root) + entradas de alloc/return cientes-de-região aditivas; ambiente INTACTO | `[dry]` |
-| `0149 MEM-E2` | ENSINO | checker: `region_slots(scope)` (pico de slots vivos simultâneos + tamanhos) + `scope_slot_count`; estende `arena_floor`; sem consumidor | `[dry]` |
-| `0150 MEM-E3` | ENSINO | checker: liga `service <lifetime>` ao oráculo — `residence_plan` recebe a `TypeTable`; binding de tipo `service singleton` força `Root`; des-stub `is_singleton` (residence.tks:83) | `[dry]` |
-| `0151 MEM-E4` | ENSINO | codegen+lower: thread o PARÂMETRO de região implícito por toda fn, **null-defaulted** (byte-idêntico); `region_from_param` fallback | `[fixpoint]` |
-| `0152 MEM-E5` | ENSINO | codegen+lower: plumba `residence_plan` no ctx dos dois motores, INCONSUMIDO (byte-idêntico) — **RESEED-1** | `[RITUAL]` |
-| `0153 MEM-S1` | SHADOW | scratchpad: os `mem_*` (§6) + baseline + correções; prova cada flip isolado; **sem reseed** (D117) | `[dry]` |
-| `0154 MEM-W1` | SWEEP | elisão: `slots==0` ⇒ não abre região, repassa o param do pai (refinamento 4); consome `scope_slot_count` | `[RITUAL]` |
-| `0155 MEM-W2` | SWEEP | pré-sizing: abre a região no tamanho de `region_slots`; **REMOVE `#arena_size`/`#arena_depth` da superfície** (refinamento 3) | `[RITUAL]` |
-| `0156 MEM-W3` | SWEEP | residência de escopo + seletor N-níveis: consome tier `Scope`; região por escopo léxico; array fixo de filhas reusado no loop (refinamento 5) — PARANOID | `[RITUAL]` |
-| `0157 MEM-W4` | SWEEP | move-on-return via PARÂMETRO: o retorno constrói na região-param do caller; consome `ReturnResidence`; retira `set_ret_dest`/`ret_dest` ambiente — PARANOID | `[RITUAL]` |
-| `0158 MEM-W5` | SWEEP | objeto-dono-da-arena: fat pointer carrega o ptr da arena; membros alocam nela; viaja com o objeto (refinamento 2) | `[RITUAL]` |
-| `0159 MEM-W6` | SWEEP | root no `_start`→`main` como param (refinamento 6); remove ambiente (`ar_control` first-touch, `region_enter/leave`, `ar_cur_*`); `ar_control()`→`region_control(param)`; retira `#arena_*` residual — **RESEED-FINAL** | `[RITUAL]` |
+| `0148 MEM-E0a` | ENSINO | tipos: recupera `0015` — renomeia signed `size`→`isize`; target-parametriza `prim_width(k,target)`; `usize`/`isize` resolvem; ponte `uptr↔usize` não-implícita. Inerte (`src/` segue `u64`) | `[dry]` |
+| `0149 MEM-E0b` | ENSINO | tipos: recupera `0011` — `Ptr` atómico opaco (sem `inner`, sem aritmética); `__wrap<T>`/`__unwrap<T>`; tag no header via `region_alloc_tagged` em `arena.tks` (Teko); inerte até um `__wrap` ler | `[dry]` |
+| `0150 MEM-E1` | ENSINO | runtime: `region_control(r)` (alcança control pela root) + entradas de alloc/return cientes-de-região aditivas; ambiente INTACTO | `[dry]` |
+| `0151 MEM-E2` | ENSINO | checker: `region_slots(scope): usize` (pico de slots vivos simultâneos + tamanhos) + `scope_slot_count`; estende `arena_floor`; sem consumidor | `[dry]` |
+| `0152 MEM-E3` | ENSINO | checker: liga `service <lifetime>` ao oráculo — `residence_plan` recebe a `TypeTable`; binding de tipo `service singleton` força `Root`; des-stub `is_singleton` (residence.tks:83) | `[dry]` |
+| `0153 MEM-E4` | ENSINO | codegen+lower: thread o PARÂMETRO de região implícito (`ptr`) por toda fn, **null-defaulted** (byte-idêntico); `region_from_param` fallback | `[fixpoint]` |
+| `0154 MEM-E5` | ENSINO | codegen+lower: plumba `residence_plan` no ctx dos dois motores, INCONSUMIDO (byte-idêntico) — **RESEED-1** | `[RITUAL]` |
+| `0155 MEM-S1` | SHADOW | scratchpad: os `mem_*` (§6) + baseline + correções; prova cada flip isolado; **sem reseed** (D117) | `[dry]` |
+| `0156 MEM-W1` | SWEEP | elisão: `slots==0` ⇒ não abre região, repassa o param do pai (refinamento 4); consome `scope_slot_count` | `[RITUAL]` |
+| `0157 MEM-W2` | SWEEP | pré-sizing: abre a região no tamanho de `region_slots` (`usize`); **REMOVE `#arena_size`/`#arena_depth` da superfície** (refinamento 3) | `[RITUAL]` |
+| `0158 MEM-W3` | SWEEP | residência de escopo + seletor N-níveis: consome tier `Scope`; região por escopo léxico; array fixo de filhas reusado no loop (refinamento 5) — PARANOID | `[RITUAL]` |
+| `0159 MEM-W4` | SWEEP | move-on-return via PARÂMETRO: o retorno constrói na região-param do caller; consome `ReturnResidence`; retira `set_ret_dest`/`ret_dest` ambiente — PARANOID | `[RITUAL]` |
+| `0160 MEM-W5` | SWEEP | objeto-dono-da-arena: fat pointer carrega o ptr da arena como `uptr`; membros alocam nela; viaja com o objeto (refinamento 2) | `[RITUAL]` |
+| `0161 MEM-W6` | SWEEP | root no `_start`→`main` como param (refinamento 6); remove ambiente (`ar_control` first-touch, `region_enter/leave`, `ar_cur_*`); `ar_control()`→`region_control(param)`; retira `#arena_*` residual; reball posições→`usize`/ponteiros→`ptr`/`uptr` — **RESEED-FINAL** | `[RITUAL]` |
 
-Ordem de dep: E1..E3 paralelos → E4 → E5 (reseed-1) → S1 → W1 → W2 → W3 → W4 → W5 → W6 (reseed-final).
+Ordem de dep: E0a,E0b,E1,E2,E3 paralelos → E4 → E5 (reseed-1) → S1 → W1 → W2 → W3 → W4 → W5 → W6 (reseed-final).
 A rota C valida-se INTEIRA por gen2==gen3 (rota-C RODA já); o runtime do NATIVO valida quando o link
 native fechar (D-gate memória) — a ESCRITURA do `lower.tks` entra AGORA (lei "escreve as duas direções").
 
@@ -159,6 +192,8 @@ real é o self-host sob `TEKO_MEM_PARANOID`/ASan. Zero `.tkr`/`.tkt` novo versio
 | **R5 — colisão nos quentes** (`codegen.tks`/`lower.tks`) | crumbs separados por rota/passo; coordenar com quem toca `lower.tks`. A escritura native entra já; a validação de runtime espera o link. |
 | **R6 — reseed grande no sweep** | SHADOW de-risca cada flip; se W3/W4 acender ASan, harvest iterativo (lei do expurgo). Recomendado 2 reseeds; permitido mais. |
 | **R7 — objeto-dono-da-arena (W5) é fat-pointer redesign** | é o mais pesado e novo; sequenciado ÚLTIMO, in-plan (não deferido a 0.3.2). Habilita a dissolução de threads (D127). |
+| **R8 — tipos (E0a/E0b) são recuperação, não invenção** | `PrimKind` já tem `Size/Usize`, `Ptr/Uptr` são kinds — as deltas são o rename `size→isize`, o target-param de `prim_width`, tornar `Ptr` opaco, e os métodos `wrap`/`unwrap`. Inerte/byte-idêntico até o reball (fixpoint-gated). O antigo FORK do `region_alloc_tagged` (C-vs-Teko) morreu com a arena-100%-Teko (D128). Sem HALT. |
+| **R9 — `size` como identificador em `src/`** | é exatamente por isso que renomeia para `isize` (não há sweep de type-name `size` porque `0015` deixou `usize`/`size` INERTES — `src/` nunca adotou; confirmar zero ocorrências de `: size` antes do rename). |
 
 **Tensão de lei que force HALT: NENHUMA.** Os refinamentos + as 4 docs + D90/D120/D111/D117/D68
 resolvem tudo. O único ponto derivado (alcance do control, §3) resolve-se law-first pelos refinamentos
