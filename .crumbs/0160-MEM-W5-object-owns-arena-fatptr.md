@@ -77,3 +77,12 @@ at the top caller, `gen2==gen3`, MEM_PARANOID clean. Reseed-class: `fixpoint-reb
 An object's fat pointer carries its arena handle (`uptr`), its members allocate in that arena, the arena
 travels with the object on move/return/store, member reads at the top caller are valid, and the ritual
 gate is green under MEM_PARANOID/ASan — the D127 thread-transport blocker dissolved.
+
+## Region-type reconciliation (D149 / crumbs 0183-0184) — THIS CRUMB IS THE CORE
+
+W5 is LITERALLY "a região vira tipo fat" (D149). The arena handle the fat pointer carries **IS a `Region`**
+(the `addr: uptr` field of the `Region` type, 0183) — D130 refinement 2's fat-region == the `Region` type.
+Member allocation = `object.region().alloc(...)`; the handle travels because it is the `Region` value inside
+the fat pointer. This stops being "add a raw `u64` field" and becomes "the object carries a `Region`". The
+`Region` type (0183) is the vehicle this crumb was always describing; each spawned task receives its `Region`
+by param → the D127 blocker dissolves. See `docs/design/arena-region-tipo-com-metodos-0.3.1.md §4`.

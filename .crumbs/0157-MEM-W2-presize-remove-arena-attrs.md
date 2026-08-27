@@ -77,3 +77,13 @@ drops, `gen2==gen3`. Reseed-class: `fixpoint-rebuild` (sweep; harvested at RESEE
 Each opened region is born at its `region_slots` compile-time size, `#arena_size`/`#arena_depth` are
 removed from the language (reject), runtime-sized allocs still chunk-grow, peak/tail-waste drop, and the
 ritual gate is green under MEM_PARANOID with the RSS ratchet satisfied.
+
+## Region-type reconciliation (D149 / crumbs 0183-0184)
+
+The "sized region-new" this crumb routes `region_slots` into **IS `Region.child_sized(floor: usize)`**, the
+method born in `0183 MEM-ARENA-TYPE` — NOT a loose `region_new_sized(parent_u64, floor)` over `u64`. This is
+the D148 "W2 refaz" resolution: W2 was stopped for reaching into `teko_rt.c` to build a sized region-new;
+the correct form is a METHOD on the `Region` type (zero C, `arena.tks` only), which requires the type to land
+first. **Reordered dep: `0183 MEM-ARENA-TYPE` lands before this crumb** (it carries `child_sized`). The
+`#arena_size`/`#arena_depth` surface removal (parse/checker/codegen) is unchanged. See
+`docs/design/arena-region-tipo-com-metodos-0.3.1.md §4`.
