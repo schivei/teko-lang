@@ -114,12 +114,16 @@ fn wrap<T>(): T
 - **`global` law (D129):** `global` on a TYPE decl (`global exp type`) is the module-type form the owner
   specified — NOT a `global var` (which stays forbidden). NOTE: `global` today means "un-namespaced
   global NAME" (`check_modules.tks:174-232`), NOT "privileged base" — see the FORK below.
-- **PRIVILEGED-BASE ENFORCEMENT GATE — FORKED, design-ahead-blocked (see plan §8):** the owner requires
-  the raw-pointer-newtype capability be usable ONLY in the compiler-base, barred in user programs. That
-  gate is NOT deliberated (no compiler-base/user boundary exists) and tensions §6 (retire-`unsafe`, which
-  removed the privileged split). It is a real FORK (HALT). This crumb DEFINES the capability + the
-  compiler-base use, VALID under any fork resolution (the compiler IS the base); ONLY the user-program
-  PROHIBITION mechanism is blocked until the owner rules. Do NOT implement a user-facing gate here.
+- **PRIVILEGED-BASE ENFORCEMENT GATE — FORKED, design-ahead-blocked (see plan §8):** the proposed gate
+  is name-collision ("type already defined") barring user redefinition, with the `global` base permitted
+  to (re)define/enrich. Mapped to code: the BARRING half is a natural extension of the existing duplicate
+  check (`collect.tks:1366` / `check_modules.tks:227`); the PERMITTING half ("base redefines/enriches")
+  is NOT deliberated — there is NO type-reopen/enrich mechanic (only trait member-absorb `merge.tks:340`),
+  and the current `global`-collision REJECTS a second same-name `global` (the opposite of "base may
+  redefine"). Real FORK (HALT): is the permitted case a one-shot single definition (nothing new needed)
+  or a genuine reopen (undeliberated merge rules + what supersedes the `global`-collision)? This crumb
+  DEFINES the capability + the compiler-base one-shot definition (VALID under any resolution — the
+  compiler IS the base); do NOT implement the base-reopen/enrich or the user-vs-base asymmetry here.
 - **Byte-preserving on 64-bit (§7b.5):** the newtype lowers as its arch-word backing → `gen2==gen3`.
 - **arena-is-Teko (D128):** the optional tag twin `region_alloc_tagged` lands in `arena.tks` (Teko) — the
   old C-vs-Teko fork (DECISION_LOG:680) is DEAD.

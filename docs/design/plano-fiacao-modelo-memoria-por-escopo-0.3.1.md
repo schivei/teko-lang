@@ -234,16 +234,59 @@ todo `T`, NÃO precisa de gate de base — é seguro-por-construção, consisten
 consegue provar mesma-base para `T` arbitrário (um user faz `p.wrap<Qualquer>()` reinterpretando memória
 alheia), então a capacidade É insegura e precisa do gate base-only — NOVO e tensiona o §6.
 
-**As perguntas ao dono (o fork, curto):**
-- (a) O que MARCA a base privilegiada? Repropor `global` (semântica nova, reconciliar com o "nome
-  global"), um namespace reservado (`teko::`), um flag de módulo-confiável, ou outro?
-- (b) COMO o checker identifica "user program" vs "compiler-base"? Não existe essa fronteira hoje.
-- (c) Reconciliar com o §6 (seguro-por-arena, sem gate): o gate SUPERSEDE o §6 para o
-  newtype-ponteiro-cru especificamente, OU a segurança deve ser estrutural (opacidade + sem-aritmética +
-  `wrap` mesma-base provado pelo checker) em vez de base-only? (Se estrutural bastar, o gate some.)
+### 8a. A VISÃO do dono (por quê importa, coordenador)
 
-**DESIGN-AHEAD (D120) — o que segue SEM o fork:** a capacidade (newtype-sobre-escalar-com-métodos) JÁ
-EXISTE (`NewtypeBody`, verificado); os `ptr`/`uptr` newtypes + `wrap`/`unwrap` + o uso NO COMPILER-BASE
-(o modelo de memória) são VÁLIDOS sob QUALQUER resolução do fork (o compilador É a base). Logo `MEM-E0b`
-e todo o modelo AVANÇAM para o compiler-base agora; **o ÚNICO bloqueado é o mecanismo de PROIBIÇÃO ao
-user-program** — o gate de enforcement. Não bloqueia o modelo de memória (que é 100% compiler-base).
+A capacidade — definir tipos ricos (newtype sobre escalar-base + métodos) NA PRÓPRIA BASE do compilador —
+é a fundação para o dono depois **refinar o código do compilador, introduzir features, e tornar a
+linguagem mais OO-like**. Não é só `ptr`/`uptr`; é a maquinaria "definir tipos de superfície" (estilo
+Go `type X Underlying` + métodos) que o compiler-base usa. **A capacidade já EXISTE** (`NewtypeBody`,
+verificado) → a visão está desbloqueada para o compiler-base HOJE.
+
+### 8b. O ENFORCEMENT proposto (coordenador) mapeado no código REAL — recuperado vs faltante
+
+Mecânica proposta: o checker dá **"tipo já definido com esse nome"** para barrar user-code de
+criar/redefinir; o **compiler-base (marcado `global`) é o único PERMITIDO a (re)definir/enriquecer** um
+tipo por essa via. Verifiquei — o que EXISTE e o que FALTA:
+
+- **EXISTE (a metade "barrar"):** `check_no_duplicate_types`/`duplicates_of_reg` (`collect.tks:1366`) —
+  dois tipos de mesmo nome+namespace+arity → erro "duplicate type"; e `global_type_collision_at`
+  (`check_modules.tks:227`) — dois `global` de mesmo nome/arity → erro. **MAS ambos aplicam a TODOS
+  igualmente, SEM exceção-base**, e a colisão `global` só pega global-vs-global (um `type ptr` NÃO-global
+  do usuário NÃO colide com o `global ptr` da base hoje).
+- **FALTA / CONTRADIZ (a metade "permitir base (re)definir/enriquecer"):**
+  1. **NÃO existe mecânica de REOPEN/ENRICH de um tipo** — um 2º decl de nome+arity existente é REJEIÇÃO
+     plana (duplicate), não merge/enrich. O único merge é de MEMBROS de trait (`merge_named_members`,
+     `merge.tks:340`: `Absorb` se AST-idêntico / `Conflict` se mesma-assinatura corpo-diferente /
+     `Overload`) — é absorção de trait, NÃO um "a base re-abre/enriquece o tipo".
+  2. **O `global` atual FORBIDS exatamente o que a proposta quer PERMITIR:** hoje um 2º `global` de mesmo
+     nome é ERRO — o oposto de "a base pode redefinir". Repropor `global` como marcador de reopen-base
+     CONTRADIZ a sua semântica de colisão vigente.
+  3. **NÃO há assimetria base-vs-user** em nenhum dos dois checks — nada distingue "a base pode".
+  4. **Crumbs `0011`/`0015` não deliberam nada disto** (definição one-shot / PrimKind-interno).
+
+### 8c. O FORK preciso (HALT) — a pergunta ao dono
+
+A metade "barrar user" é extensão NATURAL do check existente (generalizar a colisão para pegar um decl de
+usuário que colide com um `global` da base = "tipo já definido") — recomendável law-first, sem invenção.
+**O que é GENUINAMENTE não-deliberado e HALTa é a metade "a base (re)define/enriquece":**
+
+> **"Redefinir um tipo por ele próprio" (o caso permitido) é (i) definição ÚNICA one-shot — a base
+> define `ptr`/`uptr` UMA vez, sem reopen (então "redefinir/enriquecer" é só barrar-o-resto, e nada de
+> novo é preciso além da colisão-contra-`global`), OU (ii) um mecanismo REAL de REOPEN/enrich de um tipo
+> existente (novo — precisa de regras de merge: absorve-se-idêntico como trait? add-only? override?), e
+> nesse caso, já que o `global`-collision atual REJEITA um 2º `global` de mesmo nome, o que o SUPERSEDE
+> para permitir o reopen da base?"**
+
+Recuperei as duas matérias-primas existentes (rejeição-duplicate; absorb-if-identical de trait) mas
+NENHUMA é a mecânica "base (re)define/enriquece, user não" — ela não está no código nem nos desenhos
+recuperados. Reconciliar também com o §6 (aposentar-`unsafe`: seguro-por-arena, sem split
+privilegiado): o gate supersede o §6 para o newtype-ponteiro-cru, OU a segurança é estrutural
+(opaco + sem-aritmética + `wrap` mesma-base provado)?
+
+### 8d. DESIGN-AHEAD (D120) — o que segue SEM o fork
+
+A capacidade + os `ptr`/`uptr` newtypes + `wrap`/`unwrap` + TODO o uso NO COMPILER-BASE (o modelo de
+memória inteiro) são VÁLIDOS sob QUALQUER resolução (o compilador É a base — define os tipos UMA vez,
+caso (i), que funciona hoje). Logo `MEM-E0b` e os 14 crumbs AVANÇAM para o compiler-base agora. **O
+ÚNICO bloqueado é a mecânica de (re)definição/enriquecimento privilegiada + a assimetria base-vs-user**
+(o enforcement gate) — que NÃO bloqueia o modelo de memória (100% compiler-base).
