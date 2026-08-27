@@ -207,7 +207,14 @@ real é o self-host sob `TEKO_MEM_PARANOID`/ASan. Zero `.tkr`/`.tkt` novo versio
 **O ponto derivado (alcance do control, §3) resolve-se law-first pelos refinamentos 2+6** — decisão
 confirmável, não bloqueio.
 
-## 8. FORK REAL — o GATE de privilégio da capacidade newtype-ponteiro-cru (HALT)
+## 8. ~~FORK REAL — o GATE de privilégio da capacidade newtype-ponteiro-cru (HALT)~~ — RESOLVIDO (D131/D133)
+
+> **RESOLVIDO pelo dono (2026-08-27), NÃO é mais fork.** **D131:** NÃO há gate de privilégio —
+> `wrap`/`unwrap` (e a capacidade newtype) são `exp`, EXPOSTOS a todos; a segurança é do usuário (§6
+> aposentar-`unsafe` fica). **D131 clause 2 + D133:** o enforcement é NARROW e via **PROVENANCE** (não
+> nome-de-projeto, não flag): um programa de usuário não pode redefinir um NOME reservado por keyword
+> (`str`/`char`/`ptr`/`uptr`/`isize`/`usize`/`u8`…); a origem-prelúdio (base-path injetado) define-os uma
+> vez. Fiado no crumb `MEM-Wt` (0156). O texto do §8 abaixo fica como registro histórico do fork.
 
 O dono impôs uma CONSTRAINT DURA: a capacidade newtype-sobre-escalar COM `wrap`/`unwrap` de reinterpret
 CRU é **PRIVILEGIADA** — o compilador só pode usá-la no PRÓPRIO código (compiler-base), NUNCA num programa
@@ -290,3 +297,60 @@ memória inteiro) são VÁLIDOS sob QUALQUER resolução (o compilador É a base
 caso (i), que funciona hoje). Logo `MEM-E0b` e os 14 crumbs AVANÇAM para o compiler-base agora. **O
 ÚNICO bloqueado é a mecânica de (re)definição/enriquecimento privilegiada + a assimetria base-vs-user**
 (o enforcement gate) — que NÃO bloqueia o modelo de memória (100% compiler-base).
+
+## 9. SWEEP RE-SEQUENCIADO (D131/D132/D133 — arquiteto do sweep, 2026-08-27)
+
+O ENSINO (0148–0154) LANDOU (D132: 2 reseeds staging, fixpoint byte-idêntico, pico ~1049 MB). Este §
+SUPERSEDE as linhas de SWEEP do §5 e incorpora as 3 escalações do D132/D133. A verificação contra o `src/`
+atual revelou dois GAPS que os 6 crumbs originais assumiam resolvidos e NÃO estavam — por isso o sweep
+cresce de 6 para **8 crumbs**:
+
+- **GAP 1 (escalação 2):** o E4/E5 threadou `region_param`/`plan` só no `LowerCtx` NATIVO
+  (`lower.tks:454`); a rota-C (`codegen.tks`) NÃO tem parâmetro de região algum. Logo `W1` ("repassa o
+  param do pai") e `W4` ("constrói na região-param do caller") não tinham param pra consumir na rota que
+  self-hospeda. → novo crumb **`MEM-W0`** (fundação da rota-C) ANTES de W1.
+- **GAP 2 (escalação 1):** `src/sys/marshall.tks` já tem `exp global type ptr = isize { }` / `uptr` com
+  corpo VAZIO — `wrap`/`unwrap` NÃO existem. Precisam de INTRÍNSECO (não corpo-Teko). → novo crumb
+  **`MEM-Wt`** (intrínseco + provenance) primeiro (baixo risco, inerte, pré-requisito do reball/W5/W6).
+
+### Sequência final (8 crumbs, ordem de execução)
+
+| seq | crumb | etapa | o que faz | gate |
+|---|---|---|---|---|
+| 0156 | `MEM-Wt` | SWEEP | **esc.1a** `wrap`/`unwrap` INTRÍNSECO (molde `buf_ptr`, reinterpret nu) + **esc.3** provenance reserved-name (D133) | `[fixpoint]` |
+| 0157 | `MEM-W0` | SWEEP | **esc.2** thread do param de região implícito por TODA sig/chamada C + `TypeTable`/`plan` no ctx-C (ambiente-backed, byte-mover) — **RESEED-2** | `[RITUAL]` |
+| 0158 | `MEM-W1` | SWEEP | elisão `slots==0` ⇒ repassa o param do pai (consome `scope_slot_count`) | `[RITUAL]` |
+| 0159 | `MEM-W2` | SWEEP | pré-sizing por `region_slots`; REMOVE `#arena_size`/`#arena_depth` — 1ª queda estrita | `[RITUAL]` |
+| 0160 | `MEM-W3` | SWEEP | residência de escopo + seletor N-níveis + array fixo de filhas reusado no loop — PARANOID | `[RITUAL]` |
+| 0161 | `MEM-W4` | SWEEP | move-on-return via param; aposenta `set_ret_dest`/`ret_dest` ambiente — PARANOID | `[RITUAL]` |
+| 0162 | `MEM-W5` | SWEEP | objeto-dono-da-arena (fat carrega `uptr`; usa o marshal de `MEM-Wt`) | `[RITUAL]` |
+| 0163 | `MEM-W6` | SWEEP | root no `_start`→`main` param; remove ambiente (`_Thread_local`/`region_enter/leave`/`ar_cur_*`); `ar_control()`→`region_control(param)`; reball posições→`usize`/ptr→`ptr`/`uptr` (**esc.1b uso**) — **RESEED-FINAL** | `[RITUAL]` |
+
+Dep: `MEM-S1` → `Wt` → `W0` (RESEED-2) → `W1` → `W2` → `W3` → `W4` → `W5` → `W6` (RESEED-FINAL).
+
+### Onde cada escalação foi fiada
+- **Escalação 1 (wrap/unwrap intrínseco + reball W6):** o MECANISMO em `MEM-Wt` (0156) — recognição por
+  receiver-type+nome em `scope.tks` (molde `builtin_fn`), lowering a reinterpret nu em `codegen.tks`
+  (molde `emit_buf_ptr`) e `lower.tks` (molde `lower_buf_ptr_call`), corpo do newtype fica VAZIO. O USO em
+  massa (reball `u64`/`i64`→`ptr`/`uptr`, `str`↔`[]byte` zero-cópia) em `MEM-W6` (0163); o `uptr` do fat
+  em `MEM-W5` (0162).
+- **Escalação 2 (rota-C região=param):** o crumb dedicado `MEM-W0` (0157) — o byte-mover de convenção de
+  chamada, isolado e reseedado (RESEED-2) ANTES dos flips comportamentais, pra ser bisectável. `region_from_param`
+  com fallback ambiente = coexistência; W6 remove o fallback quando o `_start` supre a root.
+- **Escalação 3 (provenance reserved-name, D133):** em `MEM-Wt` (0156) — tag de proveniência derivada dos
+  paths do prelúdio injetado (`inject_runtime_prelude`), gate em `reserved_type_diags` novo ao lado de
+  `check_no_duplicate_types`. **BOUNDARY law-first:** a consolidação PLENA de `str`/`char`/`u8` como defs
+  de prelúdio (visão-futura D131) NÃO é byte-idêntica → fica FORA do envelope-fixpoint do sweep
+  (pós-modelo); o enforcement é entregue COMPLETO por-nome via provenance, sem mover `str`.
+
+### Pontos de reseed
+- **RESEED-2** (convenção): fim de `MEM-W0` (0157) — o gen0 passa a falar o param de região.
+- **RESEED-FINAL**: fim de `MEM-W6` (0163) — todo o sweep colhido; ambiente morto.
+- Reseed próprio permitido (lei do expurgo iterativo) se `MEM-W3`/`MEM-W4` acenderem ASan.
+
+### Pontos de medição de memória (ratchet D68, linha `teko: memory: peak <N> MB` do build seco)
+- `MEM-Wt`/`MEM-W0`: FIXPOINT (plumbing) — pico dentro do ruído da seed anterior; não é o ponto de queda.
+- `MEM-W2` (presize): 1ª QUEDA estrita esperada (tail-waste some).
+- `MEM-W3` (residência de escopo): QUEDA grande (reclaim por-escopo, loop plano).
+- `MEM-W4` (move): QUEDA (nada mais vaza pra root exceto `main`).
+- `MEM-W6` (final): pico rumo a `<1 GB` (reclaim 0%→scoped), a prova da campanha.
