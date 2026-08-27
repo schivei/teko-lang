@@ -946,6 +946,38 @@ pub fn ret_dest(): ptr {
     teko::sys::word_ptr(ar_ctrl_get(ar_control(), CTRL_RET_DEST) to i64)
 }
 
+/**
+ * region_control — the control-block reachable from any region by walking its parent chain to the root
+ * (the root, born in `_start`, owns the control). It supersedes the ambient `ar_control()` thread-local
+ * first-touch once the region is threaded as a parameter: every task-global accessor (program region,
+ * intern, names, panic, environ) reads its control via `region_control(<region-param>)` instead of a
+ * thread-local read. Added with no caller (the sweep reroutes the accessors); until the root owns the
+ * control it delegates to `ar_control()`, so the teaching build stays inert and byte-identical.
+ *
+ * @param r  any region in the task's region tree (an opaque handle)
+ * @return   the control-block word for the task that owns `r`
+ * @since 0.3.1
+ */
+pub fn region_control(r: ptr): uptr {
+    _ = teko::sys::ptr_word(r)
+    ar_control() to uptr
+}
+
+/**
+ * region_alloc — allocate `n` bytes from the region `r` directly, without going through the ambient
+ * current-region. The region-explicit allocation entry the param-threaded consumers call once the sweep
+ * makes callers pass a real region. Added with no caller; delegates to `ar_region_alloc_w`.
+ *
+ * @param r  the region to allocate from (an opaque handle)
+ * @param n  the byte size to allocate
+ * @return   an opaque pointer to the allocated bytes
+ * @since 0.3.1
+ */
+pub fn region_alloc(r: ptr, n: usize): ptr {
+    var control = ar_control()
+    teko::sys::word_ptr(ar_region_alloc_w(control, teko::sys::ptr_word(r) to u64, n) to i64)
+}
+
 pub fn arena_push() {
     ar_checkpoint_push_w(ar_control())
 }
