@@ -420,6 +420,74 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
     materializados (22 MB do `teko.c`, arquivos lidos inteiros) continuam vazando; o streaming com buffer
     ≤1024 B é o que corta isso. Arena-por-escopo + I/O-streaming são co-dependentes: precisam vir juntos
     pra a memória cair.
+- **MODELO DE MEMÓRIA POR-ESCOPO = A REDUÇÃO REAL (dono 2026-08-27, PIVOTAL — D130-D133).** A etapa de
+  redução baixou o número por meios BARATOS (bound-exato, NO-PUSHES, arena-bump) e **PULOU o modelo
+  documentado** (`docs/design/modelo-de-memoria-por-escopo-0.3.1.md` + `ast-computed-arena-assessment-0.3.1.md`):
+  reclaim ratio = **0,0%** (nada morre no meio do build, tudo vaza pra root). Implementar o modelo AGORA é
+  a redução de verdade (reclaim 0%→scoped, rumo ao alvo `<1 GB` RSS) + o terminal da arena + o desbloqueio
+  de threads, tudo junto. Regras DURAS do modelo:
+  1. **Toda variável morre no fim do seu escopo léxico** (5 escopos: bloco `{}`, corpo de loop por-iteração,
+     braço if, braço when/match, corpo fn). Regiões formam **ÁRVORE = árvore de escopos** (cada escopo abre
+     região filha da corrente, larga na saída). **Residência = JOIN(usos)** → nunca UAF por construção.
+  2. **DESCENDO o caller PASSA a região; SUBINDO (return) MOVE pra região do caller** (DPS — o valor é
+     construído no destino do caller, não boxeado pós-fato).
+  3. **REGIÃO = PARÂMETRO IMPLÍCITO** (mecanismo DPS: arg escondido, ponteiro de destino na arena do caller),
+     injetado pelo compilador em TODA assinatura/chamada. **NUNCA `_Thread_local`, NUNCA `global var`, NUNCA
+     tid-table.** O §5-A das docs (região-corrente thread-local) é O ÚNICO ERRO das docs — IGNORAR, usar
+     param. Isto DISSOLVE o tangle inteiro (o `tk_arena_control` ambiente sai) E o bloqueador de threads
+     (`CLONE_SETTLS`/`%fs`/D127 SOME — cada thread recebe região por param).
+  4. **ROOT só pra `service singleton` (superfície `ServiceLifetime{Singleton;Scoped;Transient}` — `#singleton`
+     NÃO existe mais) OU cross-thread (`chan`/`wait_group`→região de PROGRAMA).** Nada mais vaza pra root.
+  5. **OBJETOS DONOS DA PRÓPRIA ARENA no fat pointer** (o fat fica maior, carrega a arena como `uptr`):
+     membros alocam na arena do objeto, que VIAJA com o objeto.
+  6. **COMPILE-TIME DIMENSIONA → `#arena_size` e `#arena_depth` ELIMINADOS.** Sabendo o pico de slots ativos
+     simultâneos + os tamanhos, o compilador fixa o tamanho da arena NA INICIALIZAÇÃO. O número da AST É o
+     tamanho da arena (não semente de profiler). `#arena_size`/`#arena_depth` saem da superfície.
+  7. **`slots==0` ⇒ NÃO abre arena, repassa a do pai** (elisão dura). Ex.: `fn a(): i32 { b() }` — `a` não
+     aloca → sem arena, a região do caller atravessa direto pra `b()`. Único lugar onde a root nasce: o
+     **`_start`** (entrada per-OS zero-libc) abre a root e a passa a `main` como param (main com `slots==0`
+     NÃO é caso especial — recebe a root do `_start` como qualquer escopo recebe a do pai).
+  8. **GUARD DO ARRAY-FIXO (SIMPLES — NÃO INVENTAR MODA, dono flagrou risco):** pico de filhas vivas =
+     profundidade de aninhamento (≤ `TK_REGION_STACK_CAP=64`); array FIXO compile-time; zera slot no reclaim;
+     loop REUSA o mesmo slot (fecha anterior antes de abrir próxima → pico plano). **PROIBIDO** pool/refcount/
+     GC/lista-dinâmica/`push`. Fixture `mem_loop_per_iter` (pico plano em 1M iterações) = prova.
+  9. **ORÁCULO dirige as DUAS rotas:** `residence_plan`/`region_slots`/`scope_slot_count` (`src/checker/residence.tks`,
+     LANDADO) decide por-binding; codegen.tks (rota-C) E lower.tks (nativo) leem o MESMO plano. O SWEEP é o
+     FLIP onde o oráculo passa a DIRIGIR a emissão (hoje roda a heurística antiga de 2 níveis, oráculo com
+     ZERO consumidores). A rota-C do "região=param" é o **byte-mover de MAIOR RISCO** (param escondido em toda
+     assinatura/chamada C + `TypeTable` no codegen-C) — self-hospeda AGORA, encenar por degraus verdes.
+- **isize/usize + ptr/uptr + wrap/unwrap (dono 2026-08-27, a maquinaria do modelo — D131/D132/D133).**
+  - **`isize`/`usize`** = tipos de tamanho/índice DEPENDENTES DE ARQUITETURA (64-bit agora, comportam-se
+    conforme a arch); nomes `isize`/`usize` (NÃO `size`, já usado). Pra tamanho de array + índice. **Coerção
+    IMPLÍCITA `isize`→`i64` e `usize`→`u64`, sem `T to type`** (custo zero, mesma largura em 64-bit) — evita
+    casting-sweep quando `usize` substitui o `u64`-de-array.
+  - **`ptr`/`uptr`** = ponteiros 100% OPACOS (substituem o `u64`/`i64` cru que os implementers usaram). São
+    **TIPOS DE SUPERFÍCIE definidos em Teko** (`global exp type ptr = isize { métodos }`), não builtin →
+    o compilador PERMITE newtype-sobre-base + métodos na própria base (estilo Go). **Base primitiva é
+    READONLY dentro dos métodos** (métodos leem a base, produzem valores novos, não mutam a rep).
+  - **`wrap`/`unwrap` = INTRÍNSECO do compilador** (reinterpret genérico não serializa no header como método):
+    `ptr::unwrap<T>(ref T): ptr` (estático) e `ptr.wrap<T>(): T` (instância). Conversão DIRETA de mesma base,
+    zero cópia/cálculo/cast. Flagship HOJE: `str`↔`[]byte` sem cópia (`str` É `{ptr,len}` de bytes). Vale p/
+    `ptr` E `uptr`. Uso em massa = reball **W6**.
+  - **SEM GATE, operadores EXPOSTOS (dono, D131):** `wrap`/`unwrap` + a capacidade newtype são `exp`, expostos
+    a todos (consistente com §6 aposentar-`unsafe`). Segurança é do USUÁRIO (misuso é problema dele, como C
+    reinterpret). NÃO há operação de sigilo, NÃO há fronteira compiler-base-vs-user pra a CAPACIDADE.
+  - **ENFORCEMENT de nome-reservado = PROVENANCE / FORMA 3 (dono, D133):** o que É protegido é o NOME — um
+    programa de usuário NÃO pode definir `type` com nome RESERVADO POR KEYWORD (`str`/`char`/`ptr`/`uptr`/
+    `isize`/`usize`/`u8`…). O marcador é **PROVENANCE** (NÃO nome-de-projeto `name=="teko"`, NÃO flag de
+    build): cada unidade/decl carrega a origem (prelúdio-runtime-injetado/base vs fonte-de-usuário), derivada
+    de `inject_runtime_prelude`. Os tipos-base definem-se UMA vez no prelúdio injetado; o `src/` vira
+    consumidor via injeção → não pode redefinir os reservados (dogfood). Gate no check de colisão existente
+    (`check_no_duplicate_types`/`global_type_collision_at`). Custo: consolidar as defs-base reservadas no
+    prelúdio (adianta SÓ essa parte da visão-futura).
+  - **VISÃO FUTURA (registrar, NÃO é escopo atual):** trocar TODOS os tipos por superfície Teko (`type str =
+    []byte`, `type char = u32` newtypes; primitivos-verdadeiros viram `global exp extern type u8 = "u8" from
+    "teko"`) → **retro-alimenta o `.tkh`** (sistema de tipos auto-descrito em Teko). Fundação pra o dono
+    refinar o compilador / OO-like. Pós-modelo.
+  - **ESTADO da campanha (2026-08-27):** ENSINO (0148-0154) LANDOU verde (fixpoint 2×, pico ~1049 MB flat, 2
+    reseeds por staging). Próxima fase = **SWEEP** (crumbs 0156-0161, o FLIP onde a memória cai) carregando as
+    3 escalações acima. SHADOW (0155, fixtures `mem_*` no scratchpad D117) vem DEPOIS do sweep (modelo não fica
+    LIVE até o FLIP). Depois RESEED-FINAL. Ratchet D68 governa o sweep (tem que BAIXAR o pico, estrito).
 - **NÃO EXISTE C CONGELADO (dono 2026-08-18, REVOGA a lei "§16 C congelado" de 2026-08-17).**
   `src/runtime/teko_rt.c`, `teko_rt.h`, `src/win32_compat.h`, `src/assert/assert.c`, `assert.h`
   **PODEM ser editados** para bug de memória/correção em C. **PORÉM (dono 2026-08-18): o expurgo de
