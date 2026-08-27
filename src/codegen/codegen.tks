@@ -2048,14 +2048,14 @@ fn emit_closure_call(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(),
     buf.write(")_tcf.fn)(_tcf.env")
     var k = 0
     loop { if k >= c.args.len { break }; buf.write(", "); buf.write("_tca"); cb_u64_digits(buf, k to u64); k++ }
-    buf.write(", "); buf.write(cg_alloc_region(regions, dctx))
+    buf.write(", "); buf.write(cg_frame_region(dctx))
     buf.write(") : ((")
     cg_emit_fnptr_sig_ex(buf, prog, c.callee_type, false)
     buf.write(")_tcf.fn)(")
     var m = 0
     loop { if m >= c.args.len { break }; if m > 0 { buf.write(", ") }; buf.write("_tca"); cb_u64_digits(buf, m to u64); m++ }
     if c.args.len > 0 { buf.write(", ") }
-    buf.write(cg_alloc_region(regions, dctx))
+    buf.write(cg_frame_region(dctx))
     buf.write("); })")
 }
 
@@ -3516,11 +3516,11 @@ fn emit_weak_get(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, c: 
     buf.write(")); ")
     buf.write(v)
     buf.write(" == 0 ? ")
-    emit_variant_wrap_str(buf, prog, e.type, checker::Null { }, "0", cg_alloc_region(regions, dctx))
+    emit_variant_wrap_str(buf, prog, e.type, checker::Null { }, "0", cg_frame_region(dctx))
     buf.write(" : ")
     var tc = emit_type_str(prog, ttype)
     var tarm = $"*({tc} *){v}"
-    emit_variant_wrap_str(buf, prog, e.type, ttype, tarm, cg_alloc_region(regions, dctx))
+    emit_variant_wrap_str(buf, prog, e.type, ttype, tarm, cg_frame_region(dctx))
     buf.write("; })")
 }
 
@@ -3848,9 +3848,9 @@ fn emit_deep_copy(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, c:
     buf.write("); ")
     buf.write(ev)
     buf.write(" ? ")
-    emit_variant_wrap_str(buf, prog, e.type, checker::Error { }, "(tk_error){0}", cg_alloc_region(regions, dctx))
+    emit_variant_wrap_str(buf, prog, e.type, checker::Error { }, "(tk_error){0}", cg_frame_region(dctx))
     buf.write(" : ")
-    emit_variant_wrap_str(buf, prog, e.type, checker::Named { name = cls }, v, cg_alloc_region(regions, dctx))
+    emit_variant_wrap_str(buf, prog, e.type, checker::Named { name = cls }, v, cg_frame_region(dctx))
     buf.write("; })")
 }
 
@@ -3895,13 +3895,13 @@ fn emit_ptr_wrap(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, c: 
     buf.write("); ")
     buf.write(addr)
     buf.write(" == 0 ? ")
-    emit_variant_wrap_str(buf, prog, e.type, checker::Null { }, "0", cg_alloc_region(regions, dctx))
+    emit_variant_wrap_str(buf, prog, e.type, checker::Null { }, "0", cg_frame_region(dctx))
     buf.write(" : (")
     emit_ptr_wrap_guard(buf, addr, "")
     buf.write(" ? ")
     var tc = emit_type_str(prog, ttype)
     var tarm = $"*({tc} *){addr}"
-    emit_variant_wrap_str(buf, prog, e.type, ttype, tarm, cg_alloc_region(regions, dctx))
+    emit_variant_wrap_str(buf, prog, e.type, ttype, tarm, cg_frame_region(dctx))
     buf.write(" : ")
     emit_variant_wrap_str(buf, prog, e.type, checker::Error { }, "(tk_error){0}", cg_alloc_region(regions, dctx))
     buf.write("); })")
@@ -3925,7 +3925,7 @@ fn emit_str_from_c(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall, e
     emit_expr_ctx(buf, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx)
     buf.write($"); uint64_t {v}_n = 0; if ({v}_p != NULL) {{ while ({v}_n < {v}_max && {v}_p[{v}_n] != 0) {{ {v}_n++; }} }} uint8_t *{v}_buf = (uint8_t *)")
     cb_arena_sym(buf, CgArenaSym::RegionAlloc)
-    buf.write("("); buf.write(cg_alloc_region(regions, dctx))
+    buf.write("("); buf.write(cg_frame_region(dctx))
     buf.write($", {v}_n ? {v}_n : 1); for (uint64_t {v}_i = 0; {v}_i < {v}_n; {v}_i++) {{ {v}_buf[{v}_i] = {v}_p[{v}_i]; }} (tk_str){{ {v}_buf, {v}_n }}; }})")
 }
 
@@ -4032,7 +4032,7 @@ fn emit_capture_panic(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall
     buf.write("; ")
     cb_fn_name(buf, "teko::runtime", "capture_arm")
     buf.write("(); ")
-    emit_capture_invoke(buf, prog, c.args[0].type, bd, cg_alloc_region(regions, dctx))
+    emit_capture_invoke(buf, prog, c.args[0].type, bd, cg_frame_region(dctx))
     buf.write("; if (")
     cb_fn_name(buf, "teko::runtime", "panicking")
     buf.write("()) { ")
@@ -4093,7 +4093,7 @@ fn emit_iface_call(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), c
         emit_as_r(buf, prog, ret_type, f.params[ai], c.args[ai], escaping, regions, fn_body, dctx)
         ai++
     }
-    buf.write(", "); buf.write(cg_alloc_region(regions, dctx))
+    buf.write(", "); buf.write(cg_frame_region(dctx))
     buf.write("); })")
 }
 
@@ -4115,7 +4115,7 @@ fn emit_concat_fold(buf: teko::io::FileStream, prog: CgProg, arg: checker::TExpr
     buf.write(cb_fn_name_str("teko::runtime", "concat"))
     buf.write("(")
     emit_expr_ctx(buf, prog, checker::Void { }, arg, escaping, regions, fn_body, dctx)
-    buf.write(", "); buf.write(cg_alloc_region(regions, dctx))
+    buf.write(", "); buf.write(cg_frame_region(dctx))
     buf.write(")")
 }
 
@@ -4487,7 +4487,7 @@ fn emit_call_inner(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e
     }
     if call_wants_region {
         if c.args.len > 0 { buf.write(", ") }
-        buf.write(cg_alloc_region(regions, dctx))
+        buf.write(cg_frame_region(dctx))
     }
     buf.write(")")
     if self_hoist { buf.write("; })") }
@@ -4763,7 +4763,7 @@ fn emit_array_lit(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, a:
         emit_type(buf, prog, elem)
         buf.write(" *)")
         cb_arena_sym(buf, CgArenaSym::RegionAlloc)
-        buf.write("("); buf.write(cg_alloc_region(regions, dctx)); buf.write(", ")
+        buf.write("("); buf.write(cg_frame_region(dctx)); buf.write(", ")
         cb_u64_digits(buf, a.elements.len)
         buf.write(" * sizeof(")
         emit_type(buf, prog, elem)
@@ -4794,7 +4794,7 @@ fn emit_array_lit(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, a:
     buf.write("({ ")
     cg_array_lit_bind_operands(buf, prog, e, a, elem, tag, escaping, regions, fn_body, dctx)
     cg_array_lit_total(buf, a, totN, tag)
-    cg_array_lit_alloc(buf, prog, elem, accN, totN, posN, cg_alloc_region(regions, dctx))
+    cg_array_lit_alloc(buf, prog, elem, accN, totN, posN, cg_frame_region(dctx))
     cg_array_lit_fill(buf, a, accN, posN, tag)
     buf.write("(")
     cg_slice_typename(buf, elem)
@@ -4895,7 +4895,7 @@ fn fmt_family_takes_prec(fc_low: byte, is_flt: bool): bool {
 fn emit_interp(buf: teko::io::FileStream, prog: CgProg, in: checker::TInterp, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
     var nsegs = in.pieces.len + in.holes.len
     var v = $"_is{buf.gensym()}"
-    var rgn = cg_alloc_region(regions, dctx)
+    var rgn = cg_frame_region(dctx)
     buf.write($"({{ tk_str *{v} = (tk_str *)")
     cb_arena_sym(buf, CgArenaSym::RegionAlloc)
     buf.write("("); buf.write(rgn); buf.write(", ")
@@ -4930,7 +4930,7 @@ fn emit_interp_seg(buf: teko::io::FileStream, prog: CgProg, in: checker::TInterp
     }
     var hi = k / 2
     var h = in.holes[hi]
-    var rgn = cg_alloc_region(regions, dctx)
+    var rgn = cg_frame_region(dctx)
     if hi < in.specs.len {
         var sp = in.specs[hi]
         match sp.kind {
@@ -5621,7 +5621,7 @@ fn emit_variant_wrap(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(),
     }
     var vkey = match cg_member_key_str(value.type) { str as s => s; error => "" }
     var n = cg_var_nmem(prog, expected)
-    if emit_variant_wrap_exact_pass(buf, prog, ret_type, expected, value, vkey, n, cg_alloc_region(regions, dctx)) { return }
+    if emit_variant_wrap_exact_pass(buf, prog, ret_type, expected, value, vkey, n, cg_frame_region(dctx)) { return }
     if emit_variant_wrap_widen_pass(buf, prog, ret_type, expected, value, vkey, n, escaping, regions, fn_body, dctx) { return }
     if emit_variant_wrap_transitive_pass(buf, prog, ret_type, expected, value, vkey, n, escaping, regions, fn_body, dctx) { return }
     panic("codegen: emit_variant_wrap on an unreachable case (internal — caller must guard with cg_var_reaches)")
@@ -5650,7 +5650,7 @@ fn emit_variant_wrap_widen_pass(buf: teko::io::FileStream, prog: CgProg, ret_typ
         var wmt = cg_var_mtype(prog, expected, w)
         if cg_member_reached_via_subclass(prog, wmt, vkey) {
             var wmk = match cg_var_mkey(prog, expected, w) { str as s => s; error => "" }
-            var bx = cg_wrap_open_r(buf, prog, expected, wmk, cg_alloc_region(regions, dctx))
+            var bx = cg_wrap_open_r(buf, prog, expected, wmk, cg_frame_region(dctx))
             emit_as_r(buf, prog, ret_type, wmt, value, escaping, regions, fn_body, dctx)
             cg_wrap_close_r(buf, prog, expected, bx)
             return true
@@ -5668,7 +5668,7 @@ fn emit_variant_wrap_transitive_pass(buf: teko::io::FileStream, prog: CgProg, re
         if cg_is_variant_type(prog, mt) {
             if cg_var_reaches(prog, mt, vkey, 16) {
                 var mk = match cg_var_mkey(prog, expected, j) { str as s => s; error => "" }
-                var bx = cg_wrap_open_r(buf, prog, expected, mk, cg_alloc_region(regions, dctx))
+                var bx = cg_wrap_open_r(buf, prog, expected, mk, cg_frame_region(dctx))
                 emit_variant_wrap(buf, prog, ret_type, mt, value, escaping, regions, fn_body, dctx)
                 cg_wrap_close_r(buf, prog, expected, bx)
                 return true
@@ -5728,7 +5728,7 @@ fn cg_emit_ffi_ures(buf: teko::io::FileStream, prog: CgProg, result_ty: @Type(),
     emit_as_r(buf, prog, result_ty, result_ty, nulllit, escaping, regions, fn_body, dctx)
     buf.write(" : ")
     var errcexpr = teko::str::concat("tk_error_make(", ures_tmp, ".err)")
-    cg_emit_union_present_str(buf, prog, result_ty, checker::Error { }, errcexpr, cg_alloc_region(regions, dctx))
+    cg_emit_union_present_str(buf, prog, result_ty, checker::Error { }, errcexpr, cg_frame_region(dctx))
 }
 
 fn cg_wrap_elem_str(buf: teko::io::FileStream, prog: CgProg, expected: @Type(), vtype: @Type(), cexpr: str, region: str) {
@@ -5873,9 +5873,9 @@ fn emit_host_ffi(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, c: 
         buf.write("s.len); ")
         buf.write(t)
         buf.write("r.ok ? ")
-        emit_variant_wrap_str(buf, prog, e.type, str_t, $"{t}r.value", cg_alloc_region(regions, dctx))
+        emit_variant_wrap_str(buf, prog, e.type, str_t, $"{t}r.value", cg_frame_region(dctx))
         buf.write(" : ")
-        emit_variant_wrap_str(buf, prog, e.type, err_t, teko::str::concat("tk_error_make(", $"{t}r", ".err)"), cg_alloc_region(regions, dctx))
+        emit_variant_wrap_str(buf, prog, e.type, err_t, teko::str::concat("tk_error_make(", $"{t}r", ".err)"), cg_frame_region(dctx))
         buf.write("; })")
         return
     }
@@ -5906,17 +5906,17 @@ fn emit_host_ffi(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, c: 
     buf.write(t)
     buf.write(".ok ? ")
     if kind == "sres" {
-        emit_variant_wrap_str(buf, prog, e.type, str_t, $"{t}.value", cg_alloc_region(regions, dctx))
+        emit_variant_wrap_str(buf, prog, e.type, str_t, $"{t}.value", cg_frame_region(dctx))
     } else if kind == "u64res" {
-        emit_variant_wrap_str(buf, prog, e.type, checker::Prim { kind = checker::PrimKind::U64 }, $"{t}.value", cg_alloc_region(regions, dctx))
+        emit_variant_wrap_str(buf, prog, e.type, checker::Prim { kind = checker::PrimKind::U64 }, $"{t}.value", cg_frame_region(dctx))
     } else {
         var slice_t = checker::Slice { element = checker::Str { } }
         var sx = teko::str::concat("(tk_slice_str){ .ptr = ", t, teko::str::concat(".ptr, .len = ", t, ".len }"))
-        emit_variant_wrap_str(buf, prog, e.type, slice_t, sx, cg_alloc_region(regions, dctx))
+        emit_variant_wrap_str(buf, prog, e.type, slice_t, sx, cg_frame_region(dctx))
     }
     buf.write(" : ")
     var eexpr = if kind == "u64res" { "tk_error_make((tk_str){0})" } else { teko::str::concat("tk_error_make(", t, ".err)") }
-    emit_variant_wrap_str(buf, prog, e.type, err_t, eexpr, cg_alloc_region(regions, dctx))
+    emit_variant_wrap_str(buf, prog, e.type, err_t, eexpr, cg_frame_region(dctx))
     buf.write("; })")
 }
 
@@ -6054,7 +6054,7 @@ fn cg_emit_box_construct(buf: teko::io::FileStream, prog: CgProg, ret_type: @Typ
     buf.write(" *")
     buf.write(bxN)
     buf.write(" = "); cb_arena_sym(buf, CgArenaSym::RegionAlloc); buf.write("(")
-    if box_region.len > 0 { buf.write(box_region) } else { buf.write(cg_alloc_region(regions, dctx)) }
+    if box_region.len > 0 { buf.write(box_region) } else { buf.write(cg_frame_region(dctx)) }
     buf.write(", sizeof(")
     emit_type(buf, prog, inner)
     buf.write(")); *")
@@ -6163,13 +6163,13 @@ fn emit_as_r_in(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), expe
                         emit_type(buf, prog, T)
                         buf.write(" *)")
                         cb_arena_sym(buf, CgArenaSym::RegionAlloc)
-                        buf.write("("); buf.write(cg_alloc_region(regions, dctx)); buf.write(", "); buf.write(sv); buf.write(".len * sizeof(")
+                        buf.write("("); buf.write(cg_frame_region(dctx)); buf.write(", "); buf.write(sv); buf.write(".len * sizeof(")
                         emit_type(buf, prog, T)
                         buf.write(")); ")
                         buf.write("for (uint64_t "); buf.write(ri); buf.write(" = 0; "); buf.write(ri); buf.write(" < "); buf.write(sv); buf.write(".len; "); buf.write(ri); buf.write(" += 1) { ")
                         buf.write(rp); buf.write("["); buf.write(ri); buf.write("] = ")
                         var elem = teko::str::concat(sv, teko::str::concat(".ptr[", teko::str::concat(ri, "]")))
-                        cg_wrap_elem_str(buf, prog, T, U, elem, cg_alloc_region(regions, dctx))
+                        cg_wrap_elem_str(buf, prog, T, U, elem, cg_frame_region(dctx))
                         buf.write("; } (")
                         cg_slice_typename(buf, T)
                         buf.write("){ .ptr = "); buf.write(rp); buf.write(", .len = "); buf.write(sv); buf.write(".len }; })")
@@ -7261,6 +7261,23 @@ fn cg_binding_is_block_local_slice(escaping: []str, fn_body: []@TStatement(), bo
  */
 fn cg_alloc_region(regions: []RegionFrame, dctx: DeferCtx): str {
     if regions.len > 0 { return regions[regions.len - 1].name }
+    if dctx.cur.len > 0 { return dctx.cur }
+    if dctx.regbase.len > 0 { return dctx.regbase }
+    teko::str::concat(cg_arena_sym(CgArenaSym::RegionRoot), "()")
+}
+
+/**
+ * cg_frame_region — the enclosing function's frame region (`_tkfr` when it owns a frame, else its
+ * `_tkrgn` parameter), IGNORING any open per-scope region. This is where a value that may outlive the
+ * current lexical scope must live: call returns and escaping allocations (array literals, boxes,
+ * interpolation, variant wraps). It reproduces exactly what the ambient `region_current()` named before
+ * regions became parameters — per-scope regions are never entered, so the ambient was always the frame.
+ *
+ * @param dctx  the defer context carrying the function's base region
+ * @return      the C frame-region expression
+ */
+fn cg_frame_region(dctx: DeferCtx): str {
+    if dctx.cur.len > 0 { return dctx.cur }
     if dctx.regbase.len > 0 { return dctx.regbase }
     teko::str::concat(cg_arena_sym(CgArenaSym::RegionRoot), "()")
 }
@@ -7289,10 +7306,11 @@ type DeferCtx = struct {
     rr: str
     bracket_depth: u64
     regbase: str
+    cur: str
 }
 
 fn dctx_empty(): DeferCtx {
-    DeferCtx { defers = []; loops = []; cov = cov_off(); rr = ""; bracket_depth = 0; regbase = "" }
+    DeferCtx { defers = []; loops = []; cov = cov_off(); rr = ""; bracket_depth = 0; regbase = ""; cur = "" }
 }
 
 fn emit_defers(buf: teko::io::FileStream, defers: []@TStatement(), defer_floor: u64, prog: CgProg, indent: str, escaping: []str, fn_body: []@TStatement()) {
@@ -7315,7 +7333,7 @@ fn emit_defers(buf: teko::io::FileStream, defers: []@TStatement(), defer_floor: 
 }
 
 fn dctx_register(dctx: DeferCtx, s: @TStatement()): DeferCtx {
-    DeferCtx { defers = [..dctx.defers, s]; loops = dctx.loops; cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth; regbase = dctx.regbase }
+    DeferCtx { defers = [..dctx.defers, s]; loops = dctx.loops; cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth; regbase = dctx.regbase; cur = dctx.cur }
 }
 
 fn cg_append_direct_defers(defers: []@TStatement(), body: []@TStatement()): []@TStatement() {
@@ -7497,15 +7515,16 @@ fn emit_exprstmt_tail(buf: teko::io::FileStream, x: checker::TExpr, in_main: boo
                 cg_emit_bracket_unwind(buf, indent, dctx.bracket_depth)
                 cg_return_frame_exit(buf, indent, frame, dctx)
             }
+            var tdctx = if dctx.rr.len > 0 { cg_dctx_with_cur(dctx, dctx.rr) } else { dctx }
             buf.write(indent)
             if in_main {
                 buf.write(CG_MAIN_RETURN_OPEN)
-                emit_expr_ctx(buf, prog, checker::Void { }, x, escaping, [], fn_body, dctx)
+                emit_expr_ctx(buf, prog, checker::Void { }, x, escaping, [], fn_body, tdctx)
                 buf.write(CG_MAIN_RETURN_CLOSE)
                 return
             }
             buf.write("return ")
-            emit_as_r(buf, prog, ret_type, ret_type, x, escaping, [], fn_body, dctx)
+            emit_as_r(buf, prog, ret_type, ret_type, x, escaping, [], fn_body, tdctx)
             buf.write(";\n")
         }
     }
@@ -7786,15 +7805,29 @@ fn emit_return(buf: teko::io::FileStream, prog: CgProg, r: checker::TReturn, in_
         return
     }
     var ret_regions: []RegionFrame = []
+    var rdctx = if dctx.rr.len > 0 { cg_dctx_with_cur(dctx, dctx.rr) } else { dctx }
     if in_main {
         buf.write(CG_MAIN_RETURN_OPEN)
-        emit_expr_ctx(buf, prog, checker::Void { }, r.value, escaping, ret_regions, fn_body, dctx)
+        emit_expr_ctx(buf, prog, checker::Void { }, r.value, escaping, ret_regions, fn_body, rdctx)
         buf.write(CG_MAIN_RETURN_CLOSE)
         return
     }
     buf.write("return ")
-    emit_as_r(buf, prog, ret_type, ret_type, r.value, escaping, ret_regions, fn_body, dctx)
+    emit_as_r(buf, prog, ret_type, ret_type, r.value, escaping, ret_regions, fn_body, rdctx)
     buf.write(";\n")
+}
+
+/**
+ * cg_dctx_with_cur — a copy of `dctx` whose current allocation region is pinned to `region`, without
+ * changing the bracket depth. Used where the ambient region has already been switched (e.g. a return
+ * after the frame's own region was left) so later allocations name the surviving region explicitly.
+ *
+ * @param dctx    the defer context
+ * @param region  the region later allocations must name
+ * @return        `dctx` with `cur = region`
+ */
+fn cg_dctx_with_cur(dctx: DeferCtx, region: str): DeferCtx {
+    DeferCtx { defers = dctx.defers; loops = dctx.loops; cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth; regbase = dctx.regbase; cur = region }
 }
 
 fn emit_loop(buf: teko::io::FileStream, l: checker::TLoopStmt, in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
@@ -7816,7 +7849,7 @@ fn emit_loop_while(buf: teko::io::FileStream, l: checker::TLoopStmt, in_main: bo
     if labeled { buf.write(inner); buf.write("tk_lbl_"); buf.write(l.label); buf.write("_cont: ;\n") }
     var defer_floor = dctx.defers.len
     var fall = cg_append_direct_defers(dctx.defers, l.body)
-    var dctx2 = DeferCtx { defers = dctx.defers; loops = [..dctx.loops, LoopDeferFrame { label = l.label; defer_base = defer_floor; region_base = regions.len }]; cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth; regbase = dctx.regbase }
+    var dctx2 = DeferCtx { defers = dctx.defers; loops = [..dctx.loops, LoopDeferFrame { label = l.label; defer_base = defer_floor; region_base = regions.len }]; cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth; regbase = dctx.regbase; cur = dctx.cur }
     var want_block = (cg_block_has_block_local(prog, escaping, fn_body, l.body, false) || (dctx.rr.len > 0 && cg_block_wants_region(l.body))) && regions.len < 64 && checker::scope_slot_count(l.body) > 0
     var region = if want_block { fresh_named("_tkbr", buf.gensym() to i64) } else { "" }
     var regs2 = regions
@@ -7990,7 +8023,7 @@ fn emit_stmt_body(buf: teko::io::FileStream, s: @TStatement(), in_main: bool, pr
     emit_cov_lines(buf, dctx.cov, stmt_cov_lines(s), indent)
     if dctx.rr.len > 0 && dctx.bracket_depth == 0 && cg_conveys_escape_deep(escaping, s) {
         buf.write(indent); cb_arena_sym(buf, CgArenaSym::RegionEnter); buf.write("("); buf.write(dctx.rr); buf.write(");\n")
-        var d2 = cg_dctx_bracket(dctx)
+        var d2 = cg_dctx_bracket_cur(dctx, dctx.rr)
         emit_stmt_dispatch(buf, s, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, d2, cur_block, cur_block_is_value)
         buf.write(indent); cb_arena_sym(buf, CgArenaSym::RegionLeave); buf.write("();\n")
         return
@@ -8000,7 +8033,7 @@ fn emit_stmt_body(buf: teko::io::FileStream, s: @TStatement(), in_main: bool, pr
         if wt != "" && !str_list_has(regions[regions.len - 1].bound_names, wt) {
             var res = cg_write_residence(regions, wt)
             buf.write(indent); cb_arena_sym(buf, CgArenaSym::RegionEnter); buf.write("("); buf.write(res); buf.write(");\n")
-            var rd2 = cg_dctx_bracket(dctx)
+            var rd2 = cg_dctx_bracket_cur(dctx, res)
             emit_stmt_dispatch(buf, s, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, rd2, cur_block, cur_block_is_value)
             buf.write(indent); cb_arena_sym(buf, CgArenaSym::RegionLeave); buf.write("();\n")
             return
@@ -8435,7 +8468,21 @@ fn cg_target_name(t: @BindTarget()): str {
 }
 
 fn cg_dctx_bracket(dctx: DeferCtx): DeferCtx {
-    DeferCtx { defers = dctx.defers; loops = dctx.loops; cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth + 1; regbase = dctx.regbase }
+    DeferCtx { defers = dctx.defers; loops = dctx.loops; cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth + 1; regbase = dctx.regbase; cur = dctx.cur }
+}
+
+/**
+ * cg_dctx_bracket_cur — open an escape/residence bracket that redirects the current allocation region
+ * to `region` (the return region `_tkrr` or a binding's residence region). While this bracket is
+ * active, allocations made for the bracketed statement land in `region` instead of the frame region,
+ * mirroring the old `region_enter(region)` ambient override.
+ *
+ * @param dctx    the enclosing defer context
+ * @param region  the region entered for the bracketed statement
+ * @return        a defer context nested one bracket deeper with `cur` pinned to `region`
+ */
+fn cg_dctx_bracket_cur(dctx: DeferCtx, region: str): DeferCtx {
+    DeferCtx { defers = dctx.defers; loops = dctx.loops; cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth + 1; regbase = dctx.regbase; cur = region }
 }
 
 fn cg_conveys_escape_deep(escaping: []str, s: @TStatement()): bool {
@@ -8518,7 +8565,7 @@ fn emit_function_cov(buf: teko::io::FileStream, prog: CgProg, f: checker::TFunct
     var use_rr = want_frame
     var rr: str = if use_rr { "_tkrr" } else { "" }
     var regbase: str = if want_frame { "_tkfr" } else { if wants_region { "_tkrgn" } else { "" } }
-    var dctx = DeferCtx { defers = []; loops = []; cov = cov; rr = rr; bracket_depth = 0; regbase = regbase }
+    var dctx = DeferCtx { defers = []; loops = []; cov = cov; rr = rr; bracket_depth = 0; regbase = regbase; cur = "" }
     if use_rr { buf.write("    tk_region *_tkrr = "); buf.write(cg_rr_init_expr(wants_region)); buf.write(";\n") }
     if want_frame {
         buf.write("    tk_region *_tkfr = "); buf.write(cg_tkfr_init_expr(f, use_rr)); buf.write(";\n")
@@ -9823,7 +9870,7 @@ fn cg_lift_expr(e: checker::TExpr, ref acc: StampAcc): checker::TExpr {
  * @return  the lambda body's defer context
  */
 fn cg_lambda_dctx(): DeferCtx {
-    DeferCtx { defers = []; loops = []; cov = cov_off(); rr = ""; bracket_depth = 0; regbase = "_tkrgn" }
+    DeferCtx { defers = []; loops = []; cov = cov_off(); rr = ""; bracket_depth = 0; regbase = "_tkrgn"; cur = "" }
 }
 
 fn cg_emit_lambda_decls(buf: teko::io::FileStream, prog: CgProg, lams: []checker::TLambda, protos_only: bool) {
