@@ -505,6 +505,13 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   C** — nenhum `teko_rt.c`/`.h` novo, nenhum `tk_*` novo, nenhuma dep de libc, nenhuma dep dos C que o expurgo
   está matando. A exceção-mantida do D90 é só o C region primitive que JÁ EXISTE (native-deferido) — **NÃO
   autoriza ADICIONAR C** pra feature nova (ex.: o sized-region-new do W2 vai em `arena.tks`, não em `teko_rt.c`).
+- **REGIÃO = PARÂMETRO EM TODA PARTE; "ADIANTAR O QUE FOR NECESSÁRIO" (dono 2026-08-28 — D154/D155).** Região é
+  **parâmetro implícito EM TODA PARTE** — runtime E compile-time; **ambiente é ambiente**, proibido nos dois
+  (o veto D130 vale além do `_Thread_local` de runtime — os phase-brackets do compilador também usam
+  região-param, não `Region.enter/leave` ambiente). **LEI: "adiantar o que for necessário"** — não se pega
+  atalho (ambiente, ponte transitória `.addr`, C) pra evitar o trabalho certo; **adianta-se o pré-requisito
+  e faz-se direito.** Ex.: W4 (região=param) vem ANTES do flip de superfície do W3, em vez de uma ponte
+  transitória que morreria no W4. "Por que fazer algo que vai matar em seguida ao invés de fazer certo?"
 - **`#embed`/VFS = MECANISMO DE INJEÇÃO DO PRELÚDIO — binário SELF-CONTAINED (dono 2026-08-27 — D134).** O
   prelúdio de hoje é **disco** (`inject_runtime_prelude`→`fs::list_dir` sobre `src/`) → exige o dev ter o
   FONTE da Teko pra rodar o compilador — DEFEITO. O `#embed` (design PRONTO em `docs/design/embed-vfs.md`,
