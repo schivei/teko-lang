@@ -1044,15 +1044,21 @@ fn svc_tail_block(e: TExpr): []@TStatement() {
     [TExprStmt { expr = e }]
 }
 
-fn svc_panic_block(tname: str): []@TStatement() {
+fn svc_panic_str_suffix(env: Env): str {
+    var str_params: []@Type() = [..tempty(), Str { }]
+    var str_sig = Func { params = str_params; ret = Void { }; variadic = false; param_names = []; n_required = 1; defaults = []; ret_extra = [] }
+    overload_suffix_of(str_sig, overload_func_bindings(env, "teko::runtime", "panic"))
+}
+
+fn svc_panic_block(tname: str, env: Env): []@TStatement() {
     var msg = svc_str_lit($"svc<{name_last_segment(tname)}>: no provider registered for the runtime key")
     var pseg = [parser::Segment { name = "panic" }]
-    var pcall = TExpr { kind = TCall { overload_suffix = ""; callee = parser::Path { segments = pseg }; args = [msg]; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = []; ret_extra = [] }; type = Void { }; line = 0; col = 0 }
+    var pcall = TExpr { kind = TCall { overload_suffix = svc_panic_str_suffix(env); callee = parser::Path { segments = pseg }; args = [msg]; call_ns = "teko::runtime"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = []; ret_extra = [] }; type = Void { }; line = 0; col = 0 }
     svc_tail_block(pcall)
 }
 
 fn svc_runtime_chain(key: TExpr, providers: []SvcProvider, rtype: @Type(), tname: str, env: Env, table: TypeTable): TExpr | error {
-    var elseblk = svc_panic_block(tname)
+    var elseblk = svc_panic_block(tname, env)
     var out: TExpr = svc_bool_lit(false)
     var built = false
     var n = providers.len
@@ -2024,25 +2030,6 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
     }
     var name = c.callee.segments[c.callee.segments.len - 1].name
     var in_scope = match lookup_call(env, c.callee) { (@Type()) as _gt6 => true; error => false }
-    var teko_rooted = c.callee.segments.len == 2 && c.callee.segments[0].name == "teko"
-    if (c.callee.segments.len == 1 || teko_rooted) && !in_scope {
-        if name == "panic" {
-            if c.args.len != 1 { return error { message = "panic expects one argument (an `error` or a `str`)" } }
-            var a = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
-            var ok = match a.type { Str => true; Error => true; _ => false }
-            if !ok { return error { message = "panic's argument must be an `error` or a `str`" } }
-            var pargs = [a]
-            return TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = pargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = []; ret_extra = [] }; type = Void { }; line = 0; col = 0 }
-        }
-        if name == "exit" {
-            if c.args.len != 1 { return error { message = "exit expects one argument (an integer status code)" } }
-            var a = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
-            var ok = match a.type { Prim as p => prim_is_int(p.kind); _ => false }
-            if !ok { return error { message = "exit's argument must be an integer status code" } }
-            var eargs = [a]
-            return TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = eargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = []; ret_extra = [] }; type = Void { }; line = 0; col = 0 }
-        }
-    }
     var resolved_ns = match lookup_call(env, c.callee) { (@Type()) as _gt7 => call_ns(env, c.callee); error => "" }
     var ft = match lookup_call(env, c.callee) {
         (@Type()) as t => t
@@ -3300,10 +3287,9 @@ fn tblock_type(stmts: []@TStatement()): @Type() {
 }
 
 pub fn tcall_is_diverging_builtin(c: TCall): bool {
-    if c.callee.segments.len != 1 { return false }
     if c.is_closure_call || c.is_iface_dispatch { return false }
-    if c.call_ns.len != 0 && c.call_ns != "teko::runtime" { return false }
-    var name = c.callee.segments[0].name
+    if c.call_ns != "teko::runtime" { return false }
+    var name = c.callee.segments[c.callee.segments.len - 1].name
     name == "panic" || name == "exit"
 }
 
