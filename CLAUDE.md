@@ -173,6 +173,16 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
     (inteiro/flutuante/bigint/decimal) — é o unchecked ergonômico, uniforme. Quem quer checked usa a **função da
     stdlib** que retorna `resultado | error`. Logo `fdiv` (interno emitido pra `a/b` de float) = pânico em `/0`;
     idem int/bigint/decimal; a versão dev-facing que devolve `error` é fn `exp` da stdlib, não o operador.
+- **CONVERSÃO DE VALOR (`to`) ≠ reinterpret (`wrap`/`unwrap`) — REGRAS (LEI DURA, dono 2026-08-28).**
+  **`wrap`/`unwrap` = REINTERPRET** (mesmos bits, tipo diferente, zero-custo): p/ PONTEIRO é responsabilidade do
+  DEV — corromper a própria memória é problema dele (igual C/C++/C#). `f64_bits`/`f64_from_bits` = reinterpret
+  f64↔u64 (mesma largura, bit-idêntico), NÃO conversão de valor. **Conversão de VALOR (`T to type`):**
+  1. **Mesma base, tamanhos diferentes → ALARGA** (implícito, seguro): `u8→u64`, `f32→f64`.
+  2. **Mesma largura, bases diferentes (`i`↔`u`) → SEM implícito; explícito PANICA se impossível; checked retorna
+     `error`.** `i64`↔`u64` não converte implícito; `i64 to u64` panica se negativo; a fn checked da stdlib → `error`.
+  3. **`f`↔`u`, `f`↔`i` → IGNORA o lado fracionário (não-inteiro); o lado inteiro vai pro tipo com o MESMO princípio
+     da regra 2 (panica no explícito se impossível, `error` no checked). RECOMENDAÇÃO: sempre `checked` + `Math`
+     (round/floor/ceil) pra reduzir perdas.**
 - **`teko::X` E bare `X` são AMBAS válidas — `teko::X` é ESCAPE-HATCH (LEI DURA, dono 2026-08-28 — D180).** Uma
   chamada nua `X()` resolve pelo escopo (shadow local do dev vence); `teko::X()` (teko-rooted) **força** a fn do
   teko, ignorando shadow — a saída quando o dev define a própria `X`. Uma **regra GERAL no resolver** (`teko::<nome>`
