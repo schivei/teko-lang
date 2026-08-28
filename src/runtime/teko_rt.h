@@ -197,6 +197,7 @@ typedef struct tk_region tk_region;             // opaque — full struct lives 
 tk_region *tk_region_new(tk_region *parent);    // a fresh empty region (default chunk size), child of `parent` (NULL = no parent)
 void      *tk_region_alloc(tk_region *r, size_t n);  // bump-allocate n (n→1), aligned; OOM→panic
 void       tk_region_drop(tk_region *r);        // bulk-free every chunk + the region (NULL-tolerant; idempotent on a re-walk — head is cleared before free; callers MUST null their handle after, as the freed region must not be reused)
+void       tk_region_drop_subtree(tk_region *root);  // (#337) the `adopt` bulk-drop: drop `root` AND every live region whose ->parent chain reaches it, in one sweep (cycles among objects irrelevant); NULL-tolerant; callers MUST null their handle after
 tk_region *tk_region_root(void);                // the CURRENT TASK's root region (lazy; parent = NULL — the tree root). Since F1 there is one per task, not one per process.
 
 // --- (F1) THE TASK — the seat of the memory discipline -------------------------------------
@@ -1350,6 +1351,7 @@ _Noreturn void tk_panic_str(tk_str msg);
 // which is also what a NEGATIVE code already yielded on POSIX (-1 -> 255). Called by tk_exit and
 // by the C route's `main` return (codegen emits `return tk_exit_status((int)(<expr>));`).
 _Noreturn void tk_panic_div0(void);       // "division by zero"
+_Noreturn void tk_panic_overflow(void);   // "integer overflow"
 
 // teko::assert (the injected testing assertions) lives in its own C seed —
 // src/assert/assert.{c,h} (canonical: src/assert/assert.tks). Generated programs that
