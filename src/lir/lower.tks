@@ -1018,6 +1018,7 @@ fn lower_bool_and(ctx: LowerCtx, a_vreg: u32, b_vreg: u32, line: u32, col: u32):
 fn is_str_type(t: @Type()): bool {
     match t {
         checker::Str => true
+        checker::Named as nm => nm.name == "teko::base::str"
         _ => false
     }
 }
@@ -1071,6 +1072,7 @@ fn slice_elem_of(t: @Type()): @Type() {
 }
 
 fn slice_eq_plan(elem: @Type()): LSliceEqPlan | error {
+    if is_str_type(elem) { return LSliceEqPlan { rtfn = "tk_slice_str_eq"; needs_size = false } }
     match elem {
         checker::Char => LSliceEqPlan { rtfn = "tk_slice_eq_bytes"; needs_size = true }
         checker::Str => LSliceEqPlan { rtfn = "tk_slice_str_eq"; needs_size = false }
@@ -3599,6 +3601,7 @@ fn variant_member_index_of(members: []@Type(), value_ty: @Type(), variants: []LV
 }
 
 fn variant_member_type_matches(member: @Type(), value_ty: @Type(), variants: []LVariantDef): bool {
+    if is_str_type(member) { return is_str_type(value_ty) }
     match member {
         checker::Named as mn => variant_named_member_matches(mn.name, value_ty, variants)
         checker::Error => match value_ty { checker::Error => true; _ => false }
@@ -3794,6 +3797,7 @@ fn direct_variant_member_index(members: []@Type(), value_ty: @Type()): u32 | nul
 }
 
 fn variant_member_direct_match(member: @Type(), value_ty: @Type()): bool {
+    if is_str_type(member) { return is_str_type(value_ty) }
     match member {
         checker::Named as mn => variant_named_directly(mn.name, value_ty)
         checker::Error => match value_ty { checker::Error => true; _ => false }
@@ -4384,6 +4388,7 @@ fn lower_match_subject_conveyed(ctx: LowerCtx, m: checker::TMatchExpr): MatchSub
 }
 
 fn is_fat_type(t: @Type()): bool {
+    if is_str_type(t) { return true }
     match t {
         checker::Str => true
         checker::Slice => true
@@ -4902,6 +4907,7 @@ fn lower_const_fat(ctx: LowerCtx, e: checker::TExpr, r: LRodata): LoweredFat | e
 }
 
 fn const_fat_len(t: @Type(), byte_len: u32, enums: []LEnumInfo): u32 | error {
+    if is_str_type(t) { return byte_len }
     match t {
         checker::Str => byte_len
         checker::Slice as s => const_slice_len(s.element, byte_len, enums)
@@ -4961,6 +4967,7 @@ fn lower_bytestr_lit_fat(ctx: LowerCtx, e: checker::TExpr, s: checker::TByteStrL
 }
 
 fn lower_is_str_or_byte_slice(t: @Type()): bool {
+    if is_str_type(t) { return true }
     match t {
         checker::Str => true
         checker::Slice as sl => match sl.element { checker::Byte => true; _ => false }
@@ -5050,6 +5057,7 @@ fn interp_hole_none_symbol(k: checker::PrimKind, is_flt: bool): str {
 }
 
 fn lower_interp_hole_none_fat(ctx: LowerCtx, h: checker::TExpr): LoweredFat | error {
+    if is_str_type(h.type) { return lower_fat_expr(ctx, h) }
     match h.type {
         checker::Str => lower_fat_expr(ctx, h)
         checker::Prim as p => lower_interp_hole_prim_fat(ctx, h, p.kind)
@@ -5478,6 +5486,7 @@ fn guarded_index_addr(ctx: LowerCtx, base_vreg: u32, len: u32, index: checker::T
 }
 
 fn lower_index(ctx: LowerCtx, e: checker::TExpr, ix: checker::TIndex): Lowered | error {
+    if is_str_type(ix.receiver.type) { return lower_index_str(ctx, e, ix) }
     match ix.receiver.type {
         checker::Str => lower_index_str(ctx, e, ix)
         _ => lower_index_slice(ctx, e, ix)
@@ -5910,11 +5919,11 @@ fn is_frees_old_self_append(ctx: LowerCtx, a: checker::TAssign): bool {
 }
 
 fn lower_assign_frees_old(ctx: LowerCtx, slot: u32, a: checker::TAssign): LowerStmtOut | error {
-    var elemt = match a.bound {
+    var elemt = if is_str_type(a.bound) { checker::Byte { } } else { match a.bound {
         checker::Slice as sl => sl.element
         checker::Str => checker::Byte { }
         _ => return store_fat_through_addr(ctx, slot, a, teko::str::concat("the str/slice local `", a.name, "`"))
-    }
+    } }
     var stride = elem_byte_stride(elemt, ctx.enums)
     var avar = checker::TExpr { kind = checker::TVar { name = a.name; is_func = false; func_ns = "" }; type = a.bound; line = a.target.line; col = a.target.col }
     var old = match lower_fat_expr(ctx, avar) { LoweredFat as x => x; error as err => return err }

@@ -1117,7 +1117,7 @@ fn type_svc(c: parser::Call, env: Env, table: TypeTable): TExpr | NotSvcOp | err
         match svc_ctor_texpr(providers[0].canon, env, table) { TExpr as te => return te; error as e => return e }
     }
     var key = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
-    match key.type { Str => { }; _ => return error { message = "svc<T>(key)'s key must be a `str`" } }
+    if !is_str_type(key.type) { return error { message = "svc<T>(key)'s key must be a `str`" } }
     match svc_const_key(key) {
         str as k => {
             var hit = svc_provider_for_key(providers, k)
@@ -1151,7 +1151,7 @@ fn type_has_svc(c: parser::Call, env: Env, table: TypeTable): TExpr | NotSvcOp |
     if !type_satisfies_iservice(tname, table) { return svc_not_iservice_error(tname) }
     var providers = svc_providers(tname, table)
     var key = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
-    match key.type { Str => { }; _ => return error { message = "has_svc<T>(key)'s key must be a `str`" } }
+    if !is_str_type(key.type) { return error { message = "has_svc<T>(key)'s key must be a `str`" } }
     match svc_const_key(key) {
         str as k => {
             match svc_provider_for_key(providers, k) {
@@ -2468,7 +2468,7 @@ fn property_read_or(orig_err: error, type_name: str, recv: parser::Expr, prop: s
 
 fn type_field_access(fa: parser::FieldAccess, env: Env, table: TypeTable): TExpr | error {
     var recv = match type_expr(fa.receiver, env, table) { TExpr as te => te; error as e => return e }
-    var is_str_or_slice = match recv.type { Str => true; Slice => true; _ => false }
+    var is_str_or_slice = is_str_type(recv.type) || (match recv.type { Slice => true; _ => false })
     if is_str_or_slice && fa.field == "len" {
         return TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = Prim { kind = PrimKind::U64 }; line = 0; col = 0 }
     }
@@ -2675,7 +2675,7 @@ fn type_error_literal(sl: parser::StructLit, env: Env, table: TypeTable): TExpr 
         return error { message = "`error` is constructed as `error { message = <str> }` (one `message` field)" }
     }
     var v = match type_expr(sl.field_vals[0], env, table) { TExpr as te => te; error as e => return e }
-    match v.type { Str => { }; _ => return error { message = "`error`'s `message` must be a `str`" } }
+    if !is_str_type(v.type) { return error { message = "`error`'s `message` must be a `str`" } }
     var enames = ["message"]
     var evals = [v]
     TExpr { kind = TStructInit { field_names = enames; field_vals = evals }; type = Error { }; line = 0; col = 0 }
@@ -2811,6 +2811,7 @@ fn type_index(ix: parser::Index, env: Env, table: TypeTable): TExpr | error {
         return build_operator_call(iowner, "__index", ix.receiver, ix.index, env, table)
     }
     if !is_integer(idx.type) { return error { message = "a subscript index must be an integer" } }
+    if is_str_type(recv.type) { return TExpr { kind = TIndex { receiver = recv; index = idx }; type = Byte { }; line = 0; col = 0 } }
     match recv.type {
         Str => TExpr { kind = TIndex { receiver = recv; index = idx }; type = Byte { }; line = 0; col = 0 }
         Slice as s => TExpr { kind = TIndex { receiver = recv; index = idx }; type = s.element; line = 0; col = 0 }
@@ -2821,6 +2822,7 @@ fn type_index(ix: parser::Index, env: Env, table: TypeTable): TExpr | error {
 }
 
 fn is_interp_formattable(t: @Type()): bool {
+    if is_str_type(t) { return true }
     match t {
         Str => true
         Char => true
@@ -2915,7 +2917,7 @@ fn type_interp(in: parser::Interp, env: Env, table: TypeTable): TExpr | error {
                     loop {
                         if k >= fd.args.len { break }
                         var da = match type_expr(fd.args[k], env, table) { TExpr as te => te; error as e => return e }
-                        match da.type { Str => { }; _ => return error { message = "dynamic format spec argument must be str" } }
+                        if !is_str_type(da.type) { return error { message = "dynamic format spec argument must be str" } }
                         dyn_args = [..dyn_args, da]
                         k++
                     }
@@ -4266,6 +4268,7 @@ fn tspawn_reject_uncopyable_args(f: Func, callee: parser::Path): bool | error {
 }
 
 fn tspawn_type_copyable(t: @Type()): bool {
+    if is_str_type(t) { return true }
     match t {
         Prim => true
         Byte => true
@@ -4332,7 +4335,7 @@ fn adopt_sentinel_slice_type(v: TExpr, target: @Type()): TExpr {
     TExpr { kind = v.kind; type = target; line = v.line; col = v.col }
 }
 
-fn bytes_str_is_str(t: @Type()): bool { match t { Str => true; _ => false } }
+fn bytes_str_is_str(t: @Type()): bool { is_str_type(t) }
 
 fn bytes_str_is_byte_slice(t: @Type()): bool {
     match t { Slice as sl => match sl.element { Byte => true; _ => false }; _ => false }
@@ -4857,6 +4860,7 @@ fn extern_named_body_ok(body: @TypeBody()): bool {
 }
 
 fn teko_rt_type_ok(t: @Type()): bool {
+    if is_str_type(t) { return true }
     match t {
         Str => true
         Void => true
@@ -5238,6 +5242,7 @@ fn operator_expected_arity(name: str): u64 {
 }
 
 fn type_is_indexed(t: @Type()): bool {
+    if is_str_type(t) { return true }
     match t {
         Str => true
         Slice => true
