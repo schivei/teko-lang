@@ -246,7 +246,6 @@ static void arm_reuse_after_end(void) {
     assert(tk_g_main_task.regs == NULL);
     assert(tk_g_main_task.arena_msp == 0);
     assert(tk_g_main_task.free_large == NULL);
-    assert(tk_g_main_task.fn_stack == NULL);
 
     unsigned char *after = (unsigned char *)tk_alloc(CANARY_BYTES);
     memset(after, LANE_B_PATTERN, CANARY_BYTES);

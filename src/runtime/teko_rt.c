@@ -963,15 +963,10 @@ typedef struct tk_task {
     volatile sig_atomic_t test_depth;     // >0 = a captured body is running on THIS task
     volatile int32_t test_how[TK_TEST_CAPTURE_DEPTH_MAX];    // per-level outcome kind
     volatile int32_t test_code[TK_TEST_CAPTURE_DEPTH_MAX];   // per-level outcome code
-    uint64_t       *fn_stack;             // (D3-branch) coverage fn-attribution stack — a shadow of THIS task's call stack
-    uint64_t        fn_sp, fn_cap;        // its depth and capacity (libc heap: survives the arena rewind)
     // (E1-C1) Category C — the singletons a `#test` body or the gate touches. Process-global before
     // this axis, now per-task so a reshuffled test cannot read another test's residue. Large tables
-    // (intern, coverage sinks) keep their malloc'd BUFFER across a reset; only the counts/marks zero.
+    // (intern) keep their malloc'd BUFFER across a reset; only the counts/marks zero.
     tk_intern_entry *intern_table[TK_INTERN_BUCKETS];        // C-1 codegen string-intern cache
-    uint64_t       *cov_ids;  uint64_t cov_n, cov_cap;       // C-2 function-coverage sink
-    uint64_t       *covb_ids; uint64_t covb_n, covb_cap; int covb_on;   // C-3 branch-coverage sink
-    uint64_t       *line_ids; uint64_t line_cap, line_n; int lines_on;  // C-4 line-coverage sink
     long            test_ran, test_passed, test_failed, test_exited;    // C-6 test tally
     int32_t         test_probe_last_code;                    // C-7 last probe's outcome code
     char            scope_buf[TK_TEST_SCOPE_MAX]; size_t scope_len;     // C-8 running test's scope label
@@ -1017,25 +1012,11 @@ tk_task *tk_task_current(void) {
 #define tk_test_depth         (tk_task_current()->test_depth)
 #define tk_test_how           (tk_task_current()->test_how)
 #define tk_test_code          (tk_task_current()->test_code)
-#define tk_fn_stack           (tk_task_current()->fn_stack)
-#define tk_fn_sp              (tk_task_current()->fn_sp)
-#define tk_fn_cap             (tk_task_current()->fn_cap)
 
 // (E1-C1) The Category C families, read through the SAME seam. As with the 11 F1 families the names
 // are unchanged on purpose: every existing use site in this file keeps its exact text, so this axis
 // is a change of WHERE the state lives, not of who touches it.
 #define tk_intern_table       (tk_task_current()->intern_table)
-#define tk_cov_ids            (tk_task_current()->cov_ids)
-#define tk_cov_n              (tk_task_current()->cov_n)
-#define tk_cov_cap            (tk_task_current()->cov_cap)
-#define tk_covb_ids           (tk_task_current()->covb_ids)
-#define tk_covb_n             (tk_task_current()->covb_n)
-#define tk_covb_cap           (tk_task_current()->covb_cap)
-#define tk_covb_on            (tk_task_current()->covb_on)
-#define tk_line_ids           (tk_task_current()->line_ids)
-#define tk_line_cap           (tk_task_current()->line_cap)
-#define tk_line_n             (tk_task_current()->line_n)
-#define tk_lines_on           (tk_task_current()->lines_on)
 #define tk_test_ran           (tk_task_current()->test_ran)
 #define tk_test_passed        (tk_task_current()->test_passed)
 #define tk_test_failed        (tk_task_current()->test_failed)
@@ -1152,9 +1133,6 @@ static void tk_task_reset_transient(void) {
 void tk_task_reset(void) {
     tk_task *t = tk_task_current();
     tk_task_reset_transient();
-    tk_cov_reset();                                      // C-2 count -> 0, buffer kept
-    tk_cov_branch_reset();                               // C-3 count + fn stack -> 0, buffer kept
-    tk_cov_line_reset();                                 // C-4 count -> 0, slots cleared, buffer kept
     t->test_ran = 0; t->test_passed = 0; t->test_failed = 0; t->test_exited = 0;   // C-6 tally
     t->chan_out.len = 0; t->chan_err.len = 0;            // C-10 capture buffers kept, contents forgotten
     t->chan_label_len = 0; t->chan_open = false;
@@ -2124,8 +2102,6 @@ void tk_task_end(tk_task *previous) {
     ending->arena_msp = 0;
     tk_registry_free(&ending->regs);
     ending->root = NULL;
-    free(ending->fn_stack);
-    ending->fn_stack = NULL; ending->fn_sp = 0; ending->fn_cap = 0;
     tk_g_current_task = previous;
     if (ending != &tk_g_main_task) free(ending);
 }
@@ -3581,219 +3557,6 @@ const tk_byte *tk_test_scope_len(uint64_t *out_len) {
     tk_str r = tk_test_scope();
     *out_len = r.len;
     return r.ptr;
-}
-
-// D3 — test-coverage sink (host side-channel; see teko_rt.h). A growable array of distinct ids,
-// deduped on insert (the id count is bounded by the project's function count, so linear dedup is
-// fine). tk_cov_reset starts a fresh run; tk_cov_mark records a function-entry id; tk_cov_distinct
-// reports how many distinct functions executed.
-// (E1-C1) tk_cov_ids/n/cap are per-task members (see the seam): each lane's coverage sink is its
-// own, dumped to that lane's `.tkcov`, and the parent merges the dumps by re-reading (§3).
-void tk_cov_reset(void) { tk_cov_n = 0; }   // keep the buffer; just forget the marks
-void tk_cov_mark(uint64_t id) {
-    for (uint64_t i = 0; i < tk_cov_n; i += 1) if (tk_cov_ids[i] == id) return;   // dedup
-    if (tk_cov_n == tk_cov_cap) {
-        uint64_t ncap = tk_cov_cap ? tk_cov_cap * 2 : 64;
-        // (#109 test-gate memory) realloc (libc heap), NOT the arena — this buffer must SURVIVE the
-        // per-test arena rewind (tk_arena_pop) that bounds the self-host test gate's memory.
-        uint64_t *grown = (uint64_t *)realloc(tk_cov_ids, ncap * sizeof *grown);
-        if (!grown) abort();
-        tk_cov_ids = grown;
-        tk_cov_cap = ncap;
-    }
-    tk_cov_ids[tk_cov_n++] = id;
-}
-uint64_t tk_cov_distinct(void) { return tk_cov_n; }
-bool tk_cov_is_marked(uint64_t id) {
-    for (uint64_t i = 0; i < tk_cov_n; i += 1) if (tk_cov_ids[i] == id) return true;
-    return false;
-}
-
-// D3-branch — branch-coverage sink (a SEPARATE set, so it never perturbs the function-coverage
-// count above). Recorded only when tk_cov_branches_on(true) — a plain `teko test`/build pays one
-// flag check per branch and nothing else. A branch id packs (current-fn items-index, line, col,
-// outcome): the current fn is the TOP of a small enter/leave stack pushed around each call,
-// which makes (line,col) unique per FILE globally unique (two files may share a line:col). The
-// report queries tk_cov_branch_hit(fn, line, col, outcome) walking the typed program.
-// (E1-C1) tk_covb_ids/n/cap/on are per-task members (see the seam), mirroring the function sink.
-/* (F1) tk_fn_stack/sp/cap moved into tk_task — this stack shadows the CALL STACK, which is per
-   flow of control; two tasks sharing it would attribute one task's branches to the other's frame. */
-static uint64_t tk_branch_id(uint64_t fn, uint32_t line, uint32_t col, uint64_t outcome) {
-    // [54]=base · [38..54)=fn(16b) · [14..38)=line(24b) · [6..14)=col(8b) · [0..6)=outcome(6b)
-    return ((uint64_t)1 << 54) + (fn << 38) + ((uint64_t)line << 14)
-         + (((uint64_t)col & 0xFF) << 6) + (outcome & 0x3F);
-}
-void tk_cov_branches_on(bool on) { tk_covb_on = on ? 1 : 0; }
-void tk_cov_branch_reset(void) { tk_covb_n = 0; tk_fn_sp = 0; }
-void tk_cov_enter(uint64_t fn) {
-    if (!tk_covb_on) return;
-    if (tk_fn_sp == tk_fn_cap) {
-        uint64_t ncap = tk_fn_cap ? tk_fn_cap * 2 : 256;
-        // (#109 test-gate memory) realloc (libc heap) so this coverage fn-attribution stack survives
-        // the per-test arena rewind — tk_cov_enter runs inside each test (cov on), so an arena backing
-        // would be freed by tk_arena_pop and read at the next enter (the ASan-caught UAF).
-        uint64_t *g = (uint64_t *)realloc(tk_fn_stack, ncap * sizeof *g); if (!g) abort();
-        tk_fn_stack = g; tk_fn_cap = ncap;
-    }
-    tk_fn_stack[tk_fn_sp++] = fn;
-}
-void tk_cov_leave(void) { if (tk_covb_on && tk_fn_sp > 0) tk_fn_sp -= 1; }
-static void tk_covb_add(uint64_t id) {
-    for (uint64_t i = 0; i < tk_covb_n; i += 1) if (tk_covb_ids[i] == id) return;
-    if (tk_covb_n == tk_covb_cap) {
-        uint64_t ncap = tk_covb_cap ? tk_covb_cap * 2 : 256;
-        // (#109 test-gate memory) realloc (libc heap) so it survives the per-test arena rewind.
-        uint64_t *grown = (uint64_t *)realloc(tk_covb_ids, ncap * sizeof *grown); if (!grown) abort();
-        tk_covb_ids = grown; tk_covb_cap = ncap;
-    }
-    tk_covb_ids[tk_covb_n++] = id;
-}
-void tk_cov_branch(uint32_t line, uint32_t col, uint64_t outcome) {
-    if (!tk_covb_on) return;
-    uint64_t fn = tk_fn_sp > 0 ? tk_fn_stack[tk_fn_sp - 1] : 0;
-    tk_covb_add(tk_branch_id(fn, line, col, outcome));
-}
-// #265 (Track A) — the EXPLICIT-fn twin of tk_cov_branch. The native test gate has no fn-stack
-// inside production bodies (no enter/leave), so codegen passes the owning fn index directly, so
-// the mark keys on the same fn the static floor walk queries. Same packing, same dedup set.
-void tk_cov_branch_at(uint64_t fn, uint32_t line, uint32_t col, uint64_t outcome) {
-    if (!tk_covb_on) return;
-    tk_covb_add(tk_branch_id(fn, line, col, outcome));
-}
-bool tk_cov_branch_hit(uint64_t fn, uint32_t line, uint32_t col, uint64_t outcome) {
-    uint64_t id = tk_branch_id(fn, line, col, outcome);
-    for (uint64_t i = 0; i < tk_covb_n; i += 1) if (tk_covb_ids[i] == id) return true;
-    return false;
-}
-
-// D3-line — LINE-coverage sink. Lines are marked on EVERY evaluated expression (far more often than
-// fns/branches), so this is an open-addressing HASH SET (O(1) insert/lookup) instead of the linear
-// dedup above. A line id packs (current-fn idx, line) via the same enter/leave fn stack; 0 = empty.
-// (E1-C1) tk_line_ids/cap/n/lines_on are per-task members (see the seam), mirroring the other sinks.
-static uint64_t tk_line_id(uint64_t fn, uint32_t line) { return ((fn << 24) | (uint64_t)line) + 1; }   // ≥1 (0 = empty slot)
-static void tk_line_rehash(uint64_t ncap) {
-    // (#109 test-gate memory) malloc (libc heap), NOT the arena — this hash table must SURVIVE the
-    // per-test arena rewind. A rehash reassigns every slot, so it is malloc-new + free-old (never
-    // realloc). The old table is malloc-backed after the first grow (NULL on the first), so free() is safe.
-    uint64_t *nt = (uint64_t *)malloc(ncap * sizeof *nt); if (!nt) abort();
-    for (uint64_t i = 0; i < ncap; i += 1) nt[i] = 0;
-    for (uint64_t i = 0; i < tk_line_cap; i += 1) {
-        uint64_t id = tk_line_ids[i]; if (!id) continue;
-        uint64_t h = (id * 1099511628211ull) & (ncap - 1);
-        while (nt[h]) h = (h + 1) & (ncap - 1);
-        nt[h] = id;
-    }
-    free(tk_line_ids);
-    tk_line_ids = nt; tk_line_cap = ncap;
-}
-void tk_cov_lines_on(bool on) { tk_lines_on = on ? 1 : 0; }
-void tk_cov_line_reset(void) { tk_line_n = 0; for (uint64_t i = 0; i < tk_line_cap; i += 1) tk_line_ids[i] = 0; }
-// tk_line_insert_packed — insert a (fn,line)-packed id into the open-addressing set (grow-then-probe),
-// deduping. Shared by the stack-keyed tk_cov_line and the explicit-fn tk_cov_line_at (#265 Track A).
-static void tk_line_insert_packed(uint64_t id) {
-    if (tk_line_cap == 0) tk_line_rehash(1024);
-    else if (tk_line_n * 2 >= tk_line_cap) tk_line_rehash(tk_line_cap * 2);
-    uint64_t h = (id * 1099511628211ull) & (tk_line_cap - 1);
-    while (tk_line_ids[h]) { if (tk_line_ids[h] == id) return; h = (h + 1) & (tk_line_cap - 1); }
-    tk_line_ids[h] = id; tk_line_n += 1;
-}
-void tk_cov_line(uint32_t line) {
-    if (!tk_lines_on || line == 0) return;
-    uint64_t fn = tk_fn_sp > 0 ? tk_fn_stack[tk_fn_sp - 1] : 0;
-    tk_line_insert_packed(tk_line_id(fn, line));
-}
-// #265 (Track A) — the EXPLICIT-fn twin of tk_cov_line. The native test gate has no fn-stack inside
-// production bodies (no enter/leave), so codegen passes the owning fn index directly, so the mark
-// keys on the same fn the static floor walk queries. Same packing, same open-addressing set.
-void tk_cov_line_at(uint64_t fn, uint32_t line) {
-    if (!tk_lines_on || line == 0) return;
-    tk_line_insert_packed(tk_line_id(fn, line));
-}
-bool tk_cov_line_hit(uint64_t fn, uint32_t line) {
-    if (tk_line_cap == 0) return false;
-    uint64_t id = tk_line_id(fn, line);
-    uint64_t h = (id * 1099511628211ull) & (tk_line_cap - 1);
-    while (tk_line_ids[h]) { if (tk_line_ids[h] == id) return true; h = (h + 1) & (tk_line_cap - 1); }
-    return false;
-}
-
-// D3-cross-process (#265, reuse of the #168 .tkcov protocol) — the native test gate runs the tests in
-// a CHILD process, so its three coverage sinks live in the child. The child dumps them to a `.tkcov`
-// file at exit; the parent (the compiler) MERGES that file into ITS sinks, then runs the same static
-// walk + floors it always ran. The coverage id is the prog.items index in BOTH processes (they share
-// the same TProgram), so the packed branch/line ids are process-portable and just re-inserted.
-// File layout (host byte order — parent and child are the same build): magic "TKCOV1\0\0", then three
-// (count:u64, ids:u64[count]) sections in order fns / branches / lines.
-
-// tk_line_insert_raw — insert a pre-packed line id (from a merge), bypassing the tk_lines_on gate and
-// the fn-stack packing tk_cov_line uses. Same open-addressing set as tk_cov_line.
-static void tk_line_insert_raw(uint64_t id) {
-    if (id == 0) return;
-    if (tk_line_cap == 0) tk_line_rehash(1024);
-    else if (tk_line_n * 2 >= tk_line_cap) tk_line_rehash(tk_line_cap * 2);
-    uint64_t h = (id * 1099511628211ull) & (tk_line_cap - 1);
-    while (tk_line_ids[h]) { if (tk_line_ids[h] == id) return; h = (h + 1) & (tk_line_cap - 1); }
-    tk_line_ids[h] = id; tk_line_n += 1;
-}
-
-static bool tk_cov_write_section(FILE *f, const uint64_t *ids, uint64_t n) {
-    if (fwrite(&n, sizeof n, 1, f) != 1) return false;
-    if (n && fwrite(ids, sizeof *ids, n, f) != n) return false;
-    return true;
-}
-
-void tk_cov_dump(const char *path) {
-    FILE *f = fopen(path, "wb");
-    if (!f) return;
-    static const char magic[8] = { 'T','K','C','O','V','1','\0','\0' };
-    if (fwrite(magic, 1, 8, f) != 8) { fclose(f); return; }
-    (void)tk_cov_write_section(f, tk_cov_ids, tk_cov_n);
-    (void)tk_cov_write_section(f, tk_covb_ids, tk_covb_n);
-    // lines are a sparse hash table — compact the non-empty slots into a temporary contiguous array.
-    uint64_t *lines = NULL;
-    uint64_t ln = 0;
-    if (tk_line_n) {
-        lines = (uint64_t *)malloc(tk_line_n * sizeof *lines);
-        if (lines) {
-            for (uint64_t i = 0; i < tk_line_cap; i += 1) { if (tk_line_ids[i]) lines[ln++] = tk_line_ids[i]; }
-        }
-    }
-    (void)tk_cov_write_section(f, lines, ln);
-    free(lines);
-    fclose(f);
-}
-
-static uint64_t *tk_cov_read_section(FILE *f, uint64_t *out_n) {
-    uint64_t n = 0;
-    *out_n = 0;
-    if (fread(&n, sizeof n, 1, f) != 1) return NULL;
-    if (n == 0) return NULL;
-    uint64_t *ids = (uint64_t *)malloc(n * sizeof *ids);
-    if (!ids) return NULL;
-    if (fread(ids, sizeof *ids, n, f) != n) { free(ids); return NULL; }
-    *out_n = n;
-    return ids;
-}
-
-bool tk_cov_merge(tk_str path) {
-    char *cpath = (char *)tk_cstr_dup(path);
-    FILE *f = fopen(cpath, "rb");
-    free(cpath);
-    if (!f) return false;
-    char magic[8];
-    if (fread(magic, 1, 8, f) != 8 || memcmp(magic, "TKCOV1\0\0", 8) != 0) { fclose(f); return false; }
-    uint64_t n = 0;
-    uint64_t *fns = tk_cov_read_section(f, &n);
-    for (uint64_t i = 0; i < n; i += 1) tk_cov_mark(fns[i]);
-    free(fns);
-    uint64_t *br = tk_cov_read_section(f, &n);
-    for (uint64_t i = 0; i < n; i += 1) tk_covb_add(br[i]);
-    free(br);
-    uint64_t *ln = tk_cov_read_section(f, &n);
-    for (uint64_t i = 0; i < n; i += 1) tk_line_insert_raw(ln[i]);
-    free(ln);
-    fclose(f);
-    return true;
 }
 
 // --- amortized growable push (the teko::list::push lowering — see teko_rt.h) ---

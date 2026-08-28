@@ -20,7 +20,8 @@ fn emit_cov_line(buf: teko::io::FileStream, ctx: CovCtx, line: u32, indent: str)
     if !ctx.on { return }
     if line == 0 { return }
     buf.write(indent)
-    buf.write("tk_cov_line_at(")
+    cb_fn_name(buf, "teko::runtime", "cov_line_at")
+    buf.write("(")
     cb_u64_digits(buf, ctx.fn_idx)
     buf.write("ULL, ")
     cb_u64_digits(buf, line to u64)
@@ -30,7 +31,8 @@ fn emit_cov_line(buf: teko::io::FileStream, ctx: CovCtx, line: u32, indent: str)
 fn emit_cov_branch(buf: teko::io::FileStream, ctx: CovCtx, line: u32, col: u32, outcome: u64, indent: str) {
     if !ctx.on { return }
     buf.write(indent)
-    buf.write("tk_cov_branch_at(")
+    cb_fn_name(buf, "teko::runtime", "cov_branch_at")
+    buf.write("(")
     cb_u64_digits(buf, ctx.fn_idx)
     buf.write("ULL, ")
     cb_u64_digits(buf, line to u64)
@@ -39,6 +41,20 @@ fn emit_cov_branch(buf: teko::io::FileStream, ctx: CovCtx, line: u32, col: u32, 
     buf.write(", ")
     cb_u64_digits(buf, outcome)
     buf.write(");\n")
+}
+
+fn cb_cov_call0(buf: teko::io::FileStream, name: str) {
+    buf.write("    ")
+    cb_fn_name(buf, "teko::runtime", name)
+    buf.write("();\n")
+}
+
+fn cb_cov_call_idx(buf: teko::io::FileStream, name: str, idx: u64) {
+    buf.write("    ")
+    cb_fn_name(buf, "teko::runtime", name)
+    buf.write("(")
+    cb_u64_digits(buf, idx)
+    buf.write("ULL);\n")
 }
 
 fn cb_i64(buf: teko::io::FileStream, v: i64) {
@@ -4358,20 +4374,6 @@ fn emit_call_inner(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e
             else if last == "atomic_xchg_u32" { builtin = "tk_atomic_xchg_u32"; has_builtin = true }
             else if last == "atomic_add_u32" { builtin = "tk_atomic_add_u32"; has_builtin = true }
             else if last == "atomic_load_u32" { builtin = "tk_atomic_load_u32"; has_builtin = true }
-            else if last == "cov_reset" { builtin = "tk_cov_reset"; has_builtin = true }
-            else if last == "cov_mark" { builtin = "tk_cov_mark"; has_builtin = true }
-            else if last == "cov_distinct" { builtin = "tk_cov_distinct"; has_builtin = true }
-            else if last == "cov_is_marked" { builtin = "tk_cov_is_marked"; has_builtin = true }
-            else if last == "cov_branches_on" { builtin = "tk_cov_branches_on"; has_builtin = true }
-            else if last == "cov_branch_reset" { builtin = "tk_cov_branch_reset"; has_builtin = true }
-            else if last == "cov_enter" { builtin = "tk_cov_enter"; has_builtin = true }
-            else if last == "cov_leave" { builtin = "tk_cov_leave"; has_builtin = true }
-            else if last == "cov_branch" { builtin = "tk_cov_branch"; has_builtin = true }
-            else if last == "cov_branch_hit" { builtin = "tk_cov_branch_hit"; has_builtin = true }
-            else if last == "cov_lines_on" { builtin = "tk_cov_lines_on"; has_builtin = true }
-            else if last == "cov_line_reset" { builtin = "tk_cov_line_reset"; has_builtin = true }
-            else if last == "cov_line" { builtin = "tk_cov_line"; has_builtin = true }
-            else if last == "cov_line_hit" { builtin = "tk_cov_line_hit"; has_builtin = true }
             else if last == "arena_push" { builtin = cg_arena_sym(CgArenaSym::ArenaPush); has_builtin = true }
             else if last == "arena_pop" { builtin = cg_arena_sym(CgArenaSym::ArenaPop); has_builtin = true }
             else if last == "arena_commit" { builtin = cg_arena_sym(CgArenaSym::ArenaCommit); has_builtin = true }
@@ -8567,7 +8569,7 @@ fn cg_closure_env_region(dctx: DeferCtx): str {
 fn emit_function_cov(buf: teko::io::FileStream, prog: CgProg, f: checker::TFunction, cov_idx: i64) {
     emit_function_sig(buf, prog, f)
     buf.write(" {\n")
-    if cov_idx >= 0 { buf.write("    tk_cov_mark("); cb_u64_digits(buf, cov_idx to u64); buf.write(");\n") }
+    if cov_idx >= 0 { cb_cov_call_idx(buf, "cov_mark", cov_idx to u64) }
     var fbody = f.body
     var cov = if cov_idx >= 0 { CovCtx { on = true; fn_idx = cov_idx to u64 } } else { cov_off() }
     var escaping = checker::fn_escaping_vars(f)
@@ -10852,12 +10854,15 @@ fn emit_program_main_body(buf: teko::io::FileStream, prog: CgProg, cov: bool) {
         }
         li++
     }
-    if cov { buf.write("static void __tk_cov_atexit_dump(void) { const char *dp = getenv(\"TEKO_TKCOV\"); if (dp) tk_cov_dump(dp); }\n") }
+    if cov {
+        buf.write("static void __tk_cov_atexit_dump(void) { ")
+        cb_fn_name(buf, "teko::runtime", "cov_dump_env")
+        buf.write("(); }\n")
+    }
     buf.write("int main(int argc, char **argv) {\n")
     buf.write("    tk_set_args(argc, argv);\n")
     if cov {
-        buf.write("    tk_cov_reset(); tk_cov_branch_reset(); tk_cov_branches_on(true);\n")
-        buf.write("    tk_cov_line_reset(); tk_cov_lines_on(true);\n")
+        cb_cov_call0(buf, "cov_begin")
         buf.write("    atexit(__tk_cov_atexit_dump);\n")
     }
     var j = 0
@@ -10888,11 +10893,7 @@ fn emit_test_main(buf: teko::io::FileStream, prog: CgProg, mode: CgMode) {
     var cov = mode == CgMode::TestCov
     buf.write("int main(int argc, char **argv) {\n")
     buf.write("    tk_set_args(argc, argv);\n")
-    if cov {
-        buf.write("    tk_cov_reset();\n")
-        buf.write("    tk_cov_branch_reset(); tk_cov_branches_on(true);\n")
-        buf.write("    tk_cov_line_reset(); tk_cov_lines_on(true);\n")
-    }
+    if cov { cb_cov_call0(buf, "cov_begin") }
     var i: u64 = 0
     loop {
         if i >= prog.items.len { break }
@@ -10905,19 +10906,17 @@ fn emit_test_main(buf: teko::io::FileStream, prog: CgProg, mode: CgMode) {
         i++
     }
     if cov {
-        buf.write("    tk_cov_branches_on(false); tk_cov_lines_on(false);\n")
-        buf.write("    { const char *dp = getenv(\"TEKO_TKCOV\"); if (dp) tk_cov_dump(dp); }\n")
+        cb_cov_call0(buf, "cov_stop")
+        cb_cov_call0(buf, "cov_dump_env")
     }
     emit_test_main_close(buf)
     buf.write("}\n")
 }
 
 fn emit_test_main_analyze(buf: teko::io::FileStream, prog: CgProg) {
-    buf.write("extern int snprintf(char *, size_t, const char *, ...);\n")
     buf.write("int main(int argc, char **argv) {\n")
     buf.write("    tk_set_args(argc, argv);\n")
-    buf.write("    tk_cov_branches_on(true);\n")
-    buf.write("    tk_cov_lines_on(true);\n")
+    cb_cov_call0(buf, "cov_begin")
     var i: u64 = 0
     loop {
         if i >= prog.items.len { break }
@@ -10971,9 +10970,9 @@ fn emit_test_call(buf: teko::io::FileStream, f: checker::TFunction, idx: u64, co
     buf.write("()) {\n")
     buf.write("    "); cb_arena_sym(buf, CgArenaSym::ArenaPush); buf.write("();\n")
     emit_test_channel_open(buf, f)
-    if cov { buf.write("    tk_cov_enter("); cb_u64_digits(buf, idx); buf.write(");\n") }
+    if cov { cb_cov_call_idx(buf, "cov_enter", idx) }
     emit_test_captured_call(buf, f)
-    if cov { buf.write("    tk_cov_leave();\n") }
+    if cov { cb_cov_call0(buf, "cov_leave") }
     buf.write("    "); cb_arena_sym(buf, CgArenaSym::ArenaPop); buf.write("();\n")
     buf.write("    }\n")
 }
@@ -11023,13 +11022,11 @@ fn test_label_of(f: checker::TFunction): str {
 fn emit_test_call_analyze(buf: teko::io::FileStream, f: checker::TFunction, idx: u64) {
     buf.write("    "); cb_arena_sym(buf, CgArenaSym::ArenaPush); buf.write("();\n")
     emit_test_channel_open(buf, f)
-    buf.write("    tk_cov_reset(); tk_cov_branch_reset(); tk_cov_line_reset();\n")
-    buf.write("    tk_cov_enter("); cb_u64_digits(buf, idx); buf.write(");\n")
+    cb_cov_call0(buf, "cov_reset_all")
+    cb_cov_call_idx(buf, "cov_enter", idx)
     emit_test_captured_call(buf, f)
-    buf.write("    tk_cov_leave();\n")
-    buf.write("    { const char *d = getenv(\"TEKO_ANALYZE_DIR\"); if (d) { char p[1024]; snprintf(p, sizeof p, \"%s/")
-    cb_u64_digits(buf, idx)
-    buf.write(".tkcov\", d); tk_cov_dump(p); } }\n")
+    cb_cov_call0(buf, "cov_leave")
+    cb_cov_call_idx(buf, "cov_dump_analyze", idx)
     buf.write("    "); cb_arena_sym(buf, CgArenaSym::ArenaPop); buf.write("();\n")
 }
 
