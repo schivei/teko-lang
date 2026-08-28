@@ -3321,7 +3321,7 @@ tk_ffi_sres tk_rt_read_file(tk_str path) {
 // {ok,value,err} FFI-lift shape) so a brand-new host primitive stays lowerable by ANY codegen
 // generation — new/unrecognized `str | error`-shaped externs need a per-name lift the SEED's
 // frozen codegen.c cannot learn post-release (the bootstrap-seed constraint); a direct `bool`/
-// `str` return needs no lift at all (mirrors tk_rt_os/tk_rt_version's already-working shape).
+// `str` return needs no lift at all (mirrors tk_rt_version's already-working shape).
 // (E1-C1) Per-task member (see the seam beside the F1 families).
 
 // (DT3) tk_rt_stdin_eof() — teko::io::stdin_eof(): did the LAST read_line() hit real EOF (no
@@ -4105,53 +4105,6 @@ tk_str *tk_rt_args(uint64_t *n) {
     }
     *n = c;
     return out;
-}
-
-// (C7.1f) the HOST operating system — "macos" / "linux" / "windows" (else "unknown"). Drives the
-// per-OS [extern.*] resolution and the `#os(...)` conditional-compilation guard. A compile-time
-// constant (the bootstrap/self-host runs ON the host it builds for; cross-target overrides via
-// the manifest `[extern] target`). [teko::os]
-tk_str tk_rt_os(void) {
-#if defined(__APPLE__)
-    static const char *s = "macos";
-#elif defined(_WIN32)
-    static const char *s = "windows";
-#elif defined(__linux__)
-    static const char *s = "linux";
-#else
-    static const char *s = "unknown";
-#endif
-    return (tk_str){ (const tk_byte *)s, strlen(s) };
-}
-
-const tk_byte *tk_rt_os_len(uint64_t *out_len) {
-    tk_str r = tk_rt_os();
-    *out_len = r.len;
-    return r.ptr;
-}
-
-// (0.3.1 C2) the HOST CPU ARCHITECTURE as a canonical lowercase token — "x86_64" / "arm64"
-// (else "unknown"), selected from the compiler's own target predefines. Mirrors
-// tk_rt_os's already-working plain-str shape (no {ok,value,err} lift), so the released seed's
-// frozen codegen.c can lower it. The canonical spellings are "arm64" (not "aarch64") and
-// "x86_64" (not "amd64") so the token concatenates directly with tk_rt_os() into the
-// "<arch>-<os>" NativeTarget key (teko-target-crosslink-0.3.1.md §2.2). A compile-time
-// constant, exactly like tk_rt_os. [teko::arch]
-tk_str tk_rt_arch(void) {
-#if defined(__aarch64__) || defined(_M_ARM64)
-    static const char *s = "arm64";
-#elif defined(__x86_64__) || defined(_M_X64)
-    static const char *s = "x86_64";
-#else
-    static const char *s = "unknown";
-#endif
-    return (tk_str){ (const tk_byte *)s, strlen(s) };
-}
-
-const tk_byte *tk_rt_arch_len(uint64_t *out_len) {
-    tk_str r = tk_rt_arch();
-    *out_len = r.len;
-    return r.ptr;
 }
 
 // (CLI --version) the build's VERSION STRING — the RAW project-manifest `version` +
