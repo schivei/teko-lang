@@ -911,7 +911,7 @@ tk_ffi_sres tk_rt_read_file(tk_str path);
 // apart from a genuine blank line). A DIRECT `str` return (no {ok,value,err} lift) so this
 // brand-new primitive stays lowerable by every codegen generation, including the released
 // bootstrap seed's frozen codegen.c, which can only special-case ALREADY-KNOWN {ok,value,err}
-// shapes by name (mirrors tk_rt_os/tk_rt_version's already-working plain-str shape).
+// shapes by name (mirrors tk_rt_version's already-working plain-str shape).
 tk_str tk_rt_read_line(void);
 // (DT3) teko::io::stdin_eof() — did the LAST read_line() hit real EOF (stdin fully exhausted)?
 bool tk_rt_stdin_eof(void);
@@ -1165,8 +1165,8 @@ int32_t tk_rt_fd_wait_readable(int64_t fd, int64_t timeout_ms);
 // TWO SCALAR CALLS AND NOT ONE `str` RETURN, AND THAT IS MEASURED, NOT TASTE. The native backend
 // cannot lower ANY fat return through a general `extern fn`: its `LCall` captures exactly one result
 // register, where a `str` and a `[]byte` are both two-word values. Measured with none of this
-// block's code in the picture — a throwaway project binding the untouched, pre-existing `tk_rt_os`
-// as `extern fn host_os() -> str` exits 42 under `TEKO_BACKEND=c` and 1 on the own backend (the
+// block's code in the picture — a throwaway project binding the untouched, pre-existing `tk_rt_version`
+// as `extern fn host_ver() -> str` exits 42 under `TEKO_BACKEND=c` and 1 on the own backend (the
 // received `str` arriving with `len == 0`), and the same project binding `tk_rt_secure_bytes` as
 // `-> []byte` reads `len == 0` there too. The fat-returning host FFI that DOES work natively
 // (`tk_rt_read_file`, `tk_rt_getcwd`) works per-NAME, through a lift the released seed's frozen
@@ -1192,23 +1192,14 @@ int32_t tk_rt_fd_take_byte(void);
 // tk_set_args must run first (the generated `main` calls it before the virtual-main body).
 void    tk_set_args(int argc, char **argv);
 tk_str *tk_rt_args(uint64_t *n);
-// (C7.1f) the host OS name: "macos"/"linux"/"windows"/"unknown" (teko::os; per-OS resolution + `#os`).
-tk_str tk_rt_os(void);
-// (0.3.1 C2) the host CPU architecture: "x86_64"/"arm64"/"unknown" (teko::arch). The
-// canonical token that concatenates with tk_rt_os() into the "<arch>-<os>" target key; mirrors
-// tk_rt_os's plain-str shape so the released seed's frozen codegen can lower it.
-tk_str tk_rt_arch(void);
 // (CLI --version) the build's version string — the RAW project-manifest `version` + `-<suffix>`
 // (e.g. "0.0.1.0-bootstrap"). Compiled from the TEKO_VERSION_STRING define injected by both build
 // paths (CMake for the bootstrap, run_cc for self-host), never a runtime file read. (teko::env::version)
 tk_str tk_rt_version(void);
-// tk_rt_os_len / tk_rt_arch_len / tk_rt_version_len — the out-parameter-length twins of the three
-// zero-argument host-info strings above (mirrors `tk_str_concat_len`'s own doc): the native
-// backend's `LCall` reads exactly one result register, never the true 2-eightbyte SysV/AAPCS64
-// struct each plain twin returns by value, so each COMPILE-TIME-CONSTANT string's pointer rides
-// the return register and its length rides `*out_len` (0.3.1.0 degrau 17).
-const tk_byte *tk_rt_os_len(uint64_t *out_len);
-const tk_byte *tk_rt_arch_len(uint64_t *out_len);
+// tk_rt_version_len — the out-parameter-length twin of the zero-argument version string above
+// (mirrors `tk_str_concat_len`'s own doc): the native backend's `LCall` reads exactly one result
+// register, never the true 2-eightbyte SysV/AAPCS64 struct the plain twin returns by value, so the
+// COMPILE-TIME-CONSTANT string's pointer rides the return register and its length rides `*out_len`.
 const tk_byte *tk_rt_version_len(uint64_t *out_len);
 // tk_rt_read_line_len / tk_rt_read_stdin_len / tk_assert_scenario_prefix_len / tk_test_scope_len —
 // the out-parameter-length twins of the remaining plain-`tk_str`-returning host primitives the
