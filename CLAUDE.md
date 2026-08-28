@@ -566,6 +566,20 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
     expurgo; o resto (não-alocantes inline: `str_eq`/`cast_check`/guards de panic + todo name-detect/inline-synth
     do codegen) é onda dedicada, censo-primeiro, **fora do byte-mover de risco do W4** mas MANDADA. Benefício-raiz:
     **desacoplar** o pipeline pra o compilador poder evoluir (é o que o acoplamento intrínseco impede hoje).
+  - **ZERO EXCEÇÃO NO BACKEND PRO QUE O TEKO SABE INTERPRETAR — caminho GENÉRICO nas DUAS rotas (LEI DURA, dono 2026-08-28 — afia o D161).**
+    Se o Teko sabe interpretar uma função/método/tipo/lógica, **NÃO existe motivo pra exceção no `lower.tks` NEM no
+    codegen-C**: ela faz o MESMO que faria com código de USUÁRIO chamando o próprio código — resolve e rebaixa pelo
+    **caminho de chamada GENÉRICO**, zero dispatch especial, zero name-detect, zero builtin-sig, zero honest-stop
+    dedicado. **Corolário que corrige o erro comum:** ao expurgar um builtin/name-detect, a resposta NÃO é *rotear o
+    builtin pro símbolo de superfície num caso especial do backend* (isso é trocar uma exceção por outra) — é **DEIXAR
+    DE SER builtin**: promover a `exp global fn` (resolve bare + `teko::` por D170/D180), REMOVER a assinatura builtin
+    de `scope.tks` E o name-detect do codegen E o dispatch do `lower.tks` — os três lados — pra a chamada cair no
+    genérico nas duas rotas (foi o que chars/len_chars/to_lower/to_upper fizeram certo; bytes_of_str/char_at/
+    str_slice_chars/as_ptr ficaram como builtin-com-roteamento = ERRADO). **As ÚNICAS "exceções" magic/reinterpret/
+    bypass legítimas são os PONTOS DE ARENA** — e não por serem especiais, só porque precisam do bypass pra não cair
+    em overflow (a maquinaria de região não recursa pelo caminho normal). Ficam magic e SÓ eles: **DPS, injeção de
+    arena/região, operadores primários** (os de overload são funções com açúcar), **reinterpret (`wrap`/`unwrap`)** e
+    demais açúcares. Qualquer outra coisa com corpo de superfície = genérico, sem exceção de backend.
 - **ARENA/REGIÃO = TEKO + codegen(ABI/syscall/linker), ZERO adição de C (dono 2026-08-28 — D148).** Toda feature
   de arena/região se escreve **em Teko** (`arena.tks`, que já é 100% Teko/VIVA — D128) e reflete no **codegen**
   (rota-C emite a chamada Teko compilada; native `lower.tks` emite via ABI/syscall/linker). **PROIBIDO ADICIONAR
