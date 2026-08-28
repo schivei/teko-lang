@@ -342,6 +342,14 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
     agente que toca `teko_rt.{c,h}` (ou `assert.{c,h}`/`win32_compat.h`) tem que (1) grep dos nomes mexidos em
     `scripts/**/*.{c,h}` e (2) COMPILAR+RODAR os `scripts/*_test.sh` que linkam contra teko_rt.c — os 3 verdes —
     ANTES de declarar pronto. O verificador independente confere o mesmo.**
+  - **VARREDURA DE CALL-SITE / RENOMEAÇÃO = ÁRVORE INTEIRA, não só `src/` (dono 2026-08-28, bateu na str/char D191).**
+    Quando um expurgo muda como um nome resolve (ex.: builtin `teko::X::nome` de qualquer profundidade vira `exp global`
+    em `teko::runtime` → só o qualificador CERTO resolve), toda chamada com o qualificador VELHO quebra. O self-build/
+    fixpoint/ASan/harnesses só exercitam `src/` — mas `cases/**` e `examples/**` (o corpus do `regressor.tkr`/`teko test .`)
+    RODAM no CI e NÃO no fixpoint. **REGRA: renomeação/canonização de call-site ou símbolo varre `src/` + `cases/` +
+    `examples/` + `tklib/` (a árvore toda), com grep do qualificador velho = zero, ANTES de declarar pronto.** O `teko
+    test .` local dá OOM → validar os arquivos afetados por probe isolado (gen0 compila o arquivo), não o suite. O
+    verificador independente confere a árvore inteira, não só `src/`.
 - **Teko é um monólito e precisa cross-compilar.** A perna C emite **UM** `teko.c`
   que compila em toda arquitetura/SO via `#if` do C — tem que **emitir tudo**
   (todos os alvos), não podar para o host que emite. Só o backend **native** emite
