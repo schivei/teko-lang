@@ -166,10 +166,13 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
 - **CHECKED vs UNCHECKED — exposta=`error`, interna=pânico (LEI DURA, dono 2026-08-28).** Função **exposta ao
   desenvolvedor (`exp`) retorna `error` no caminho de falha (CHECKED)** — o dev da stdlib recebe o erro pra
   tratar, não leva pânico. Função **NÃO-exposta (`pub`/privado/interna) entra em PÂNICO (UNCHECKED)** — o
-  compilador controla o interno e sabe que está correto; se o pânico dispara, é bug. Ex.: `fdiv` interno
-  (emitido pra `a/b`) = unchecked/pânico em `/0`; a divisão checada dev-facing = `error`. Vale pra TODO helper
+  compilador controla o interno e sabe que está correto; se o pânico dispara, é bug. Vale pra TODO helper
   de runtime surfaceado no expurgo (a superfície `exp` retorna `error`; o unchecked interno panica). Consistente
   com `crypto_error` (o usuário RECEBE o erro, não o constrói).
+  - **DIVISÃO = caso canônico (dono 2026-08-28):** o **operador `/` PANICA se `b==0`, para TODO tipo numérico**
+    (inteiro/flutuante/bigint/decimal) — é o unchecked ergonômico, uniforme. Quem quer checked usa a **função da
+    stdlib** que retorna `resultado | error`. Logo `fdiv` (interno emitido pra `a/b` de float) = pânico em `/0`;
+    idem int/bigint/decimal; a versão dev-facing que devolve `error` é fn `exp` da stdlib, não o operador.
 - **`teko::X` E bare `X` são AMBAS válidas — `teko::X` é ESCAPE-HATCH (LEI DURA, dono 2026-08-28 — D180).** Uma
   chamada nua `X()` resolve pelo escopo (shadow local do dev vence); `teko::X()` (teko-rooted) **força** a fn do
   teko, ignorando shadow — a saída quando o dev define a própria `X`. Uma **regra GERAL no resolver** (`teko::<nome>`
