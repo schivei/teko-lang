@@ -318,10 +318,6 @@ tk_str tk_str_concat(tk_str a, tk_str b) {
 }
 
 
-// (C7.1a) marshalling — the raw byte pointer of a Teko str (NOT NUL-terminated), for ptr+len C
-// APIs like write(fd,buf,len). Borrows the str's buffer — valid only while the str is alive; the
-// FFI boundary is unsafe by contract (cast away const). [teko::mem::as_ptr]
-void *tk_as_ptr(tk_str s) { return (void *)s.ptr; }
 
 // (C7.1a) marshalling — a fresh NUL-terminated C copy of a Teko str, for C `char*` APIs (getenv,
 // fopen, …). A Teko str is NOT NUL-terminated, so this copy is required when the foreign function
@@ -374,20 +370,6 @@ const tk_byte *tk_str_of_bytes_len(const tk_byte *ptr, uint64_t len, uint64_t *o
     tk_str r = tk_str_of_bytes((tk_str){ ptr, len });
     *out_len = r.len;
     return r.ptr;
-}
-
-// tk_bytes_of_str — zero-copy view of a str's bytes as a tk_slice_byte. Same ptr and len,
-// reinterpret-cast from const to mutable pointer; the slice is read-only in practice.
-tk_slice_byte tk_bytes_of_str(tk_str s) {
-    return (tk_slice_byte){ (tk_byte *)s.ptr, s.len };
-}
-
-// tk_bytes_of_str_len — the out-parameter-length twin of `tk_bytes_of_str` (0.3.1.0 degrau 21):
-// the view IS s's own (ptr, len), unchanged — no allocation, no copy, so the twin needs no logic
-// beyond handing the SAME pair back through this backend's out-parameter convention.
-const tk_byte *tk_bytes_of_str_len(const tk_byte *ptr, uint64_t len, uint64_t *out_len) {
-    *out_len = len;
-    return ptr;
 }
 
 // rt_valid_utf8 — strict RFC 3629 well-formedness check (reject overlong encodings, UTF-16
@@ -474,46 +456,6 @@ uint32_t tk_char_to_u32(tk_char c) {
          | ((uint32_t)(c.ptr[1] & 0x3F) << 12)
          | ((uint32_t)(c.ptr[2] & 0x3F) << 6)
          |  (uint32_t)(c.ptr[3] & 0x3F);
-}
-
-// utf8_lead_len — byte width of a UTF-8 sequence starting with lead byte b0.
-// Returns 1 for ASCII (b0 < 0x80), 2 for 0xC0–0xDF, 3 for 0xE0–0xEF, 4 for 0xF0–0xF7.
-// Any other byte (continuation or invalid) is treated as 1 (graceful degradation).
-static size_t utf8_lead_len(uint8_t b0) {
-    if (b0 < 0x80) return 1;
-    if (b0 < 0xC0) return 1;   // continuation byte — malformed; consume as 1
-    if (b0 < 0xE0) return 2;
-    if (b0 < 0xF0) return 3;
-    return 4;
-}
-
-// tk_str_len_chars — count UTF-8 codepoints in s (no allocation).
-uint64_t tk_str_len_chars(tk_str s) {
-    uint64_t count = 0;
-    size_t i = 0;
-    while (i < s.len) {
-        i += utf8_lead_len(s.ptr[i]);
-        count += 1;
-    }
-    return count;
-}
-
-// tk_str_chars — split s into a malloc'd array of tk_char, one per UTF-8 codepoint.
-// Each tk_char borrows INTO s.ptr (no copy of codepoint bytes).
-tk_slice_char tk_str_chars(tk_str s) {
-    uint64_t count = tk_str_len_chars(s);
-    tk_char *arr = malloc((count ? count : 1) * sizeof *arr);
-    if (arr == NULL) tk_panic("out of memory (chars)");
-    uint64_t ci = 0;
-    size_t i = 0;
-    while (i < s.len) {
-        size_t w = utf8_lead_len(s.ptr[i]);
-        if (i + w > s.len) w = s.len - i;   // clamp if bytes run short
-        arr[ci] = (tk_char){ (uint8_t *)(s.ptr + i), (uint64_t)w };
-        ci += 1;
-        i  += w;
-    }
-    return (tk_slice_char){ arr, count };
 }
 
 // tk_str_concat3 REMOVED (2026-07-01) — superseded by `concat(params pieces: []str)`, bridged
@@ -677,14 +619,6 @@ const tk_byte *tk_str_slice_from_len(const tk_byte *s_ptr, uint64_t s_len, uint6
     *out_len = r.len;
     return r.ptr;
 }
-// tk_str_slice_chars_len — out-parameter-length twin of tk_str_slice_chars (codepoint-index
-// slice). Thin wrapper: calls tk_str_slice_chars, writes r.len into *out_len and returns r.ptr.
-const tk_byte *tk_str_slice_chars_len(const tk_byte *s_ptr, uint64_t s_len, int64_t from, int64_t to, uint64_t *out_len) {
-    tk_str r = tk_str_slice_chars((tk_str){ s_ptr, s_len }, from, to);
-    *out_len = r.len;
-    return r.ptr;
-}
-
 // tk_str_len — the byte length (no allocation).
 uint64_t tk_str_len(tk_str s) {
     return s.len;
@@ -715,108 +649,6 @@ bool tk_str_contains(tk_str s, tk_str needle) {
 }
 
 // --- ROUND 0: UTF-8 codepoint operations ---
-
-// tk_char_at — return the tk_char at 0-based codepoint index i in s. Panics if out of range.
-// The returned tk_char borrows INTO s.ptr (no copy).
-tk_char tk_char_at(tk_str s, int64_t i) {
-    if (i < 0) tk_panic("char_at: negative codepoint index");
-    uint64_t idx = (uint64_t)i;
-    size_t pos = 0;
-    uint64_t ci = 0;
-    while (pos < s.len) {
-        size_t w = utf8_lead_len(s.ptr[pos]);
-        if (w > s.len - pos) w = s.len - pos;  // clamp at string end
-        if (ci == idx) return (tk_char){ (uint8_t *)(s.ptr + pos), (uint64_t)w };
-        ci  += 1;
-        pos += w;
-    }
-    tk_panic("char_at: codepoint index out of range");
-}
-
-// tk_str_slice_chars — substring from codepoint index `from` (inclusive) to `to` (exclusive),
-// returned as a fresh owned str (copied). Panics if from > to or to > codepoint count.
-tk_str tk_str_slice_chars(tk_str s, int64_t from, int64_t to) {
-    if (from < 0 || to < 0) tk_panic("str_slice_chars: negative codepoint index");
-    uint64_t ufrom = (uint64_t)from, uto = (uint64_t)to;
-    if (ufrom > uto) tk_panic("str_slice_chars: from > to");
-    // walk to byte offsets for `from` and `to`
-    size_t byte_from = 0, byte_to = 0;
-    uint64_t ci = 0;
-    size_t pos = 0;
-    while (pos <= s.len) {
-        if (ci == ufrom) byte_from = pos;
-        if (ci == uto)   { byte_to = pos; break; }
-        if (pos == s.len) {
-            // ran out of codepoints before reaching `to`
-            tk_panic("str_slice_chars: codepoint index out of range");
-        }
-        size_t w = utf8_lead_len(s.ptr[pos]);
-        if (w > s.len - pos) w = s.len - pos;
-        ci  += 1;
-        pos += w;
-    }
-    if (ufrom > uto) tk_panic("str_slice_chars: from > to (post-walk)"); // unreachable but defensive
-    size_t n = byte_to - byte_from;
-    tk_byte *buf = malloc(n ? n : 1);
-    if (buf == NULL) tk_panic("out of memory (str_slice_chars)");
-    if (n) memcpy(buf, s.ptr + byte_from, n);
-    return (tk_str){ buf, n };
-}
-
-
-
-
-// Static lowercase lookup table for ASCII (used by tk_to_lower / tk_to_upper).
-// Avoids calling tolower/toupper which are locale-dependent.
-static const uint8_t tk_ascii_lower[128] = {
-    0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,
-    32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,'0','1','2','3','4','5','6','7','8','9',
-    58,59,60,61,62,63,64,
-    'a','b','c','d','e','f','g','h','i','j','k','l','m',
-    'n','o','p','q','r','s','t','u','v','w','x','y','z',
-    91,92,93,94,95,96,
-    'a','b','c','d','e','f','g','h','i','j','k','l','m',
-    'n','o','p','q','r','s','t','u','v','w','x','y','z',
-    123,124,125,126,127
-};
-static const uint8_t tk_ascii_upper[128] = {
-    0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,
-    32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,'0','1','2','3','4','5','6','7','8','9',
-    58,59,60,61,62,63,64,
-    'A','B','C','D','E','F','G','H','I','J','K','L','M',
-    'N','O','P','Q','R','S','T','U','V','W','X','Y','Z',
-    91,92,93,94,95,96,
-    'A','B','C','D','E','F','G','H','I','J','K','L','M',
-    'N','O','P','Q','R','S','T','U','V','W','X','Y','Z',
-    123,124,125,126,127
-};
-
-// Per-ASCII-character static byte stores for tk_to_lower / tk_to_upper.
-// These are valid for the program lifetime so returned tk_char views are always safe.
-static uint8_t tk_lower_byte[128];
-static uint8_t tk_upper_byte[128];
-
-// tk_to_lower — ASCII lowercase. Non-ASCII chars returned unchanged (borrowed view).
-tk_char tk_to_lower(tk_char c) {
-    if (c.len == 0) return c;
-    uint8_t b0 = c.ptr[0];
-    if (b0 < 0x80) {
-        tk_lower_byte[b0] = tk_ascii_lower[b0];
-        return (tk_char){ &tk_lower_byte[b0], 1 };
-    }
-    return c;  // non-ASCII: return unchanged
-}
-
-// tk_to_upper — ASCII uppercase. Non-ASCII chars returned unchanged (borrowed view).
-tk_char tk_to_upper(tk_char c) {
-    if (c.len == 0) return c;
-    uint8_t b0 = c.ptr[0];
-    if (b0 < 0x80) {
-        tk_upper_byte[b0] = tk_ascii_upper[b0];
-        return (tk_char){ &tk_upper_byte[b0], 1 };
-    }
-    return c;  // non-ASCII: return unchanged
-}
 
 // ── Arena allocation (S1) — bump allocator over a chunk-list. See teko_rt.h. ──
 // Each chunk is one aligned-malloc'd block: a header + payload, bump-filled by `used`.

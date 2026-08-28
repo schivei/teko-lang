@@ -201,6 +201,41 @@ exp global fn len_chars(s: str): i64 {
     utf8_codepoint_count(s) to i64
 }
 
+/** teko::runtime::chars — `s` split into one `char` per UTF-8 codepoint; each borrows into `s`. */
+exp global fn chars(s: str): []char {
+    var n = utf8_codepoint_count(s)
+    var arr: [n]char = []
+    var ci: u64 = 0
+    var pos: u64 = 0
+    loop {
+        if pos >= s.len { break }
+        var w = utf8_lead_width(s[pos])
+        if w > s.len - pos { w = s.len - pos }
+        arr[ci] = teko::str::slice(s, pos, pos + w)
+        ci = ci + 1
+        pos = pos + w
+    }
+    arr
+}
+
+/** teko::runtime::char_at — the `char` at 0-based codepoint index `i` in `s` (borrows into `s`).
+ * Panics when `i` is out of range. */
+exp fn char_at(s: str, i: i64): char {
+    if i < 0 { panic("char_at: negative codepoint index") }
+    var idx = i to u64
+    var pos: u64 = 0
+    var ci: u64 = 0
+    loop {
+        if pos >= s.len { break }
+        var w = utf8_lead_width(s[pos])
+        if w > s.len - pos { w = s.len - pos }
+        if ci == idx { return teko::str::slice(s, pos, pos + w) }
+        ci = ci + 1
+        pos = pos + w
+    }
+    panic("char_at: codepoint index out of range")
+}
+
 /** teko::runtime::str_slice_chars — the substring of `s` from codepoint index `from` (inclusive)
  * to `to` (exclusive), as a zero-copy view. Panics when the range is invalid. */
 exp fn str_slice_chars(s: str, from: i64, to: i64): str {
@@ -222,6 +257,20 @@ exp fn str_slice_chars(s: str, from: i64, to: i64): str {
         pos = pos + w
     }
     teko::str::slice(s, byte_from, byte_to)
+}
+
+/** teko::runtime::to_lower — the ASCII lowercase of `c`; non-ASCII codepoints are unchanged. */
+exp global fn to_lower(c: char): char {
+    var cp = c to u32
+    if cp >= 65 && cp <= 90 { return one_byte((cp + 32) to byte) }
+    c
+}
+
+/** teko::runtime::to_upper — the ASCII uppercase of `c`; non-ASCII codepoints are unchanged. */
+exp global fn to_upper(c: char): char {
+    var cp = c to u32
+    if cp >= 97 && cp <= 122 { return one_byte((cp - 32) to byte) }
+    c
 }
 
 /** teko::runtime::char_eq — true iff `a` and `b` are the same codepoint. */
