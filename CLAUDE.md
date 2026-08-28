@@ -580,6 +580,19 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
     em overflow (a maquinaria de região não recursa pelo caminho normal). Ficam magic e SÓ eles: **DPS, injeção de
     arena/região, operadores primários** (os de overload são funções com açúcar), **reinterpret (`wrap`/`unwrap`)** e
     demais açúcares. Qualquer outra coisa com corpo de superfície = genérico, sem exceção de backend.
+  - **CLASSIFICAR O QUE PODE SER BUILTIN — a lista de privilégio é FECHADA (dono 2026-08-28, endurece D187).** Não é
+    só consertar caso-a-caso: como estamos renivelando TUDO pra ter superfície, **não há uma única justificativa
+    (exceto arena) pra qualquer função/símbolo manter o privilégio de builtin/name-detect/inline no backend.** A
+    tabela inteira de builtins (`scope.tks`) + todo name-detect/inline-synth (codegen/lower) tem que ser AUDITADA e
+    cada entrada julgada contra a lista FECHADA de legítimos — **(1) pontos de arena** (região/DPS/injeção, bypass
+    anti-overflow); **(2) operador que bate num OPCODE** (a primitiva ABI direta); **(3) reinterpret `wrap`/`unwrap`**;
+    **(4) `syscall` raw** (chão irredutível do SO). **Fora desses 4, TUDO é função → superfície → caminho genérico.**
+    Zero exceção sobrevive "por conveniência/performance/histórico".
+  - **OPERADORES — OPCODE vs OVERLOAD (dono 2026-08-28).** Operador que **invoca um opcode** = magic (primitiva ABI,
+    caso 2 acima). Operador que **NÃO invoca opcode** = resolve pela **forma que o USUÁRIO definiu na sobrecarga**
+    (`operator`/overload) — que é **função normal**, caminho genérico, ZERO magic. Ou seja o backend não "conhece" o
+    operador não-opcode; ele desce à fn de overload como qualquer chamada. (Açúcar de sintaxe no parser é OK; a
+    semântica é chamada de função genérica.)
 - **ARENA/REGIÃO = TEKO + codegen(ABI/syscall/linker), ZERO adição de C (dono 2026-08-28 — D148).** Toda feature
   de arena/região se escreve **em Teko** (`arena.tks`, que já é 100% Teko/VIVA — D128) e reflete no **codegen**
   (rota-C emite a chamada Teko compilada; native `lower.tks` emite via ABI/syscall/linker). **PROIBIDO ADICIONAR
