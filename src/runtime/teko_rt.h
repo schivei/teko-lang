@@ -229,16 +229,13 @@ void       tk_thread_spawn(void (*entry)(void *), void *ctx_blob);
 // returns an opaque handle for a later tk_thread_join to block on until the thread's `entry` returns.
 // UNUSED by the spawn surface (spawn is detached); declared now so the await lowering resumes quickly.
 // Do NOT wire a Teko surface to it in this batch.
-uint64_t   tk_thread_join_spawn(void (*entry)(void *), void *ctx_blob);
 // (§10 AWAIT-BATCH) tk_thread_join — block until the thread named by `handle` has returned, then free
 // the handle. UNUSED by the spawn surface. §16 will retire libc.
-void       tk_thread_join(uint64_t handle);
 // (§10 C0a) tk_thread_spawn_selftest — the C-owned probe body the `thread_spawn_paranoid` fixture
 // reaches through ONE ordinary extern call (the tk_test_capture_probe pattern — a Teko test cannot
 // pass a `void(*)(void*)`). Spawns `n` threads, each doing tk_task_begin/alloc/tk_task_end, JOINS
 // them all (deterministic — detached threads give the test no finish edge), then returns the
 // tk_names_live_count delta from the pre-spawn baseline (MUST be 0 under TEKO_MEM_PARANOID=1).
-uint64_t   tk_thread_spawn_selftest(int64_t n);
 
 // (§10 C0b) tk_memchan — an in-process MPSC FIFO for opaque fixed-width elements, living in the F2
 // program region (tk_region_program) so it OUTLIVES the producing task's tk_task_end (a channel is
@@ -251,33 +248,22 @@ typedef struct tk_memchan tk_memchan;
 // lives in the F2 program region (stable address for the registry); the ring BUFFER and the pthread
 // mutex/cond are heap/OS resources that tk_memchan_end releases (F2 has no per-entry free yet — see
 // the C5 teardown note). bounds==0 => unbounded (buffer doubles on demand). OOM => tk_panic.
-tk_memchan *tk_memchan_make(uint64_t elem_size, uint64_t bounds);
 // tk_memchan_send — copy `elem_size` bytes from `elem` into the FIFO tail. Blocks while a BOUNDED
 // channel is full; returns immediately once space exists or the channel is closed (a send on a
 // closed channel is a no-op — the producer contract closes exactly once).
-void        tk_memchan_send(tk_memchan *ch, const void *elem);
 // tk_memchan_recv — copy the FIFO head into `out` (`elem_size` bytes). Blocks while empty. Returns 1
 // when an element was delivered, 0 when the channel is CLOSED AND DRAINED (the `Closed` signal the
 // Teko Rx.pop surfaces). A single reader (MPSC) is assumed.
-int         tk_memchan_recv(tk_memchan *ch, void *out);
 // tk_memchan_close — mark closed and wake every blocked sender/receiver. Idempotent.
-void        tk_memchan_close(tk_memchan *ch);
 // tk_memchan_end — close + release the ring buffer and destroy the mutex/cond (the drop-cascade's
 // transport teardown). Idempotent. The F2 struct shell is reclaimed at process exit.
-void        tk_memchan_end(tk_memchan *ch);
 // tk_memchan_selftest — C-owned probe body reached through ONE plain-scalar extern (the
 // tk_thread_spawn_selftest pattern). Spawns a producer that sends 0..n-1 (i64), the caller thread
 // recv's them, asserts order+sum, then close+end. Returns 0 on success, a non-zero failure code
 // otherwise. Under TEKO_MEM_PARANOID=1 the arena live-count is asserted balanced by the caller.
-uint64_t    tk_memchan_selftest(int64_t n);
 // The u64-HANDLE ABI the Teko `extern fn` surface binds to (the tk_region_new_u convention): a
 // tk_memchan* travels through Teko as a `u64`, and the element buffer as a `u64` address, so these
 // thin twins take/return that width and cast at the boundary (no int<->pointer conversion warning).
-uint64_t    tk_memchan_make_u(uint64_t elem_size, uint64_t bounds);   // handle as a u64
-void        tk_memchan_send_u(uint64_t ch, uint64_t elem_addr);       // elem read from the u64 address
-int64_t     tk_memchan_recv_u(uint64_t ch, uint64_t out_addr);        // 1=value, 0=closed+drained
-void        tk_memchan_close_u(uint64_t ch);                          // mark closed, wake blocked ends
-void        tk_memchan_end_u(uint64_t ch);                            // close + release
 
 // (§10 C0c) tk_oschan — an AF_UNIX SOCK_DGRAM MPSC transport: ONE reader socket bound to a
 // key-derived ABSTRACT-namespace name (sun_path[0]==0, Linux — auto-removed on close, no filesystem
@@ -289,54 +275,30 @@ typedef struct tk_oschan tk_oschan;
 // tk_oschan_make — create+bind the reader socket to the abstract name derived from `key`; set
 // SO_RCVBUF from `bounds` (bounds==0 => the OS default, effectively unbounded). Returns the
 // F2-resident handle, or tk_panic on a socket/bind failure (the surface maps this to `make`'s error).
-tk_oschan  *tk_oschan_make(uint64_t elem_size, uint64_t bounds, const char *key, uint64_t key_len);
 // tk_oschan_send — sendto the reader's bound name (a writer socket is lazily opened per calling
 // thread and cached thread-local). Returns 0 on accept, -1 when the receive queue is full (EAGAIN
 // under MSG_DONTWAIT for a bounded channel); a blocking (bounds==0) send omits MSG_DONTWAIT.
-int         tk_oschan_send(tk_oschan *ch, const void *elem);
 // tk_oschan_recv — recvfrom the reader socket (blocking). Returns 1 with `out` filled (elem_size
 // bytes), or 0 on the CLOSED sentinel (a zero-length control datagram the producer's close sends).
-int         tk_oschan_recv(tk_oschan *ch, void *out);
 // tk_oschan_close — send the zero-length CLOSED sentinel so a blocked reader wakes and drains;
 // idempotent.
-void        tk_oschan_close(tk_oschan *ch);
 // tk_oschan_end — close + close(2) the reader fd (abstract name vanishes) + close cached writer fds.
 // Idempotent.
-void        tk_oschan_end(tk_oschan *ch);
 // tk_oschan_selftest — the fan-in proof as a C-owned body reached by one scalar extern: `w` writer
 // threads each send `r` records carrying (writer_id, seq, pattern=f(id,seq)); the reader verifies all
 // three per record (proof by CONTENT not count). Returns 0 on success.
-uint64_t    tk_oschan_selftest(int64_t w, int64_t r);
 // The u64-HANDLE ABI the Teko `extern fn` surface binds to (the tk_region_new_u convention). The key
 // bytes travel as a u64 address + a length so a Teko `str` reaches the C `const char *`.
-uint64_t    tk_oschan_make_u(uint64_t elem_size, uint64_t bounds, uint64_t key_addr, uint64_t key_len);
 // tk_oschan_make_str — the same make with the key delivered as a Teko `str` fat pointer (the natural
 // binder for a `str` channel key), so a Teko caller needs no manual byte-address plumbing.
-uint64_t    tk_oschan_make_str(uint64_t elem_size, uint64_t bounds, tk_str key);
-int64_t     tk_oschan_send_u(uint64_t ch, uint64_t elem_addr);        // 0=accept, -1=full (bounded)
-int64_t     tk_oschan_recv_u(uint64_t ch, uint64_t out_addr);         // 1=value, 0=closed
-void        tk_oschan_close_u(uint64_t ch);                           // send the CLOSED sentinel
-void        tk_oschan_end_u(uint64_t ch);                             // close + tear down
 
 // (§10 C5) tk_waitgroup — a MANUAL counter with a blocking wait, F2-resident (survives producing
 // tasks). add(n)/done() mutate the count under a mutex; wait() blocks on a cond until the count
 // reaches zero.
 typedef struct tk_waitgroup tk_waitgroup;
-tk_waitgroup *tk_waitgroup_make(void);               // count=0, in tk_region_program
-void          tk_waitgroup_add(tk_waitgroup *wg, int64_t n);  // count += n (call before spawn = race-free)
-void          tk_waitgroup_done(tk_waitgroup *wg);   // count -= 1; broadcast not-busy at zero
-void          tk_waitgroup_wait(tk_waitgroup *wg);   // block while count > 0
-void          tk_waitgroup_end(tk_waitgroup *wg);    // destroy mutex/cond (drop-cascade)
-uint64_t      tk_waitgroup_selftest(int64_t n);      // n threads each done() after an add(n); wait returns 0
 // The u64-HANDLE ABI the Teko `extern fn` surface binds to (the tk_region_new_u convention).
-uint64_t      tk_waitgroup_make_u(void);             // handle as a u64
-void          tk_waitgroup_add_u(uint64_t wg, int64_t n);
-void          tk_waitgroup_done_u(uint64_t wg);
-void          tk_waitgroup_wait_u(uint64_t wg);
-void          tk_waitgroup_end_u(uint64_t wg);
 // (§10 C5) tk_region_deregister — bind `type_id` -> NULL in `r`'s OWN table so a post-teardown
 // tk_region_lookup MISSES (the drop-cascade key removal). The arg-flip twin of tk_region_register.
-void       tk_region_deregister(tk_region *r, uint64_t type_id);
 
 // (F2) tk_region_program — the PROGRAM region: one per process, owned by NO task, so an object in
 // it survives both a task's tk_arena_pop and that task's exit. F1 leaves the runtime with N task
@@ -394,10 +356,8 @@ uint64_t   tk_arena_paranoid(void);             // cached TEKO_MEM_PARANOID prob
 // second registration of the same type_id in the same region OVERWRITES — the compiler is
 // expected to enforce true duplicate-registration errors at a higher DI layer; this is just the
 // storage primitive).
-void       tk_region_register(tk_region *r, uint64_t type_id, void *instance);
 // tk_region_lookup — find `type_id`'s instance in `r`, else its parent, else its parent's parent,
 // … until found or the chain ends (NULL). The #scoped walk-up primitive.
-void      *tk_region_lookup(tk_region *r, uint64_t type_id);
 // (W9.3b) tk_regions_free_all — free every still-live region of the CURRENT TASK (its root + its
 // live scoped frame/block regions) AND the (F2) program region, emptying both registries. Called at
 // the termination choke points (tk_panic*, tk_exit, and an atexit hook registered lazily by whichever
@@ -450,7 +410,6 @@ void       tk_regions_free_all(void);
 // tk_names_open — register `resource` under a fresh name of `kind`. The registry never allocates,
 // frees or dereferences the resource: it only hands back a name for it. 0 on refusal (index space
 // exhausted). THIS IS THE F4 SEAM: a `tk_chan *` enters here under its own kind.
-uint64_t   tk_names_open(uint32_t kind, void *resource);
 // tk_names_lookup — the resource `name` stands for, or NULL when the name is dead, was never issued,
 // or names a resource of another kind. The kind argument is what stops one kind's name from ever
 // resolving to another kind's bytes.
@@ -536,7 +495,6 @@ void tk_assert_scenario_ok(void);
 void tk_test_begin(tk_str label);
 // tk_test_end — close the open channel and emit the `ok` verdict block (verdict line, then the
 // captured stdout/stderr lines, prefixed). A no-op when no channel is open.
-void tk_test_end(void);
 // TK_TEST_SCOPE_MAX — the scope token buffer. A token is `<shard>-<sanitised label>`, so it is bounded
 // by the label bound plus the shard digits and a separator.
 #define TK_TEST_SCOPE_MAX (TK_TEST_LABEL_MAX + 24)
@@ -561,7 +519,6 @@ tk_str tk_test_scope(void);
 // tk_test_shard_take — the SHARD filter: count this test and answer whether THIS process owns it.
 // With no shard selected (`TEKO_TEST_SHARD` unset/malformed) every test is owned, so the emitted
 // harness is behaviourally identical to the unsharded one. See teko_rt.c for the `i/n` protocol.
-bool tk_test_shard_take(void);
 // --- the CAPTURE (owner ruling 2026-07-30, §14 of docs/design/journaling-de-corrida-0.3.1.md) ------
 //
 // "E PARA CAPTURAR E SAIR ELEGANTE ANTES SEM ENVIAR SYSCALL DE SAIDA QUANDO COMPILAR TESTES... Uma
@@ -593,20 +550,16 @@ typedef struct { int32_t how; int32_t code; } tk_test_outcome;
 // stay alive, and a local modified between the setjmp and the longjmp is indeterminate unless it is
 // `volatile`. `body` is `volatile` for exactly that reason: it is the one setjmp requirement that
 // cannot be delegated.
-tk_test_outcome tk_test_run(void (* volatile body)(void));
 // tk_test_report — write ONE test's verdict block and count it into the run's tally.
 //
 // Replaces the bare `tk_test_end()` of the passing path and the abort of the failing one: `ok` closes
 // the channel as before, a PANICKED body closes it with FAILED (its panic line already sits in THIS
 // test's captured stderr, never on the shared stream), and an EXITED body closes it with FAILED plus
 // the code it tried to leave with.
-void tk_test_report(tk_test_outcome e);
 // tk_test_summary — the run's one closing block: how many tests ran, passed, failed, and how many of
 // the failures were an `exit` rather than a panic. A COUNT, not a reconstruction — the harness now
 // always reaches the end, so the numbers are sums.
-void tk_test_summary(void);
 // tk_test_any_failed — did any `#test` of this run end other than `ok`? The gate binary's exit status.
-bool tk_test_any_failed(void);
 // --- the GUARD's way in ---------------------------------------------------------------------------
 //
 // §14.3 of the design gives the capture a Teko surface, `run_capturing(body: cabi fn())`. MEASURED:
@@ -638,16 +591,13 @@ bool tk_test_any_failed(void);
 // `Named` return for teko_rt externs, but codegen emits NO prototype for them — it relies on this
 // header — and the header's C struct type is not the mangled Teko one, so the generated call site is
 // an `invalid initializer`. The exit CODE is therefore a second read.
-int32_t tk_test_capture_probe(int32_t which);
 // tk_test_capture_last_code — the `code` recorded by the most recent tk_test_capture_probe.
-int32_t tk_test_capture_last_code(void);
 // tk_print — write exactly s.len bytes from s.ptr to stdout; no newline, no NUL.
 void tk_print(tk_str s);
 // tk_println — tk_print(s) then a single '\n' (0x0A).
 void tk_println(tk_str s);
 /* Flush stdout now, so a name printed before a crash is not lost in the block buffer.
    See teko_rt.c for the misdiagnosis that motivated it. */
-void tk_flush_out(void);
 // Host output FFI bottoms (scope.c write/ewrite/eprint/eprintln) — s.len bytes, NUL-tolerant.
 // write → stdout; ewrite/eprint → stderr; eprintln → stderr + '\n'.
 void tk_write(tk_str s);
@@ -672,20 +622,16 @@ tk_str tk_str_concat(tk_str a, tk_str b);
 // in `r` (tk_region_alloc) instead of malloc'd: the str lives in `r` and dies when `r` is dropped, so
 // a str produced inside a `{}` can participate in death-by-scope. `r == tk_region_root()`/program (or
 // NULL) reproduces the leak-tolerant malloc behaviour of tk_str_concat.
-tk_str tk_str_concat_r(tk_region *r, tk_str a, tk_str b);
 // (C7.1a) FFI marshalling: the raw byte pointer of a str (teko::mem::as_ptr — borrows, ptr+len
 // use), a fresh NUL-terminated C copy of a str (teko::mem::as_cstr), and a copy of a
 // NUL-terminated foreign C string back into a fresh str (teko::mem::str_from_cstr).
 void *tk_as_ptr(tk_str s);
 void *tk_cstr_dup(tk_str s);
-tk_str tk_str_from_cstr(const void *p);
 // (tk_bytes_from_ptr is declared after tk_ffi_bytes, below — its return type is defined there.)
 // tk_i64_to_str / tk_u64_to_str — the integer's DECIMAL text in a fresh str. The interp
 // lowering widens every signed int hole to i64 and every unsigned hole to u64 (EVERY Teko
 // integer prim fits — 64 bits is the language's widest integer; the checker scopes holes to
 // what the corpus needs).
-tk_str tk_i64_to_str(int64_t v);
-tk_str tk_u64_to_str(uint64_t v);
 
 // tk_str_concat_len / tk_i64_to_str_len / tk_u64_to_str_len — the SAME three builders above, with
 // their result's length handed back through an OUT-PARAMETER instead of `tk_str`'s second field.
@@ -698,8 +644,6 @@ tk_str tk_u64_to_str(uint64_t v);
 // wrappers — each still calls its own two-word twin above and owns no logic of its own
 // (0.3.1.0 degrau 9).
 const tk_byte *tk_str_concat_len(const tk_byte *a_ptr, uint64_t a_len, const tk_byte *b_ptr, uint64_t b_len, uint64_t *out_len);
-const tk_byte *tk_i64_to_str_len(int64_t v, uint64_t *out_len);
-const tk_byte *tk_u64_to_str_len(uint64_t v, uint64_t *out_len);
 
 // --- Phase 3 str/byte stdlib (the four recognized-but-not-yet-lowered builtins) ---
 // Same contract as tk_str_concat: a fresh malloc'd buffer the result OWNS, tk_panic on OOM
@@ -715,7 +659,6 @@ tk_str tk_str_of_bytes(tk_str bytes);
 // so the copied buffer's pointer rides the return register and its length rides `*out_len`.
 const tk_byte *tk_str_of_bytes_len(const tk_byte *ptr, uint64_t len, uint64_t *out_len);
 // tk_one_byte — a fresh 1-byte str holding c.
-tk_str tk_one_byte(tk_byte c);
 // tk_one_byte_len — the out-parameter-length twin of `tk_one_byte` (mirrors `tk_str_of_bytes_len`'s
 // own doc): the native backend's `LCall` reads exactly one result register, never the true
 // 2-eightbyte SysV/AAPCS64 struct `tk_one_byte` returns by value, so the fresh buffer's pointer
@@ -725,7 +668,6 @@ tk_str tk_one_byte(tk_byte c);
 // sub-register-width argument unspecified, and this backend has no argument-narrowing pass
 // (`apply_native_c_return_narrow` narrows RETURNS only); the low 8 bits are taken here instead
 // (0.3.1.0 degrau 32).
-const tk_byte *tk_one_byte_len(uint64_t c, uint64_t *out_len);
 // tk_bytes_of_str — zero-copy view of a str's bytes as a []byte slice. Returns a tk_slice_byte
 // pointing into the same memory. The caller must not outlive the originating str allocation.
 tk_slice_byte tk_bytes_of_str(tk_str s);
@@ -854,11 +796,8 @@ tk_char tk_char_at(tk_str s, int64_t i);
 tk_str tk_str_slice_chars(tk_str s, int64_t from, int64_t to);
 // tk_is_alpha — true if the codepoint is a Unicode letter. For single-byte ASCII uses isalpha(3);
 // for multibyte codepoints (lead byte ≥ 0x80) returns true (simplified ROUND 0 rule).
-bool tk_is_alpha(tk_char c);
 // tk_is_digit — true iff the codepoint is an ASCII decimal digit '0'–'9'.
-bool tk_is_digit(tk_char c);
 // tk_is_space — true iff the codepoint is ASCII whitespace (' ', '\t', '\n', '\r', '\f', '\v').
-bool tk_is_space(tk_char c);
 // tk_to_lower — ASCII lowercase: 'A'–'Z' → 'a'–'z'; non-ASCII chars are returned unchanged.
 // Returns a tk_char that either borrows the source bytes (non-ASCII) or a static 1-byte store
 // (ASCII — the result is valid for the program lifetime).
@@ -929,7 +868,6 @@ tk_str tk_rt_read_stdin(void);
 // {ptr,len} ABI `tk_rt_secure_bytes` already uses) so a brand-new primitive stays lowerable by
 // the released bootstrap seed's frozen codegen (the generic user-`extern` path emits the raw C
 // symbol directly — no per-name lift, which only `str | error`-shaped externs would need).
-tk_slice_byte tk_rt_read_stdin_n(uint64_t n);
 // teko::env::var(name) — the environment value, or error when unset.
 tk_ffi_sres tk_rt_getenv(tk_str name);
 // teko::io::write_file(path, content) — (over)write the file; error on failure.
@@ -1001,7 +939,6 @@ bool tk_rt_last_index_of_ok(tk_str hay, tk_str needle, uint64_t *out_index);
 // (ptr, len) in the SAME out-slots (the caller's `bool` decides which meaning to read).
 bool tk_rt_getenv_ok(const tk_byte *name_ptr, uint64_t name_len, const tk_byte **out_ptr, uint64_t *out_len);
 bool tk_rt_getcwd_ok(const tk_byte **out_ptr, uint64_t *out_len);
-bool tk_rt_read_file_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_ptr, uint64_t *out_len);
 // []str | error — ok → the tk_str[] entries' (base, count) in the out-slots (a `[]str` slice's
 // element layout IS an array of `tk_str`, so the backend stores that pair as the fat payload
 // unchanged); !ok → the error message's (ptr, len) in the SAME out-slots.
@@ -1012,8 +949,6 @@ bool tk_rt_setenv_ok(const tk_byte *name_ptr, uint64_t name_len, const tk_byte *
 bool tk_rt_chdir_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_err_ptr, uint64_t *out_err_len);
 bool tk_rt_mkdir_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_err_ptr, uint64_t *out_err_len);
 bool tk_rt_remove_file_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_err_ptr, uint64_t *out_err_len);
-bool tk_rt_write_file_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte *content_ptr, uint64_t content_len, const tk_byte **out_err_ptr, uint64_t *out_err_len);
-bool tk_rt_write_file_bytes_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte *data_ptr, uint64_t data_len, const tk_byte **out_err_ptr, uint64_t *out_err_len);
 // TK_RT_SPAWN_FAILED — "the runtime could not start a child at all", as distinct from any status a
 // child could report. It is NEGATIVE on purpose: a real child's code is 0..255 (128+signo for a
 // signalled one, so <= 191), which makes a negative provably outside that space and therefore
@@ -1121,8 +1056,6 @@ int64_t tk_rt_pipe(void);
 // tk_rt_pipe_read_fd / tk_rt_pipe_write_fd — the two halves of a `tk_rt_pipe` packing, unpacked.
 // TK_RT_FD_NONE in, TK_RT_FD_NONE out, so a failed `pipe` propagates through both accessors instead
 // of decoding into the descriptor pair (-1, -1) minus the sign.
-int64_t tk_rt_pipe_read_fd(int64_t packed);
-int64_t tk_rt_pipe_write_fd(int64_t packed);
 // teko::process::close_fd(fd) — close one descriptor. 0 on success, TK_RT_FD_NONE on failure or
 // when `fd` was never a descriptor.
 //
@@ -1216,7 +1149,6 @@ const tk_byte *tk_test_scope_len(uint64_t *out_len);
 uint64_t tk_peak_rss(void);
 // (arena-por-escopo M0) the process CURRENT RSS in bytes (0 = unavailable) — the twin of
 // tk_peak_rss, for per-phase peak attribution. Linux-only (/proc/self/statm); 0 elsewhere.
-uint64_t tk_cur_rss(void);
 // (E1-C6) the OS-granted online processor count (>= 1) — the default and cap for the test/regression
 // job pools, so a run never hard-codes how parallel a machine may be. Bound in the build source
 // through an `extern fn ... from "teko_rt"` (regression.tks `os_max`), the seed-lowerable route the
@@ -1255,16 +1187,9 @@ typedef struct { int32_t  days;                          } tk_date;
 typedef struct { uint64_t ticks;                         } tk_time;
 typedef struct { int64_t  ticks;                         } tk_span;
 
-tk_date  tk_rt_date_from_days(int32_t days);
-int32_t  tk_rt_date_year(tk_date d);
-int32_t  tk_rt_date_month(tk_date d);
-int32_t  tk_rt_date_day_of_month(tk_date d);
 
 // --- host clock reads (SCALAR-only, see above) ---
-int32_t  tk_rt_wall_days(void);            // days since 1970-01-01, UTC, host wall clock
-uint64_t tk_rt_wall_ns_of_day(void);       // ns since midnight, UTC, host wall clock
 int16_t  tk_rt_wall_offset_minutes(void);  // host local UTC offset, in minutes
-int64_t  tk_rt_monotonic_ns(void);         // ns from an unspecified monotonic origin
 
 // tk_nproc — logical processors the OS grants this process now. POSIX: sysconf(_SC_NPROCESSORS_ONLN).
 // Windows: GetActiveProcessorCount(ALL_PROCESSOR_GROUPS). Floor 1 (never 0). No allocation. The
@@ -1425,8 +1350,6 @@ _Noreturn void tk_panic_str(tk_str msg);
 // tk_exit_status — the platform-uniform process status for a raw Teko exit code: its low byte,
 // which is also what a NEGATIVE code already yielded on POSIX (-1 -> 255). Called by tk_exit and
 // by the C route's `main` return (codegen emits `return tk_exit_status((int)(<expr>));`).
-int tk_exit_status(int32_t code);
-_Noreturn void tk_exit(int32_t code);
 _Noreturn void tk_panic_div0(void);       // "division by zero"
 _Noreturn void tk_panic_overflow(void);   // "integer overflow"
 

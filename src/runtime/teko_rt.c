@@ -317,19 +317,6 @@ tk_str tk_str_concat(tk_str a, tk_str b) {
     return (tk_str){ buf, n };
 }
 
-// (0.3.1 modelo-de-memoria §9) tk_str_concat_r — like tk_str_concat, but the fresh result buffer is
-// bump-allocated in `r` (tk_region_alloc) instead of malloc'd. The result lives in `r` and DIES when
-// `r` is dropped. `r == tk_region_root()`/program reproduces the leak-tolerant tk_str_concat; `r` = a
-// scope region makes the concatenated str die with the scope. Allocation failure PANICS (M.1);
-// zero-length uses a 1-byte buffer so ptr is never NULL.
-tk_str tk_str_concat_r(tk_region *r, tk_str a, tk_str b) {
-    if (r == NULL) return tk_str_concat(a, b);
-    size_t n = a.len + b.len;
-    tk_byte *buf = tk_region_alloc(r, n ? n : 1);
-    if (a.len) memcpy(buf, a.ptr, a.len);
-    if (b.len) memcpy(buf + a.len, b.ptr, b.len);
-    return (tk_str){ buf, n };
-}
 
 // (C7.1a) marshalling — the raw byte pointer of a Teko str (NOT NUL-terminated), for ptr+len C
 // APIs like write(fd,buf,len). Borrows the str's buffer — valid only while the str is alive; the
@@ -347,15 +334,6 @@ void *tk_cstr_dup(tk_str s) {
     return buf;
 }
 
-// (C7.1a) marshalling — copy a NUL-terminated C string from a foreign pointer into a fresh Teko
-// str (octets up to the NUL, exclusive). A NULL pointer yields the empty str. [teko::mem::str_from_cstr]
-tk_str tk_str_from_cstr(const void *p) {
-    size_t n = (p == NULL) ? 0 : strlen((const char *)p);
-    tk_byte *buf = malloc(n ? n : 1);
-    if (buf == NULL) tk_panic("out of memory (str from cstr)");
-    if (n) memcpy(buf, p, n);
-    return (tk_str){ buf, n };
-}
 
 // (C7.1a) marshalling — copy n octets from a foreign pointer into a fresh Teko []byte. A NULL
 // pointer or n==0 yields an empty slice (a 1-byte buffer so the pointer is distinct). The codegen
@@ -367,47 +345,13 @@ tk_ffi_bytes tk_bytes_from_ptr(const void *p, uint64_t n) {
     return (tk_ffi_bytes){ buf, (n && p) ? n : 0 };
 }
 
-// decimal text of an unsigned 64-bit value into a fresh str (no leading zeros; "0" for 0).
-tk_str tk_u64_to_str(uint64_t v) {
-    char tmp[20];                 // u64 max = 20 digits
-    size_t i = 0;
-    if (v == 0) { tmp[i++] = '0'; }
-    else { while (v > 0) { tmp[i++] = (char)('0' + (v % 10)); v /= 10; } }
-    if (tk_obs_enabled() == 1) tk_obs_mstr_note(i ? i : 1, __builtin_return_address(0));
-    tk_byte *buf = malloc(i ? i : 1);
-    if (buf == NULL) tk_panic("out of memory (int to str)");
-    for (size_t j = 0; j < i; j += 1) buf[j] = (tk_byte)tmp[i - 1 - j];   // reverse
-    return (tk_str){ buf, i };
-}
 
-// decimal text of a signed 64-bit value; a '-' prefix for negatives (uses the unsigned
-// magnitude so INT64_MIN is handled without overflow).
-tk_str tk_i64_to_str(int64_t v) {
-    if (v >= 0) return tk_u64_to_str((uint64_t)v);
-    uint64_t mag = (uint64_t)(-(v + 1)) + 1u;    // |INT64_MIN| without UB
-    tk_str digits = tk_u64_to_str(mag);
-    tk_byte *buf = malloc(digits.len + 1);
-    if (buf == NULL) tk_panic("out of memory (int to str)");
-    buf[0] = (tk_byte)'-';
-    if (digits.len) memcpy(buf + 1, digits.ptr, digits.len);
-    return (tk_str){ buf, digits.len + 1 };
-}
 
 // tk_str_concat_len / tk_i64_to_str_len / tk_u64_to_str_len — out-parameter-length twins of the
 // three builders above (declared in teko_rt.h; see that comment for WHY). Each is a thin wrapper:
 // it calls its own two-word twin, writes the length out, and returns the pointer half.
 const tk_byte *tk_str_concat_len(const tk_byte *a_ptr, uint64_t a_len, const tk_byte *b_ptr, uint64_t b_len, uint64_t *out_len) {
     tk_str r = tk_str_concat((tk_str){ a_ptr, a_len }, (tk_str){ b_ptr, b_len });
-    *out_len = r.len;
-    return r.ptr;
-}
-const tk_byte *tk_i64_to_str_len(int64_t v, uint64_t *out_len) {
-    tk_str r = tk_i64_to_str(v);
-    *out_len = r.len;
-    return r.ptr;
-}
-const tk_byte *tk_u64_to_str_len(uint64_t v, uint64_t *out_len) {
-    tk_str r = tk_u64_to_str(v);
     *out_len = r.len;
     return r.ptr;
 }
@@ -512,24 +456,7 @@ bool tk_rt_str_from_utf8_ok(const tk_byte *ptr, uint64_t len, const tk_byte **ou
     return false;
 }
 
-// tk_one_byte — a fresh 1-byte str holding c.
-tk_str tk_one_byte(tk_byte c) {
-    tk_byte *buf = malloc(1);
-    if (buf == NULL) tk_panic("out of memory (one byte)");
-    buf[0] = c;
-    return (tk_str){ buf, 1 };
-}
 
-// tk_one_byte_len — the out-parameter-length twin of `tk_one_byte` (0.3.1.0 degrau 32): the same
-// fresh 1-byte buffer, handed back through the native backend's out-parameter convention. The
-// parameter is FULL WIDTH and masked here because SysV/AAPCS64 leave an argument's bits above its
-// declared width unspecified and this backend narrows RETURNS only
-// (`apply_native_c_return_narrow`), never arguments.
-const tk_byte *tk_one_byte_len(uint64_t c, uint64_t *out_len) {
-    tk_str r = tk_one_byte((tk_byte)(c & 0xFF));
-    *out_len = r.len;
-    return r.ptr;
-}
 
 // tk_char_to_u32 — decode a `char` (1–4 UTF-8 bytes) to its scalar codepoint. The bytes are valid
 // UTF-8 by construction (the lexer validated the `c'…'` literal), so a straight lead+continuation
@@ -836,32 +763,8 @@ tk_str tk_str_slice_chars(tk_str s, int64_t from, int64_t to) {
     return (tk_str){ buf, n };
 }
 
-// tk_is_alpha — true if the codepoint is a Unicode letter. ASCII: uses isalpha(3).
-// Multibyte (lead byte >= 0x80): returns true (simplified ROUND 0 rule — all non-ASCII are
-// treated as letters; a future round may consult Unicode tables).
-bool tk_is_alpha(tk_char c) {
-    if (c.len == 0) return false;
-    uint8_t b0 = c.ptr[0];
-    if (b0 < 0x80) return (bool)isalpha((unsigned char)b0);
-    return true;  // non-ASCII codepoint → treated as letter (ROUND 0 simplification)
-}
 
-// tk_is_digit — true iff the codepoint is an ASCII decimal digit '0'–'9'. Multibyte → false.
-bool tk_is_digit(tk_char c) {
-    if (c.len == 0) return false;
-    uint8_t b0 = c.ptr[0];
-    if (b0 < 0x80) return b0 >= (uint8_t)'0' && b0 <= (uint8_t)'9';
-    return false;
-}
 
-// tk_is_space — true iff the codepoint is ASCII whitespace. Multibyte → false.
-bool tk_is_space(tk_char c) {
-    if (c.len == 0) return false;
-    uint8_t b0 = c.ptr[0];
-    if (b0 < 0x80) return b0 == ' ' || b0 == '\t' || b0 == '\n'
-                       || b0 == '\r' || b0 == '\f' || b0 == '\v';
-    return false;
-}
 
 // Static lowercase lookup table for ASCII (used by tk_to_lower / tk_to_upper).
 // Avoids calling tolower/toupper which are locale-dependent.
@@ -1542,32 +1445,7 @@ tk_region *tk_region_new(tk_region *parent) {
     return tk_region_new_on(&tk_task_current()->regs, parent);
 }
 
-// (S2) bind type_id → instance in r's OWN table. A second registration of the same type_id
-// OVERWRITES (storage primitive only — true duplicate-registration errors belong to a higher
-// DI layer, not the arena).
-void tk_region_register(tk_region *r, uint64_t type_id, void *instance) {
-    if (r == NULL) return;
-    for (size_t i = 0; i < r->nentries; i += 1) {
-        if (r->entries[i].type_id == type_id) { r->entries[i].instance = instance; return; }
-    }
-    if (r->nentries == r->entries_cap) {
-        size_t ncap = r->entries_cap == 0 ? 4 : r->entries_cap * 2;
-        tk_region_entry *ne = realloc(r->entries, ncap * sizeof *ne);
-        if (ne == NULL) tk_panic("out of memory");
-        r->entries = ne; r->entries_cap = ncap;
-    }
-    r->entries[r->nentries++] = (tk_region_entry){ .type_id = type_id, .instance = instance };
-}
 
-// (S2) walk r, then r->parent, then r->parent->parent, … until type_id is found (else NULL).
-void *tk_region_lookup(tk_region *r, uint64_t type_id) {
-    for (; r != NULL; r = r->parent) {
-        for (size_t i = 0; i < r->nentries; i += 1) {
-            if (r->entries[i].type_id == type_id) return r->entries[i].instance;
-        }
-    }
-    return NULL;
-}
 
 // (2026-08-03, native-region-crash, chunk-canary) TEKO_NATIVE_CHUNK_CANARY — a CI-narrowing aid, the
 // same env-gated pattern as TEKO_NATIVE_REGION_CHECK/TEKO_NATIVE_CONST_SIZE_CHECK: byte-identical
@@ -2164,14 +2042,6 @@ int64_t tk_names_status(uint64_t name) {
     return status;
 }
 
-uint64_t tk_names_open(uint32_t kind, void *resource) {
-    uint64_t name = 0;
-    tk_name_slot *s = tk_names_take(&name);
-    if (s == NULL) return 0;
-    s->kind = kind;
-    s->resource = resource;
-    return name;
-}
 
 void *tk_names_lookup(uint64_t name, uint32_t kind) {
     int64_t status = TK_NAMES_OK;
@@ -2308,40 +2178,9 @@ void tk_thread_spawn(void (*entry)(void *), void *ctx_blob) {
 // tk_thread_handle — opaque, heap-boxed so a u64 can name it (AWAIT-BATCH twin).
 typedef struct { pthread_t th; } *tk_thread_handle;
 
-uint64_t tk_thread_join_spawn(void (*entry)(void *), void *ctx_blob) {
-    tk_thread_call *call = malloc(sizeof *call);
-    if (call == NULL) tk_panic("out of memory");
-    call->entry = entry; call->ctx_blob = ctx_blob;
-    tk_thread_handle h = malloc(sizeof *h);
-    if (h == NULL) tk_panic("out of memory");
-    if (pthread_create(&h->th, NULL, tk_thread_start, call) != 0) tk_panic("spawn: cannot create thread");
-    return (uint64_t)(uintptr_t)h;   // uintptr_t is unsigned — the i64->u64 neg-cast trap does not apply
-}
 
-void tk_thread_join(uint64_t handle) {
-    tk_thread_handle h = (tk_thread_handle)(uintptr_t)handle;
-    pthread_join(h->th, NULL);
-    free(h);
-}
 
-// tk_thread_spawn_paranoid_body — one thread's work: a fresh task, a handful of allocations, a clean
-// task end. Under TEKO_MEM_PARANOID=1 the freed blocks are poisoned + never parked, so a stray
-// cross-task pointer would corrupt and the live-count would drift.
-static void tk_thread_spawn_paranoid_body(void *unused) { (void)unused;
-    for (int i = 0; i < 32; i++) { volatile char *p = (volatile char *)tk_alloc(64 + (size_t)i); p[0] = (char)i; }
-}
 
-uint64_t tk_thread_spawn_selftest(int64_t n) {
-    uint64_t baseline = tk_names_live_count();
-    if (n < 0) n = 0;
-    // JOIN each thread — a detached spawn gives the test no finish edge, so the paranoid selftest uses
-    // the joinable twin to be deterministic (this is exactly why the twin is designed now).
-    for (int64_t i = 0; i < n; i++) {
-        uint64_t h = tk_thread_join_spawn(tk_thread_spawn_paranoid_body, NULL);
-        tk_thread_join(h);
-    }
-    return tk_names_live_count() - baseline;   // MUST be 0: every task_begin/alloc/task_end balanced
-}
 
 // ============================ (§10 C0b) tk_memchan ================================================
 //
@@ -2362,136 +2201,18 @@ struct tk_memchan {
     pthread_cond_t  not_full;  // bounded send waits here
 };
 
-tk_memchan *tk_memchan_make(uint64_t elem_size, uint64_t bounds) {
-    if (elem_size == 0) elem_size = 1;
-    tk_memchan *ch = (tk_memchan *)tk_region_alloc(tk_region_program(), sizeof *ch);
-    ch->elem_size = elem_size;
-    ch->unbounded = (bounds == 0);
-    ch->cap = ch->unbounded ? 8u : bounds;
-    ch->buf = (unsigned char *)malloc((size_t)ch->cap * (size_t)elem_size);
-    if (ch->buf == NULL) tk_panic("out of memory");
-    ch->head = ch->tail = ch->count = 0;
-    ch->closed = 0;
-    pthread_mutex_init(&ch->lock, NULL);
-    pthread_cond_init(&ch->not_empty, NULL);
-    pthread_cond_init(&ch->not_full, NULL);
-    return ch;
-}
 
-// tk_memchan_grow — double an UNBOUNDED channel's ring, re-linearizing from head so the arena's lack
-// of realloc costs one malloc+copy at each capacity doubling. Caller holds the lock.
-static void tk_memchan_grow(tk_memchan *ch) {
-    uint64_t ncap = ch->cap * 2u;
-    unsigned char *nbuf = (unsigned char *)malloc((size_t)ncap * (size_t)ch->elem_size);
-    if (nbuf == NULL) tk_panic("out of memory");
-    for (uint64_t i = 0; i < ch->count; i += 1) {
-        uint64_t src = (ch->head + i) % ch->cap;
-        memcpy(nbuf + i * ch->elem_size, ch->buf + src * ch->elem_size, ch->elem_size);
-    }
-    free(ch->buf);
-    ch->buf = nbuf;
-    ch->cap = ncap;
-    ch->head = 0;
-    ch->tail = ch->count;
-}
 
-void tk_memchan_send(tk_memchan *ch, const void *elem) {
-    pthread_mutex_lock(&ch->lock);
-    if (ch->closed) { pthread_mutex_unlock(&ch->lock); return; }
-    if (ch->unbounded) {
-        if (ch->count == ch->cap) tk_memchan_grow(ch);
-    } else {
-        while (ch->count == ch->cap && !ch->closed) pthread_cond_wait(&ch->not_full, &ch->lock);
-        if (ch->closed) { pthread_mutex_unlock(&ch->lock); return; }
-    }
-    memcpy(ch->buf + ch->tail * ch->elem_size, elem, ch->elem_size);
-    ch->tail = (ch->tail + 1) % ch->cap;
-    ch->count += 1;
-    pthread_cond_signal(&ch->not_empty);
-    pthread_mutex_unlock(&ch->lock);
-}
 
-int tk_memchan_recv(tk_memchan *ch, void *out) {
-    pthread_mutex_lock(&ch->lock);
-    while (ch->count == 0 && !ch->closed) pthread_cond_wait(&ch->not_empty, &ch->lock);
-    if (ch->count == 0 && ch->closed) { pthread_mutex_unlock(&ch->lock); return 0; }
-    memcpy(out, ch->buf + ch->head * ch->elem_size, ch->elem_size);
-    ch->head = (ch->head + 1) % ch->cap;
-    ch->count -= 1;
-    pthread_cond_signal(&ch->not_full);
-    pthread_mutex_unlock(&ch->lock);
-    return 1;
-}
 
-void tk_memchan_close(tk_memchan *ch) {
-    pthread_mutex_lock(&ch->lock);
-    ch->closed = 1;
-    pthread_cond_broadcast(&ch->not_empty);
-    pthread_cond_broadcast(&ch->not_full);
-    pthread_mutex_unlock(&ch->lock);
-}
 
-void tk_memchan_end(tk_memchan *ch) {
-    pthread_mutex_lock(&ch->lock);
-    if (ch->buf == NULL) { pthread_mutex_unlock(&ch->lock); return; }  // already ended (idempotent)
-    ch->closed = 1;
-    pthread_cond_broadcast(&ch->not_empty);
-    pthread_cond_broadcast(&ch->not_full);
-    free(ch->buf);
-    ch->buf = NULL;
-    pthread_mutex_unlock(&ch->lock);
-    pthread_mutex_destroy(&ch->lock);
-    pthread_cond_destroy(&ch->not_empty);
-    pthread_cond_destroy(&ch->not_full);
-}
 
-uint64_t tk_memchan_make_u(uint64_t elem_size, uint64_t bounds) {
-    return (uint64_t)(uintptr_t)tk_memchan_make(elem_size, bounds);
-}
-void tk_memchan_send_u(uint64_t ch, uint64_t elem_addr) {
-    tk_memchan_send((tk_memchan *)(uintptr_t)ch, (const void *)(uintptr_t)elem_addr);
-}
-int64_t tk_memchan_recv_u(uint64_t ch, uint64_t out_addr) {
-    return (int64_t)tk_memchan_recv((tk_memchan *)(uintptr_t)ch, (void *)(uintptr_t)out_addr);
-}
-void tk_memchan_close_u(uint64_t ch) {
-    tk_memchan_close((tk_memchan *)(uintptr_t)ch);
-}
-void tk_memchan_end_u(uint64_t ch) {
-    tk_memchan_end((tk_memchan *)(uintptr_t)ch);
-}
 
 // tk_memchan_selftest_arg / _producer — the producer half of the C0b selftest, reached through the
 // joinable spawn twin so the caller has a deterministic finish edge. The blob is this arg; the
 // producer frees it (tk_thread_start frees only the call record, never the blob).
 typedef struct { tk_memchan *ch; int64_t n; } tk_memchan_selftest_arg;
-static void tk_memchan_selftest_producer(void *blob) {
-    tk_memchan_selftest_arg a = *(tk_memchan_selftest_arg *)blob;
-    free(blob);
-    for (int64_t i = 0; i < a.n; i += 1) tk_memchan_send(a.ch, &i);
-    tk_memchan_close(a.ch);
-}
 
-uint64_t tk_memchan_selftest(int64_t n) {
-    if (n < 0) n = 0;
-    tk_memchan *ch = tk_memchan_make(sizeof(int64_t), 16);   // bounded-16 exercises the blocking send
-    tk_memchan_selftest_arg *arg = (tk_memchan_selftest_arg *)malloc(sizeof *arg);
-    if (arg == NULL) tk_panic("out of memory");
-    arg->ch = ch; arg->n = n;
-    uint64_t h = tk_thread_join_spawn(tk_memchan_selftest_producer, arg);
-    int64_t expect = 0, sum = 0, got = 0;
-    uint64_t rc = 0;
-    while (tk_memchan_recv(ch, &got)) {
-        if (got != expect) rc = 1;
-        sum += got;
-        expect += 1;
-    }
-    tk_thread_join(h);
-    if (expect != n) rc = 2;
-    if (n > 0 && sum != n * (n - 1) / 2) rc = 3;
-    tk_memchan_end(ch);
-    return rc;
-}
 
 // ============================ (§10 C5) tk_waitgroup ==============================================
 //
@@ -2499,62 +2220,10 @@ uint64_t tk_memchan_selftest(int64_t n) {
 // done() via the worker's handle; wait() on the creator's ctx. Same pthread idiom as tk_memchan.
 struct tk_waitgroup { int64_t count; pthread_mutex_t lock; pthread_cond_t zero; };
 
-tk_waitgroup *tk_waitgroup_make(void) {
-    tk_waitgroup *wg = (tk_waitgroup *)tk_region_alloc(tk_region_program(), sizeof *wg);
-    wg->count = 0;
-    pthread_mutex_init(&wg->lock, NULL);
-    pthread_cond_init(&wg->zero, NULL);
-    return wg;
-}
-void tk_waitgroup_add(tk_waitgroup *wg, int64_t n) {
-    pthread_mutex_lock(&wg->lock);
-    wg->count += n;
-    if (wg->count <= 0) pthread_cond_broadcast(&wg->zero);
-    pthread_mutex_unlock(&wg->lock);
-}
-void tk_waitgroup_done(tk_waitgroup *wg) {
-    pthread_mutex_lock(&wg->lock);
-    wg->count -= 1;
-    if (wg->count <= 0) pthread_cond_broadcast(&wg->zero);
-    pthread_mutex_unlock(&wg->lock);
-}
-void tk_waitgroup_wait(tk_waitgroup *wg) {
-    pthread_mutex_lock(&wg->lock);
-    while (wg->count > 0) pthread_cond_wait(&wg->zero, &wg->lock);
-    pthread_mutex_unlock(&wg->lock);
-}
-void tk_waitgroup_end(tk_waitgroup *wg) {
-    pthread_mutex_destroy(&wg->lock);
-    pthread_cond_destroy(&wg->zero);
-}
-uint64_t tk_waitgroup_make_u(void) { return (uint64_t)(uintptr_t)tk_waitgroup_make(); }
-void tk_waitgroup_add_u(uint64_t wg, int64_t n) { tk_waitgroup_add((tk_waitgroup *)(uintptr_t)wg, n); }
-void tk_waitgroup_done_u(uint64_t wg) { tk_waitgroup_done((tk_waitgroup *)(uintptr_t)wg); }
-void tk_waitgroup_wait_u(uint64_t wg) { tk_waitgroup_wait((tk_waitgroup *)(uintptr_t)wg); }
-void tk_waitgroup_end_u(uint64_t wg) { tk_waitgroup_end((tk_waitgroup *)(uintptr_t)wg); }
 
 // tk_waitgroup_selftest_arg / _worker — n workers each done() once after an add(n); wait must return
 // only once every worker has signalled. Returns 0 when the barrier held.
 typedef struct { tk_waitgroup *wg; } tk_waitgroup_selftest_arg;
-static void tk_waitgroup_selftest_worker(void *blob) {
-    tk_waitgroup_selftest_arg a = *(tk_waitgroup_selftest_arg *)blob;
-    free(blob);
-    tk_waitgroup_done(a.wg);
-}
-uint64_t tk_waitgroup_selftest(int64_t n) {
-    if (n < 0) n = 0;
-    tk_waitgroup *wg = tk_waitgroup_make();
-    tk_waitgroup_add(wg, n);
-    for (int64_t i = 0; i < n; i += 1) {
-        tk_waitgroup_selftest_arg *arg = (tk_waitgroup_selftest_arg *)malloc(sizeof *arg);
-        if (arg == NULL) tk_panic("out of memory");
-        arg->wg = wg;
-        tk_thread_spawn(tk_waitgroup_selftest_worker, arg);
-    }
-    tk_waitgroup_wait(wg);
-    tk_waitgroup_end(wg);
-    return 0;
-}
 #endif // _WIN32 — end of the pthread-backed §10 concurrency block (C0a/C0b/C5)
 
 // ============================ (§10 C0c) tk_oschan ================================================
@@ -2573,40 +2242,7 @@ struct tk_oschan {
     int ended;
 };
 
-// The reader's abstract-namespace name: sun_path[0]==0, then "tkchan:" and the key bytes. Truncates
-// an over-long key to fit sun_path rather than overrun it.
-static socklen_t tk_oschan_bind_name(struct sockaddr_un *a, const char *key, uint64_t key_len) {
-    memset(a, 0, sizeof *a);
-    a->sun_family = AF_UNIX;
-    a->sun_path[0] = 0;
-    const char *prefix = "tkchan:";
-    size_t plen = 7;
-    size_t room = sizeof(a->sun_path) - 1 - plen;
-    size_t klen = (size_t)key_len;
-    if (klen > room) klen = room;
-    memcpy(a->sun_path + 1, prefix, plen);
-    memcpy(a->sun_path + 1 + plen, key, klen);
-    return (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + plen + klen);
-}
 
-tk_oschan *tk_oschan_make(uint64_t elem_size, uint64_t bounds, const char *key, uint64_t key_len) {
-    if (elem_size == 0) elem_size = 1;
-    tk_oschan *ch = (tk_oschan *)tk_region_alloc(tk_region_program(), sizeof *ch);
-    memset(ch, 0, sizeof *ch);
-    ch->elem_size = elem_size;
-    ch->bounded = (bounds != 0);
-    ch->ended = 0;
-    ch->reader_fd = socket(AF_UNIX, SOCK_DGRAM, 0);
-    if (ch->reader_fd < 0) tk_panic("oschan: socket failed");
-    ch->addrlen = tk_oschan_bind_name(&ch->addr, key, key_len);
-    if (bind(ch->reader_fd, (struct sockaddr *)&ch->addr, ch->addrlen) < 0) tk_panic("oschan: bind failed");
-    if (bounds != 0) {
-        int rcvbuf = (int)(bounds * elem_size * 2);
-        if (rcvbuf < 1024) rcvbuf = 1024;
-        setsockopt(ch->reader_fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof rcvbuf);
-    }
-    return ch;
-}
 
 // A per-thread writer-socket cache keyed by the channel pointer: a writer never needs its own bound
 // name to sendto the reader. Bounded to a handful of channels per thread; overflow opens an
@@ -2615,150 +2251,16 @@ tk_oschan *tk_oschan_make(uint64_t elem_size, uint64_t bounds, const char *key, 
 static _Thread_local struct { tk_oschan *ch; int fd; } tk_oschan_wcache[TK_OSCHAN_WCACHE];
 static _Thread_local int tk_oschan_wcache_n = 0;
 
-static int tk_oschan_writer_fd(tk_oschan *ch) {
-    for (int i = 0; i < tk_oschan_wcache_n; i += 1) {
-        if (tk_oschan_wcache[i].ch == ch) return tk_oschan_wcache[i].fd;
-    }
-    int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
-    if (fd < 0) tk_panic("oschan: writer socket failed");
-    if (tk_oschan_wcache_n < TK_OSCHAN_WCACHE) {
-        tk_oschan_wcache[tk_oschan_wcache_n].ch = ch;
-        tk_oschan_wcache[tk_oschan_wcache_n].fd = fd;
-        tk_oschan_wcache_n += 1;
-    }
-    return fd;
-}
 
-int tk_oschan_send(tk_oschan *ch, const void *elem) {
-    int fd = tk_oschan_writer_fd(ch);
-    int flags = ch->bounded ? MSG_DONTWAIT : 0;
-    for (;;) {
-        ssize_t r = sendto(fd, elem, (size_t)ch->elem_size, flags, (struct sockaddr *)&ch->addr, ch->addrlen);
-        if (r == (ssize_t)ch->elem_size) return 0;
-        if (r < 0 && errno == EINTR) continue;
-        return -1;
-    }
-}
 
-int tk_oschan_recv(tk_oschan *ch, void *out) {
-    for (;;) {
-        ssize_t r = recvfrom(ch->reader_fd, out, (size_t)ch->elem_size, 0, NULL, NULL);
-        if (r == 0) return 0;                       // zero-length CLOSED sentinel
-        if (r < 0) { if (errno == EINTR) continue; return 0; }
-        return 1;
-    }
-}
 
-void tk_oschan_close(tk_oschan *ch) {
-    int fd = tk_oschan_writer_fd(ch);
-    sendto(fd, "", 0, 0, (struct sockaddr *)&ch->addr, ch->addrlen);
-}
 
-void tk_oschan_end(tk_oschan *ch) {
-    if (ch->ended) return;
-    ch->ended = 1;
-    tk_oschan_close(ch);
-    close(ch->reader_fd);
-    for (int i = 0; i < tk_oschan_wcache_n; i += 1) {
-        if (tk_oschan_wcache[i].ch == ch) { close(tk_oschan_wcache[i].fd); tk_oschan_wcache[i].ch = NULL; }
-    }
-}
 
-uint64_t tk_oschan_make_u(uint64_t elem_size, uint64_t bounds, uint64_t key_addr, uint64_t key_len) {
-    return (uint64_t)(uintptr_t)tk_oschan_make(elem_size, bounds, (const char *)(uintptr_t)key_addr, key_len);
-}
-uint64_t tk_oschan_make_str(uint64_t elem_size, uint64_t bounds, tk_str key) {
-    return (uint64_t)(uintptr_t)tk_oschan_make(elem_size, bounds, (const char *)key.ptr, (uint64_t)key.len);
-}
-int64_t tk_oschan_send_u(uint64_t ch, uint64_t elem_addr) {
-    return (int64_t)tk_oschan_send((tk_oschan *)(uintptr_t)ch, (const void *)(uintptr_t)elem_addr);
-}
-int64_t tk_oschan_recv_u(uint64_t ch, uint64_t out_addr) {
-    return (int64_t)tk_oschan_recv((tk_oschan *)(uintptr_t)ch, (void *)(uintptr_t)out_addr);
-}
-void tk_oschan_close_u(uint64_t ch) { tk_oschan_close((tk_oschan *)(uintptr_t)ch); }
-void tk_oschan_end_u(uint64_t ch) { tk_oschan_end((tk_oschan *)(uintptr_t)ch); }
 
-// The content pattern each fan-in record's third word must hold — a function of writer id and seq so
-// two records differing in EITHER field differ in pattern (the proof is by content, never by count).
-static uint64_t tk_oschan_pattern(uint64_t id, uint64_t seq) {
-    return id * 1000003u + seq * 7919u + 12648430u;
-}
 typedef struct { tk_oschan *ch; int64_t id; int64_t r; } tk_oschan_selftest_arg;
-static void tk_oschan_selftest_writer(void *blob) {
-    tk_oschan_selftest_arg a = *(tk_oschan_selftest_arg *)blob;
-    free(blob);
-    for (int64_t s = 0; s < a.r; s += 1) {
-        uint64_t rec[3];
-        rec[0] = (uint64_t)a.id;
-        rec[1] = (uint64_t)s;
-        rec[2] = tk_oschan_pattern((uint64_t)a.id, (uint64_t)s);
-        tk_oschan_send(a.ch, rec);
-    }
-}
-uint64_t tk_oschan_selftest(int64_t w, int64_t r) {
-    if (w < 1) w = 1;
-    if (w > 8) w = 8;
-    if (r < 0) r = 0;
-    char key[48];
-    snprintf(key, sizeof key, "selftest-%d", (int)getpid());
-    tk_oschan *ch = tk_oschan_make(24, 0, key, strlen(key));   // unbounded => blocking send, no EAGAIN
-    uint64_t handles[8];
-    for (int64_t i = 0; i < w; i += 1) {
-        tk_oschan_selftest_arg *arg = (tk_oschan_selftest_arg *)malloc(sizeof *arg);
-        if (arg == NULL) tk_panic("out of memory");
-        arg->ch = ch; arg->id = i + 1; arg->r = r;
-        handles[i] = tk_thread_join_spawn(tk_oschan_selftest_writer, arg);
-    }
-    int64_t expected[9];
-    for (int i = 0; i < 9; i += 1) expected[i] = 0;
-    int64_t total = w * r;
-    uint64_t rc = 0;
-    for (int64_t got = 0; got < total; got += 1) {
-        uint64_t rec[3];
-        if (!tk_oschan_recv(ch, rec)) { rc = 4; break; }
-        uint64_t id = rec[0], seq = rec[1], pat = rec[2];
-        if (id < 1 || id > (uint64_t)w) { rc = 1; break; }
-        if (pat != tk_oschan_pattern(id, seq)) { rc = 2; break; }
-        if ((int64_t)seq != expected[id]) { rc = 3; break; }
-        expected[id] += 1;
-    }
-    for (int64_t i = 0; i < w; i += 1) tk_thread_join(handles[i]);
-    tk_oschan_end(ch);
-    return rc;
-}
 #else
-// Windows has no AF_UNIX abstract namespace; the mailslot port is a later crumb (§10.2). The symbols
-// exist so the surface links, but any use is program-fatal until the port lands.
-tk_oschan *tk_oschan_make(uint64_t elem_size, uint64_t bounds, const char *key, uint64_t key_len) {
-    (void)elem_size; (void)bounds; (void)key; (void)key_len; tk_panic("oschan: not supported on Windows yet"); return NULL;
-}
-int tk_oschan_send(tk_oschan *ch, const void *elem) { (void)ch; (void)elem; tk_panic("oschan: not supported on Windows yet"); return -1; }
-int tk_oschan_recv(tk_oschan *ch, void *out) { (void)ch; (void)out; tk_panic("oschan: not supported on Windows yet"); return 0; }
-void tk_oschan_close(tk_oschan *ch) { (void)ch; tk_panic("oschan: not supported on Windows yet"); }
-void tk_oschan_end(tk_oschan *ch) { (void)ch; tk_panic("oschan: not supported on Windows yet"); }
-uint64_t tk_oschan_make_u(uint64_t elem_size, uint64_t bounds, uint64_t key_addr, uint64_t key_len) {
-    (void)elem_size; (void)bounds; (void)key_addr; (void)key_len; tk_panic("oschan: not supported on Windows yet"); return 0;
-}
-uint64_t tk_oschan_make_str(uint64_t elem_size, uint64_t bounds, tk_str key) {
-    (void)elem_size; (void)bounds; (void)key; tk_panic("oschan: not supported on Windows yet"); return 0;
-}
-int64_t tk_oschan_send_u(uint64_t ch, uint64_t elem_addr) { (void)ch; (void)elem_addr; tk_panic("oschan: not supported on Windows yet"); return -1; }
-int64_t tk_oschan_recv_u(uint64_t ch, uint64_t out_addr) { (void)ch; (void)out_addr; tk_panic("oschan: not supported on Windows yet"); return 0; }
-void tk_oschan_close_u(uint64_t ch) { (void)ch; tk_panic("oschan: not supported on Windows yet"); }
-void tk_oschan_end_u(uint64_t ch) { (void)ch; tk_panic("oschan: not supported on Windows yet"); }
-uint64_t tk_oschan_selftest(int64_t w, int64_t r) { (void)w; (void)r; tk_panic("oschan: not supported on Windows yet"); return 0; }
 #endif
 
-// (§10 C5) tk_region_deregister — bind type_id -> NULL in r's OWN table so a post-teardown
-// tk_region_lookup MISSES. The arg-flip twin of tk_region_register (never touches an ancestor's
-// table). A type_id that was never registered is a no-op.
-void tk_region_deregister(tk_region *r, uint64_t type_id) {
-    if (r == NULL) return;
-    for (size_t i = 0; i < r->nentries; i += 1) {
-        if (r->entries[i].type_id == type_id) { r->entries[i].instance = NULL; return; }
-    }
-}
 
 void *tk_alloc(size_t n) {
     // (S1) Route through the process root region: bump-allocated, never dropped = today's
@@ -2914,12 +2416,6 @@ void tk_test_begin(tk_str label) {
     tk_chan_open = true;
 }
 
-void tk_test_end(void) {
-    if (!tk_chan_open) return;
-    tk_chan_open = false;
-    tk_chan_verdict_line("ok");
-    tk_chan_emit_body();
-}
 
 // tk_test_close_failed — close the open channel with a FAILING verdict, then this test's OWN captured
 // bytes. Closing the channel FIRST is what lets anything written afterwards reach the real streams.
@@ -2981,94 +2477,15 @@ _Noreturn static void tk_test_capture_panic(const char *msg, size_t len) {
     tk_test_capture_leave(TK_TEST_PANICKED, 0);
 }
 
-// tk_test_outcome_at — the outcome recorded at capture depth `d`, as a plain (non-volatile) value.
-static tk_test_outcome tk_test_outcome_at(int d) {
-    tk_test_outcome e;
-    e.how = (int32_t)tk_test_how[d];
-    e.code = (int32_t)tk_test_code[d];
-    return e;
-}
 
-tk_test_outcome tk_test_run(void (* volatile body)(void)) {
-    volatile int d = (int)tk_test_depth;
-    if (d >= TK_TEST_CAPTURE_DEPTH_MAX) { body(); return tk_test_outcome_at(d - 1); }
-    tk_test_how[d] = TK_TEST_OK;
-    tk_test_code[d] = 0;
-    tk_test_depth = d + 1;
-    if (setjmp(tk_test_jb[d]) == 0) body();
-    tk_test_depth = d;
-    return tk_test_outcome_at(d);
-}
 
-// --- the GUARD's way in (and why it is here rather than in Teko) ----------------------------------
-//
-// §14.3 of the design gives the guard a Teko surface, `run_capturing(body: cabi fn())`. MEASURED ON
-// THIS TREE, THAT SURFACE DOES NOT EXIST AND CANNOT BE WRITTEN: `cabi` is not a token the lexer mints
-// (zero occurrences outside docs) and `fn() -> T` in parameter position does not parse. It is crumb
-// C1 of concorrencia-adiantada-s8, a whole language feature, and C0 does not need it — the `#test`
-// harness is emitted C, where `&<symbol>` asks the language for nothing.
-//
-// The GUARD does need a way in, though, and a guard that cannot fail is decoration. So the bodies it
-// runs live here, next to the mechanism they exercise, and a `#test` reaches them through one
-// ordinary extern call. When `cabi fn` lands, `run_capturing` replaces this and the bodies move into
-// the test file where they belong.
-static void tk_test_probe_returns(void) { }
-static void tk_test_probe_panics(void)  { tk_panic("capture guard: the panic that must not kill the suite"); }
-static void tk_test_probe_exits(void)   { tk_exit(TK_TEST_PROBE_EXIT_CODE); }
-static void tk_test_probe_div0(void)    { tk_panic_div0(); }
 
-// tk_test_probe_body — the body `which` selects, or NULL when `which` names nothing. NULL is what
-// makes an out-of-range selector a reported failure instead of a silent pass.
-static void (*tk_test_probe_body(int32_t which))(void) {
-    if (which == TK_TEST_PROBE_RETURNS) return tk_test_probe_returns;
-    if (which == TK_TEST_PROBE_PANICS)  return tk_test_probe_panics;
-    if (which == TK_TEST_PROBE_EXITS)   return tk_test_probe_exits;
-    if (which == TK_TEST_PROBE_DIV0)    return tk_test_probe_div0;
-    return NULL;
-}
 
-// tk_test_probe_last_code — the `code` of the most recent probe. It is a SECOND READ rather than a
-// second field of a returned struct because a `from "teko_rt"` extern cannot return a user struct by
-// value on this tree: codegen emits no prototype for such an extern (it relies on teko_rt.h) and the
-// header's C struct is not the mangled Teko one, so the call site fails to compile. Measured, not
-// assumed — `tk_t_teko__test__TestOutcome e = tk_test_capture_probe(...)` is an `invalid initializer`.
-// (E1-C1) Per-task member (see the seam beside the F1 families).
 
-int32_t tk_test_capture_probe(int32_t which) {
-    void (*body)(void) = tk_test_probe_body(which);
-    tk_test_probe_last_code = 0;
-    if (!body) return TK_TEST_PROBE_UNKNOWN;
-    tk_test_outcome e = tk_test_run(body);
-    tk_test_probe_last_code = e.code;
-    return e.how;
-}
 
-int32_t tk_test_capture_last_code(void) { return tk_test_probe_last_code; }
 
-// tk_test_report_exited — the EXITED verdict, which carries the value: `FAILED (exit <n>)`. A test
-// that leaves by exiting is not a pass, and naming the code is what makes the report actionable.
-static void tk_test_report_exited(int32_t code) {
-    char verdict[TK_TEST_VERDICT_MAX];
-    snprintf(verdict, sizeof verdict, "FAILED (exit %" PRId32 ")", code);
-    tk_test_close_failed(verdict);
-}
 
-void tk_test_report(tk_test_outcome e) {
-    tk_test_ran += 1;
-    if (e.how == TK_TEST_OK) { tk_test_passed += 1; tk_test_end(); return; }
-    tk_test_failed += 1;
-    if (e.how != TK_TEST_EXITED) { tk_test_close_failed("FAILED"); return; }
-    tk_test_exited += 1;
-    tk_test_report_exited(e.code);
-}
 
-void tk_test_summary(void) {
-    fprintf(stdout, "test result: %s. %ld ran; %ld passed; %ld failed; %ld exited\n",
-            tk_test_failed ? "FAILED" : "ok", tk_test_ran, tk_test_passed, tk_test_failed, tk_test_exited);
-    fflush(stdout);
-}
-
-bool tk_test_any_failed(void) { return tk_test_failed != 0; }
 
 // --- the SHARD filter ---------------------------------------------------------------------------
 //
@@ -3103,13 +2520,6 @@ static void tk_shard_parse(void) {
     tk_shard_count = n;
 }
 
-bool tk_test_shard_take(void) {
-    if (tk_shard_index < 0) tk_shard_parse();
-    long ordinal = tk_shard_seen;
-    tk_shard_seen += 1;
-    if (tk_shard_count <= 1) return true;
-    return (ordinal % tk_shard_count) == tk_shard_index;
-}
 
 // --- the TEST SCOPE (see teko_rt.h for WHY the discipline is isolation, uniformly) ----------------
 //
@@ -3187,22 +2597,6 @@ void tk_println(tk_str s) {
     fputc('\n', stdout);   // single 0x0A
 }
 
-// tk_flush_out — push stdout to the OS now.
-//
-// Exists for ONE reason, and it is a diagnosis reason. stdout is block-buffered whenever it is not
-// a tty — which is every CI run and every `> log` — while a panic, an assert() abort and a segfault
-// all reach the terminal through stderr, unbuffered. So a crash prints its message while the test
-// NAMES that led up to it are still sitting in stdout's buffer, and the reader attributes the crash
-// to whichever test was last flushed: an offset of up to a whole buffer.
-//
-// That is not hypothetical. It cost a full investigation on this train: an abort was attributed to
-// a spine test ~66 tests before the real one, and the misattribution was reported up as a probable
-// compiler defect ("adding a field to a struct breaks an unrelated test") before `stdbuf -o0`
-// showed the true failure. The test harness calls this after printing each test's name and BEFORE
-// running its body, so the name is on the wire before anything can kill the process.
-void tk_flush_out(void) {
-    fflush(stdout);
-}
 
 // Host output FFI bottoms (scope.c: write/ewrite/eprint/eprintln) — exactly s.len bytes, tolerate
 // embedded NUL. write → stdout; ewrite/eprint → stderr; eprintln → stderr + '\n'.
@@ -3259,21 +2653,6 @@ _Noreturn void tk_panic_str(tk_str msg) {
     tk_backtrace();   // (C1.9) show the call stack
     tk_regions_free_all();   // (W9.3b) abort() skips atexit — free the arena regions explicitly first
     abort();
-}
-// the platform-uniform process status for a raw Teko exit code (owner ruling 2026-07-30 — the
-// language equalizes the exit code, the programmer never writes the mask). See TK_EXIT_STATUS_MASK
-// in teko_rt.h for WHY the low byte is the portable observable. Signed `&` in C keeps the negative
-// convention POSIX already had: -1 & 0xFF == 255.
-int tk_exit_status(int32_t code) { return (int)(code & TK_EXIT_STATUS_MASK); }
-// the Teko-level `exit(<int>)` — end the program with a status code (no panic message).
-// (W9.3b) free every live arena region before exiting so a diverging exit() is leak-clean (the atexit
-// hook would also fire, but the explicit call keeps the contract local + obvious; free_all is idempotent).
-// Under CAPTURE (test mode only) the value is recorded as a fact about the TEST and no syscall is
-// sent; outside it the exit stays the program's contract with whoever invoked it, byte for byte.
-_Noreturn void tk_exit(int32_t code) {
-    if (tk_test_capturing()) tk_test_capture_leave(TK_TEST_EXITED, code);
-    tk_regions_free_all();
-    exit(tk_exit_status(code));
 }
 
 _Noreturn void tk_panic_div0(void)     { tk_panic("division by zero"); }
@@ -3384,26 +2763,6 @@ tk_str tk_rt_read_stdin(void) {
     return (tk_str){ buf, len };
 }
 
-// (0.3.1.0 LSP crumb 0) tk_rt_read_stdin_n — read EXACTLY `n` bytes from stdin into an
-// arena-owned []byte slice. Loops fread until `n` bytes have been consumed or stdin hits EOF
-// (fread returns 0). The returned slice length is what was actually read: `n` on a full body,
-// fewer on EOF mid-body — the transport layer (src/lsp/jsonrpc.tks) compares that length to `n`
-// and raises "truncated body" rather than accepting a short frame, so a truncated JSON-RPC frame
-// is never silently taken. Uses fread on the same stdin FILE* the header line reader (fgetc via
-// tk_rt_read_line) uses, so headers and body share one buffered stream with no over-read: the
-// line reader stops at the '\n' after the blank separator, and this reads the exact body that
-// follows. A genuine read fault (ferror) panics (M.1 fail-loud), mirroring tk_rt_read_stdin.
-tk_slice_byte tk_rt_read_stdin_n(uint64_t n) {
-    tk_byte *out = (tk_byte *)tk_alloc(n == 0 ? 1 : n);
-    uint64_t filled = 0;
-    while (filled < n) {
-        size_t got = fread(out + filled, 1, (size_t)(n - filled), stdin);
-        if (got == 0) break;
-        filled += (uint64_t)got;
-    }
-    if (ferror(stdin)) tk_panic("cannot read stdin");
-    return (tk_slice_byte){ out, filled };
-}
 
 tk_ffi_sres tk_rt_getenv(tk_str name) {
     char *n = tk_cstr(name);
@@ -3624,9 +2983,6 @@ bool tk_rt_getcwd_ok(const tk_byte **out_ptr, uint64_t *out_len) {
     return tk_ffi_sres_into_out(tk_rt_getcwd(), out_ptr, out_len);
 }
 
-bool tk_rt_read_file_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_ptr, uint64_t *out_len) {
-    return tk_ffi_sres_into_out(tk_rt_read_file((tk_str){ path_ptr, (size_t)path_len }), out_ptr, out_len);
-}
 
 bool tk_rt_list_dir_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_ptr, uint64_t *out_len) {
     tk_ffi_slres r = tk_rt_list_dir((tk_str){ path_ptr, (size_t)path_len });
@@ -3656,13 +3012,7 @@ bool tk_rt_remove_file_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_b
     return tk_ffi_ures_into_out(tk_rt_remove_file((tk_str){ path_ptr, (size_t)path_len }), out_err_ptr, out_err_len);
 }
 
-bool tk_rt_write_file_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte *content_ptr, uint64_t content_len, const tk_byte **out_err_ptr, uint64_t *out_err_len) {
-    return tk_ffi_ures_into_out(tk_rt_write_file((tk_str){ path_ptr, (size_t)path_len }, (tk_str){ content_ptr, (size_t)content_len }), out_err_ptr, out_err_len);
-}
 
-bool tk_rt_write_file_bytes_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte *data_ptr, uint64_t data_len, const tk_byte **out_err_ptr, uint64_t *out_err_len) {
-    return tk_ffi_ures_into_out(tk_rt_write_file_bytes((tk_str){ path_ptr, (size_t)path_len }, data_ptr, data_len), out_err_ptr, out_err_len);
-}
 
 // (romaneio .31) TK_RT_SIGNAL_EXIT_BASE — the shell convention for "died by signal N": 128 + N.
 // A child killed by SIGABRT (6) therefore reports 134, exactly what `sh -c` reports for the same
@@ -3995,15 +3345,7 @@ int64_t tk_rt_pipe(void) {
     return tk_rt_pack_pipe(fds[0], fds[1]);
 }
 
-int64_t tk_rt_pipe_read_fd(int64_t packed) {
-    if (packed < 0) return TK_RT_FD_NONE;
-    return packed & TK_RT_FD_HALF_MASK;
-}
 
-int64_t tk_rt_pipe_write_fd(int64_t packed) {
-    if (packed < 0) return TK_RT_FD_NONE;
-    return (packed >> TK_RT_FD_HALF_BITS) & TK_RT_FD_HALF_MASK;
-}
 
 int32_t tk_rt_close_fd(int64_t fd) {
     if (fd < 0) return TK_RT_FD_NONE;
@@ -4136,29 +3478,6 @@ uint64_t tk_peak_rss(void) {
 #endif
 }
 
-// (arena-por-escopo M0) tk_cur_rss — this process's CURRENT resident set size in BYTES, the
-// twin of tk_peak_rss: where ru_maxrss reports only the high-water mark, this reports the RSS
-// RIGHT NOW, so the build can ATTRIBUTE a peak to the phase boundary it crosses (checker / mono
-// / consteval / codegen). No runtime primitive exposes current RSS; without it the per-phase
-// retention is invisible and no later crumb is gateable by "where the peak lands". Reads
-// /proc/self/statm on Linux (field 2 = resident pages) and scales by the page size; 0 =
-// unavailable (same contract as tk_peak_rss, the caller then suppresses the print). Read-only
-// and side-effect-free, exactly like its twin.
-uint64_t tk_cur_rss(void) {
-#if defined(_WIN32) || defined(__APPLE__)
-    return 0;   /* /proc is Linux-only; the per-phase attribution is a Linux-first measurement */
-#else
-    FILE *f = fopen("/proc/self/statm", "r");
-    if (f == NULL) return 0;
-    unsigned long long total_pages = 0, resident_pages = 0;
-    int got = fscanf(f, "%llu %llu", &total_pages, &resident_pages);
-    fclose(f);
-    if (got != 2) return 0;
-    long page = sysconf(_SC_PAGESIZE);
-    if (page <= 0) return 0;
-    return (uint64_t)resident_pages * (uint64_t)page;
-#endif
-}
 
 // (E1-C6) tk_rt_nproc — the number of processors the OS grants THIS process right now (online CPUs),
 // at least 1. The OS-granted count is what the test/regression job pools default to and clamp their
@@ -4767,60 +4086,12 @@ static int64_t tk_wall_now_ns(void) {
 #endif
 }
 
-// Gregorian calendar from a days-since-epoch value (Julian Day Number algorithm).
-// Based on the Richards (2013) algorithm; handles negative days (pre-1970 dates). Mirrored
-// (by design, not shared — see teko_rt.h) by src/time/time.tks::civil_from_days.
-static void tk_jdn_to_ymd(int32_t days, int32_t *y, int32_t *m, int32_t *d_out) {
-    int64_t jdn = (int64_t)days + 2440588LL;  // JDN of 1970-01-01 = 2440588
-    int64_t f = jdn + 1401LL + (((4LL * jdn + 274277LL) / 146097LL) * 3LL / 4LL) - 38LL;
-    int64_t e = 4LL * f + 3LL;
-    int64_t g = (e % 1461LL) / 4LL;
-    int64_t h = 5LL * g + 2LL;
-    *d_out = (int32_t)((h % 153LL) / 5LL + 1LL);
-    *m     = (int32_t)((h / 153LL + 2LL) % 12LL + 1LL);
-    *y     = (int32_t)(e / 1461LL - 4716LL + (14LL - (int64_t)*m) / 12LL);
-}
 
-// --- the time_types-fixture-only quartet (unchanged signatures/behavior) ---
 
-tk_date tk_rt_date_from_days(int32_t days) {
-    return (tk_date){ .days = days };
-}
 
-int32_t tk_rt_date_year(tk_date d) {
-    int32_t y, m, dd;
-    tk_jdn_to_ymd(d.days, &y, &m, &dd);
-    return y;
-}
 
-int32_t tk_rt_date_month(tk_date d) {
-    int32_t y, m, dd;
-    tk_jdn_to_ymd(d.days, &y, &m, &dd);
-    return m;
-}
 
-int32_t tk_rt_date_day_of_month(tk_date d) {
-    int32_t y, m, dd;
-    tk_jdn_to_ymd(d.days, &y, &m, &dd);
-    return dd;
-}
 
-// --- host clock reads (SCALAR-only) ---
-
-int32_t tk_rt_wall_days(void) {
-    int64_t secs = tk_wall_now_ns() / 1000000000LL;
-    // Floor division (towards -inf) so a pre-1970 read maps to the correct earlier day.
-    if (secs >= 0) { return (int32_t)(secs / 86400LL); }
-    return (int32_t)((secs - 86399LL) / 86400LL);
-}
-
-uint64_t tk_rt_wall_ns_of_day(void) {
-    int64_t ns = tk_wall_now_ns();
-    int64_t day_ns = (int64_t)86400LL * 1000000000LL;
-    int64_t rem = ns % day_ns;
-    if (rem < 0) { rem += day_ns; }   // C `%` truncates; adjust a pre-1970 negative remainder up
-    return (uint64_t)rem;
-}
 
 int16_t tk_rt_wall_offset_minutes(void) {
 #if defined(_WIN32)
@@ -4836,19 +4107,6 @@ int16_t tk_rt_wall_offset_minutes(void) {
 #endif
 }
 
-int64_t tk_rt_monotonic_ns(void) {
-#if defined(_WIN32)
-    LARGE_INTEGER freq, counter;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&counter);
-    double secs = (double)counter.QuadPart / (double)freq.QuadPart;
-    return (int64_t)(secs * 1000000000.0);
-#else
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
-#endif
-}
 
 // tk_nproc — logical CPUs the OS grants this process. Floor 1: an OS that answers 0 or fails is
 // treated as one CPU, because a run always has at least the lane executing it. No allocation.
