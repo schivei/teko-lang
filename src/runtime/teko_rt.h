@@ -57,8 +57,8 @@ typedef struct {
 } tk_char;
 
 // tk_slice_byte — the runtime layout of a `[]byte` slice. Same {ptr,len} shape as tk_char
-// (both are byte arrays). Pre-declared here so tk_bytes_of_str can use it in teko_rt.h
-// without depending on the generated program's per-file typedef.
+// (both are byte arrays). Pre-declared here so runtime helpers can name it without depending
+// on the generated program's per-file typedef.
 typedef struct {
     tk_byte  *ptr;
     uint64_t  len;
@@ -622,10 +622,8 @@ tk_str tk_str_concat(tk_str a, tk_str b);
 // in `r` (tk_region_alloc) instead of malloc'd: the str lives in `r` and dies when `r` is dropped, so
 // a str produced inside a `{}` can participate in death-by-scope. `r == tk_region_root()`/program (or
 // NULL) reproduces the leak-tolerant malloc behaviour of tk_str_concat.
-// (C7.1a) FFI marshalling: the raw byte pointer of a str (teko::mem::as_ptr — borrows, ptr+len
-// use), a fresh NUL-terminated C copy of a str (teko::mem::as_cstr), and a copy of a
-// NUL-terminated foreign C string back into a fresh str (teko::mem::str_from_cstr).
-void *tk_as_ptr(tk_str s);
+// (C7.1a) FFI marshalling: a fresh NUL-terminated C copy of a str (teko::mem::as_cstr), and a
+// copy of a NUL-terminated foreign C string back into a fresh str (teko::mem::str_from_cstr).
 void *tk_cstr_dup(tk_str s);
 // (tk_bytes_from_ptr is declared after tk_ffi_bytes, below — its return type is defined there.)
 // tk_i64_to_str / tk_u64_to_str — the integer's DECIMAL text in a fresh str. The interp
@@ -668,28 +666,11 @@ const tk_byte *tk_str_of_bytes_len(const tk_byte *ptr, uint64_t len, uint64_t *o
 // sub-register-width argument unspecified, and this backend has no argument-narrowing pass
 // (`apply_native_c_return_narrow` narrows RETURNS only); the low 8 bits are taken here instead
 // (0.3.1.0 degrau 32).
-// tk_bytes_of_str — zero-copy view of a str's bytes as a []byte slice. Returns a tk_slice_byte
-// pointing into the same memory. The caller must not outlive the originating str allocation.
-tk_slice_byte tk_bytes_of_str(tk_str s);
-// tk_bytes_of_str_len — the out-parameter-length twin of `tk_bytes_of_str` (mirrors
-// `tk_str_of_bytes_len`'s own doc, reversed direction): the native backend's `LCall` reads
-// exactly one result register, never the true 2-eightbyte SysV/AAPCS64 struct `tk_bytes_of_str`
-// returns by value, so the view's pointer rides the return register and its length rides
-// `*out_len`. Zero-copy, same as `tk_bytes_of_str`: no allocation, no ownership transfer (0.3.1.0
-// degrau 21).
-const tk_byte *tk_bytes_of_str_len(const tk_byte *ptr, uint64_t len, uint64_t *out_len);
 // tk_char_to_u32 — decode a `char` (its 1–4 UTF-8 bytes) to the scalar codepoint value. The bytes
 // are valid UTF-8 by construction (the lexer validated the literal), so this is a pure decode.
 uint32_t tk_char_to_u32(tk_char c);
-// tk_str_len_chars — count UTF-8 codepoints in s. Walks the byte sequence using lead-byte widths;
-// no allocation, no copy. (The `len_chars` builtin lowers to this.)
-uint64_t tk_str_len_chars(tk_str s);
-// tk_str_chars — split s into a heap-allocated array of tk_char (one per UTF-8 codepoint).
-// Each tk_char.ptr borrows INTO s.ptr (no copy of the codepoint bytes); the outer array is
-// malloc'd. Returns {ptr, len} where len == tk_str_len_chars(s). OOM panics (M.1).
-// (The `chars` builtin lowers to this; the generated C holds the result as tk_slice_char.)
+// tk_slice_char — the runtime layout of a `[]char` slice (the generated C holds char arrays here).
 typedef struct { tk_char *ptr; uint64_t len; } tk_slice_char;
-tk_slice_char tk_str_chars(tk_str s);
 // tk_str_concat3 REMOVED (2026-07-01) — superseded by `concat(params pieces: []str)`, bridged
 // at the call site (codegen.c/.tks) by folding N pieces via tk_str_concat; no runtime symbol needed.
 // --- Phase 3 str query/slice builtins (the checker types these via tk_builtin_fn) ---
@@ -770,12 +751,6 @@ tk_str tk_str_slice_from(tk_str s, uint64_t start);
 const tk_byte *tk_str_slice_len(const tk_byte *s_ptr, uint64_t s_len, uint64_t start, uint64_t end, uint64_t *out_len);
 const tk_byte *tk_str_slice_to_len(const tk_byte *s_ptr, uint64_t s_len, uint64_t end, uint64_t *out_len);
 const tk_byte *tk_str_slice_from_len(const tk_byte *s_ptr, uint64_t s_len, uint64_t start, uint64_t *out_len);
-// tk_str_slice_chars_len — out-parameter-length twin of tk_str_slice_chars (codepoint-index
-// slice). Same hidden-out-param convention as tk_str_slice_len: the native backend's LCall result
-// capture is one register, one short of the two-eightbyte tk_str return; this wrapper hands the
-// length back through *out_len and returns the pointer half. Thin wrapper — calls tk_str_slice_chars
-// and owns no logic of its own.
-const tk_byte *tk_str_slice_chars_len(const tk_byte *s_ptr, uint64_t s_len, int64_t from, int64_t to, uint64_t *out_len);
 // tk_str_len — s.len (the byte length). No allocation.
 uint64_t tk_str_len(tk_str s);
 // tk_str_ends_with — true iff s ends with suffix (suffix.len <= s.len and the tail bytes
@@ -784,26 +759,6 @@ bool tk_str_ends_with(tk_str s, tk_str suffix);
 // tk_str_contains — true iff needle occurs in s (naive byte search; an empty needle → true).
 // No allocation.
 bool tk_str_contains(tk_str s, tk_str needle);
-
-// --- ROUND 0: UTF-8 codepoint operations (char_at / str_slice_chars / is_alpha / is_digit /
-//     is_space / to_lower / to_upper). Mirrored in scope.c/.tks, codegen.c/.tks. ---
-//
-// tk_char_at — the UTF-8 codepoint at 0-based codepoint index i in s. Panics if out of range.
-// Returns a tk_char view INTO s.ptr (no copy); the caller must ensure s outlives the result.
-tk_char tk_char_at(tk_str s, int64_t i);
-// tk_str_slice_chars — the substring from codepoint index `from` (inclusive) to `to` (exclusive),
-// returned as a FRESH owned str (copied). Panics if from > to or to > len_chars(s). (M.1)
-tk_str tk_str_slice_chars(tk_str s, int64_t from, int64_t to);
-// tk_is_alpha — true if the codepoint is a Unicode letter. For single-byte ASCII uses isalpha(3);
-// for multibyte codepoints (lead byte ≥ 0x80) returns true (simplified ROUND 0 rule).
-// tk_is_digit — true iff the codepoint is an ASCII decimal digit '0'–'9'.
-// tk_is_space — true iff the codepoint is ASCII whitespace (' ', '\t', '\n', '\r', '\f', '\v').
-// tk_to_lower — ASCII lowercase: 'A'–'Z' → 'a'–'z'; non-ASCII chars are returned unchanged.
-// Returns a tk_char that either borrows the source bytes (non-ASCII) or a static 1-byte store
-// (ASCII — the result is valid for the program lifetime).
-tk_char tk_to_lower(tk_char c);
-// tk_to_upper — ASCII uppercase: 'a'–'z' → 'A'–'Z'; non-ASCII chars are returned unchanged.
-tk_char tk_to_upper(tk_char c);
 
 // =========================================================================
 // Host-FFI + arithmetic bottoms (Phase 7 / scope.c builtin_fn surface).

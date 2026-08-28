@@ -3358,17 +3358,29 @@ fn cg_is_byte_slice_type(t: @Type()): bool {
     match t { checker::Slice as sl => match sl.element { checker::Byte => true; _ => false }; _ => false }
 }
 
-fn emit_bytes_str_reinterpret(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, inner: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
-    var to_bytes = cg_is_byte_slice_type(e.type)
-    var src_c = if to_bytes { "({ tk_str _tkbsr = (" } else { "({ tk_slice_byte _tkbsr = (" }
-    var tail = if to_bytes { "); (tk_slice_byte){ (tk_byte *)_tkbsr.ptr, _tkbsr.len }; })" } else { "); (tk_str){ (const tk_byte *)_tkbsr.ptr, _tkbsr.len }; })" }
-    buf.write(src_c)
-    emit_expr_ctx(buf, prog, checker::Void { }, inner, escaping, regions, fn_body, dctx)
-    buf.write(tail)
+fn cg_fat_view_ctor(t: @Type()): str {
+    match t {
+        checker::Char => "(tk_char){ (uint8_t *)_tkbsr.ptr, _tkbsr.len }"
+        checker::Slice => "(tk_slice_byte){ (tk_byte *)_tkbsr.ptr, _tkbsr.len }"
+        _ => "(tk_str){ (const tk_byte *)_tkbsr.ptr, _tkbsr.len }"
+    }
 }
 
+fn emit_bytes_str_reinterpret(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, inner: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
+    buf.write("({ ")
+    emit_type(buf, prog, inner.type)
+    buf.write(" _tkbsr = (")
+    emit_expr_ctx(buf, prog, checker::Void { }, inner, escaping, regions, fn_body, dctx)
+    buf.write("); ")
+    buf.write(cg_fat_view_ctor(e.type))
+    buf.write("; })")
+}
+
+fn cg_is_char_type(t: @Type()): bool { match t { checker::Char => true; _ => false } }
+
 fn cg_is_bytes_str_reinterpret(dst: @Type(), src: @Type()): bool {
-    (cg_is_str_type(src) && cg_is_byte_slice_type(dst)) || (cg_is_byte_slice_type(src) && cg_is_str_type(dst))
+    (cg_is_str_type(src) && cg_is_byte_slice_type(dst)) || (cg_is_byte_slice_type(src) && cg_is_str_type(dst)) ||
+    (cg_is_str_type(src) && cg_is_char_type(dst)) || (cg_is_char_type(src) && cg_is_str_type(dst))
 }
 
 fn emit_cast_checked(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, inner: checker::TExpr, tmp_ctype: str, check_suffix: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
@@ -4379,16 +4391,8 @@ fn emit_call_inner(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e
             else if last == "arena_commit" { builtin = cg_arena_sym(CgArenaSym::ArenaCommit); has_builtin = true }
             else if last == "task_reset" { builtin = "tk_task_reset"; has_builtin = true }
             else if last == "len" { builtin = cb_fn_name_str("teko::runtime", "str_len"); has_builtin = true }
-            else if last == "bytes_of_str" { builtin = "tk_bytes_of_str"; has_builtin = true }
-            else if last == "chars" { builtin = "tk_str_chars"; has_builtin = true }
-            else if last == "len_chars" { builtin = "tk_str_len_chars"; has_builtin = true }
-            else if last == "char_at" { builtin = "tk_char_at"; has_builtin = true }
-            else if last == "str_slice_chars" { builtin = "tk_str_slice_chars"; has_builtin = true }
-            else if last == "to_lower" && c.call_ns.len == 0 { builtin = "tk_to_lower"; has_builtin = true }
-            else if last == "to_upper" && c.call_ns.len == 0 { builtin = "tk_to_upper"; has_builtin = true }
             else if last == "ends_with" { builtin = cb_fn_name_str("teko::runtime", "str_ends_with"); has_builtin = true }
             else if last == "contains" { builtin = cb_fn_name_str("teko::runtime", "str_contains"); has_builtin = true }
-            else if last == "as_ptr" { builtin = "tk_as_ptr"; has_builtin = true }
             else if last == "version" { builtin = "tk_rt_version"; has_builtin = true }
             else if last == "peak_rss" { builtin = cb_fn_name_str("teko::runtime", "peak_rss"); has_builtin = true }
             else if last == "floor" { builtin = "tk_floor"; has_builtin = true }
