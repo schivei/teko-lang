@@ -163,6 +163,19 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   verificar/corrigir as pernas.
 
 ## Convenções da linguagem/codebase
+- **CHECKED vs UNCHECKED — exposta=`error`, interna=pânico (LEI DURA, dono 2026-08-28).** Função **exposta ao
+  desenvolvedor (`exp`) retorna `error` no caminho de falha (CHECKED)** — o dev da stdlib recebe o erro pra
+  tratar, não leva pânico. Função **NÃO-exposta (`pub`/privado/interna) entra em PÂNICO (UNCHECKED)** — o
+  compilador controla o interno e sabe que está correto; se o pânico dispara, é bug. Ex.: `fdiv` interno
+  (emitido pra `a/b`) = unchecked/pânico em `/0`; a divisão checada dev-facing = `error`. Vale pra TODO helper
+  de runtime surfaceado no expurgo (a superfície `exp` retorna `error`; o unchecked interno panica). Consistente
+  com `crypto_error` (o usuário RECEBE o erro, não o constrói).
+- **`teko::X` E bare `X` são AMBAS válidas — `teko::X` é ESCAPE-HATCH (LEI DURA, dono 2026-08-28 — D180).** Uma
+  chamada nua `X()` resolve pelo escopo (shadow local do dev vence); `teko::X()` (teko-rooted) **força** a fn do
+  teko, ignorando shadow — a saída quando o dev define a própria `X`. Uma **regra GERAL no resolver** (`teko::<nome>`
+  → `exp global` correspondente), NÃO name-detect por-nome. Expurgar name-detect de um runtime-fn NÃO pode dropar
+  a resolução `teko::X`; substitui pela regra geral. Verificar SEMPRE as duas formas (a regressão do os/arch escapou
+  por testar só bare).
 - **Só existe `VAR` e `CONST` — `let`/`mut` NÃO existem, tudo é mutável** (ruling do dono). Interno:
   `BindKind = enum { Var; Const }` — `Mut`→`Var`, `Let`→`Var` (sem repensar Let; discard/loop-var idem).
   Params seguem imutáveis por B.21 (eixo separado, não é BindKind).
