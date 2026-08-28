@@ -114,12 +114,16 @@ Faz merge/cherry-pick de `expurgo/str-char-surface` em `fix/retirement` (os 8 co
 `teko::runtime`, o reinterpret str↔[]byte↔char, o C removido). Já é verde. **Reseed.**
 Risco: baixo (já validado). Fixpoint gen2==gen3.
 
-### CRUMB 1 — ponte de tipo `Str{} ≡ Named{"teko::base::str"}` (aditivo, dormante)
-Em `type.tks type_eq`: braço `Str => match b { Str => true; Named as nb => nb.name == STR_QN; _ }`
-e recíproco no braço `Named`. Introduz `fn str_qual_name(): str { "teko::base::str" }`.
-NADA produz `Named{str}` ainda → comportamento idêntico, código dormante. Fixpoint verde,
-**sem reseed** (folha lógica, C idêntico pois nunca dispara).
-Risco: mínimo.
+### CRUMB 1 — ponte de tipo `Str{} ≡ Named{"teko::base::str"}` (aditivo, dormante) — LANDOU `adda7989`
+Em `type.tks type_eq`: braço `Str => match b { Str => true; Named as nb => nb.name == "teko::base::str"; _ }`
+e recíproco no braço `Named`. **STR_QN = literal INLINE `"teko::base::str"` em cada uso — NÃO um helper.**
+**CORREÇÃO (implementer, 2026-08-28):** um `fn str_qual_name(): str { ... }` QUEBRA a dormância — fn que
+retorna `str` (alocante) chamada de dentro do `type_eq` força `type_eq` a ganhar param de região que
+propaga por ~89 fns do call-graph = mudança de emissão massiva. Usar SEMPRE literal inline (como Error/Null).
+NADA produz `Named{str}` ainda → dormância de RUNTIME (o braço nunca casa). **A emissão NÃO é byte-idêntica**
+(os 2 braços SÃO compilados no C) — mas **sem reseed**: gen0-do-seed-commitado ainda builda o tip + fixpoint
+gen2==gen3 fecha (o seed converge em 1 passo; reseed absorvido no CRUMB 3). Verificado: 2 hunks de append
+puro, zero ripple, ASan 0, 3 harnesses. Risco: mínimo. **STR_QN em todo este doc = o literal inline.**
 
 ### CRUMB 2 — predicado-único de DISPATCH por camada (roteamento; comportamento idêntico)
 Introduz/consolida `fn is_str_type(t): bool` que reconhece `Str{}` **e** `Named{STR_QN}`, e roteia
