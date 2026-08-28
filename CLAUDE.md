@@ -593,6 +593,14 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
     (`operator`/overload) — que é **função normal**, caminho genérico, ZERO magic. Ou seja o backend não "conhece" o
     operador não-opcode; ele desce à fn de overload como qualquer chamada. (Açúcar de sintaxe no parser é OK; a
     semântica é chamada de função genérica.)
+    **SOBRECARGA = MÉTODO DO TIPO (dono 2026-08-28, desenho JÁ EXISTE):** a sobrecarga de operador ocorre em
+    QUALQUER tipo ou subtipo como **método daquele tipo** — logo operador-sem-opcode resolve pelo **método do tipo**
+    (chamada genérica de método), sem máquina nova. Só os primitivos numéricos batendo opcode são L2. **`div/mod/
+    arith-guard NÃO é fork (dono confirmou):** o operador numérico primitivo emite o opcode DIRETO (L2, inline, NÃO
+    vira fn → sem recursão), e o guard (div0/overflow) CHAMA a fn de panic de superfície que já existe (`panic_div0`/
+    `panic_overflow`, `exp global` em `teko_rt.tks`). Expurgo = trocar o wrapper C `tk_div_<tag>`/`tk_add_<tag>` por
+    (emite opcode + chama panic de superfície). SEM "primitiva raw-divide". bigint/dec já são o modelo (operador →
+    método/call genérica).
   - **O ROTEADOR DE SUPERFÍCIE JÁ EXISTE — é o `global`; o expurgo NÃO constrói máquina nova (dono 2026-08-28).**
     `global` É o roteador: diz "esta fn/tipo tem que ser enxergada **com ou sem namespace**" (D170/D180 — `is_global`
     em `call_binding_matches`). Logo generizar um builtin é MECÂNICO e sem invenção: marca `exp global` + **apaga** os
