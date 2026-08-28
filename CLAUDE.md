@@ -593,6 +593,14 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
     (`operator`/overload) — que é **função normal**, caminho genérico, ZERO magic. Ou seja o backend não "conhece" o
     operador não-opcode; ele desce à fn de overload como qualquer chamada. (Açúcar de sintaxe no parser é OK; a
     semântica é chamada de função genérica.)
+  - **O ROTEADOR DE SUPERFÍCIE JÁ EXISTE — é o `global`; o expurgo NÃO constrói máquina nova (dono 2026-08-28).**
+    `global` É o roteador: diz "esta fn/tipo tem que ser enxergada **com ou sem namespace**" (D170/D180 — `is_global`
+    em `call_binding_matches`). Logo generizar um builtin é MECÂNICO e sem invenção: marca `exp global` + **apaga** os
+    três lados de exceção (builtin-sig em `scope.tks`, name-detect no codegen, dispatch no `lower.tks`). NÃO se
+    constrói roteamento novo no backend — o `global` já resolve, bare OU qualificado, nas duas rotas. **Corolário:**
+    como `global` é "vista com ou sem namespace", a fn global resolve **independente da forma de qualificação da
+    chamada** (`X`, `teko::X`, `teko::sub::X`) — NÃO precisa reescrever sítio de chamada nem mover de namespace pra
+    generizar; se uma forma "não resolveria", é porque o `global` não foi aplicado, não porque falta máquina.
 - **ARENA/REGIÃO = TEKO + codegen(ABI/syscall/linker), ZERO adição de C (dono 2026-08-28 — D148).** Toda feature
   de arena/região se escreve **em Teko** (`arena.tks`, que já é 100% Teko/VIVA — D128) e reflete no **codegen**
   (rota-C emite a chamada Teko compilada; native `lower.tks` emite via ABI/syscall/linker). **PROIBIDO ADICIONAR
