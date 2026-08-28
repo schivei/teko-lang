@@ -333,6 +333,15 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
     -fno-omit-frame-pointer -g`) do gen0 compilando o tip — limpo (zero stack-use-after-scope/UAF/OOB) —
     ALÉM do fixpoint gen2==gen3. Barato, pega a classe de UB de memória que o build seco esconde. Vale pra
     TODO conserto/feature de codegen/lir.
+  - **HARNESSES C STANDALONE = PONTO-CEGO OBRIGATÓRIO DO GATE (dono 2026-08-28, bateu 2×: pré-sweep D185 +
+    cov D186).** Os `scripts/*_test.c` que dão `#include "teko_rt.c"` (`task_memory_isolation_test`,
+    `region_drop_subtree_test`, `tk_arena_commit_test`, …) testam o runtime C ISOLADO, FORA do self-build/
+    fixpoint/ASan (que só compilam o `src/` Teko) — e RODAM em pernas do CI (`pr.yml`). Logo NÃO aparecem no
+    fixpoint nem no ASan build, e QUALQUER mudança em `teko_rt.{c,h}` (deleção de fn, remoção/renome de campo
+    de struct como `tk_task`, mudança de assinatura) pode quebrá-los sem o gate padrão perceber. **REGRA: todo
+    agente que toca `teko_rt.{c,h}` (ou `assert.{c,h}`/`win32_compat.h`) tem que (1) grep dos nomes mexidos em
+    `scripts/**/*.{c,h}` e (2) COMPILAR+RODAR os `scripts/*_test.sh` que linkam contra teko_rt.c — os 3 verdes —
+    ANTES de declarar pronto. O verificador independente confere o mesmo.**
 - **Teko é um monólito e precisa cross-compilar.** A perna C emite **UM** `teko.c`
   que compila em toda arquitetura/SO via `#if` do C — tem que **emitir tudo**
   (todos os alvos), não podar para o host que emite. Só o backend **native** emite
