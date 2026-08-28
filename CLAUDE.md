@@ -601,6 +601,13 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
     como `global` é "vista com ou sem namespace", a fn global resolve **independente da forma de qualificação da
     chamada** (`X`, `teko::X`, `teko::sub::X`) — NÃO precisa reescrever sítio de chamada nem mover de namespace pra
     generizar; se uma forma "não resolveria", é porque o `global` não foi aplicado, não porque falta máquina.
+  - **MATA O CORPO MORTO NA PRÓPRIA ONDA, GATED PELO FIXPOINT (dono 2026-08-28 — alívio de trabalho).** Se uma
+    remodelagem/generização mata um corpo velho (C, inline-synth, shadow, name-detect — o que for), o AGENTE **remove
+    na hora**, NÃO defere pra um pré-sweep à parte — **desde que comprove o fixpoint**. Ressalva de processo (D185):
+    "comprovar o fixpoint" = o **gate completo** (fixpoint gen2==gen3 byte-idêntico + os 3 harnesses C `scripts/*_test.sh`
+    + ASan+UBSan limpo + grep zero-ref do removido), porque o fixpoint sozinho não vê os harnesses standalone. Com o
+    gate verde, a remoção do morto é prova de morte suficiente — mata junto, sem sweep separado. (Generaliza a
+    metodologia de pré-sweep D125/D181: o compilador/linker enumera a morte; o agente limpa o que a própria onda matou.)
 - **ARENA/REGIÃO = TEKO + codegen(ABI/syscall/linker), ZERO adição de C (dono 2026-08-28 — D148).** Toda feature
   de arena/região se escreve **em Teko** (`arena.tks`, que já é 100% Teko/VIVA — D128) e reflete no **codegen**
   (rota-C emite a chamada Teko compilada; native `lower.tks` emite via ABI/syscall/linker). **PROIBIDO ADICIONAR
