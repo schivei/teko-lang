@@ -1231,44 +1231,6 @@ int64_t tk_rt_pid(void);
 bool tk_rt_pid_alive(int64_t pid);
 // ===== journal runtime funds — END =====
 
-// D3 — TEST-COVERAGE SINK. A host side-channel (like print's buffer / args), so the compiler
-// can record which production functions executed during a `teko test` run WITHOUT a Teko
-// module-mutable (M.0). The native test binary marks a function's id (its source line) on
-// entry; the runner reads the distinct count afterward to compute function-level coverage.
-void     tk_cov_reset(void);        // clear the executed-id set (call before a test run)
-void     tk_cov_mark(uint64_t id);  // record an executed id (deduped)
-uint64_t tk_cov_distinct(void);     // how many distinct ids were marked
-bool     tk_cov_is_marked(uint64_t id);   // was this exact id marked?
-
-// D3-branch — branch coverage (only recorded when ON; off by default). enter/leave maintain the
-// current-fn stack so a branch id can pack (fn, line, col, outcome); the report queries hits.
-void     tk_cov_branches_on(bool on);     // enable/disable branch recording
-void     tk_cov_branch_reset(void);       // clear branch marks + fn stack
-void     tk_cov_enter(uint64_t fn);       // push the entered fn's items-index
-void     tk_cov_leave(void);              // pop it
-void     tk_cov_branch(uint32_t line, uint32_t col, uint64_t outcome);   // mark a taken branch outcome (current fn)
-bool     tk_cov_branch_hit(uint64_t fn, uint32_t line, uint32_t col, uint64_t outcome);  // report query
-
-// D3-line — LINE coverage (marked on every evaluated expression; a hash set, only when ON).
-void     tk_cov_lines_on(bool on);
-void     tk_cov_line_reset(void);
-void     tk_cov_line(uint32_t line);                       // mark a line as executed (current fn)
-bool     tk_cov_line_hit(uint64_t fn, uint32_t line);      // report query
-
-// #265 (Track A) — EXPLICIT-fn line/branch marks for the native test gate. tk_cov_line/tk_cov_branch
-// read tk_fn_stack[sp-1], but the native test binary has NO enter/leave inside production bodies
-// to maintain that stack automatically, so codegen passes the owning fn's
-// prog.items index EXPLICITLY, bypassing the stack — every interior mark keys on the fn the static
-// floor walk (line_coverage/branch_coverage) queries. Same tk_line_id/tk_branch_id packing.
-void     tk_cov_line_at(uint64_t fn, uint32_t line);                             // mark a line for fn (explicit)
-void     tk_cov_branch_at(uint64_t fn, uint32_t line, uint32_t col, uint64_t outcome);  // mark a branch for fn (explicit)
-
-// #265 — cross-process coverage merge for the NATIVE test gate. The child test binary dumps its three
-// sinks to a `.tkcov` file at exit; the compiler (parent) merges them, then runs the unchanged static
-// walk + floors. The coverage id is the shared prog.items index, so the packed ids are portable.
-void     tk_cov_dump(const char *path);    // write the three sinks to a `.tkcov` file (child, cov-on)
-bool     tk_cov_merge(tk_str path);        // union a `.tkcov` into this process's sinks (parent)
-
 // (#148 R2) bulk byte-append with free-old-on-grow BY DECREE (the linear cb emitter chain) — one
 // memcpy per fragment; the old buffer parks for reuse the moment a grow replaces it.
 void *tk_append_bytes_fo(const void *ptr, uint64_t len, const void *src, uint64_t n, uint64_t *out_len);
