@@ -44,12 +44,14 @@ const COV_HASH_MULT: u64 = 1099511628211
 
 const COV_BRANCH_BASE: u64 = 18014398509481984
 
+const COV_HEADER_BYTES: u64 = 32
+
 fn cov_state(): u64 {
-    var s = teko::arena::cov_state_slot()
+    var s = cov_state_slot()
     if s != 0 { return s }
-    var blk = teko::sys::ptr_word(teko::arena::region_alloc(teko::arena::region_root(), COVS_BYTES)) to u64
+    var blk = teko::sys::ptr_word(region_alloc(region_root(), COVS_BYTES)) to u64
     _ = rt_memset(blk, 0, COVS_BYTES)
-    teko::arena::set_cov_state_slot(blk)
+    set_cov_state_slot(blk)
     blk
 }
 
@@ -62,7 +64,7 @@ fn covs_set(field: u64, value: u64) {
 }
 
 fn cov_alloc_words(n: u64): u64 {
-    var addr = teko::sys::ptr_word(teko::arena::region_alloc(teko::arena::region_root(), n * 8)) to u64
+    var addr = teko::sys::ptr_word(region_alloc(region_root(), n * 8)) to u64
     _ = rt_memset(addr, 0, n * 8)
     addr
 }
@@ -308,24 +310,27 @@ exp global fn cov_reset_all() {
 }
 
 fn cov_put_u64(buf: ref []byte, k: u64, v: u64) {
-    buf[k] = (v & 255) to byte
-    buf[k + 1] = ((v >> 8) & 255) to byte
-    buf[k + 2] = ((v >> 16) & 255) to byte
-    buf[k + 3] = ((v >> 24) & 255) to byte
-    buf[k + 4] = ((v >> 32) & 255) to byte
-    buf[k + 5] = ((v >> 40) & 255) to byte
-    buf[k + 6] = ((v >> 48) & 255) to byte
-    buf[k + 7] = ((v >> 56) & 255) to byte
+    var i: u64 = 0
+    loop {
+        if i >= 8 { break }
+        buf[k + i] = ((v >> (i * 8)) & 255) to byte
+        i++
+    }
 }
 
 fn cov_get_u64(buf: []byte, k: u64): u64 {
-    (buf[k] to u64) | ((buf[k + 1] to u64) << 8) | ((buf[k + 2] to u64) << 16)
-        | ((buf[k + 3] to u64) << 24) | ((buf[k + 4] to u64) << 32) | ((buf[k + 5] to u64) << 40)
-        | ((buf[k + 6] to u64) << 48) | ((buf[k + 7] to u64) << 56)
+    var v: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= 8 { break }
+        v = v | ((buf[k + i] to u64) << (i * 8))
+        i++
+    }
+    v
 }
 
 fn cov_dump_size(fn_n: u64, br_n: u64, ln_n: u64): u64 {
-    8 + 24 + (fn_n + br_n + ln_n) * 8
+    COV_HEADER_BYTES + (fn_n + br_n + ln_n) * 8
 }
 
 fn cov_write_magic(buf: ref []byte) {
@@ -339,13 +344,13 @@ fn cov_write_magic(buf: ref []byte) {
     buf[7] = 0 to byte
 }
 
-fn cov_write_words(buf: ref []byte, at: u64, base: u64, n: u64): u64 {
+fn cov_write_words(buf: ref []byte, at: u64, src_base: u64, n: u64): u64 {
     cov_put_u64(buf, at, n)
     var k = at + 8
     var i: u64 = 0
     loop {
         if i >= n { break }
-        cov_put_u64(buf, k, teko::mem::load_u64(base + i * 8))
+        cov_put_u64(buf, k, teko::mem::load_u64(src_base + i * 8))
         k = k + 8
         i++
     }
@@ -359,17 +364,17 @@ exp global fn cov_dump(path: str) {
     var ln_n = covs_get(COVS_LN_N)
     var total = cov_dump_size(fn_n, br_n, ln_n)
     var buf: [total]byte = []
-    cov_write_magic(ref buf)
-    var k = cov_write_words(ref buf, 8, covs_get(COVS_FN_IDS), fn_n)
-    k = cov_write_words(ref buf, k, covs_get(COVS_BR_IDS), br_n)
-    cov_put_u64(ref buf, k, ln_n)
+    cov_write_magic(buf)
+    var k = cov_write_words(buf, 8, covs_get(COVS_FN_IDS), fn_n)
+    k = cov_write_words(buf, k, covs_get(COVS_BR_IDS), br_n)
+    cov_put_u64(buf, k, ln_n)
     k = k + 8
     var used = covs_get(COVS_LN_USED)
     var ids = covs_get(COVS_LN_IDS)
     var i: u64 = 0
     loop {
         if i >= ln_n { break }
-        cov_put_u64(ref buf, k, teko::mem::load_u64(ids + teko::mem::load_u64(used + i * 8) * 8))
+        cov_put_u64(buf, k, teko::mem::load_u64(ids + teko::mem::load_u64(used + i * 8) * 8))
         k = k + 8
         i++
     }
@@ -393,8 +398,8 @@ exp global fn cov_dump_analyze(idx: u64) {
 }
 
 fn cov_magic_ok(buf: []byte): bool {
-    buf.len >= 8 && buf[0] == b'T' && buf[1] == b'K' && buf[2] == b'C' && buf[3] == b'O'
-        && buf[4] == b'V' && buf[5] == b'1'
+    if buf.len < 8 { return false }
+    buf[0] == b'T' && buf[1] == b'K' && buf[2] == b'C' && buf[3] == b'O' && buf[4] == b'V' && buf[5] == b'1'
 }
 
 /** teko::runtime::cov_merge — union a `.tkcov` file into this process's sinks; false when unreadable. */
