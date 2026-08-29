@@ -4,7 +4,7 @@ fn encode_root_table(t: TomlValue): []byte {
     loop {
         if i >= t.keys.len { break }
         out = append_all(out, format_key(t.keys[i]))
-        out = append_all(out, bytes_of_str(" = "))
+        out = append_all(out, " = ".bytes())
         out = append_all(out, encode_value(t.vals[i]))
         out = [..out, b'\n']
         i++
@@ -25,10 +25,10 @@ exp fn encode_toml(v: TomlValue): str {
 fn encode_value(v: TomlValue): []byte {
     match v.kind {
         TomlKind::String => encode_string_value(v.text)
-        TomlKind::Integer => bytes_of_str(i64_to_str(v.int_val))
+        TomlKind::Integer => i64_to_str(v.int_val).bytes()
         TomlKind::Float => format_float(v.float_val)
-        TomlKind::Boolean => bytes_of_str(if v.bool_val { "true" } else { "false" })
-        TomlKind::DateTime => bytes_of_str(v.text)
+        TomlKind::Boolean => (if v.bool_val { "true" } else { "false" }).bytes()
+        TomlKind::DateTime => v.text.bytes()
         TomlKind::Array => encode_array_value(v.items)
         TomlKind::Table => encode_table_value(v)
     }
@@ -41,17 +41,17 @@ fn encode_string_value(s: str): []byte {
 }
 
 fn escape_basic_string_bytes(s: str): []byte {
-    var b = bytes_of_str(s)
+    var b = s.bytes()
     var out: []byte = []
     var i: u64 = 0
     loop {
         if i >= b.len { break }
         var c = b[i]
-        if c == b'"' { out = append_all(out, bytes_of_str("\\\"")); i++; continue }
-        if c == b'\\' { out = append_all(out, bytes_of_str("\\\\")); i++; continue }
-        if c == b'\n' { out = append_all(out, bytes_of_str("\\n")); i++; continue }
-        if c == b'\r' { out = append_all(out, bytes_of_str("\\r")); i++; continue }
-        if c == 0x09 to byte { out = append_all(out, bytes_of_str("\\t")); i++; continue }
+        if c == b'"' { out = append_all(out, "\\\"".bytes()); i++; continue }
+        if c == b'\\' { out = append_all(out, "\\\\".bytes()); i++; continue }
+        if c == b'\n' { out = append_all(out, "\\n".bytes()); i++; continue }
+        if c == b'\r' { out = append_all(out, "\\r".bytes()); i++; continue }
+        if c == 0x09 to byte { out = append_all(out, "\\t".bytes()); i++; continue }
         if c < 0x20 to byte { out = append_all(out, escape_control_hex(c)); i++; continue }
         out = [..out, c]
         i++
@@ -60,10 +60,10 @@ fn escape_basic_string_bytes(s: str): []byte {
 }
 
 fn escape_control_hex(c: byte): []byte {
-    var hex_digits = bytes_of_str("0123456789abcdef")
+    var hex_digits = "0123456789abcdef".bytes()
     var hi = (c to u64) >> 4
     var lo = (c to u64) & 0xF
-    var out = bytes_of_str("\\u00")
+    var out = "\\u00".bytes()
     out = [..out, hex_digits[hi]]
     [..out, hex_digits[lo]]
 }
@@ -71,16 +71,16 @@ fn escape_control_hex(c: byte): []byte {
 fn format_float(v: f64): []byte {
     if teko::math::is_nan(v) {
         var neg = ((f64_bits(v) >> 63) & 1) == 1
-        return bytes_of_str(if neg { "-nan" } else { "nan" })
+        return (if neg { "-nan" } else { "nan" }).bytes()
     }
     if teko::math::is_inf(v) {
-        return bytes_of_str(if v < 0.0 { "-inf" } else { "inf" })
+        return (if v < 0.0 { "-inf" } else { "inf" }).bytes()
     }
     ensure_float_looking(teko::runtime::f64_g17(v))
 }
 
 fn ensure_float_looking(text: str): []byte {
-    var b = bytes_of_str(text)
+    var b = text.bytes()
     var has_marker = false
     var i: u64 = 0
     loop {
@@ -89,17 +89,17 @@ fn ensure_float_looking(text: str): []byte {
         i++
     }
     if has_marker { return b }
-    append_all(b, bytes_of_str(".0"))
+    append_all(b, ".0".bytes())
 }
 
 fn encode_array_value(items: []TomlValue): []byte {
-    if items.len == 0 { return bytes_of_str("[]") }
+    if items.len == 0 { return "[]".bytes() }
     var out: []byte = [b'[']
     out = [..out, b' ']
     var i: u64 = 0
     loop {
         if i >= items.len { break }
-        if i > 0 { out = append_all(out, bytes_of_str(", ")) }
+        if i > 0 { out = append_all(out, ", ".bytes()) }
         out = append_all(out, encode_value(items[i]))
         i++
     }
@@ -108,15 +108,15 @@ fn encode_array_value(items: []TomlValue): []byte {
 }
 
 fn encode_table_value(t: TomlValue): []byte {
-    if t.keys.len == 0 { return bytes_of_str("{}") }
+    if t.keys.len == 0 { return "{}".bytes() }
     var out: []byte = [b'{']
     out = [..out, b' ']
     var i: u64 = 0
     loop {
         if i >= t.keys.len { break }
-        if i > 0 { out = append_all(out, bytes_of_str(", ")) }
+        if i > 0 { out = append_all(out, ", ".bytes()) }
         out = append_all(out, format_key(t.keys[i]))
-        out = append_all(out, bytes_of_str(" = "))
+        out = append_all(out, " = ".bytes())
         out = append_all(out, encode_value(t.vals[i]))
         i++
     }
@@ -125,7 +125,7 @@ fn encode_table_value(t: TomlValue): []byte {
 }
 
 fn is_valid_bare_key(k: str): bool {
-    var b = bytes_of_str(k)
+    var b = k.bytes()
     if b.len == 0 { return false }
     var i: u64 = 0
     loop {
@@ -137,6 +137,6 @@ fn is_valid_bare_key(k: str): bool {
 }
 
 fn format_key(k: str): []byte {
-    if is_valid_bare_key(k) { return bytes_of_str(k) }
+    if is_valid_bare_key(k) { return k.bytes() }
     encode_string_value(k)
 }

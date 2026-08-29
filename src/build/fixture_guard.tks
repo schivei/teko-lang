@@ -15,7 +15,7 @@ fn line_end_at(text: str, from: u64): u64 {
 }
 
 fn doc_fence_closes_on_line(line: str): bool {
-    teko::str::contains(line, "*" ~ "/")
+    line.contains("*" ~ "/")
 }
 
 fn scan_source_structure(text: str): SourceStructure {
@@ -28,7 +28,7 @@ fn scan_source_structure(text: str): SourceStructure {
     loop {
         if cur >= text.len { break }
         var eol = line_end_at(text, cur)
-        var line = teko::str::slice(text, cur, eol)
+        var line = text.slice(cur, eol)
         lineno = lineno + 1
         cur = if eol < text.len { eol + 1 } else { eol }
         if in_comment || in_str {
@@ -60,7 +60,7 @@ fn source_structure_defect(path: str): str {
 }
 
 fn is_teko_source(name: str): bool {
-    teko::str::ends_with(name, ".tks") || teko::str::ends_with(name, ".tkt")
+    name.ends_with(".tks") || name.ends_with(".tkt")
 }
 
 fn collect_teko_sources(dir: str): []str {
@@ -128,7 +128,7 @@ fn called_names_with_prefix(text: str, prefix: str): []str {
         if i > 0 && is_ident_byte(text[i - 1]) { i = i + 1; continue }
         var end = ident_end_at(text, i)
         if end == i { i = i + 1; continue }
-        var name = teko::str::slice(text, i, end)
+        var name = text.slice(i, end)
         var called = end < text.len && text[end] == b'('
         if called && mf_starts_with(name, prefix) && !list_has_str(out, name) { out = [..out, name] }
         i = end
@@ -142,7 +142,7 @@ fn declared_fn_name_on_line(line: str): str {
     if mf_starts_with(line, "pub fn ") { at = 7 }
     if at == 0 { return "" }
     var end = ident_end_at(line, at)
-    teko::str::slice(line, at, end)
+    line.slice(at, end)
 }
 
 fn declared_fn_names(text: str): []str {
@@ -151,7 +151,7 @@ fn declared_fn_names(text: str): []str {
     loop {
         if cur >= text.len { break }
         var eol = line_end_at(text, cur)
-        var name = declared_fn_name_on_line(teko::str::slice(text, cur, eol))
+        var name = declared_fn_name_on_line(text.slice(cur, eol))
         if name.len > 0 { out = [..out, name] }
         cur = if eol < text.len { eol + 1 } else { eol }
     }
@@ -206,7 +206,7 @@ fn code_only_line(line: str, in_str: bool, in_comment: bool): CodeScan {
         if c == b'/' && k + 1 < line.len && line[k + 1] == b'/' { break }
         if c == b'/' && k + 1 < line.len && line[k + 1] == b'*' { comment = true; out = out ~ "  "; k = k + 2; continue }
         if c == b'"' || c == b'\'' { open = true; quote = c; out = out ~ " "; k = k + 1; continue }
-        out = out ~ teko::str::slice(line, k, k + 1)
+        out = out ~ line.slice(k, k + 1)
         k = k + 1
     }
     CodeScan { text = out; in_str = open; in_comment = comment }
@@ -221,7 +221,7 @@ fn code_only_text(text: str): str {
     loop {
         if cur >= text.len { break }
         var eol = line_end_at(text, cur)
-        var scan = code_only_line(teko::str::slice(text, cur, eol), open, comment)
+        var scan = code_only_line(text.slice(cur, eol), open, comment)
         open = scan.in_str
         comment = scan.in_comment
         if !first { out = out ~ "\n" }
@@ -254,15 +254,15 @@ fn is_bare_number(s: str): bool {
 }
 
 fn ends_with_narrowing_cast(s: str): bool {
-    if teko::str::ends_with(s, " to i8") { return true }
-    if teko::str::ends_with(s, " to i16") { return true }
-    if teko::str::ends_with(s, " to i32") { return true }
-    if teko::str::ends_with(s, " to u8") { return true }
-    if teko::str::ends_with(s, " to u16") { return true }
-    if teko::str::ends_with(s, " to u32") { return true }
-    if teko::str::ends_with(s, " to u64") { return true }
-    if teko::str::ends_with(s, " to f32") { return true }
-    teko::str::ends_with(s, " to byte")
+    if s.ends_with(" to i8") { return true }
+    if s.ends_with(" to i16") { return true }
+    if s.ends_with(" to i32") { return true }
+    if s.ends_with(" to u8") { return true }
+    if s.ends_with(" to u16") { return true }
+    if s.ends_with(" to u32") { return true }
+    if s.ends_with(" to u64") { return true }
+    if s.ends_with(" to f32") { return true }
+    s.ends_with(" to byte")
 }
 
 fn arrow_index(s: str): u64 {
@@ -288,12 +288,12 @@ fn match_arm_values(body: str): []str {
         if c == b')' || c == b']' || c == b'}' { depth = depth - 1 }
         if depth == 0 && (c == b';' || c == b'\n') {
             var arrow = arrow_index(cur)
-            if arrow < cur.len { out = [..out, tkr_trim(teko::str::slice(cur, arrow + 2, cur.len))] }
+            if arrow < cur.len { out = [..out, tkr_trim(cur.slice(arrow + 2, cur.len))] }
             cur = ""
             k = k + 1
             continue
         }
-        if !at_end { cur = cur ~ teko::str::slice(body, k, k + 1) }
+        if !at_end { cur = cur ~ body.slice(k, k + 1) }
         k = k + 1
     }
     out
@@ -317,7 +317,7 @@ fn seed_hostile_match_body(body: str): bool {
 
 fn match_keyword_at(code: str, i: u64): bool {
     if i + 6 > code.len { return false }
-    if teko::str::slice(code, i, i + 6) != "match " { return false }
+    if code.slice(i, i + 6) != "match " { return false }
     if i == 0 { return true }
     !is_ident_byte(code[i - 1])
 }
@@ -361,7 +361,7 @@ fn seed_hostile_arm_lines(text: str): []u64 {
         if open >= code.len { i = i + 6; continue }
         var close = matching_brace(code, open)
         if close >= code.len { i = i + 6; continue }
-        if seed_hostile_match_body(teko::str::slice(code, open + 1, close)) { out = [..out, line] }
+        if seed_hostile_match_body(code.slice(open + 1, close)) { out = [..out, line] }
         i = i + 6
     }
     out
@@ -386,7 +386,7 @@ fn seed_hostile_arms_under(dir: str): []str {
     var i: u64 = 0
     loop {
         if i >= files.len { break }
-        if teko::str::ends_with(files[i], ".tks") {
+        if files[i].ends_with(".tks") {
             var defects = seed_hostile_arm_defects(files[i])
             var d: u64 = 0
             loop { if d >= defects.len { break }; out = [..out, defects[d]]; d = d + 1 }

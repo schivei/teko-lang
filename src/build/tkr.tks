@@ -107,7 +107,7 @@ fn tkr_trim(s: str): str {
         if !tkr_is_ws(s[b - 1]) { break }
         b = b - 1
     }
-    teko::str::slice(s, a, b)
+    s.slice(a, b)
 }
 
 fn tkr_find_byte(s: str, c: byte, from: u64): u64 {
@@ -120,7 +120,7 @@ fn tkr_find_byte(s: str, c: byte, from: u64): u64 {
     s.len
 }
 
-fn tkr_after(line: str, prefix: str): str { tkr_trim(teko::str::slice_from(line, prefix.len)) }
+fn tkr_after(line: str, prefix: str): str { tkr_trim(line.slice_from(prefix.len)) }
 
 fn tkr_table_cells(line: str): []str {
     var t = tkr_trim(line)
@@ -131,7 +131,7 @@ fn tkr_table_cells(line: str): []str {
         if k >= t.len { break }
         var nb = tkr_find_byte(t, b'|', k)
         if nb >= t.len { break }
-        out = [..out, tkr_trim(teko::str::slice(t, k, nb))]
+        out = [..out, tkr_trim(t.slice(k, nb))]
         k = nb + 1
     }
     out
@@ -163,14 +163,14 @@ fn tkr_parse_step(phase: TkrPhase, body: str): TkrStep | error {
     if eq >= body.len {
         return TkrStep { phase = phase; noun = ""; verb = body; osarch = ""; value = "" }
     }
-    var value = tkr_trim(teko::str::slice_from(body, eq + 1))
-    var lhs = tkr_trim(teko::str::slice_to(body, eq))
+    var value = tkr_trim(body.slice_from(eq + 1))
+    var lhs = tkr_trim(body.slice_to(eq))
     var osarch = ""
     if mf_starts_with(lhs, "on ") {
-        var rest = tkr_trim(teko::str::slice_from(lhs, 3))
+        var rest = tkr_trim(lhs.slice_from(3))
         var q = match mf_read_quoted(rest, 0) { MfQuoted as x => x; error as e => return e }
         osarch = q.text
-        lhs = tkr_trim(teko::str::slice_from(rest, q.next))
+        lhs = tkr_trim(rest.slice_from(q.next))
     }
     TkrStep { phase = phase; noun = lhs; verb = ""; osarch = osarch; value = value }
 }
@@ -371,7 +371,7 @@ fn tkr_slurp_docstring_body(src: str, from: u64): TkrSlurp | error {
             if src[eol] == b'\n' { break }
             eol = eol + 1
         }
-        var raw = teko::str::slice(src, cur, eol)
+        var raw = src.slice(cur, eol)
         var next = if eol < src.len { eol + 1 } else { eol }
         if tkr_trim(raw) == "\"\"\"" { return TkrSlurp { text = out; next = next } }
         if !first { out = out ~ "\n" }
@@ -384,7 +384,7 @@ fn tkr_slurp_docstring_body(src: str, from: u64): TkrSlurp | error {
 
 fn tkr_strip_trailing_fence(line: str): str {
     if line.len < 3 { return line }
-    teko::str::slice_to(line, line.len - 3)
+    line.slice_to(line.len - 3)
 }
 
 fn parse_tkr(src: str): []TkrFeature | error {
@@ -398,7 +398,7 @@ fn parse_tkr(src: str): []TkrFeature | error {
             if src[eol] == b'\n' { break }
             eol = eol + 1
         }
-        var raw = teko::str::slice(src, cur, eol)
+        var raw = src.slice(cur, eol)
         cur = if eol < src.len { eol + 1 } else { eol }
         var line = tkr_trim(raw)
         if line.len == 0 || line[0] == b'#' { continue }
@@ -456,11 +456,11 @@ fn tkr_replace_all(hay: str, needle: str, rep: str): str {
     var k: u64 = 0
     loop {
         if k >= hay.len { break }
-        if k + needle.len <= hay.len && teko::str::slice(hay, k, k + needle.len) == needle {
+        if k + needle.len <= hay.len && hay.slice(k, k + needle.len) == needle {
             out = out ~ rep
             k = k + needle.len
         } else {
-            out = out ~ teko::str::slice(hay, k, k + 1)
+            out = out ~ hay.slice(k, k + 1)
             k = k + 1
         }
     }
@@ -531,13 +531,13 @@ fn tkr_put_golden(list: []TkrGolden, osarch: str, sha: str): []TkrGolden {
 }
 
 fn tkr_noun_stream_match(noun: str, value: str): TkrMatch | error {
-    if teko::str::ends_with(noun, "bytes") {
+    if noun.ends_with("bytes") {
         var b = match tkr_read_hex_docstring(value, 0) { str as x => x; error as e => return e }
         return TkrMatch { mode = TkrMatchMode::Literal; text = b }
     }
     var q = match mf_read_quoted(value, 0) { MfQuoted as x => x; error as e => return e }
-    if teko::str::ends_with(noun, "sha256") { return TkrMatch { mode = TkrMatchMode::Sha256; text = q.text } }
-    if teko::str::ends_with(noun, "pattern") { return TkrMatch { mode = TkrMatchMode::Pattern; text = q.text } }
+    if noun.ends_with("sha256") { return TkrMatch { mode = TkrMatchMode::Sha256; text = q.text } }
+    if noun.ends_with("pattern") { return TkrMatch { mode = TkrMatchMode::Pattern; text = q.text } }
     TkrMatch { mode = TkrMatchMode::Literal; text = q.text }
 }
 
