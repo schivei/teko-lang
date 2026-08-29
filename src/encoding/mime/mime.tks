@@ -62,7 +62,7 @@ fn append_bytes(out: []byte, extra: []byte): []byte {
 }
 
 fn append_str(out: []byte, text: str): []byte {
-    append_bytes(out, bytes_of_str(text))
+    append_bytes(out, text.bytes())
 }
 
 fn append_crlf(out: []byte): []byte {
@@ -71,7 +71,7 @@ fn append_crlf(out: []byte): []byte {
 }
 
 fn append_quoted(out: []byte, text: str): []byte {
-    var input = bytes_of_str(text)
+    var input = text.bytes()
     var o = [..out, b'"']
     var i: u64 = 0
     loop {
@@ -225,7 +225,7 @@ type ParamLookup = struct {
 }
 
 fn find_param_value(line: []byte, param: str): ParamLookup | error {
-    var marker = bytes_of_str(concat(param, "=\""))
+    var marker = concat(param, "=\"").bytes()
     var pos = match bytes_index_of(line, marker, 0) {
         u64 as p => p
         null => return ParamLookup { found = false; value = "" }
@@ -261,11 +261,11 @@ fn apply_content_type(info: HeaderInfo, line: []byte, prefix_len: u64): HeaderIn
 }
 
 fn apply_header_line(info: HeaderInfo, line: []byte): HeaderInfo | error {
-    var disposition_prefix = bytes_of_str("content-disposition:")
+    var disposition_prefix = "content-disposition:".bytes()
     if bytes_ieq_at(line, disposition_prefix, 0) {
         return apply_content_disposition(info, line)
     }
-    var type_prefix = bytes_of_str("content-type:")
+    var type_prefix = "content-type:".bytes()
     if bytes_ieq_at(line, type_prefix, 0) {
         return apply_content_type(info, line, type_prefix.len)
     }
@@ -275,7 +275,7 @@ fn apply_header_line(info: HeaderInfo, line: []byte): HeaderInfo | error {
 fn parse_headers(headers: []byte): HeaderInfo | error {
     var info = HeaderInfo { name = ""; filename = ""; content_type = ""; has_name = false }
     if headers.len == 0 { return info }
-    var crlf = bytes_of_str("\r\n")
+    var crlf = "\r\n".bytes()
     var start: u64 = 0
     loop {
         var line_end = match bytes_index_of(headers, crlf, start) { u64 as p => p; null => headers.len }
@@ -294,7 +294,7 @@ type PartSlice = struct {
 
 fn split_headers_and_body(body: []byte, start: u64, end: u64): PartSlice | error {
     var region = bytes_slice(body, start, end)
-    var separator = bytes_of_str("\r\n\r\n")
+    var separator = "\r\n\r\n".bytes()
     var blank = match bytes_index_of(region, separator, 0) {
         u64 as p => p
         null => return error { message = "mime: multipart part missing header/body blank-line separator" }
@@ -312,11 +312,11 @@ fn parse_one_part(body: []byte, start: u64, end: u64): MultipartPart | error {
 }
 
 fn is_final_boundary(body: []byte, pos: u64): bool {
-    bytes_match_at(body, bytes_of_str("--"), pos)
+    bytes_match_at(body, "--".bytes(), pos)
 }
 
 fn skip_boundary_crlf(body: []byte, pos: u64): u64 | error {
-    if bytes_match_at(body, bytes_of_str("\r\n"), pos) { return pos + 2 }
+    if bytes_match_at(body, "\r\n".bytes(), pos) { return pos + 2 }
     error { message = "mime: malformed multipart boundary delimiter line" }
 }
 
@@ -332,7 +332,7 @@ fn trim_trailing_crlf(body: []byte, end: u64): u64 {
  * a dangling quoted-value escape — is a checked `error`, never a panic (M.1 fail-loud).
  */
 exp fn parse_multipart(body: []byte, boundary: str): []MultipartPart | error {
-    var delim = bytes_of_str(concat("--", boundary))
+    var delim = concat("--", boundary).bytes()
     var cursor = match bytes_index_of(body, delim, 0) {
         u64 as p => p
         null => return error { message = "mime: multipart boundary not found in body" }
@@ -380,8 +380,8 @@ fn extract_quoted_boundary(input: []byte, start: u64): str | error {
  * forms RFC 2046 §5.1 allows.
  */
 exp fn extract_boundary(content_type: str): str | error {
-    var input = bytes_of_str(content_type)
-    var marker = bytes_of_str("boundary=")
+    var input = content_type.bytes()
+    var marker = "boundary=".bytes()
     var pos = match bytes_index_of(input, marker, 0) {
         u64 as p => p
         null => return error { message = "mime: Content-Type has no boundary parameter" }
