@@ -92,8 +92,12 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
 É para **REMOVER e REDUZIR — não mover** para outro lugar. Documentação de verdade mora em
 `docs/design/`, escrita à parte; não é o dump dos doc comments do código.
 - **Comentários inline `//` em `.tks`/`.tkt`: PROIBIDOS (0%).** Remover todos.
-- **PASSO ANTERIOR ao doc — visibilidade (dono 2026-08-18):** `pub` é só interno — NÃO vai pro `.tkh`
-  (`tast.tks` M.4: só `exp` alcança o header). **stdlib default = `exp`**: toda a superfície consumível
+- **PASSO ANTERIOR ao doc — visibilidade (dono 2026-08-18) — ⚠️ EVOLUI no D196 (modelo OO de membros):** `pub`
+  é só interno — NÃO vai pro `.tkh` (`tast.tks` M.4: só `exp` alcança o header). **stdlib default = `exp`**:
+  toda a superfície consumível
+  <!-- D196 (dono 2026-08-29, rumo futuro): MEMBROS (campos/métodos) passam a usar pub/privado, e exp SÓ no
+       TIPO/objeto — membro exportado ⟺ (tipo exp) ∧ (membro pub); + virtual/override/protected. Muda este
+       modelo para membros; funções/tipos livres seguem com exp. Não implementado ainda. Ver DECISION_LOG D196. -->
   da stdlib (list/str/map/io/fs/crypto/numeric/collections/encoding/sort/cmp/math/iter/fmt/text/…) DEVE
   ser `exp`. Exceção: implementação que **realmente** não precisa ser exposta (helper interno) fica
   `pub`/privado — **não dá pra expor 100%**. A **maquinaria do compilador** (parser/checker/codegen/lir/
