@@ -513,7 +513,42 @@ pub fn assign_frees_old(fn_body: []@TStatement(), a: TAssign): bool {
     total - last_reads == st.self_appends
 }
 
-pub fn binding_is_frame_local_slice(escaping: []str, b: TBinding): bool {
+fn named_type_is_slice_backed(n: Named, table: TypeTable, visited: []str): bool {
+    if str_set_has(visited, n.name) { return false }
+    match type_table_find(table, n.name, "") {
+        parser::TypeDecl as td => type_decl_is_slice_backed(td, table, str_set_add(visited, n.name))
+        error => false
+    }
+}
+
+fn type_decl_is_slice_backed(td: parser::TypeDecl, table: TypeTable, visited: []str): bool {
+    match td.body {
+        parser::NewtypeBody as nb => type_expr_is_slice_backed(nb.backing, table, visited, type_ns_of(table, td.name))
+        parser::AliasBody as ab => type_expr_is_slice_backed(ab.alias, table, visited, type_ns_of(table, td.name))
+        _ => false
+    }
+}
+
+fn type_expr_is_slice_backed(te: @TypeExpr(), table: TypeTable, visited: []str, owner_ns: str): bool {
+    match resolve_type(te, table, owner_ns) {
+        (@Type()) as t => bound_type_is_slice_backed(t, table, visited)
+        error => false
+    }
+}
+
+fn bound_type_is_slice_backed(t: @Type(), table: TypeTable, visited: []str): bool {
+    match t {
+        Slice => true
+        Named as n => named_type_is_slice_backed(n, table, visited)
+        _ => false
+    }
+}
+
+pub fn type_is_slice_backed(t: @Type(), table: TypeTable): bool {
+    bound_type_is_slice_backed(t, table, [])
+}
+
+pub fn binding_is_frame_local_slice(escaping: []str, table: TypeTable, b: TBinding): bool {
     var name = match b.target {
         parser::SimpleName as sn => sn.name
         parser::DestructurePattern => return false
@@ -521,10 +556,7 @@ pub fn binding_is_frame_local_slice(escaping: []str, b: TBinding): bool {
     if name == "_" { return false }
     if b.kind == parser::BindKind::Const { return false }
     if str_set_has(escaping, name) { return false }
-    match b.bound {
-        Slice => true
-        _ => false
-    }
+    type_is_slice_backed(b.bound, table)
 }
 
 fn count_reads_expr(e: TExpr, name: str): i64 {
