@@ -3992,27 +3992,20 @@ fn emit_str_from_c(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall, e
     buf.write($", {v}_n ? {v}_n : 1); for (uint64_t {v}_i = 0; {v}_i < {v}_n; {v}_i++) {{ {v}_buf[{v}_i] = {v}_p[{v}_i]; }} (tk_str){{ {v}_buf, {v}_n }}; }})")
 }
 
-fn emit_str_slice_start(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall, kind: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
-    if kind == "slice_to" { buf.write("0"); return }
-    emit_expr_ctx(buf, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx)
-}
-
-fn emit_str_slice_end(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall, kind: str, v: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
-    if kind == "slice_from" { buf.write($"{v}.len"); return }
-    if kind == "slice_to" { emit_expr_ctx(buf, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx); return }
-    emit_expr_ctx(buf, prog, checker::Void { }, c.args[2], escaping, regions, fn_body, dctx)
-}
-
-fn emit_str_slice(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall, kind: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
-    var v = $"_ssl{buf.gensym()}"
-    buf.write($"({{ tk_str {v} = (")
+fn emit_slice_view(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
+    if c.args.len != 3 { panic("codegen: slice_view expects a slice, a start and an end (internal)") }
+    var v = $"_sv{buf.gensym()}"
+    buf.write("({ ")
+    emit_type(buf, prog, c.args[0].type)
+    buf.write($" {v} = (")
     emit_expr_ctx(buf, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx)
     buf.write($"); uint64_t {v}_a = (uint64_t)(")
-    emit_str_slice_start(buf, prog, c, kind, escaping, regions, fn_body, dctx)
+    emit_expr_ctx(buf, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx)
     buf.write($"); uint64_t {v}_b = (uint64_t)(")
-    emit_str_slice_end(buf, prog, c, kind, v, escaping, regions, fn_body, dctx)
-    var panic_sym = cb_fn_name_str("teko::runtime", "panic_str_slice_oob")
-    buf.write($"); if ({v}_a > {v}_b || {v}_b > {v}.len) {panic_sym}(); (tk_str){{ {v}.ptr + {v}_a, (size_t)({v}_b - {v}_a) }}; }})")
+    emit_expr_ctx(buf, prog, checker::Void { }, c.args[2], escaping, regions, fn_body, dctx)
+    buf.write("); (")
+    emit_type(buf, prog, c.args[0].type)
+    buf.write($"){{ {v}.ptr + {v}_a, (size_t)({v}_b - {v}_a) }}; }})")
 }
 
 fn emit_region_buf(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
@@ -4362,9 +4355,7 @@ fn emit_call_inner(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e
             if l == "byte_ptr" { return emit_byte_ptr(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "as_cstr" { return emit_as_cstr(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "str_from_c" { return emit_str_from_c(buf, prog, c, escaping, regions, fn_body, dctx) }
-            if l == "slice" { return emit_str_slice(buf, prog, c, "slice", escaping, regions, fn_body, dctx) }
-            if l == "slice_to" { return emit_str_slice(buf, prog, c, "slice_to", escaping, regions, fn_body, dctx) }
-            if l == "slice_from" { return emit_str_slice(buf, prog, c, "slice_from", escaping, regions, fn_body, dctx) }
+            if l == "slice_view" { return emit_slice_view(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "region_buf" { return emit_region_buf(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "ptr_word" { return emit_ptr_word(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "word_ptr" { return emit_word_ptr(buf, prog, c, escaping, regions, fn_body, dctx) }

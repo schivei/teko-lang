@@ -1751,6 +1751,38 @@ fn lower_bytes_from_ptr_call(ctx: LowerCtx, c: checker::TCall): LoweredFat | err
     LoweredFat { ctx = len_lowered.ctx; ptr = ptr_lowered.vreg; len = len_lowered.vreg }
 }
 
+fn is_slice_view_call(callee: parser::Path): bool {
+    var segs = callee.segments
+    segs.len > 0 && segs[segs.len - 1].name == "slice_view"
+}
+
+fn slice_view_stride(t: @Type(), enums: []LEnumInfo): u32 {
+    if is_str_type(t) { return 1 to u32 }
+    match slice_element_of(t) {
+        (@Type()) as et => elem_byte_stride(et, enums)
+        null => 1 to u32
+    }
+}
+
+fn lower_slice_view_call(ctx: LowerCtx, c: checker::TCall): LoweredFat | error {
+    if c.args.len != 3 {
+        return error { message = "native backend N1: `slice_view` expects a slice, a start and an end (internal)" }
+    }
+    var fatb = match lower_fat_expr(ctx, c.args[0]) { LoweredFat as x => x; error as err => return err }
+    var lo = match lower_expr(fatb.ctx, c.args[1]) { Lowered as x => x; error as err => return err }
+    var hi = match lower_expr(lo.ctx, c.args[2]) { Lowered as x => x; error as err => return err }
+    var stride = slice_view_stride(c.args[0].type, hi.ctx.enums)
+    var strv = ctx_alloc(hi.ctx)
+    var with_strv = ctx_append(strv.ctx, const_int_inst(strv.vreg, stride to i64, c.args[0].line, c.args[0].col))
+    var off = ctx_alloc(with_strv)
+    var with_off = ctx_append(off.ctx, bin_inst(off.vreg, LBinOp::IMul, lo.vreg, strv.vreg, c.args[0].line, c.args[0].col))
+    var np = ctx_alloc(with_off)
+    var with_np = ctx_append(np.ctx, bin_inst(np.vreg, LBinOp::IAdd, fatb.ptr, off.vreg, c.args[0].line, c.args[0].col))
+    var nl = ctx_alloc(with_np)
+    var with_nl = ctx_append(nl.ctx, bin_inst(nl.vreg, LBinOp::ISub, hi.vreg, lo.vreg, c.args[0].line, c.args[0].col))
+    LoweredFat { ctx = with_nl; ptr = np.vreg; len = nl.vreg }
+}
+
 fn is_buf_ptr_call(callee: parser::Path): bool {
     var segs = callee.segments
     segs.len > 0 && segs[segs.len - 1].name == "buf_ptr"
@@ -1869,7 +1901,6 @@ fn takes_one_str_by_value(sym: str): bool {
     sym == "tk_rt_spawn_redirected" || sym == "tk_float_parse" ||
     sym == "tk_cstr_dup" || sym == "tk_str_len" || sym == "tk_str_hash" ||
     sym == "tk_str_of_bytes" || sym == "teko_teko__runtime__intern_get" ||
-    sym == "tk_str_slice" || sym == "tk_str_slice_to" || sym == "tk_str_slice_from" ||
     sym == "tk_rt_read_file" || sym == "tk_rt_getenv" ||
     sym == "tk_rt_chdir" || sym == "tk_rt_mkdir" || sym == "tk_rt_remove_file" ||
     sym == "tk_rt_list_dir" || sym == "tk_rt_write_file_bytes" ||
@@ -2019,13 +2050,6 @@ fn builtin_str_query_symbol(last: str): str | null {
     null
 }
 
-fn builtin_str_slice_symbol(last: str): str | null {
-    if last == "slice" { return "tk_str_slice_len" }
-    if last == "slice_to" { return "tk_str_slice_to_len" }
-    if last == "slice_from" { return "tk_str_slice_from_len" }
-    null
-}
-
 fn builtin_int_to_str_symbol(last: str): str | null {
     if last == "i64_to_str" { return "teko_teko__runtime__i64_to_str_len" }
     if last == "u64_to_str" { return "teko_teko__runtime__u64_to_str_len" }
@@ -2061,7 +2085,6 @@ fn builtin_peak_rss_symbol(last: str): str | null {
 fn native_builtin_symbol(last: str): str | null {
     match builtin_arena_symbol(last) { str as s => return s; null => { } }
     match builtin_str_query_symbol(last) { str as s => return s; null => { } }
-    match builtin_str_slice_symbol(last) { str as s => return s; null => { } }
     match builtin_int_to_str_symbol(last) { str as s => return s; null => { } }
     match builtin_float_to_str_symbol(last) { str as s => return s; null => { } }
     match builtin_str_of_bytes_symbol(last) { str as s => return s; null => { } }
@@ -4423,6 +4446,7 @@ fn lower_call_fat(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall): Lowered
     if cl.call_ns.len == 0 && is_concat_builtin_call(cl.callee) { return lower_concat_call(ctx, e, cl) }
     if cl.call_ns.len == 0 && is_append_fo_call(cl.callee) { return lower_append_fo_call(ctx, e, cl) }
     if cl.call_ns.len == 0 && is_bytes_from_ptr_call(cl.callee) { return lower_bytes_from_ptr_call(ctx, cl) }
+    if cl.call_ns.len == 0 && is_slice_view_call(cl.callee) { return lower_slice_view_call(ctx, cl) }
     var sym = match call_symbol(cl, ctx.externs, ctx.flat_symbols) { str as s => s; error as err => return err }
     var effective = match fat_extern_len_twin(sym) { str as t => t; null => sym }
     var lo = match lower_args(ctx, cl.args, callee_param_types(cl)) { LoweredArgs as x => x; error as err => return err }
