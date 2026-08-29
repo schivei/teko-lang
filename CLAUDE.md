@@ -380,15 +380,16 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   IMUTÁVEL; `teko::list::push`/`empty()`-em-loop está **PROIBIDO** — é a RAIZ dos 93% de memória
   (profiler `tk_obs`: `tk_slice_push_r` = 4980 MB = 93%, 20,3M copy-grows que vazam na arena `root`
   nunca-liberada). Index-assign passa de proibido a PREFERIDO.
-  - **PUSH GENUÍNO → `List<>`, NUNCA array raw `[..x,y]` (dono 2026-08-29).** O acumulador `x = [..x, y]`
-    sobre ARRAY é copy-grow (reconstrói o backing inteiro a cada passo) — é a MESMA classe do `push`
-    banido, só re-escrito como spread-reatribuição. **PROIBIDO em array.** Nos **casos específicos** em que
-    crescimento dinâmico é GENUINAMENTE necessário (tamanho realmente desconhecido/streaming, não calculável
-    pelas 4 naturezas), usa-se o **container `List<>`** — cuja push é gerenciada (não o copy-grow ingênuo
-    `[..self.items,x]`) — NÃO array raw. Array = fixo/pré-alocado (as 4 naturezas); `List<>` = o único
-    portador de push. Os acumuladores `[..x,y]` remanescentes (list.tks:15 `push`, Map/Dict/Hashset, fmt,
-    lexer, emit, backend) são dívida NO-PUSHES a converter: 4-naturezas onde o tamanho é calculável, `List<>`
-    onde push é irredutível. **AS 4 NATUREZAS E COMO CONVERTER
+  - **NADA DE REATRIBUIÇÃO-CRESCIMENTO; `List<>` SÓ onde faz sentido (dono 2026-08-29).** O acumulador
+    `x = [..x, y]` sobre ARRAY é copy-grow (reconstrói o backing a cada passo, reatribuindo a variável) — MESMA
+    classe do `push` banido, só re-escrito como spread-reatribuição. **PROIBIDO.** A meta é **eliminar a
+    REATRIBUIÇÃO-crescimento**, não trocar por outro container por reflexo. Ordem de preferência: **(1) as 4
+    naturezas** (pré-aloca `[]T` do tamanho calculado + index-assign — ZERO reatribuição, é o caminho padrão);
+    **(2) `List<>`** — SÓ nos casos que **realmente fazem sentido** (crescimento dinâmico genuíno, tamanho
+    irredutivelmente desconhecido/streaming) **e que não exijam reatribuição** (o `List<>` cresce IN-PLACE,
+    sem `x = ...`). NÃO usar `List<>` onde as 4-naturezas resolvem (a maioria). Os acumuladores `[..x,y]`
+    remanescentes (list.tks:15, Map/Dict/Hashset, fmt, lexer, emit, backend) = dívida NO-PUSHES: 4-naturezas
+    onde calculável (quase tudo), `List<>` só no push irredutível-e-sem-reatribuição. **AS 4 NATUREZAS E COMO CONVERTER
   (rulings dono 2026-08-18, sobre código real — NENHUM sítio é impossível, tudo é calculável):**
   1. **MAP** (um item por elemento da fonte) → tamanho = `fonte.len`; pré-aloca `[]T` de `fonte.len` +
      `loop i { xs[i] = f(fonte[i]) }`.
