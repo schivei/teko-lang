@@ -610,6 +610,15 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
     anti-overflow); **(2) operador que bate num OPCODE** (a primitiva ABI direta); **(3) reinterpret `wrap`/`unwrap`**;
     **(4) `syscall` raw** (chão irredutível do SO). **Fora desses 4, TUDO é função → superfície → caminho genérico.**
     Zero exceção sobrevive "por conveniência/performance/histórico".
+  - **SURFACEAR BUILTIN DE BYPASS-DE-MEMÓRIA PRESERVA A SEMÂNTICA — nunca regride pra cópia (dono 2026-08-29 — D197).**
+    Muitos builtins obfuscados faziam um **bypass de memória**: emitiam view/reinterpret/zero-cópia direto no codegen,
+    "por fora" da arena (eficiente, mas escondido). Ao EXPURGAR (surfacear) um desses, a fn/primitiva de superfície
+    de substituição **TEM que preservar a semântica de memória** (via primitiva reinterpret-class declarada — ex.:
+    `slice_view<T>` pra sub-view `{ptr+from,len}`, `wrap`/`unwrap`), **NUNCA** regredir pra CÓPIA. Surfacear um
+    bypass-view como fn-que-copia REGRIDE a memória (com reclaim 0%, cada cópia VAZA — foi o crumb 5 da reificação:
+    `str.slice` view→cópia = +1815 MB). Regra do expurgo: ao surfacear um builtin, VERIFICAR se ele fazia bypass
+    (view/reinterpret/zero-cópia) e replicar na superfície. Adjacentes que copiam apesar do nome "view" (onda futura):
+    `arr_slice<T>` (collections.tks:94), `str_slice_bytes_view` (csv), `bytes_slice_view` (base64) → adotar `slice_view`.
   - **OPERADORES — OPCODE vs OVERLOAD (dono 2026-08-28).** Operador que **invoca um opcode** = magic (primitiva ABI,
     caso 2 acima). Operador que **NÃO invoca opcode** = resolve pela **forma que o USUÁRIO definiu na sobrecarga**
     (`operator`/overload) — que é **função normal**, caminho genérico, ZERO magic. Ou seja o backend não "conhece" o
