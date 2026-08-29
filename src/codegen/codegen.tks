@@ -462,6 +462,7 @@ type CgProg = struct {
     uses_capture: bool
     maypanic: CgNameTable
     needs_region: CgNameTable
+    table: checker::TypeTable
 }
 
 fn cg_prog_uses_capture(items: []@TItem()): bool {
@@ -1399,7 +1400,7 @@ fn cg_prog_needs_region_of(items: []@TItem()): CgNameTable {
 
 fn cg_prog_of(p: checker::TProgram): CgProg {
     var uc = cg_prog_uses_capture(p.items)
-    CgProg { items = p.items; ix = cg_index_of(p.items); cond_consts = checker::cond_const_names(p.items); uses_capture = uc; maypanic = cg_prog_maypanic(p.items, uc); needs_region = cg_prog_needs_region_of(p.items) }
+    CgProg { items = p.items; ix = cg_index_of(p.items); cond_consts = checker::cond_const_names(p.items); uses_capture = uc; maypanic = cg_prog_maypanic(p.items, uc); needs_region = cg_prog_needs_region_of(p.items); table = checker::type_table_of(p) }
 }
 
 fn cg_mode_is_test(mode: CgMode): bool {
@@ -1414,7 +1415,7 @@ fn cg_mode_is_test(mode: CgMode): bool {
 fn cg_prog_maybe_force_capture(prog: CgProg, mode: CgMode): CgProg {
     if !cg_mode_is_test(mode) { return prog }
     if prog.uses_capture { return prog }
-    CgProg { items = prog.items; ix = prog.ix; cond_consts = prog.cond_consts; uses_capture = true; maypanic = cg_prog_maypanic(prog.items, true); needs_region = prog.needs_region }
+    CgProg { items = prog.items; ix = prog.ix; cond_consts = prog.cond_consts; uses_capture = true; maypanic = cg_prog_maypanic(prog.items, true); needs_region = prog.needs_region; table = prog.table }
 }
 
 fn cg_prog_bare(p: checker::TProgram): CgProg {
@@ -1426,11 +1427,11 @@ fn cg_prog_bare(p: checker::TProgram): CgProg {
     }
     var ix = CgIndex { exact = empty; last = empty; fns = empty; same_last_next = [] }
     var uc = cg_prog_uses_capture(p.items)
-    CgProg { items = p.items; ix = ix; cond_consts = checker::cond_const_names(p.items); uses_capture = uc; maypanic = cg_prog_maypanic(p.items, uc); needs_region = cg_prog_needs_region_of(p.items) }
+    CgProg { items = p.items; ix = ix; cond_consts = checker::cond_const_names(p.items); uses_capture = uc; maypanic = cg_prog_maypanic(p.items, uc); needs_region = cg_prog_needs_region_of(p.items); table = checker::type_table_of(p) }
 }
 
 fn cg_type_table(prog: CgProg): checker::TypeTable {
-    checker::type_table_of(checker::TProgram { items = prog.items })
+    prog.table
 }
 
 fn cg_path_last(p: parser::Path): str {
@@ -7248,7 +7249,7 @@ fn cg_block_slice_accums(prog: CgProg, escaping: []str, fn_body: []@TStatement()
         if i >= body.len { break }
         match body[i] {
             checker::TBinding as b => {
-                if cg_binding_is_block_local_slice(escaping, fn_body, body, is_value, b) {
+                if cg_binding_is_block_local_slice(prog, escaping, fn_body, body, is_value, b) {
                     match b.target {
                         parser::SimpleName as sn => { acc = [..acc, sn.name] }
                         parser::DestructurePattern => { }
@@ -7262,11 +7263,9 @@ fn cg_block_slice_accums(prog: CgProg, escaping: []str, fn_body: []@TStatement()
     acc
 }
 
-fn cg_binding_is_block_local_slice(escaping: []str, fn_body: []@TStatement(), body: []@TStatement(), is_value: bool, b: checker::TBinding): bool {
-    match b.bound {
-        checker::Slice => checker::binding_is_block_local(escaping, fn_body, body, is_value, b)
-        _ => false
-    }
+fn cg_binding_is_block_local_slice(prog: CgProg, escaping: []str, fn_body: []@TStatement(), body: []@TStatement(), is_value: bool, b: checker::TBinding): bool {
+    if !checker::type_is_slice_backed(b.bound, prog.table) { return false }
+    checker::binding_is_block_local(escaping, fn_body, body, is_value, b)
 }
 
 /**
@@ -7459,7 +7458,7 @@ fn cg_block_has_block_local(prog: CgProg, escaping: []str, fn_body: []@TStatemen
         if i >= block.len { break }
         match block[i] {
             checker::TBinding as b => {
-                if cg_binding_is_block_local_slice(escaping, fn_body, block, is_value, b) { return true }
+                if cg_binding_is_block_local_slice(prog, escaping, fn_body, block, is_value, b) { return true }
                 if checker::binding_is_block_local(escaping, fn_body, block, is_value, b) {
                     if cg_same_named_struct(b.bound, b.value.type) || cg_binding_routes_box_to_local_region(prog, b) || cg_binding_routes_str_to_local_region(prog, b) { return true }
                 }
@@ -8459,7 +8458,7 @@ fn fn_body_has_frame_local(prog: CgProg, escaping: []str, body: []@TStatement())
         match body[i] {
             checker::TBinding as b => {
                 if checker::binding_is_frame_local(escaping, b) && (cg_same_named_struct(b.bound, b.value.type) || cg_binding_routes_box_to_local_region(prog, b)) { return true }
-                if checker::binding_is_frame_local_slice(escaping, b) { return true }
+                if checker::binding_is_frame_local_slice(escaping, prog.table, b) { return true }
             }
             _ => { }
         }
