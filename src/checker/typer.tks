@@ -251,7 +251,7 @@ fn type_tilde_chain(b: parser::Binary, env: Env, table: TypeTable): TExpr | erro
     var ni: u64 = 0
     loop { if ni >= folded.len { break }; pos_names = [..pos_names, ""]; ni++ }
     var call = parser::Call { callee = parser::Path { segments = segs }; args = folded; arg_names = pos_names; owner_type_args = []; callee_type_args = [] }
-    type_call(call, env, table)
+    type_call(call, null, env, table)
 }
 fn deref_ref_value(te: TExpr): TExpr {
     match te.type {
@@ -541,7 +541,7 @@ fn build_operator_call(owner_canonical: str, dn: str, left: parser::Expr, right:
     var callee = method_dispatch_callee(owner_canonical, dn)
     var args: []parser::Expr = [left, right]
     var names: []str = ["", ""]
-    type_call(parser::Call { callee = callee; args = args; arg_names = names; owner_type_args = []; callee_type_args = [] }, env, table)
+    type_call(parser::Call { callee = callee; args = args; arg_names = names; owner_type_args = []; callee_type_args = [] }, null, env, table)
 }
 
 fn dispatch_binop_operator(dn: str, left: parser::Expr, right: parser::Expr, l: TExpr, r: TExpr, env: Env, table: TypeTable): TExpr | NoOperator | error {
@@ -629,7 +629,7 @@ fn build_unary_operator_call(owner_canonical: str, dn: str, operand: parser::Exp
     var callee = method_dispatch_callee(owner_canonical, dn)
     var args: []parser::Expr = [operand]
     var names: []str = [""]
-    type_call(parser::Call { callee = callee; args = args; arg_names = names; owner_type_args = []; callee_type_args = [] }, env, table)
+    type_call(parser::Call { callee = callee; args = args; arg_names = names; owner_type_args = []; callee_type_args = [] }, null, env, table)
 }
 
 fn type_binary(b: parser::Binary, env: Env, table: TypeTable): TExpr | error {
@@ -798,11 +798,18 @@ fn call_is_zero_builtin(callee: parser::Path): bool {
     false
 }
 
-fn type_zero_builtin(c: parser::Call, env: Env, table: TypeTable): TExpr | NotZeroBuiltin | error {
+fn zero_builtin_element(c: parser::Call, expected: @Type() | null, env: Env, table: TypeTable): @Type() | error {
+    if c.callee_type_args.len == 1 { return resolve_type(c.callee_type_args[0], table, env.cur_ns) }
+    if c.callee_type_args.len == 0 {
+        match expected { (@Type()) as e => return e; null => { } }
+    }
+    error { message = "zero<T>() takes one explicit type argument" }
+}
+
+fn type_zero_builtin(c: parser::Call, expected: @Type() | null, env: Env, table: TypeTable): TExpr | NotZeroBuiltin | error {
     if !call_is_zero_builtin(c.callee) { return NotZeroBuiltin { } }
-    if c.callee_type_args.len != 1 { return error { message = "zero<T>() takes one explicit type argument" } }
+    var elem = match zero_builtin_element(c, expected, env, table) { (@Type()) as t => t; error as e => return e }
     if c.args.len != 0 { return error { message = "zero<T>() takes no arguments" } }
-    var elem = match resolve_type(c.callee_type_args[0], table, env.cur_ns) { (@Type()) as t => t; error as e => return e }
     match elem {
         Reference => return error { message = "a reference has no zero value" }
         Void => return error { message = "zero<void> is invalid — void is not a storable value" }
@@ -1046,7 +1053,7 @@ fn svc_service_implements(cb: parser::ClassBody, want: str): bool {
 fn svc_ctor_texpr(canon: str, env: Env, table: TypeTable): TExpr | error {
     var bpath = name_to_path(canon)
     var segs = [..bpath.segments, parser::Segment { name = "ctor" }]
-    type_call(parser::Call { callee = parser::Path { segments = segs }; args = []; arg_names = []; owner_type_args = []; callee_type_args = [] }, env, table)
+    type_call(parser::Call { callee = parser::Path { segments = segs }; args = []; arg_names = []; owner_type_args = []; callee_type_args = [] }, null, env, table)
 }
 
 fn svc_str_lit(s: str): TExpr {
@@ -1644,7 +1651,7 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr |
             if name_is_phantom_instance(rn.name, table) {
                 var psegs = method_dispatch_callee(rn.name, mc.method).segments
                 var pcargs: []parser::Expr = [mc.receiver, ..mc.args]
-                return type_call(parser::Call { callee = parser::Path { segments = psegs }; args = pcargs; arg_names = method_call_arg_names(mc); owner_type_args = []; callee_type_args = mc.type_args }, env, table)
+                return type_call(parser::Call { callee = parser::Path { segments = psegs }; args = pcargs; arg_names = method_call_arg_names(mc); owner_type_args = []; callee_type_args = mc.type_args }, null, env, table)
             }
         }
         _ => { }
@@ -1729,7 +1736,7 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr |
     var segs = method_dispatch_callee(struct_name, mc.method).segments
     var cargs: []parser::Expr = [mc.receiver, ..mc.args]
     var cnames: []str = method_call_arg_names(mc)
-    type_call(parser::Call { callee = parser::Path { segments = segs }; args = cargs; arg_names = cnames; owner_type_args = []; callee_type_args = mc.type_args }, env, table)
+    type_call(parser::Call { callee = parser::Path { segments = segs }; args = cargs; arg_names = cnames; owner_type_args = []; callee_type_args = mc.type_args }, null, env, table)
 }
 
 fn struct_iface_named_stop(from: @Type(), to: @Type(), table: TypeTable): error | null {
@@ -2012,7 +2019,36 @@ fn reject_multivalue_in_value_position(call: TCall): error | null {
     return null
 }
 
-fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
+fn unify_ret_with_expected(ret: @Type(), expected: @Type() | null, s: Subst, table: TypeTable): Subst | error {
+    match expected {
+        (@Type()) as e => unify(ret, e, s, table)
+        null => s
+    }
+}
+
+fn first_unbound_type_param(names: []str, s: Subst): str | null {
+    var i = 0
+    loop {
+        if i >= names.len { break }
+        match subst_find(s, names[i]) { (@Type()) as _bound => { }; null => return names[i] }
+        i++
+    }
+    null
+}
+
+fn mono_type_args_of(names: []str, s: Subst, needed: bool): []@Type() {
+    if !needed { return [] }
+    var out: [names.len]@Type() = []
+    var i = 0
+    loop {
+        if i >= names.len { break }
+        out[i] = match subst_find(s, names[i]) { (@Type()) as t => t; null => Void { } }
+        i++
+    }
+    out
+}
+
+fn type_call(c0: parser::Call, expected: @Type() | null, env: Env, table: TypeTable): TExpr | error {
     if c0.owner_type_args.len > max_generic_arity() || c0.callee_type_args.len > max_generic_arity() {
         return error { message = "at most 16 explicit type arguments" }
     }
@@ -2032,7 +2068,7 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
     }
     match lookup_call(env, c.callee) {
         (@Type()) as _zero_shadow => { }
-        error => match type_zero_builtin(c, env, table) {
+        error => match type_zero_builtin(c, expected, env, table) {
             TExpr as te => return te
             error as e => return e
             NotZeroBuiltin => { }
@@ -2117,9 +2153,6 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
                 return error { message = $"'{name}' is not generic — it takes no explicit type arguments" }
             }
             if all_tps.len > 0 {
-                var param_tps: []str = []
-                var pp = 0
-                loop { if pp >= f.params.len { break }; param_tps = collect_sig_type_params(f.params[pp], table, param_tps); pp++ }
                 if explicit_fn_args.len > 0 {
                     if explicit_fn_args.len != all_tps.len {
                         return error { message = $"'{name}' takes {all_tps.len} type argument(s), but {explicit_fn_args.len} were given" }
@@ -2146,20 +2179,27 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
                     }
                     return TExpr { kind = TCall { overload_suffix = ov_suffix; callee = c.callee; args = targs; call_ns = resolved_ns; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = xtypes; ret_extra = [] }; type = subst_type(f.ret, s); line = 0; col = 0 }
                 }
-                var rk = 0
-                loop {
-                    if rk >= all_tps.len { break }
-                    if !is_type_param(all_tps[rk], param_tps) { return error { message = $"cannot infer type parameter {all_tps[rk]} — it appears only in the return type; annotate the call" } }
-                    rk++
-                }
-                var s = Subst { params = param_tps; names = []; types = [] }
+                var s = Subst { params = all_tps; names = []; types = [] }
                 var gi = 0
                 loop {
                     if gi >= targs.len { break }
                     s = match unify(f.params[gi], targs[gi].type, s, table) { Subst as x => x; error as e => return e }
                     gi++
                 }
-                return TExpr { kind = TCall { overload_suffix = ov_suffix; callee = c.callee; args = targs; call_ns = resolved_ns; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = []; ret_extra = [] }; type = subst_type(f.ret, s); line = 0; col = 0 }
+                var ret_only_inferred = false
+                match first_unbound_type_param(all_tps, s) {
+                    str => {
+                        ret_only_inferred = true
+                        s = match unify_ret_with_expected(f.ret, expected, s, table) { Subst as x => x; error as e => return e }
+                    }
+                    null => { }
+                }
+                match first_unbound_type_param(all_tps, s) {
+                    str as missing => return error { message = $"cannot infer type parameter {missing} — it appears only in the return type; annotate the call" }
+                    null => { }
+                }
+                var inferred_type_args: []@Type() = mono_type_args_of(all_tps, s, ret_only_inferred)
+                return TExpr { kind = TCall { overload_suffix = ov_suffix; callee = c.callee; args = targs; call_ns = resolved_ns; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = inferred_type_args; ret_extra = [] }; type = subst_type(f.ret, s); line = 0; col = 0 }
             }
             var args: [targs.len]TExpr = []
             var i = 0
@@ -2898,7 +2938,7 @@ fn desugar_datetime_hole(raw_hole: parser::Expr, hole_ns: str, fn_name: str, pat
     var arg_names: []str = [""]
     arg_names = [..arg_names, ""]
     var call = parser::Call { callee = parser::Path { segments = segs }; args = args; arg_names = arg_names; owner_type_args = []; callee_type_args = [] }
-    type_call(call, env, table)
+    type_call(call, null, env, table)
 }
 
 fn type_interp(in: parser::Interp, env: Env, table: TypeTable): TExpr | error {
@@ -3214,7 +3254,7 @@ fn type_dispatch(e: parser::Expr, env: Env, table: TypeTable): TExpr | error {
         parser::Compare as c => type_compare(c, env, table)
         parser::Call as cl => {
             match svc_guard_arg_list(cl.args) { error as e => return e; null => { } }
-            type_call(cl, env, table)
+            type_call(cl, null, env, table)
         }
         parser::IfExpr as f => type_if(f, env, table)
         parser::MatchExpr as m => type_match(m, env, table)
@@ -3591,6 +3631,10 @@ fn type_value_expected(e: parser::Expr, expected: @Type(), env: Env, table: Type
         parser::NullLit => {
             if null_widens_into(expected, table) { return TExpr { kind = TNullLit { }; type = Null { }; line = e.line; col = e.col } }
             adopt_value_to_expected(e, expected, env, table)
+        }
+        parser::Call as cl => {
+            match svc_guard_arg_list(cl.args) { error as se => return se; null => { } }
+            type_call(cl, expected, env, table)
         }
         _ => adopt_value_to_expected(e, expected, env, table)
     }
