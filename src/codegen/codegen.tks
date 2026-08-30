@@ -845,6 +845,7 @@ fn cg_type_is_heap(t: @Type()): bool {
 fn cg_expr_allocs(e: checker::TExpr): bool {
     match e.kind {
         checker::TSliceOfLen => true
+        checker::TZeroOf => true
         checker::TArrayLit => true
         checker::TInterp => true
         checker::TLambda => true
@@ -3652,6 +3653,7 @@ fn cg_dc_scan_expr(s: DcScan, e: checker::TExpr): DcScan | error {
         }
         checker::TArrayLit as al => { var i = 0; loop { if i >= al.elements.len { break }; s2 = match cg_dc_scan_expr(s2, al.elements[i].expr) { DcScan as x => x; error as err => return err }; i++ } }
         checker::TSliceOfLen as sol => { s2 = match cg_dc_scan_expr(s2, sol.size) { DcScan as x => x; error as err => return err } }
+        checker::TZeroOf => { }
         checker::TLambda as lam => { s2 = match cg_dc_scan_block(s2, lam.body) { DcScan as x => x; error as err => return err } }
         checker::TBorrow as bw => { s2 = match cg_dc_scan_expr(s2, bw.operand) { DcScan as x => x; error as err => return err } }
         checker::TBlockExpr as blk => { s2 = match cg_dc_scan_block(s2, blk.body) { DcScan as x => x; error as err => return err } }
@@ -4735,6 +4737,12 @@ fn emit_slice_of_len(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr,
         buf.write(lenN)
     }
     buf.write(" }; })")
+}
+
+fn emit_zero_of(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, z: checker::TZeroOf, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
+    buf.write("(")
+    emit_type(buf, prog, z.element)
+    buf.write("){0}")
 }
 
 fn emit_array_lit(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, a: checker::TArrayLit, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
@@ -7078,6 +7086,7 @@ fn emit_expr_ctx(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e: 
         checker::TInExpr as ie => emit_in(buf, prog, ie, escaping, regions, fn_body, dctx)
         checker::TArrayLit as a => emit_array_lit(buf, prog, e, a, escaping, regions, fn_body, dctx)
         checker::TSliceOfLen as s => emit_slice_of_len(buf, prog, e, s, escaping, regions, fn_body, dctx)
+        checker::TZeroOf as z => emit_zero_of(buf, prog, e, z, escaping, regions, fn_body, dctx)
         checker::TPathExpr as pe => {
             if cg_named_is_flags(prog, pe.enum_name) {
                 mangle_type_name(buf, "", pe.enum_name)
