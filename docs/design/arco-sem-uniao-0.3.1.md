@@ -17,7 +17,7 @@
   array dinâmico, `push`, `grow_inplace`, nem acumulador `x=[..x,y]`. Migração de assinatura em massa =
   pré-aloca `[n]T` do tamanho contado. `List<>` só no crescimento irredutível-e-sem-reatribuição.
 - **CHECKED vs UNCHECKED (dono 2026-08-28):** `exp` devolve `error` no caminho de falha; interno (`pub`/
-  privado) **panica**. O `value()` do `null<T>` panica se ausente = coerente (é `pub`, unchecked).
+  privado) **panica**. O `.value` de um `null<T>` de REFERÊNCIA ausente panica **automático** (ponteiro-vazio, maquinaria que já existe) — SEM check forçado no getter; T de valor ausente = zero silencioso (dev's problem).
 - **D187/D188 — lista FECHADA de builtin-legítimo:** (1) pontos de arena; (2) operador↔opcode; (3)
   reinterpret `wrap`/`unwrap`/`slice_view`; (4) `syscall` raw. **Tudo o mais é função de superfície pelo
   caminho GENÉRICO nas duas rotas.** `zero<T>` entra como **gêmeo escalar do `of_len<T>`** (D188-legítimo,
@@ -160,19 +160,16 @@ exp global type null<T> = class null {
     fn has_value(): bool { self._setted }
 
     /**
-     * value — o `T` presente; PANICA se ausente (pub=unchecked, guard explícito de `_setted`).
-     * @return o valor presente
+     * value — o `T` presente (get de campo, `x.value`). SEM check: só devolve `_value`.
+     * @return o valor
      */
-    fn value(): T {
-        if !self._setted { panic_absent_null() }
-        self._value
-    }
+    get value(): T { self._value }
 
     /**
-     * value — grava o `T` e marca presente.
-     * @param val o valor a transportar
+     * value — grava o `T` e marca presente (set de campo, `x.value = v`).
+     * @param val o valor
      */
-    setter value(val: T) { self._value = val; self._setted = true }
+    set value(val: T) { self._value = val; self._setted = true }
 
     /**
      * new — o `null<T>` ausente (valor zerado, não-setado).
@@ -201,10 +198,12 @@ exp global fn NULL<T>(): null<T> { null<T>::new() }
 exp global fn NULL(): null { .{ } }
 ```
 
-`value()` PANICA explicitamente se `!_setted` — não confia só no deref-zero (que não dispara para T
-tipo-valor, onde `zero<T>()` é bit-válido). É `pub`/unchecked (problema do dev). `getter value()`/`setter
-value()` viram açúcar quando o D196 (getter/setter propriedade) estiver vivo; **até lá, método `.value()`
-explícito** — divergência-de-forma controlada, semântica idêntica.
+`value` é **get/set de campo OBRIGATÓRIO** (`x.value` / `x.value = v`) — a maquinaria de propriedade está viva
+em class; se faltar algo pro caso, o C0.3 implementa (D4). O getter **NÃO força pânico**: só devolve `_value`.
+O **pânico é AUTOMÁTICO** pela maquinaria de **ponteiro-vazio que já existe** (dono: "já foi criada"): T de
+**referência** — `_value` zerado = ponteiro vazio → o dev usar/desreferenciar dispara o guard sozinho (problema
+do dev). T de **valor** (`i64`/struct) — leitura ausente dá `zero<T>()` silencioso (footgun aceito, dev's
+problem; o dev checa `has_value()` antes). O `_setted` serve ao `has_value()`, NÃO a um check no getter.
 
 **2º factory presente (D199):** `null<T>::new(val)` constrói o presente por aridade — o dev que já tem o
 valor não passa por `setter`. `NULL()`/`NULL<T>()` = atalho global só do ausente.
