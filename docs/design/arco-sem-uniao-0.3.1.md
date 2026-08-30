@@ -347,7 +347,7 @@ Princípio: **construir o novo (dormante) → coexistir → migrar consumidores 
 - **C0.5 · expurgo de constraint `ConstraintOr` + `notnull` (folha, ISOLADO).** Ver §8.1 — remoção pura de
   maquinaria não-usada (ZERO call-site na árvore). Independente do resto do arco; pode landar cedo. **Reseed**
   (muda o parser/checker/tkb → toca o C emitido). Risco: BAIXO (nada consome; o compilador enumera qualquer
-  ramo morto). Fixture: `constraint_or_reject` (§9).
+  ramo morto). **Zero teste** (§9) — o compilador enumera a rejeição do `|`/`notnull` sozinho.
 
 ### FASE I — nulável: `T | null` → `null<T>`
 - **C1.1 · lane errors.As (downcast por identidade-de-vtable).** Autônoma (roadmap lane 1): `LGlobalAddr`+
@@ -535,29 +535,19 @@ enumera qualquer ramo morto ao auto-compilar (D125/D181).
 
 ---
 
-## 9. Fixtures de regressão (SÓ path que o self-build NÃO exercita)
+## 9. Testes: ZERO (dono 2026-08-30 — endurece a lei no-test)
 
-Lei dura (CLAUDE.md): **nada de teste afirmativo para o que o self-build/fixpoint exercita** — o compilador
-usa `null<T>`, a tríplice, downcast e a fábrica ao se compilar. Só oráculos `.tkr` isolados de **rejeição/erro**
-(path que o self-build nunca dirige):
+**REGRA DURA: nenhum crumb deste arco cria teste — nem afirmativo, nem oráculo de rejeição.** ZERO `.tkt`/
+`.tkr` novo. (Endurece a lei CLAUDE.md; o dono flagrou um agente criando fixtures desnecessários e mandou
+remover TODOS, inclusive os de rejeição.)
 
-- **`null_reserved_reject`** — `type null = i32` num arquivo de USUÁRIO (ns não-base) → `EXPECT_COMPILE_FAIL`
-  "type 'null' is reserved" (exercita `check_reserved_type_redefs` no caminho de falha).
-- **`error_reserved_reject`** — idem `type error = struct{}` de usuário.
-- **`null_value_absent_panic`** — `NULL<i64>().value()` → **pânico em runtime** `file:line:col: value() on
-  absent null<T>` (guard explícito de `_setted`; o compilador nunca dispara, é backstop do usuário). 1 oráculo
-  `.tkr` de runtime-panic. **(Nota: a tríplice NÃO tem fixture-de-pânico análogo — ler o `T` de uma falha sem
-  checar o `bool` dá `zero<T>()` silencioso, footgun aceito, SEM pânico — §4.3.)**
-- **`nonexistent_method_on_null`** — `NULL<i64>().foo()` → `no such method 'foo' on struct 'null'` (caminho de
-  erro de `type_method_call`).
-- **`interface_downcast_miss`** (C1.1) — `match e { WrongClass as w => … }` onde `WrongClass` não conforma →
-  `'WrongClass' does not implement 'error'` (`discriminant_mismatch_error`, `match.tks:71-79`, caminho de
-  falha).
-- **`constraint_or_reject`** (C0.5) — `fn f<T: A | B>(x: T)` → `EXPECT_COMPILE_FAIL` (o `|` de constraint
-  deixou de parsear; mensagem-de-termo nova). E `<T: notnull>` idem. Exercita o caminho de rejeição do parser
-  de constraint que o self-build (sem esses construtos) nunca dirige.
+A **única prova é o self-build / fixpoint**: o compilador compila o prelúdio (`null_surface.tks`, `error_surface.tks`),
+usa `null<T>`, a tríplice, downcast e a fábrica ao se auto-compilar → qualquer bug de parse/check/codegen
+aparece sozinho no build. Os caminhos de **rejeição** (nome reservado `type null`/`type error` de usuário;
+`value()` em `null<T>` ausente = pânico; `<T: A | B>`/`notnull` que deixou de parsear) são **enumerados pelo
+próprio compilador quando alguém os aciona** — não por um arquivo de teste. Não se escreve `.tkr` pra isso.
 
-NENHUM oráculo afirmativo além destes. Ao drenar, RECUSAR qualquer `.tkt`/`.tkr` novo não-nomeado aqui.
+**Ao drenar: RECUSAR qualquer `.tkt`/`.tkr`/arquivo de teste novo no delta** — kill + re-limpa, não drena.
 
 ---
 
