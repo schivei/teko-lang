@@ -351,9 +351,12 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
     em `teko::runtime` → só o qualificador CERTO resolve), toda chamada com o qualificador VELHO quebra. O self-build/
     fixpoint/ASan/harnesses só exercitam `src/` — mas `cases/**` e `examples/**` (o corpus do `regressor.tkr`/`teko test .`)
     RODAM no CI e NÃO no fixpoint. **REGRA: renomeação/canonização de call-site ou símbolo varre `src/` + `cases/` +
-    `examples/` + `tklib/` (a árvore toda), com grep do qualificador velho = zero, ANTES de declarar pronto.** O `teko
+    `examples/` + `tklib/` + `tooling/` + a RAIZ (`main.tks`) — a árvore TODA**, com grep do qualificador velho = zero,
+    ANTES de declarar pronto. O `teko
     test .` local dá OOM → validar os arquivos afetados por probe isolado (gen0 compila o arquivo), não o suite. O
-    verificador independente confere a árvore inteira, não só `src/`.
+    verificador independente confere a árvore inteira, não só `src/`. **`tooling/` e `main.tks` (raiz) são pontos-cegos
+    recorrentes (bateram no crumb 5 / dreno D197: `teko::str::slice` free-fn quebrou em `tooling/{vim,nano,emacs,vscode}`
+    e no `main.tks` sem o self-build perceber). Incluí-los SEMPRE.**
 - **Teko é um monólito e precisa cross-compilar.** A perna C emite **UM** `teko.c`
   que compila em toda arquitetura/SO via `#if` do C — tem que **emitir tudo**
   (todos os alvos), não podar para o host que emite. Só o backend **native** emite
