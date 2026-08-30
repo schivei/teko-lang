@@ -1017,7 +1017,6 @@ fn lower_bool_and(ctx: LowerCtx, a_vreg: u32, b_vreg: u32, line: u32, col: u32):
 
 fn is_str_type(t: @Type()): bool {
     match t {
-        checker::Str => true
         checker::Named as nm => nm.name == "teko::base::str"
         _ => false
     }
@@ -1075,7 +1074,6 @@ fn slice_eq_plan(elem: @Type()): LSliceEqPlan | error {
     if is_str_type(elem) { return LSliceEqPlan { rtfn = "tk_slice_str_eq"; needs_size = false } }
     match elem {
         checker::Char => LSliceEqPlan { rtfn = "tk_slice_eq_bytes"; needs_size = true }
-        checker::Str => LSliceEqPlan { rtfn = "tk_slice_str_eq"; needs_size = false }
         checker::Byte => LSliceEqPlan { rtfn = "tk_slice_eq_bytes"; needs_size = true }
         checker::Prim as p => slice_eq_plan_prim(p.kind)
         _ => error { message = teko::str::concat("native backend N1: `[]T == []T` is not lowered yet for element type `", checker::type_render(elem), "` (N2 — only numeric/bool/byte/char/str elements compare by value)") }
@@ -1530,7 +1528,7 @@ fn lower_str_from_utf8_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall)
     if c.args.len != 1 {
         return error { message = "native backend N1: `str_from_utf8` expects exactly one []byte argument (internal)" }
     }
-    lower_ffi_fat_or_error_call(ctx, e, c, "tk_rt_str_from_utf8_ok", checker::Str { })
+    lower_ffi_fat_or_error_call(ctx, e, c, "tk_rt_str_from_utf8_ok", checker::Named { name = "teko::base::str" })
 }
 
 fn is_ffi_aggregate_return_symbol(sym: str): bool {
@@ -1541,9 +1539,9 @@ fn is_ffi_aggregate_return_symbol(sym: str): bool {
 }
 
 fn lower_ffi_aggregate_return_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall, sym: str): Lowered | error {
-    if sym == "tk_rt_getenv" { return lower_ffi_fat_or_error_call(ctx, e, c, "tk_rt_getenv_ok", checker::Str { }) }
-    if sym == "tk_rt_getcwd" { return lower_ffi_fat_or_error_call(ctx, e, c, "tk_rt_getcwd_ok", checker::Str { }) }
-    if sym == "tk_rt_list_dir" { return lower_ffi_fat_or_error_call(ctx, e, c, "tk_rt_list_dir_ok", checker::Slice { element = checker::Str { } }) }
+    if sym == "tk_rt_getenv" { return lower_ffi_fat_or_error_call(ctx, e, c, "tk_rt_getenv_ok", checker::Named { name = "teko::base::str" }) }
+    if sym == "tk_rt_getcwd" { return lower_ffi_fat_or_error_call(ctx, e, c, "tk_rt_getcwd_ok", checker::Named { name = "teko::base::str" }) }
+    if sym == "tk_rt_list_dir" { return lower_ffi_fat_or_error_call(ctx, e, c, "tk_rt_list_dir_ok", checker::Slice { element = checker::Named { name = "teko::base::str" } }) }
     if sym == "tk_rt_setenv" { return lower_ffi_ures_call(ctx, e, c, "tk_rt_setenv_ok") }
     if sym == "tk_rt_chdir" { return lower_ffi_ures_call(ctx, e, c, "tk_rt_chdir_ok") }
     if sym == "tk_rt_mkdir" { return lower_ffi_ures_call(ctx, e, c, "tk_rt_mkdir_ok") }
@@ -3629,7 +3627,6 @@ fn variant_member_type_matches(member: @Type(), value_ty: @Type(), variants: []L
         checker::Named as mn => variant_named_member_matches(mn.name, value_ty, variants)
         checker::Error => match value_ty { checker::Error => true; _ => false }
         checker::Prim as mp => match value_ty { checker::Prim as vp => mp.kind == vp.kind; _ => false }
-        checker::Str => match value_ty { checker::Str => true; _ => false }
         checker::Byte => match value_ty { checker::Byte => true; _ => false }
         checker::Char => match value_ty { checker::Char => true; _ => false }
         checker::Slice => match value_ty { checker::Slice => true; _ => false }
@@ -3825,7 +3822,6 @@ fn variant_member_direct_match(member: @Type(), value_ty: @Type()): bool {
         checker::Named as mn => variant_named_directly(mn.name, value_ty)
         checker::Error => match value_ty { checker::Error => true; _ => false }
         checker::Prim as mp => match value_ty { checker::Prim as vp => mp.kind == vp.kind; _ => false }
-        checker::Str => match value_ty { checker::Str => true; _ => false }
         checker::Byte => match value_ty { checker::Byte => true; _ => false }
         checker::Slice => match value_ty { checker::Slice => true; _ => false }
         checker::Variant => variant_member_aggregate_matches(member, value_ty)
@@ -4413,7 +4409,6 @@ fn lower_match_subject_conveyed(ctx: LowerCtx, m: checker::TMatchExpr): MatchSub
 fn is_fat_type(t: @Type()): bool {
     if is_str_type(t) { return true }
     match t {
-        checker::Str => true
         checker::Slice => true
         _ => false
     }
@@ -4933,7 +4928,6 @@ fn lower_const_fat(ctx: LowerCtx, e: checker::TExpr, r: LRodata): LoweredFat | e
 fn const_fat_len(t: @Type(), byte_len: u32, enums: []LEnumInfo): u32 | error {
     if is_str_type(t) { return byte_len }
     match t {
-        checker::Str => byte_len
         checker::Slice as s => const_slice_len(s.element, byte_len, enums)
         _ => error { message = "native backend N1: aggregate const fat receiver is not a str/slice (internal)" }
     }
@@ -4993,7 +4987,6 @@ fn lower_bytestr_lit_fat(ctx: LowerCtx, e: checker::TExpr, s: checker::TByteStrL
 fn lower_is_str_or_byte_slice(t: @Type()): bool {
     if is_str_type(t) { return true }
     match t {
-        checker::Str => true
         checker::Slice as sl => match sl.element { checker::Byte => true; _ => false }
         _ => false
     }
@@ -5083,7 +5076,6 @@ fn interp_hole_none_symbol(k: checker::PrimKind, is_flt: bool): str {
 fn lower_interp_hole_none_fat(ctx: LowerCtx, h: checker::TExpr): LoweredFat | error {
     if is_str_type(h.type) { return lower_fat_expr(ctx, h) }
     match h.type {
-        checker::Str => lower_fat_expr(ctx, h)
         checker::Prim as p => lower_interp_hole_prim_fat(ctx, h, p.kind)
         _ => error { message = "native backend N1: interpolation hole of this type not yet lowered (N2)" }
     }
@@ -5252,7 +5244,7 @@ fn error_field_sizes(types: []LType): []u32 {
 
 fn error_field_size_of(t: LType): u32 {
     match t {
-        Ptr => fat_value_bytes(checker::Str { })
+        Ptr => fat_value_bytes(checker::Named { name = "teko::base::str" })
         _ => ltype_size(t)
     }
 }
@@ -5511,10 +5503,7 @@ fn guarded_index_addr(ctx: LowerCtx, base_vreg: u32, len: u32, index: checker::T
 
 fn lower_index(ctx: LowerCtx, e: checker::TExpr, ix: checker::TIndex): Lowered | error {
     if is_str_type(ix.receiver.type) { return lower_index_str(ctx, e, ix) }
-    match ix.receiver.type {
-        checker::Str => lower_index_str(ctx, e, ix)
-        _ => lower_index_slice(ctx, e, ix)
-    }
+    lower_index_slice(ctx, e, ix)
 }
 
 fn lower_index_str(ctx: LowerCtx, e: checker::TExpr, ix: checker::TIndex): Lowered | error {
@@ -5945,7 +5934,6 @@ fn is_frees_old_self_append(ctx: LowerCtx, a: checker::TAssign): bool {
 fn lower_assign_frees_old(ctx: LowerCtx, slot: u32, a: checker::TAssign): LowerStmtOut | error {
     var elemt = if is_str_type(a.bound) { checker::Byte { } } else { match a.bound {
         checker::Slice as sl => sl.element
-        checker::Str => checker::Byte { }
         _ => return store_fat_through_addr(ctx, slot, a, teko::str::concat("the str/slice local `", a.name, "`"))
     } }
     var stride = elem_byte_stride(elemt, ctx.enums)
@@ -6594,7 +6582,7 @@ fn field_layout_size(te: @TypeExpr(), ft: LType, nested: LStructLayout | null, t
 
 fn fat_field_width_type(rft: @Type()): @Type() {
     if is_fat_type(rft) { return rft }
-    checker::Slice { element = checker::Str { } }
+    checker::Slice { element = checker::Named { name = "teko::base::str" } }
 }
 
 fn field_is_fat_resolved(te: @TypeExpr(), table: checker::TypeTable, rft: @Type()): bool {
@@ -6680,7 +6668,6 @@ pub fn lower_item(m: LModule, loose: []@TStatement(), it: @TItem(), layouts: []L
 fn const_decl_is_scalar(t: @Type()): bool {
     match t {
         checker::Slice => false
-        checker::Str => false
         checker::Named => false
         checker::Variant => false
         checker::Func => false

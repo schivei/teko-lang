@@ -1979,7 +1979,6 @@ fn emit_type(buf: teko::io::FileStream, prog: CgProg, t: @Type()) {
         checker::Byte => buf.write("uint8_t")
         checker::Char => buf.write("tk_char")
         checker::Void => buf.write("void")
-        checker::Str => buf.write("tk_str")
         checker::Slice as sl => match sl.element {
             checker::Void => panic("codegen: an untyped empty slice needs a known element type from context (internal)")
             _ => cg_slice_typename(buf, sl.element)
@@ -2011,7 +2010,6 @@ fn emit_type_str(prog: CgProg, t: @Type()): str {
         checker::Byte => "uint8_t"
         checker::Char => "tk_char"
         checker::Void => "void"
-        checker::Str => "tk_str"
         checker::Slice as sl => match sl.element {
             checker::Void => panic("codegen: an untyped empty slice needs a known element type from context (internal)")
             _ => teko::str::concat("tk_slice_", match cg_opt_mangle_str(sl.element) { str as s => s; error as e => panic(e.message) })
@@ -2114,7 +2112,6 @@ fn cg_opt_mangle_str(inner: @Type()): str | error {
         }
         checker::Byte => "byte"
         checker::Char => "char"
-        checker::Str => "str"
         checker::Error => "error"
         checker::Null => "null"
         checker::Void => "void"
@@ -2289,7 +2286,6 @@ fn cg_type_is_niche_able(prog: CgProg, x: @Type()): bool {
     match x {
         checker::Ptr => true
         checker::Reference => true
-        checker::Str => true
         checker::Error => true
         checker::Named as nm => cg_is_class_named(prog, nm.name) && !cg_is_polymorphic_base(prog, nm.name)
         _ => false
@@ -2316,13 +2312,12 @@ fn cg_union_niche_member(prog: CgProg, v: checker::Variant): @Type() | null {
 
 fn cg_niche_is_fat(x: @Type()): bool {
     if cg_is_str_type(x) { return true }
-    match x { checker::Str => true; checker::Error => true; _ => false }
+    match x { checker::Error => true; _ => false }
 }
 
 fn cg_niche_null_accessor(x: @Type()): str {
     if cg_is_str_type(x) { return ".ptr" }
     match x {
-        checker::Str => ".ptr"
         checker::Error => ".message.ptr"
         _ => ""
     }
@@ -2392,7 +2387,6 @@ fn cg_type_min_bytes_d(prog: CgProg, x: @Type(), depth: u64): u64 {
         checker::Prim as p => cg_prim_min_bytes(p.kind)
         checker::Byte => 1 to u64
         checker::Char => 4 to u64
-        checker::Str => 16 to u64
         checker::Error => 16 to u64
         checker::Slice => 16 to u64
         checker::Ptr => 8 to u64
@@ -3148,7 +3142,6 @@ pub type CgCmpRoute = enum { Plain; StrEq; CharEq; SliceEq }
 fn cg_cmp_route_of(t: @Type()): CgCmpRoute {
     if cg_is_str_type(t) { return CgCmpRoute::StrEq }
     match t {
-        checker::Str => CgCmpRoute::StrEq
         checker::Char => CgCmpRoute::CharEq
         checker::Slice => CgCmpRoute::SliceEq
         _ => CgCmpRoute::Plain
@@ -3229,7 +3222,6 @@ fn cg_slice_eq_plan(elem: @Type()): CgSliceEqPlan | error {
     if cg_is_str_type(elem) { return CgSliceEqPlan { rtfn = "tk_slice_str_eq"; needs_size = false; as_word = false } }
     match elem {
         checker::Char => CgSliceEqPlan { rtfn = "tk_slice_char_eq"; needs_size = false; as_word = false }
-        checker::Str => CgSliceEqPlan { rtfn = "tk_slice_str_eq"; needs_size = false; as_word = false }
         checker::Byte => CgSliceEqPlan { rtfn = cb_fn_name_str("teko::runtime", "slice_eq_bytes"); needs_size = true; as_word = true }
         checker::Prim as p => cg_slice_eq_plan_prim(p.kind)
         _ => error { message = teko::str::concat("codegen: `[]T == []T` is not lowered yet for element type `", checker::type_render(elem), "` (only numeric/bool/byte/char/str elements compare by value)") }
@@ -3368,7 +3360,6 @@ fn cg_cast_target_is_variant(prog: CgProg, t: @Type()): bool {
 
 fn cg_is_str_type(t: @Type()): bool {
     match t {
-        checker::Str => true
         checker::Named as nm => nm.name == "teko::base::str"
         _ => false
     }
@@ -3745,7 +3736,6 @@ fn cg_dc_plan_type(prog: CgProg, t: @Type()): DcFieldPlan | error {
         checker::Prim => DcFieldPlan { is_class = false; nullable = false; class_name = "" }
         checker::Byte => DcFieldPlan { is_class = false; nullable = false; class_name = "" }
         checker::Char => DcFieldPlan { is_class = false; nullable = false; class_name = "" }
-        checker::Str => DcFieldPlan { is_class = false; nullable = false; class_name = "" }
         checker::Named as n => {
             if !cg_is_class_named(prog, n.name) { return error { message = $"codegen: deep_copy does not support field type '{n.name}' (internal)" } }
             if cg_is_polymorphic_base(prog, n.name) { return error { message = $"codegen: deep_copy does not support polymorphic class '{n.name}' yet (internal)" } }
@@ -4309,7 +4299,7 @@ fn emit_call_inner(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e
             buf.write(" "); buf.write(ab); buf.write(" = ")
             emit_as(buf, prog, checker::Slice { element = checker::Byte { } }, c.args[0], escaping, regions, fn_body, dctx)
             buf.write("; tk_str "); buf.write(asr); buf.write(" = ")
-            emit_as(buf, prog, checker::Str { }, c.args[1], escaping, regions, fn_body, dctx)
+            emit_as(buf, prog, checker::Named { name = "teko::base::str" }, c.args[1], escaping, regions, fn_body, dctx)
             buf.write("; uint64_t "); buf.write(al); buf.write("; uint8_t *"); buf.write(ap)
             buf.write(" = (uint8_t *)tk_append_bytes_fo("); buf.write(ab); buf.write(".ptr, "); buf.write(ab); buf.write(".len, "); buf.write(asr); buf.write(".ptr, "); buf.write(asr); buf.write(".len, &"); buf.write(al)
             buf.write("); (")
@@ -4640,7 +4630,6 @@ fn emit_index(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, ix: ch
             buf.write("){0}); })")
             return
         }
-        checker::Str => { }
         _ => if !cg_is_str_type(ix.receiver.type) { panic("codegen: indexing a non-string value not yet supported") }
     }
     var stmp = $"_s{buf.gensym()}"
@@ -4925,7 +4914,7 @@ fn emit_interp(buf: teko::io::FileStream, prog: CgProg, in: checker::TInterp, es
     }
     buf.write(cb_fn_name_str("teko::runtime", "concat"))
     buf.write("((")
-    cg_slice_typename(buf, checker::Str { })
+    cg_slice_typename(buf, checker::Named { name = "teko::base::str" })
     buf.write("){ .ptr = ")
     buf.write(v)
     buf.write(", .len = ")
@@ -4995,7 +4984,6 @@ fn emit_interp_seg(buf: teko::io::FileStream, prog: CgProg, in: checker::TInterp
                     }
                     _ => {
                         match h.type {
-                            checker::Str => { emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) }
                             checker::Char => { emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) }
                             checker::Prim as p => {
                                 if p.kind == checker::PrimKind::Bool {
@@ -5033,7 +5021,6 @@ fn emit_interp_seg(buf: teko::io::FileStream, prog: CgProg, in: checker::TInterp
         return
     }
     match h.type {
-        checker::Str => { emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) }
         checker::Char => { emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) }
         checker::Prim as p => {
             if p.kind == checker::PrimKind::Bool {
@@ -5785,7 +5772,7 @@ fn cg_wrap_elem_str_contract(buf: teko::io::FileStream, prog: CgProg, en: checke
 
 fn emit_host_ffi(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, c: checker::TCall, kind: str, rtfn: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
     var t = $"_h{buf.gensym()}"
-    var str_t = checker::Str { }
+    var str_t = checker::Named { name = "teko::base::str" }
     var err_t = checker::Error { }
 
     if kind == "args" {
@@ -5922,7 +5909,7 @@ fn emit_host_ffi(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, c: 
     } else if kind == "u64res" {
         emit_variant_wrap_str(buf, prog, e.type, checker::Prim { kind = checker::PrimKind::U64 }, $"{t}.value", cg_frame_region(dctx))
     } else {
-        var slice_t = checker::Slice { element = checker::Str { } }
+        var slice_t = checker::Slice { element = checker::Named { name = "teko::base::str" } }
         var sx = teko::str::concat("(tk_slice_str){ .ptr = ", t, teko::str::concat(".ptr, .len = ", t, ".len }"))
         emit_variant_wrap_str(buf, prog, e.type, slice_t, sx, cg_frame_region(dctx))
     }
@@ -5944,7 +5931,6 @@ fn cg_mangle_errors(t: @Type()): bool {
         checker::Prim => false
         checker::Byte => false
         checker::Char => false
-        checker::Str => false
         checker::Error => false
         checker::Named => false
         checker::Slice as sl => match sl.element {
@@ -8108,7 +8094,6 @@ fn emit_stmt_dispatch(b0: teko::io::FileStream, s: @TStatement(), in_main: bool,
 fn cg_spawn_arg_is_fat(t: @Type()): bool {
     if cg_is_str_type(t) { return true }
     match t {
-        checker::Str => true
         checker::Slice => true
         _ => false
     }
@@ -8217,7 +8202,6 @@ fn cg_spawn_target_wants_region(prog: CgProg, c: checker::TCall): bool {
 fn cg_spawn_fat_bytes(prog: CgProg, t: @Type(), i: u64): str {
     if cg_is_str_type(t) { return $"(size_t)a{i}.len" }
     match t {
-        checker::Str => $"(size_t)a{i}.len"
         checker::Slice as sl => {
             var elem = cg_ctype_text(prog, sl.element)
             $"(size_t)a{i}.len * sizeof({elem})"
@@ -8229,7 +8213,6 @@ fn cg_spawn_fat_bytes(prog: CgProg, t: @Type(), i: u64): str {
 fn emit_spawn_pack_field(buf: teko::io::FileStream, prog: CgProg, t: @Type(), i: u64) {
     if cg_is_str_type(t) { buf.write($"    _tail = (char *)(((uintptr_t)_tail + 15u) & ~(uintptr_t)15u); tk_memcpy(_tail, (const void *)a{i}.ptr, (uintptr_t)a{i}.len); _c->a{i}.ptr = (const tk_byte *)_tail; _c->a{i}.len = a{i}.len; _tail += a{i}.len;\n"); return }
     match t {
-        checker::Str => buf.write($"    _tail = (char *)(((uintptr_t)_tail + 15u) & ~(uintptr_t)15u); tk_memcpy(_tail, (const void *)a{i}.ptr, (uintptr_t)a{i}.len); _c->a{i}.ptr = (const tk_byte *)_tail; _c->a{i}.len = a{i}.len; _tail += a{i}.len;\n")
         checker::Slice as sl => {
             var elem = cg_ctype_text(prog, sl.element)
             buf.write($"    {{ uintptr_t _n = (uintptr_t)a{i}.len * sizeof({elem}); _tail = (char *)(((uintptr_t)_tail + 15u) & ~(uintptr_t)15u); tk_memcpy(_tail, (const void *)a{i}.ptr, _n); _c->a{i}.ptr = ({elem} *)_tail; _c->a{i}.len = a{i}.len; _tail += _n; }}\n")
@@ -9000,7 +8983,7 @@ fn cg_te_to_type_ns(prog: CgProg, ref_ns: str, te: @TypeExpr()): @Type() {
             else if last == "usize" { checker::Prim { kind = checker::PrimKind::Usize } }
             else if last == "isize" { checker::Prim { kind = checker::PrimKind::Isize } }
             else if last == "byte" { checker::Byte { } }
-            else if last == "str" { checker::Str { } }
+            else if last == "str" { checker::Named { name = "teko::base::str" } }
             else if last == "error" { checker::Error { } }
             else if last == "void" { checker::Void { } }
             else if last == "()" { checker::Void { } }
