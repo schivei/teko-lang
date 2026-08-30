@@ -526,11 +526,12 @@ fn parse_operator_member(tokens: []lexer::Token, pos: u64, allow_bodyless: bool)
     Parsed<Function> { node = Function { name = name; type_params = []; type_constraints = []; params = params.items; has_return = has_return; return_type = return_type; body = blk.items; vis = Visibility::Pub; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; os_guard = ""; is_intern = false; is_abstract = false; is_virtual = false; is_override = false; is_static = true; is_getter = false; is_setter = false; accessor_prop = ""; ret_types = []; is_operator = true; is_global = false }; next = blk.next }
 }
 
-fn parse_value_type_members(tokens: []lexer::Token, pos: u64): ParsedList<Function> | error {
+fn parse_value_type_members(tokens: []lexer::Token, pos: u64): ParsedStructBody | error {
     var p = skip_seps(tokens, pos + 1)
     var methods: []Function = []
+    var consts: []ConstDecl = []
     if is_kind_at(tokens, p, lexer::TokenKind::RBrace) {
-        return ParsedList<Function> { items = methods; next = p + 1 }
+        return ParsedStructBody { fields = []; methods = methods; consts = consts; next = p + 1 }
     }
     loop {
         if value_member_is_operator(tokens, p) {
@@ -538,23 +539,27 @@ fn parse_value_type_members(tokens: []lexer::Token, pos: u64): ParsedList<Functi
             methods = [..methods, op.node]
             p = op.next
         } else {
-            var k = value_member_prefix_end(tokens, p)
-            if is_kind_at(tokens, k, lexer::TokenKind::Static) {
-                return err_at(tokens, k, "a value-type body may not declare a `static` method — write a separate free function instead")
+            var fdoc = peel_leading_doc(tokens, p)
+            var mcs = match try_parse_member_const(tokens, fdoc.next, fdoc.has_doc, fdoc.doc, consts) { MemberConstStep as x => x; error as e => return e }
+            if mcs.handled {
+                consts = mcs.consts
+                p = mcs.next
+            } else {
+                var k = value_member_prefix_end(tokens, p)
+                if is_kind_at(tokens, k, lexer::TokenKind::Static) {
+                    return err_at(tokens, k, "a value-type body may not declare a `static` method — write a separate free function instead")
+                }
+                if is_name_at(tokens, k) && is_kind_at(tokens, k + 1, lexer::TokenKind::Colon) {
+                    return err_at(tokens, k, "a value-type body may not declare fields")
+                }
+                if !is_kind_at(tokens, k, lexer::TokenKind::Fn) {
+                    return err_at(tokens, k, "a value-type body may contain only readonly methods (`fn …`), `operator …`, and `const` declarations")
+                }
+                var m = match parse_function(tokens, p, false, "", true, false) { Parsed<@Decl()> as x => x; error as e => return e }
+                var mf = match m.node { Function as f => f; _ => return err_at(tokens, p, "internal: a value-type method must parse to a Function") }
+                methods = [..methods, mf]
+                p = m.next
             }
-            if is_kind_at(tokens, k, lexer::TokenKind::Const) {
-                return err_at(tokens, k, "a value-type body may not declare a `const` member")
-            }
-            if is_name_at(tokens, k) && is_kind_at(tokens, k + 1, lexer::TokenKind::Colon) {
-                return err_at(tokens, k, "a value-type body may not declare fields")
-            }
-            if !is_kind_at(tokens, k, lexer::TokenKind::Fn) {
-                return err_at(tokens, k, "a value-type body may contain only readonly methods (`fn …`) and `operator …` declarations")
-            }
-            var m = match parse_function(tokens, p, false, "", true, false) { Parsed<@Decl()> as x => x; error as e => return e }
-            var mf = match m.node { Function as f => f; _ => return err_at(tokens, p, "internal: a value-type method must parse to a Function") }
-            methods = [..methods, mf]
-            p = m.next
         }
         if is_kind_at(tokens, p, lexer::TokenKind::RBrace) { break }
         if !is_sep(tokens, p) {
@@ -563,7 +568,7 @@ fn parse_value_type_members(tokens: []lexer::Token, pos: u64): ParsedList<Functi
         p = skip_seps(tokens, p)
         if is_kind_at(tokens, p, lexer::TokenKind::RBrace) { break }
     }
-    ParsedList<Function> { items = methods; next = p + 1 }
+    ParsedStructBody { fields = []; methods = methods; consts = consts; next = p + 1 }
 }
 
 fn struct_item_is_method(tokens: []lexer::Token, pos: u64): bool {
@@ -968,10 +973,10 @@ fn parse_type_body(tokens: []lexer::Token, pos: u64): Parsed<@TypeBody()> | erro
         match reject_const_body_member(tokens, pos + 1) { error as e => return e; null => { } }
         var ms = match parse_field_names(tokens, pos + 1) { ParsedList<str> as x => x; error as e => return e }
         if is_kind_at(tokens, ms.next, lexer::TokenKind::LBrace) {
-            var mb = match parse_value_type_members(tokens, ms.next) { ParsedList<Function> as x => x; error as e => return e }
-            return Parsed<@TypeBody()> { node = EnumBody { members = ms.items; methods = mb.items }; next = mb.next }
+            var mb = match parse_value_type_members(tokens, ms.next) { ParsedStructBody as x => x; error as e => return e }
+            return Parsed<@TypeBody()> { node = EnumBody { members = ms.items; methods = mb.methods; consts = mb.consts }; next = mb.next }
         }
-        return Parsed<@TypeBody()> { node = EnumBody { members = ms.items; methods = [] }; next = ms.next }
+        return Parsed<@TypeBody()> { node = EnumBody { members = ms.items; methods = []; consts = [] }; next = ms.next }
     }
     if is_kind_at(tokens, pos, lexer::TokenKind::Flags) {
         if !is_kind_at(tokens, pos + 1, lexer::TokenKind::LBrace) {
@@ -980,10 +985,10 @@ fn parse_type_body(tokens: []lexer::Token, pos: u64): Parsed<@TypeBody()> | erro
         match reject_const_body_member(tokens, pos + 1) { error as e => return e; null => { } }
         var ms = match parse_field_names(tokens, pos + 1) { ParsedList<str> as x => x; error as e => return e }
         if is_kind_at(tokens, ms.next, lexer::TokenKind::LBrace) {
-            var mb = match parse_value_type_members(tokens, ms.next) { ParsedList<Function> as x => x; error as e => return e }
-            return Parsed<@TypeBody()> { node = FlagsBody { members = ms.items; values = []; methods = mb.items }; next = mb.next }
+            var mb = match parse_value_type_members(tokens, ms.next) { ParsedStructBody as x => x; error as e => return e }
+            return Parsed<@TypeBody()> { node = FlagsBody { members = ms.items; values = []; methods = mb.methods; consts = mb.consts }; next = mb.next }
         }
-        return Parsed<@TypeBody()> { node = FlagsBody { members = ms.items; values = []; methods = [] }; next = ms.next }
+        return Parsed<@TypeBody()> { node = FlagsBody { members = ms.items; values = []; methods = []; consts = [] }; next = ms.next }
     }
     if is_kind_at(tokens, pos, lexer::TokenKind::Variant) {
         var ty = match parse_type(tokens, pos + 1) { ParsedType as x => x; error as e => return e }
@@ -991,8 +996,8 @@ fn parse_type_body(tokens: []lexer::Token, pos: u64): Parsed<@TypeBody()> | erro
     }
     var al = match parse_type(tokens, pos) { ParsedType as x => x; error as e => return e }
     if is_kind_at(tokens, al.next, lexer::TokenKind::LBrace) {
-        var mb = match parse_value_type_members(tokens, al.next) { ParsedList<Function> as x => x; error as e => return e }
-        return Parsed<@TypeBody()> { node = NewtypeBody { backing = al.node; methods = mb.items }; next = mb.next }
+        var mb = match parse_value_type_members(tokens, al.next) { ParsedStructBody as x => x; error as e => return e }
+        return Parsed<@TypeBody()> { node = NewtypeBody { backing = al.node; methods = mb.methods; consts = mb.consts }; next = mb.next }
     }
     Parsed<@TypeBody()> { node = AliasBody { alias = al.node }; next = al.next }
 }
@@ -1033,13 +1038,15 @@ fn parse_flags_decl(tokens: []lexer::Token, pos: u64): Parsed<@Decl()> | error {
     }
     var ms = match parse_field_names(tokens, p) { ParsedList<str> as x => x; error as e => return e }
     var methods: []Function = []
+    var consts: []ConstDecl = []
     var body_next = ms.next
     if is_kind_at(tokens, ms.next, lexer::TokenKind::LBrace) {
-        var mb = match parse_value_type_members(tokens, ms.next) { ParsedList<Function> as x => x; error as e => return e }
-        methods = mb.items
+        var mb = match parse_value_type_members(tokens, ms.next) { ParsedStructBody as x => x; error as e => return e }
+        methods = mb.methods
+        consts = mb.consts
         body_next = mb.next
     }
-    Parsed<@Decl()> { node = TypeDecl { name = name; type_params = []; type_constraints = []; body = FlagsBody { members = ms.items; values = []; methods = methods }; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_global = is_global }; next = body_next }
+    Parsed<@Decl()> { node = TypeDecl { name = name; type_params = []; type_constraints = []; body = FlagsBody { members = ms.items; values = []; methods = methods; consts = consts }; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_global = is_global }; next = body_next }
 }
 
 fn parse_extern_type_body(tokens: []lexer::Token, pos: u64): Parsed<@TypeBody()> | error {
