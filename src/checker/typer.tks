@@ -1029,7 +1029,7 @@ fn svc_ctor_texpr(canon: str, env: Env, table: TypeTable): TExpr | error {
 }
 
 fn svc_str_lit(s: str): TExpr {
-    TExpr { kind = TStrLit { text = s }; type = Str { }; line = 0; col = 0 }
+    TExpr { kind = TStrLit { text = s }; type = Named { name = "teko::base::str" }; line = 0; col = 0 }
 }
 
 fn svc_bool_lit(b: bool): TExpr {
@@ -1046,7 +1046,7 @@ fn svc_tail_block(e: TExpr): []@TStatement() {
 }
 
 fn svc_panic_str_suffix(env: Env): str {
-    var str_params: []@Type() = [..tempty(), Str { }]
+    var str_params: []@Type() = [..tempty(), Named { name = "teko::base::str" }]
     var str_sig = Func { params = str_params; ret = Void { }; variadic = false; param_names = []; n_required = 1; defaults = []; ret_extra = [] }
     overload_suffix_of(str_sig, overload_func_bindings(env, "teko::runtime", "panic"))
 }
@@ -1628,7 +1628,7 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr |
         }
         _ => { }
     }
-    var struct_name = match recv_t { Named as n => n.name; Str => "teko::base::str"; _ => return error { message = "method typing is deferred" } }
+    var struct_name = match recv_t { Named as n => n.name; _ => return error { message = "method typing is deferred" } }
     var decl = match type_table_find(table, struct_name, "") { parser::TypeDecl as td => td; error => return error { message = "method typing is deferred" } }
     match type_param_call_error(decl, table) { error as e => return e; null => { } }
     match decl.body {
@@ -2195,7 +2195,7 @@ fn cast_kind(t: @Type()): PrimKind | error {
         Byte => PrimKind::U8
         Ptr as p => cast_kind_of_ptr(p)
         Uptr => PrimKind::U64
-        _ => error { message = "cast not defined for this type in the seed (Named/Str/Slice/… — pending)" }
+        _ => error { message = "cast not defined for this type in the seed (Named/Slice/… — pending)" }
     }
 }
 
@@ -2477,7 +2477,7 @@ fn type_field_access(fa: parser::FieldAccess, env: Env, table: TypeTable): TExpr
     var is_error = match recv.type { Error => true; _ => false }
     if is_error {
         if fa.field == "message" || fa.field == "file" || fa.field == "expected" || fa.field == "actual" {
-            return TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = Str { }; line = 0; col = 0 }
+            return TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = Named { name = "teko::base::str" }; line = 0; col = 0 }
         }
         if fa.field == "line" || fa.field == "col" {
             return TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = Prim { kind = PrimKind::U32 }; line = 0; col = 0 }
@@ -2552,7 +2552,6 @@ fn elem_type_name(t: @Type()): str | error {
         Prim as p => prim_name(p.kind)
         Byte => "byte"
         Char => "char"
-        Str => "str"
         Named as n => name_last_segment(n.name)
         _ => error { message = "internal: a for-each iterator's element type must be a nameable type (prim/byte/char/str/named) — this shape is not yet supported" }
     }
@@ -2815,7 +2814,6 @@ fn type_index(ix: parser::Index, env: Env, table: TypeTable): TExpr | error {
     if !is_integer(idx.type) { return error { message = "a subscript index must be an integer" } }
     if is_str_type(recv.type) { return TExpr { kind = TIndex { receiver = recv; index = idx }; type = Byte { }; line = 0; col = 0 } }
     match recv.type {
-        Str => TExpr { kind = TIndex { receiver = recv; index = idx }; type = Byte { }; line = 0; col = 0 }
         Slice as s => TExpr { kind = TIndex { receiver = recv; index = idx }; type = s.element; line = 0; col = 0 }
         Ptr => ptr_opaque_error()
         Uptr => ptr_opaque_error()
@@ -2826,7 +2824,6 @@ fn type_index(ix: parser::Index, env: Env, table: TypeTable): TExpr | error {
 fn is_interp_formattable(t: @Type()): bool {
     if is_str_type(t) { return true }
     match t {
-        Str => true
         Char => true
         Byte => true
         Error => true
@@ -2932,7 +2929,7 @@ fn type_interp(in: parser::Interp, env: Env, table: TypeTable): TExpr | error {
         }
         i++
     }
-    TExpr { kind = TInterp { pieces = in.pieces; holes = holes; specs = specs }; type = Str { }; line = 0; col = 0 }
+    TExpr { kind = TInterp { pieces = in.pieces; holes = holes; specs = specs }; type = Named { name = "teko::base::str" }; line = 0; col = 0 }
 }
 
 fn type_in(n: parser::InExpr, env: Env, table: TypeTable): TExpr | error {
@@ -4274,7 +4271,6 @@ fn tspawn_type_copyable(t: @Type()): bool {
     match t {
         Prim => true
         Byte => true
-        Str => true
         Slice as sl => tspawn_scalar_type(sl.element)
         _ => false
     }
@@ -4864,7 +4860,6 @@ fn extern_named_body_ok(body: @TypeBody()): bool {
 fn teko_rt_type_ok(t: @Type()): bool {
     if is_str_type(t) { return true }
     match t {
-        Str => true
         Void => true
         Prim => true
         Byte => true
@@ -5246,7 +5241,6 @@ fn operator_expected_arity(name: str): u64 {
 fn type_is_indexed(t: @Type()): bool {
     if is_str_type(t) { return true }
     match t {
-        Str => true
         Slice => true
         _ => false
     }
