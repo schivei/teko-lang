@@ -715,6 +715,7 @@ pub fn lower_expr(ctx: LowerCtx, e: checker::TExpr): Lowered | error {
         checker::TIndex as ix => lower_index(ctx, e, ix)
         checker::TArrayLit as al => lower_array_lit(ctx, e, al)
         checker::TSliceOfLen as sol => lower_slice_of_len(ctx, e, sol)
+        checker::TZeroOf as z => lower_zero_of(ctx, e, z)
         checker::TByteLit as b => lower_byte_lit(ctx, e, b)
         checker::TCharLit as c => lower_char_lit(ctx, e, c)
         checker::TBoolLit as b => lower_bool_lit(ctx, e, b)
@@ -4415,6 +4416,7 @@ pub fn lower_fat_expr(ctx: LowerCtx, e: checker::TExpr): LoweredFat | error {
         checker::TCast as c => lower_fat_cast(ctx, e, c)
         checker::TArrayLit as al => lower_array_lit_fat(ctx, e, al)
         checker::TSliceOfLen as sol => lower_slice_of_len_fat(ctx, e, sol)
+        checker::TZeroOf as z => lower_zero_of_fat(ctx, e, z)
         checker::TVar as v => lower_var_fat(ctx, e, v)
         checker::TFieldAccess as fa => lower_fat_field(ctx, fa)
         checker::TIfExpr as f => lower_if_fat(ctx, e, f)
@@ -5722,6 +5724,64 @@ fn lower_slice_of_len(ctx: LowerCtx, e: checker::TExpr, s: checker::TSliceOfLen)
     Lowered { ctx = f.ctx; vreg = f.ptr }
 }
 
+fn zero_of_not_lowered(): error {
+    error { message = "native backend N1: `zero<T>` for this element type is not yet lowered (N2)" }
+}
+
+fn lower_zero_of_fat(ctx: LowerCtx, e: checker::TExpr, z: checker::TZeroOf): LoweredFat {
+    lower_list_empty(ctx, e)
+}
+
+fn lower_zero_of_int_scalar(ctx: LowerCtx, e: checker::TExpr): Lowered {
+    var r = ctx_alloc(ctx)
+    Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, 0, e.line, e.col)); vreg = r.vreg }
+}
+
+fn lower_zero_of_float_scalar(ctx: LowerCtx, e: checker::TExpr, wide: bool): Lowered {
+    var r = ctx_alloc(ctx)
+    Lowered { ctx = ctx_append(r.ctx, const_float_inst(r.vreg, teko::f64_bits(0.0), wide, e.line, e.col)); vreg = r.vreg }
+}
+
+fn lower_zero_of_prim(ctx: LowerCtx, e: checker::TExpr, p: checker::Prim): Lowered {
+    if prim_is_float_kind(p.kind) { return lower_zero_of_float_scalar(ctx, e, float_literal_is_wide(ctx, e)) }
+    lower_zero_of_int_scalar(ctx, e)
+}
+
+fn lower_zero_of_named_register(ctx: LowerCtx, e: checker::TExpr, n: checker::Named): Lowered {
+    var carrier = match find_value_carrier(ctx.enums, n.name) { LEnumInfo as info => info.carrier; null => enum_carrier_ltype() }
+    if carrier == LType::F32 || carrier == LType::F64 { return lower_zero_of_float_scalar(ctx, e, carrier == LType::F64) }
+    lower_zero_of_int_scalar(ctx, e)
+}
+
+fn lower_zero_of_register(ctx: LowerCtx, e: checker::TExpr, t: @Type()): Lowered | error {
+    match t {
+        checker::Prim as p => lower_zero_of_prim(ctx, e, p)
+        checker::Byte => lower_zero_of_int_scalar(ctx, e)
+        checker::Named as n => lower_zero_of_named_register(ctx, e, n)
+        _ => zero_of_not_lowered()
+    }
+}
+
+fn lower_zero_of_aggregate(ctx: LowerCtx, e: checker::TExpr, t: @Type()): Lowered | error {
+    var bytes = match aggregate_box_bytes(t, ctx) { u32 as n => n; null => return zero_of_not_lowered() }
+    var align = match aggregate_box_align(t, ctx) { u32 as a => a; null => 1 to u32 }
+    var slot = ctx_alloc(ctx)
+    var with_alloca = ctx_append(slot.ctx, alloca_inst(slot.vreg, bytes, align, e.line, e.col))
+    var count = ctx_alloc(with_alloca)
+    var with_count = ctx_append(count.ctx, const_int_inst(count.vreg, bytes to i64, e.line, e.col))
+    var zeroed = zero_fill_bytes(with_count, slot.vreg, count.vreg, e.line, e.col)
+    Lowered { ctx = zeroed; vreg = slot.vreg }
+}
+
+fn lower_zero_of(ctx: LowerCtx, e: checker::TExpr, z: checker::TZeroOf): Lowered | error {
+    if is_fat_type(z.element) {
+        var f = lower_zero_of_fat(ctx, e, z)
+        return Lowered { ctx = f.ctx; vreg = f.ptr }
+    }
+    if is_register_value_type(z.element, ctx.enums) { return lower_zero_of_register(ctx, e, z.element) }
+    lower_zero_of_aggregate(ctx, e, z.element)
+}
+
 fn bool_lit_value(v: bool): i64 { if v { 1 } else { 0 } }
 
 fn lower_byte_lit(ctx: LowerCtx, e: checker::TExpr, b: checker::TByteLit): Lowered {
@@ -6031,6 +6091,7 @@ fn texpr_kind_name(e: checker::TExpr): str {
         checker::TPathExpr => "enum member"
         checker::TArrayLit => "array literal"
         checker::TSliceOfLen => "sized array"
+        checker::TZeroOf => "zero-value primitive"
         checker::TLambda => "lambda"
         checker::TBorrow => "borrow"
         checker::TBlockExpr => "block expression"
