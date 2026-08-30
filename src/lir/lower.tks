@@ -1269,7 +1269,6 @@ fn lower_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | er
     if c.call_ns.len == 0 && is_store_u64_call(c.callee) { return lower_store_u64_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_load_u8_call(c.callee) { return lower_load_u8_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_store_u8_call(c.callee) { return lower_store_u8_call(ctx, e, c) }
-    if c.call_ns.len == 0 && is_len_builtin_call(c.callee) { return lower_len_builtin_call(ctx, e, c) }
     var sym = match call_symbol(c, ctx.externs, ctx.flat_symbols) { str as s => s; error as err => return err }
     if is_ffi_aggregate_return_symbol(sym) { return lower_ffi_aggregate_return_call(ctx, e, c, sym) }
     if is_str_arg_builtin(sym) { return lower_str_arg_call(ctx, e, sym, c) }
@@ -2042,12 +2041,6 @@ fn assert_seed_symbol(callee: parser::Path): str | null {
     null
 }
 
-fn builtin_str_query_symbol(last: str): str | null {
-    if last == "ends_with" { return "tk_str_ends_with" }
-    if last == "contains" { return "tk_str_contains" }
-    null
-}
-
 fn builtin_int_to_str_symbol(last: str): str | null {
     if last == "i64_to_str" { return "teko_teko__runtime__i64_to_str_len" }
     if last == "u64_to_str" { return "teko_teko__runtime__u64_to_str_len" }
@@ -2082,7 +2075,6 @@ fn builtin_peak_rss_symbol(last: str): str | null {
 
 fn native_builtin_symbol(last: str): str | null {
     match builtin_arena_symbol(last) { str as s => return s; null => { } }
-    match builtin_str_query_symbol(last) { str as s => return s; null => { } }
     match builtin_int_to_str_symbol(last) { str as s => return s; null => { } }
     match builtin_float_to_str_symbol(last) { str as s => return s; null => { } }
     match builtin_str_of_bytes_symbol(last) { str as s => return s; null => { } }
@@ -5453,16 +5445,6 @@ fn lower_ref_deref_read(ctx: LowerCtx, e: checker::TExpr, fa: checker::TFieldAcc
 
 fn lower_len_field(ctx: LowerCtx, fa: checker::TFieldAccess): Lowered | error {
     var fo = match lower_fat_expr(ctx, fa.receiver) { LoweredFat as x => x; error as err => return err }
-    Lowered { ctx = fo.ctx; vreg = fo.len }
-}
-
-fn is_len_builtin_call(callee: parser::Path): bool {
-    callee.segments.len > 0 && callee.segments[callee.segments.len - 1].name == "len"
-}
-
-fn lower_len_builtin_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | error {
-    if c.args.len != 1 { return error { message = "native backend N1: builtin `len` expects one argument (internal)" } }
-    var fo = match lower_fat_expr(ctx, c.args[0]) { LoweredFat as x => x; error as err => return err }
     Lowered { ctx = fo.ctx; vreg = fo.len }
 }
 
