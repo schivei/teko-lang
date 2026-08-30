@@ -312,7 +312,7 @@ interface). char antes dos primitivos (precedente newtype-escalar de menor raio)
 
 - **D4 — RATIFICADO: propriedade = getter/setter, sintaxe do dono `getter propriedade(): T { … }`
   acessa `a.propriedade`; simétrico `setter propriedade(v: T) { … }` acessa `a.propriedade = v`
-  (forma inferida, a confirmar).** Açúcar de método puro — a REP NÃO ganha campo (`typer` "no fields"
+  (confirmado).** Açúcar de método puro — a REP NÃO ganha campo (`typer` "no fields"
   continua verdadeiro). Só vive se o arco error passar da lane 1. Peça do **modelo OO de membros
   (D196)** → implementa naquela onda, não agora.
 
