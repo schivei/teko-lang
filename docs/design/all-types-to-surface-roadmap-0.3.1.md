@@ -283,32 +283,38 @@ interface). char antes dos primitivos (precedente newtype-escalar de menor raio)
 
 ---
 
-## PARTE D — Decisões-SURFACE (A/B) que precisam do dono
+## PARTE D — Decisões-SURFACE (A/B) — RATIFICADAS pelo dono (2026-08-29, DECISION_LOG D198)
 
-- **D1 — forma do `extern type` de primitivo.** A visão escreve `global exp extern type u8 = "u8"
-  from "teko"`, mas essa forma **não existe** (o `from` atual = tag de struct C). Opções:
-  **(A)** estender `extern type` com cláusula `= "<sym>" from "teko"` (floor-symbol) — superfície
-  nova, casa a visão literalmente; **(B)** reusar `Prim` internamente e só **expor** um `.tkh`-view
-  de superfície sem novo construto (o primitivo continua builtin, ganha só métodos via anexação
-  estilo str). Recomendo **(B)** pra a 1ª rodada (menor raio, primitivos são entranhados demais pra
-  um construto novo); (A) fica como end-state do `.tkh` auto-descrito.
+> **Status:** todas as 4 RULADAS. Roadmap EXECUTÁVEL. Ordem: `errors.As` (lane 1) → `char=u32`
+> → resto do arco error só sob medição. Ver DECISION_LOG D198.
 
-- **D2 — `char` é `u32` puro ou newtype `type char = u32 { métodos }`?** A visão D131 diz `char =
-  u32` newtype. Recomendo **newtype** (`type char = u32 { to_lower/to_upper/is_alpha/… }`) — casa o
-  template str, dá métodos, e o resolvedor newtype→underlying (D195) já trata a REP como u32. `u32`
-  puro perderia o nominal-distinto (char vs u32) que o checker usa hoje.
+- **D1 — RATIFICADO: `exp global type u8 = u8 { … }` (forma auto-referente).** O dono escolheu a
+  forma visível no fonte (dogfooda, mesma cara do str), aceitando a "redundância" `= u8` — preterindo
+  (A) construto novo `= "<sym>" from "teko"` (não existe, fica end-state do `.tkh`) e (B) `.tkh`-view
+  implícito. **Regra de checker a implementar:** decl de nome-reservado sob provingência-base cuja base
+  é o PRÓPRIO nome ⇒ backing resolve pro `Prim{kind}` verdadeiro (floor opcode/ABI, magic-legítimo
+  D188), NÃO ciclo; o `type` vira o `Named` de superfície que carrega só os métodos. Modelo str: opaco
+  (`Named`) só pra dispatch de método, transparente (`Prim`) pra REP/opcode.
 
-- **D3 — mecanismo do `error`-interface: arco COMPLETO ou só a lane 1?** As lanes 2-4 custam
-  interface-em-união + gramática de propriedades + a **vazão de 118 chamadas indiretas** (razão forte
-  contra). A lane 1 (`errors.As`) entrega o valor central (interrogar erro tipado) **sozinha, sem
-  tocar no `error`, sem custo de vazão**. Recomendo **ratificar a lane 1 já** e **segurar a decisão
-  do arco completo** até a lane 1 existir e a vazão ser medida. (Não é HALT — é a decisão barata que
-  o próprio arco §F.3 previu.)
+- **D2 — RATIFICADO: `char` = newtype `type char = u32 { métodos }` + literal `'x'`=char (u32
+  codepoint) / `b'x'`=byte (u8).** Casa o template str, dá métodos, resolvedor newtype→underlying
+  (D195) trata a REP como u32. Rep-change de rota (rota-C hoje fat-view `{ptr,len}` 16B; native já
+  escalar 4B) → colapsa a fat-view da rota-C pro escalar 4B. Vem **depois do str fechado** (reinterpret
+  str↔char precisa da forma final de str). Desenho confirma o lexer (hoje `'x'` sem prefixo).
 
-- **D4 — propriedades em interface (se o arco continuar): saída-açúcar-getter (0 reescritas, muda
-  gramática+46 consumidores) vs sem-propriedades (118 reescritas + quebra de superfície de usuário)?**
-  Recomendo **açúcar-de-getter** (arco §C.3: mais barato no que conta, sem quebra de superfície; a
-  REP não ganha campos → `typer` "no fields" continua verdadeiro na representação).
+- **D3 — RATIFICADO: error-interface é a decisão do dono (era proposta sem número); NÃO há fork.** O
+  "custo" (118 leituras de campo do caminho quente → chamada indireta por vtable + boxing) já é
+  governado pelo **ratchet D68** — não é decisão de dono, é o agente obedecendo a lei: mede e, se o
+  caminho quente subir o pico, **estagia** (error embutido concreto até a conversão ser neutra).
+  Sequenciamento (arco §F.3, sob ratchet): **lane 1 (`errors.As`) primeiro** (autônoma, serve TODA
+  interface, 2 instr LIR existentes, zero crescimento) → lanes 2-4, a 4 só após MEDIR a vazão. A
+  maquinaria de interface JÁ está viva (D30) → não é keystone-a-construir.
+
+- **D4 — RATIFICADO: propriedade = getter/setter, sintaxe do dono `getter propriedade(): T { … }`
+  acessa `a.propriedade`; simétrico `setter propriedade(v: T) { … }` acessa `a.propriedade = v`
+  (forma inferida, a confirmar).** Açúcar de método puro — a REP NÃO ganha campo (`typer` "no fields"
+  continua verdadeiro). Só vive se o arco error passar da lane 1. Peça do **modelo OO de membros
+  (D196)** → implementa naquela onda, não agora.
 
 ---
 
