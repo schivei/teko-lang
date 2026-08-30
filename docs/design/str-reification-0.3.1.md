@@ -163,7 +163,16 @@ o dono quer a forma canônica. Grep do qualificador velho = zero nos sítios mig
 `exp global fn` de `teko::runtime` (os métodos delegam a eles). **Reseed.** Gate completo.
 Risco: MÉDIO (volume de sítios; mecânico, guiado por grep).
 
-### CRUMB 6 — EXPURGO da variante `Str {}` + name-detects residuais
+### CRUMB 6 — EXPURGO da variante `Str {}` + name-detects residuais — LANDOU `242a96a5`
+Variante `Str{}` removida do enum `Type` + macro; ~40 sítios de construção residuais → `Named{"teko::base::str"}`;
+todos os braços `Str=>` de dispatch (guardados por `is_str_type`/`cg_is_str_type` ou fallback `Named`/`_`) removidos;
+as duas pontes transitórias (`type_eq` Str≡Named e `type_method_call` Str→str) removidas; tag Str(2) do tkb
+retirado (str já serializa como Named tag 6 desde o flip do crumb 3, sem bump); name-detects `len`/`ends_with`/
+`contains` (scope.tks sigs + codegen + lower nativo) removidos, caindo no genérico via método; call-sites livres
+remanescentes (`main.tks`, `tooling/.../extract.tks`) convertidos p/ método (D191). `concat`/`last_index_of` INTOCADOS
+(D194). Fixpoint gen2==gen3 byte-idêntico (gen2.c==gen3.c 21744590 bytes), gen0-do-seed builda o tip, ASan+UBSan
+limpo, 3 harnesses verdes, determinismo cross-run, pico 1061 MB (não cresce vs ~1070).
+
 Com o keyword flipado e todo dispatch por predicado, `Str {}` é código morto: remove a variante do
 enum `Type` (`type.tks:84`), o macro `Type()`, e todos os `match {Str=>}` (agora inalcançáveis —
 o compilador ENUMERA os que sobraram ao auto-compilar, metodologia D125/D181). Remove os
