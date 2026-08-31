@@ -1,30 +1,133 @@
 namespace teko
 
+use teko::stdlib::operators
+
 /**
  * A string type represented as a slice of bytes.
  */
-exp global type str = class Array<char> {
-    pub get bytes(enc: Encoding = Encoding::UTF8): []byte {
-        var b: [self.len * 4]byte = []
-        var s: usize = 0
-        for i in 0..self.len {
-            let c = self[i]
-            let encoded = c.encode(enc)
-            for j in 0..encoded.len {
-                b[s + j] = encoded[j]
-            }
-            s += encoded.len
-        }
-        return b
+exp global struct str : Array<char> & __type & Equatable {
+    pub const __SIZE_OF: usize = uptr::__SIZE_OF + usize::__SIZE_OF
+    pub const __V_KIND: ValueKind = .Array | .Value
+
+    _len: usize
+    _ptr: uptr
+
+    pub static arena fn new(values: []char): self {
+        @slot.swap<[]char, self>(values, self)
     }
 
-    pub fn ends_with(suffix: self): bool {
+    pub static arena fn new(size: usize): self {
+        var s: self = .{ _len = size, _ptr = @slot.alloc(char::__SIZE_OF * size) }
+        s
+    }
+
+    pub static arena fn new(size: usize, initial_values: []char): self {
+        var s: self = .{ _len = size, _ptr = @slot.alloc(char::__SIZE_OF * size) }
+        @slot.copy(initial_values, s._ptr)
+        s
+    }
+
+    exp arena get bytes: []byte {
+        @slot.swap<str, []byte>(self)
+    }
+
+    exp get len: usize {
+        self._len
+    }
+
+    exp fn ends_with(suffix: self, ignore_case: bool = false): bool {
         if suffix.len > self.len {
             return false
         }
 
-        var ends = self.slice(self.len - suffix.len, suffix.len)
+        var slice = self[self.len - suffix.len..suffix.len]
+        if ignore_case {
+            slice = slice.to_lowercase()
+            suffix = suffix.to_lowercase()
+        }
 
-        return ends == suffix
+        slice.equal(suffix, ignore_case)
+    }
+
+    exp fn starts_with(prefix: self, ignore_case: bool = false): bool {
+        if prefix.len > self.len {
+            return false
+        }
+
+        var slice = self[0..prefix.len]
+        if ignore_case {
+            slice = slice.to_lowercase()
+            prefix = prefix.to_lowercase()
+        }
+
+        slice.equal(prefix, ignore_case)
+    }
+
+    exp fn index_of(sub: char): (bool, usize) {
+        loop i in 0..self.len {
+            if self[i] == sub {
+                return (true, i)
+            }
+        }
+        (false, 0)
+    }
+
+    exp fn last_index_of(sub: char): (bool, usize) {
+        loop i in (0..self.len).rev() {
+            if self[i] == sub {
+                return (true, i)
+            }
+        }
+        (false, 0)
+    }
+
+    exp fn contains(sub: self): bool {
+        self.contains(sub, false)
+    }
+
+    exp fn contains(substring: self, ignore_case: bool): bool {
+        if substring.len > self.len {
+            return false
+        }
+
+        if substring.len == 0 {
+            return true
+        }
+
+        if ignore_case {
+            substring = substring.to_lowercase()
+        }
+
+        var i: usize = 0
+        loop i in 0..self.len - substring.len + 1 {
+            var cf = self[i]
+            var cl = self[i + substring.len - 1]
+            if ignore_case {
+                cf = cf.to_lowercase()
+                cl = cl.to_lowercase()
+            }
+            if cf == substring[0] && cl == substring[substring.len - 1] {
+                var slice = self[i..i + substring.len]
+                if ignore_case {
+                    slice = slice.to_lowercase()
+                    substring = substring.to_lowercase()
+                }
+
+                if slice.equal(substring, ignore_case) {
+                    return true
+                }
+            }
+            i += 1
+        }
+
+        false
+    }
+
+    exp fn to_lowercase(): self {
+        var result: [self.len]char = []
+        loop i in 0..self.len {
+            result[i] = self[i].to_lowercase()
+        }
+        self::new(result)
     }
 }
