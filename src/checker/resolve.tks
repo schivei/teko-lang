@@ -735,10 +735,21 @@ pub fn method_type_param_table(owner_name: str, mtps: []str, mtcs: []@Constraint
     }
 }
 
+fn resolve_named_builtin_fallback(name: str, path: parser::Path, table: TypeTable, arity: u64): @Type() | error {
+    if path.segments.len == 1 && table.manual {
+        match builtin_type(name) {
+            (@Type()) as t => return t
+            NotBuiltinType => { }
+            error as e => return e
+        }
+    }
+    unknown_named_error(name, table, arity)
+}
+
 fn resolve_named(path: parser::Path, table: TypeTable, ref_ns: str, arity: u64): @Type() | error {
     if path.segments.len == 0 { return error { message = "internal: empty type path (a void/missing type used where a value type is required)" } }
     var name = path.segments[path.segments.len - 1].name
-    if path.segments.len == 1 {
+    if path.segments.len == 1 && !table.manual {
         match builtin_type(name) {
             (@Type()) as t => return t
             NotBuiltinType => { }
@@ -753,7 +764,7 @@ fn resolve_named(path: parser::Path, table: TypeTable, ref_ns: str, arity: u64):
                 _ => return if name_is_g_instance(name) { Named { name = name } } else { Named { name = qualify(type_ref_ns(path, table, ref_ns), name) } }
             }
         }
-        NotUserType => return unknown_named_error(name, table, arity)
+        NotUserType => return resolve_named_builtin_fallback(name, path, table, arity)
         error as e => return e
     }
     unknown_named_error(name, table, arity)
