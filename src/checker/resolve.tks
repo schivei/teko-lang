@@ -12,10 +12,22 @@ pub type TypeTable = struct {
     regs: []TypeReg
     by_last: NameIndex
     comptimes: []ComptimeReg
+    manual: bool
 }
 
 pub fn tt_empty(): TypeTable {
-    TypeTable { regs = []; by_last = nidx_empty(); comptimes = [] }
+    TypeTable { regs = []; by_last = nidx_empty(); comptimes = []; manual = false }
+}
+
+/**
+ * Returns a copy of the table with the bootstrap manual-mode flag set.
+ *
+ * @param t   the source table
+ * @param b   the manual-mode flag to stamp
+ * @return    a table identical to `t` but with `manual = b`
+ */
+pub fn tt_set_manual(t: TypeTable, b: bool): TypeTable {
+    TypeTable { regs = t.regs; by_last = t.by_last; comptimes = t.comptimes; manual = b }
 }
 
 pub fn tt_len(t: TypeTable): u64 {
@@ -27,7 +39,7 @@ pub fn tt_at(t: TypeTable, i: u64): TypeReg {
 }
 
 pub fn tt_push(t: TypeTable, r: TypeReg): TypeTable {
-    TypeTable { regs = [..t.regs, r]; by_last = nidx_empty(); comptimes = t.comptimes }
+    TypeTable { regs = [..t.regs, r]; by_last = nidx_empty(); comptimes = t.comptimes; manual = t.manual }
 }
 
 pub fn tt_indexed(t: TypeTable): bool {
@@ -48,11 +60,11 @@ fn tt_last_names(regs: []TypeReg): []str {
 
 pub fn tt_freeze(t: TypeTable): TypeTable {
     if tt_indexed(t) { return t }
-    TypeTable { regs = t.regs; by_last = nidx_build(tt_last_names(t.regs)); comptimes = t.comptimes }
+    TypeTable { regs = t.regs; by_last = nidx_build(tt_last_names(t.regs)); comptimes = t.comptimes; manual = t.manual }
 }
 
 pub fn tt_with_comptimes(t: TypeTable, decls: []ComptimeReg): TypeTable {
-    TypeTable { regs = t.regs; by_last = t.by_last; comptimes = decls }
+    TypeTable { regs = t.regs; by_last = t.by_last; comptimes = decls; manual = t.manual }
 }
 
 pub type ComptimeReg = struct { decl: parser::ComptimeDecl; namespace: str }
@@ -213,7 +225,7 @@ pub fn type_table_rekeyed(table: TypeTable): TypeTable {
         regs[i] = rekeyed_reg(tt_at(table, i))
         i++
     }
-    tt_freeze(TypeTable { regs = regs; by_last = nidx_empty(); comptimes = [] })
+    tt_freeze(TypeTable { regs = regs; by_last = nidx_empty(); comptimes = []; manual = table.manual })
 }
 
 fn rekeyed_reg(r: TypeReg): TypeReg {
@@ -691,7 +703,7 @@ pub fn type_param_table(type_params: []str, type_constraints: []@ConstraintExpr(
         k++
         j++
     }
-    tt_freeze(TypeTable { regs = regs; by_last = nidx_empty(); comptimes = [] })
+    tt_freeze(TypeTable { regs = regs; by_last = nidx_empty(); comptimes = []; manual = table.manual })
 }
 
 fn concat_tps(a: []str, b: []str): []str {
@@ -723,10 +735,21 @@ pub fn method_type_param_table(owner_name: str, mtps: []str, mtcs: []@Constraint
     }
 }
 
+fn resolve_named_builtin_fallback(name: str, path: parser::Path, table: TypeTable, arity: u64): @Type() | error {
+    if path.segments.len == 1 && table.manual {
+        match builtin_type(name) {
+            (@Type()) as t => return t
+            NotBuiltinType => { }
+            error as e => return e
+        }
+    }
+    unknown_named_error(name, table, arity)
+}
+
 fn resolve_named(path: parser::Path, table: TypeTable, ref_ns: str, arity: u64): @Type() | error {
     if path.segments.len == 0 { return error { message = "internal: empty type path (a void/missing type used where a value type is required)" } }
     var name = path.segments[path.segments.len - 1].name
-    if path.segments.len == 1 {
+    if path.segments.len == 1 && !table.manual {
         match builtin_type(name) {
             (@Type()) as t => return t
             NotBuiltinType => { }
@@ -741,7 +764,7 @@ fn resolve_named(path: parser::Path, table: TypeTable, ref_ns: str, arity: u64):
                 _ => return if name_is_g_instance(name) { Named { name = name } } else { Named { name = qualify(type_ref_ns(path, table, ref_ns), name) } }
             }
         }
-        NotUserType => return unknown_named_error(name, table, arity)
+        NotUserType => return resolve_named_builtin_fallback(name, path, table, arity)
         error as e => return e
     }
     unknown_named_error(name, table, arity)
@@ -2048,7 +2071,7 @@ pub fn table_generic_instance_regs(table: TypeTable): TypeTable {
         }
         i++
     }
-    TypeTable { regs = teko::collections::arr_slice(regs, 0, count); by_last = nidx_empty(); comptimes = [] }
+    TypeTable { regs = teko::collections::arr_slice(regs, 0, count); by_last = nidx_empty(); comptimes = []; manual = table.manual }
 }
 
 pub fn table_generic_instances(table: TypeTable): []parser::TypeDecl {
@@ -2170,5 +2193,5 @@ pub fn normalize_table_instances(table: TypeTable): TypeTable {
         }
         i++
     }
-    TypeTable { regs = regs; by_last = nidx_empty(); comptimes = [] }
+    TypeTable { regs = regs; by_last = nidx_empty(); comptimes = []; manual = table.manual }
 }
