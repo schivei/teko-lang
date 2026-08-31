@@ -50,11 +50,22 @@ if ((Get-Command sh -ErrorAction SilentlyContinue) -and (Test-Path $DeriveSh)) {
 $Extra = @()
 if ($env:CFLAGS_EXTRA) { $Extra = $env:CFLAGS_EXTRA.Split(" ", [StringSplitOptions]::RemoveEmptyEntries) }
 
+# Standalone clang (the GNU-style driver) does NOT read %INCLUDE% and relies on its own MSVC
+# auto-detection, which fails on newer VS layouts (e.g. VS 2026) — "'stdlib.h' not found" even
+# inside a VS developer shell. Feed the dev shell's INCLUDE paths to clang explicitly as
+# -isystem so header search does not depend on clang's detection. The linker reads %LIB% itself.
+$SysInc = @()
+if ($env:INCLUDE) {
+    foreach ($p in $env:INCLUDE.Split(";", [StringSplitOptions]::RemoveEmptyEntries)) {
+        $SysInc += "-isystem"; $SysInc += $p
+    }
+}
+
 Write-Host "comp_teko_win: CC=$CC -> $Out (version $Ver)"
 try { & $CC --version 2>$null | Select-Object -First 1 } catch { }
 
 # No -pthread on Windows: teko_rt.c uses CreateThread there (guarded by #ifdef _WIN32).
-& $CC -std=c2x -w -O2 "-DTEKO_VERSION_STRING=$Ver" @Extra `
+& $CC -std=c2x -w -O2 "-DTEKO_VERSION_STRING=$Ver" @Extra @SysInc `
     "-I$Root\src\runtime" "-I$Root\src\assert" `
     $TekoC "$Root\src\runtime\teko_rt.c" "$Root\src\assert\assert.c" `
     -o $Out

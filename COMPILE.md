@@ -115,11 +115,13 @@ new PowerShell and build:
 .\teko.exe --version
 ```
 
-> **`fatal error: 'stdlib.h' file not found`** means clang can't see the MSVC CRT /
-> Windows SDK headers — they are only on the include path inside a VS developer
-> environment. The script auto-enters it (via `vswhere`) when `INCLUDE` is unset. If that
-> fails (VS not found), run the script from **"Developer PowerShell for VS 2022"** (Start
-> menu), which sets the environment up itself.
+> **`fatal error: 'stdlib.h' file not found`** — standalone clang (the GNU-style driver)
+> does not read `%INCLUDE%` and relies on its own MSVC auto-detection, which fails on newer
+> VS layouts (e.g. VS 2026), so it fails even inside a VS developer shell. The script works
+> around this: it feeds the dev shell's `INCLUDE` paths to clang as `-isystem`, and
+> auto-enters a VS developer environment (via `vswhere`) when `INCLUDE` is unset. If no VS is
+> found it warns; run it then from a **"Developer PowerShell for VS"** (any version), or use
+> MSYS2/MinGW clang (Option B), whose clang carries its own headers.
 
 ### Option B — MSYS2 / MinGW-w64
 
