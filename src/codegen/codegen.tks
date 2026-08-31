@@ -463,6 +463,7 @@ type CgProg = struct {
     maypanic: CgNameTable
     needs_region: CgNameTable
     table: checker::TypeTable
+    manual: bool
 }
 
 fn cg_prog_uses_capture(items: []@TItem()): bool {
@@ -1371,6 +1372,7 @@ fn cg_fn_key(ns: str, name: str): str { teko::str::concat(ns, "::", name) }
  * @return      true iff `f`'s signature carries `tk_region *_tkrgn`
  */
 fn cg_fn_needs_region(prog: CgProg, f: checker::TFunction): bool {
+    if prog.manual { return false }
     if f.is_extern { return false }
     cg_table_get(prog.needs_region, cg_fn_key(f.namespace, f.name)) != 0
 }
@@ -1384,6 +1386,7 @@ fn cg_fn_needs_region(prog: CgProg, f: checker::TFunction): bool {
  * @return      true iff the callee is above the line
  */
 fn cg_call_needs_region(prog: CgProg, ns: str, name: str): bool {
+    if prog.manual { return false }
     if ns.len == 0 { return false }
     cg_table_get(prog.needs_region, cg_fn_key(ns, name)) != 0
 }
@@ -1401,7 +1404,7 @@ fn cg_prog_needs_region_of(items: []@TItem()): CgNameTable {
 
 fn cg_prog_of(p: checker::TProgram): CgProg {
     var uc = cg_prog_uses_capture(p.items)
-    CgProg { items = p.items; ix = cg_index_of(p.items); cond_consts = checker::cond_const_names(p.items); uses_capture = uc; maypanic = cg_prog_maypanic(p.items, uc); needs_region = cg_prog_needs_region_of(p.items); table = checker::type_table_of(p) }
+    CgProg { items = p.items; ix = cg_index_of(p.items); cond_consts = checker::cond_const_names(p.items); uses_capture = uc; maypanic = cg_prog_maypanic(p.items, uc); needs_region = cg_prog_needs_region_of(p.items); table = checker::type_table_of(p); manual = p.manual }
 }
 
 fn cg_mode_is_test(mode: CgMode): bool {
@@ -1416,7 +1419,7 @@ fn cg_mode_is_test(mode: CgMode): bool {
 fn cg_prog_maybe_force_capture(prog: CgProg, mode: CgMode): CgProg {
     if !cg_mode_is_test(mode) { return prog }
     if prog.uses_capture { return prog }
-    CgProg { items = prog.items; ix = prog.ix; cond_consts = prog.cond_consts; uses_capture = true; maypanic = cg_prog_maypanic(prog.items, true); needs_region = prog.needs_region; table = prog.table }
+    CgProg { items = prog.items; ix = prog.ix; cond_consts = prog.cond_consts; uses_capture = true; maypanic = cg_prog_maypanic(prog.items, true); needs_region = prog.needs_region; table = prog.table; manual = prog.manual }
 }
 
 fn cg_prog_bare(p: checker::TProgram): CgProg {
@@ -1428,7 +1431,7 @@ fn cg_prog_bare(p: checker::TProgram): CgProg {
     }
     var ix = CgIndex { exact = empty; last = empty; fns = empty; same_last_next = [] }
     var uc = cg_prog_uses_capture(p.items)
-    CgProg { items = p.items; ix = ix; cond_consts = checker::cond_const_names(p.items); uses_capture = uc; maypanic = cg_prog_maypanic(p.items, uc); needs_region = cg_prog_needs_region_of(p.items); table = checker::type_table_of(p) }
+    CgProg { items = p.items; ix = ix; cond_consts = checker::cond_const_names(p.items); uses_capture = uc; maypanic = cg_prog_maypanic(p.items, uc); needs_region = cg_prog_needs_region_of(p.items); table = checker::type_table_of(p); manual = p.manual }
 }
 
 fn cg_type_table(prog: CgProg): checker::TypeTable {
@@ -8595,7 +8598,7 @@ fn emit_function_cov(buf: teko::io::FileStream, prog: CgProg, f: checker::TFunct
     var fbody = f.body
     var cov = if cov_idx >= 0 { CovCtx { on = true; fn_idx = cov_idx to u64 } } else { cov_off() }
     var escaping = checker::fn_escaping_vars(f)
-    var want_frame = fn_body_has_frame_local(prog, escaping, fbody)
+    var want_frame = !prog.manual && fn_body_has_frame_local(prog, escaping, fbody)
     var wants_region = cg_fn_needs_region(prog, f)
     var frame: str = if want_frame { "_tkfr" } else { "" }
     var use_rr = want_frame
@@ -9781,7 +9784,7 @@ fn cg_lift_lambdas(prog: CgProg): LiftResult {
         items[prog.items.len + j] = lifted_fns[j]
         j++
     }
-    LiftResult { prog = checker::TProgram { items = items }; lams = tlamvec_flat(acc.lams); spawns = acc.spawns }
+    LiftResult { prog = checker::TProgram { items = items; manual = prog.manual }; lams = tlamvec_flat(acc.lams); spawns = acc.spawns }
 }
 fn cg_lift_block(stmts: []@TStatement(), ref acc: StampAcc): []@TStatement() {
     var out: [stmts.len]@TStatement() = []
