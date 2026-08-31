@@ -463,6 +463,7 @@ type CgProg = struct {
     maypanic: CgNameTable
     needs_region: CgNameTable
     table: checker::TypeTable
+    manual: bool
 }
 
 fn cg_prog_uses_capture(items: []@TItem()): bool {
@@ -1371,6 +1372,7 @@ fn cg_fn_key(ns: str, name: str): str { teko::str::concat(ns, "::", name) }
  * @return      true iff `f`'s signature carries `tk_region *_tkrgn`
  */
 fn cg_fn_needs_region(prog: CgProg, f: checker::TFunction): bool {
+    if prog.manual { return false }
     if f.is_extern { return false }
     cg_table_get(prog.needs_region, cg_fn_key(f.namespace, f.name)) != 0
 }
@@ -1384,6 +1386,7 @@ fn cg_fn_needs_region(prog: CgProg, f: checker::TFunction): bool {
  * @return      true iff the callee is above the line
  */
 fn cg_call_needs_region(prog: CgProg, ns: str, name: str): bool {
+    if prog.manual { return false }
     if ns.len == 0 { return false }
     cg_table_get(prog.needs_region, cg_fn_key(ns, name)) != 0
 }
@@ -1401,7 +1404,7 @@ fn cg_prog_needs_region_of(items: []@TItem()): CgNameTable {
 
 fn cg_prog_of(p: checker::TProgram): CgProg {
     var uc = cg_prog_uses_capture(p.items)
-    CgProg { items = p.items; ix = cg_index_of(p.items); cond_consts = checker::cond_const_names(p.items); uses_capture = uc; maypanic = cg_prog_maypanic(p.items, uc); needs_region = cg_prog_needs_region_of(p.items); table = checker::type_table_of(p) }
+    CgProg { items = p.items; ix = cg_index_of(p.items); cond_consts = checker::cond_const_names(p.items); uses_capture = uc; maypanic = cg_prog_maypanic(p.items, uc); needs_region = cg_prog_needs_region_of(p.items); table = checker::type_table_of(p); manual = p.manual }
 }
 
 fn cg_mode_is_test(mode: CgMode): bool {
@@ -1416,7 +1419,7 @@ fn cg_mode_is_test(mode: CgMode): bool {
 fn cg_prog_maybe_force_capture(prog: CgProg, mode: CgMode): CgProg {
     if !cg_mode_is_test(mode) { return prog }
     if prog.uses_capture { return prog }
-    CgProg { items = prog.items; ix = prog.ix; cond_consts = prog.cond_consts; uses_capture = true; maypanic = cg_prog_maypanic(prog.items, true); needs_region = prog.needs_region; table = prog.table }
+    CgProg { items = prog.items; ix = prog.ix; cond_consts = prog.cond_consts; uses_capture = true; maypanic = cg_prog_maypanic(prog.items, true); needs_region = prog.needs_region; table = prog.table; manual = prog.manual }
 }
 
 fn cg_prog_bare(p: checker::TProgram): CgProg {
@@ -1428,7 +1431,7 @@ fn cg_prog_bare(p: checker::TProgram): CgProg {
     }
     var ix = CgIndex { exact = empty; last = empty; fns = empty; same_last_next = [] }
     var uc = cg_prog_uses_capture(p.items)
-    CgProg { items = p.items; ix = ix; cond_consts = checker::cond_const_names(p.items); uses_capture = uc; maypanic = cg_prog_maypanic(p.items, uc); needs_region = cg_prog_needs_region_of(p.items); table = checker::type_table_of(p) }
+    CgProg { items = p.items; ix = ix; cond_consts = checker::cond_const_names(p.items); uses_capture = uc; maypanic = cg_prog_maypanic(p.items, uc); needs_region = cg_prog_needs_region_of(p.items); table = checker::type_table_of(p); manual = p.manual }
 }
 
 fn cg_type_table(prog: CgProg): checker::TypeTable {
@@ -2809,36 +2812,47 @@ fn cg_emit_slice_type_expr(buf: teko::io::FileStream, prog: CgProg, st: parser::
     }
 }
 
+fn cg_named_has_user_decl(prog: CgProg, path: parser::Path, ref_ns: str): bool {
+    match cg_find_decl_ns(prog, path, ref_ns) { parser::TypeDecl => true; error => false }
+}
+
+fn emit_builtin_ctype(buf: teko::io::FileStream, prog: CgProg, nt: parser::NamedType, last: str, ref_ns: str): bool {
+    if last == "u8" { buf.write("uint8_t"); return true }
+    else if last == "u16" { buf.write("uint16_t"); return true }
+    else if last == "u32" { buf.write("uint32_t"); return true }
+    else if last == "u64" { buf.write("uint64_t"); return true }
+    else if last == "i8" { buf.write("int8_t"); return true }
+    else if last == "i16" { buf.write("int16_t"); return true }
+    else if last == "i32" { buf.write("int32_t"); return true }
+    else if last == "i64" { buf.write("int64_t"); return true }
+    else if last == "f32" { buf.write("float"); return true }
+    else if last == "f64" { buf.write("double"); return true }
+    else if last == "bool" { buf.write("bool"); return true }
+    else if last == "usize" { buf.write("uint64_t"); return true }
+    else if last == "isize" { buf.write("int64_t"); return true }
+    else if last == "byte" { buf.write("uint8_t"); return true }
+    else if last == "char" { buf.write("tk_char"); return true }
+    else if last == "str" { buf.write("tk_str"); return true }
+    else if last == "error" { buf.write("tk_error"); return true }
+    else if last == "ptr" {
+        if nt.args.len > 0 { emit_type_expr(buf, prog, nt.args[0], ref_ns); buf.write(" *") }
+        else { buf.write("void *") }
+        return true
+    }
+    else if last == "uptr" { buf.write("uintptr_t"); return true }
+    else if last == "Ref" {
+        if nt.args.len > 0 { emit_type_expr(buf, prog, nt.args[0], ref_ns); buf.write(" *"); return true }
+        panic("`Ref<T>` needs a type argument")
+    }
+    false
+}
+
 fn emit_type_expr(buf: teko::io::FileStream, prog: CgProg, te: @TypeExpr(), ref_ns: str) {
     match te {
         parser::NamedType as nt => {
             var last = nt.path.segments[nt.path.segments.len - 1].name
-            if last == "u8" { buf.write("uint8_t"); return }
-            else if last == "u16" { buf.write("uint16_t"); return }
-            else if last == "u32" { buf.write("uint32_t"); return }
-            else if last == "u64" { buf.write("uint64_t"); return }
-            else if last == "i8" { buf.write("int8_t"); return }
-            else if last == "i16" { buf.write("int16_t"); return }
-            else if last == "i32" { buf.write("int32_t"); return }
-            else if last == "i64" { buf.write("int64_t"); return }
-            else if last == "f32" { buf.write("float"); return }
-            else if last == "f64" { buf.write("double"); return }
-            else if last == "bool" { buf.write("bool"); return }
-            else if last == "usize" { buf.write("uint64_t"); return }
-            else if last == "isize" { buf.write("int64_t"); return }
-            else if last == "byte" { buf.write("uint8_t"); return }
-            else if last == "char" { buf.write("tk_char"); return }
-            else if last == "str" { buf.write("tk_str"); return }
-            else if last == "error" { buf.write("tk_error"); return }
-            else if last == "ptr" {
-                if nt.args.len > 0 { emit_type_expr(buf, prog, nt.args[0], ref_ns); buf.write(" *") }
-                else { buf.write("void *") }
-                return
-            }
-            else if last == "uptr" { buf.write("uintptr_t"); return }
-            else if last == "Ref" {
-                if nt.args.len > 0 { emit_type_expr(buf, prog, nt.args[0], ref_ns); buf.write(" *"); return }
-                else { panic("`Ref<T>` needs a type argument") }
+            if !(prog.manual && cg_named_has_user_decl(prog, nt.path, ref_ns)) {
+                if emit_builtin_ctype(buf, prog, nt, last, ref_ns) { return }
             }
             var cdname = match cg_find_decl_ns(prog, nt.path, ref_ns) { parser::TypeDecl as d => d.name; error => last }
             match cg_find_decl_ns(prog, nt.path, ref_ns) {
@@ -8595,7 +8609,7 @@ fn emit_function_cov(buf: teko::io::FileStream, prog: CgProg, f: checker::TFunct
     var fbody = f.body
     var cov = if cov_idx >= 0 { CovCtx { on = true; fn_idx = cov_idx to u64 } } else { cov_off() }
     var escaping = checker::fn_escaping_vars(f)
-    var want_frame = fn_body_has_frame_local(prog, escaping, fbody)
+    var want_frame = !prog.manual && fn_body_has_frame_local(prog, escaping, fbody)
     var wants_region = cg_fn_needs_region(prog, f)
     var frame: str = if want_frame { "_tkfr" } else { "" }
     var use_rr = want_frame
@@ -9781,7 +9795,7 @@ fn cg_lift_lambdas(prog: CgProg): LiftResult {
         items[prog.items.len + j] = lifted_fns[j]
         j++
     }
-    LiftResult { prog = checker::TProgram { items = items }; lams = tlamvec_flat(acc.lams); spawns = acc.spawns }
+    LiftResult { prog = checker::TProgram { items = items; manual = prog.manual }; lams = tlamvec_flat(acc.lams); spawns = acc.spawns }
 }
 fn cg_lift_block(stmts: []@TStatement(), ref acc: StampAcc): []@TStatement() {
     var out: [stmts.len]@TStatement() = []
@@ -10758,7 +10772,7 @@ fn tk_emit_c_body(prog0: checker::TProgram, mode: CgMode, buf: teko::io::FileStr
     var sc_used = cg_scan_syscall_arities(prog)
     cg_emit_syscall_helpers(buf, sc_used)
     cg_emit_cond_const_ladder(buf, prog)
-    cg_emit_arena_provider_ladder(buf)
+    if !prog.manual { cg_emit_arena_provider_ladder(buf) }
     cg_emit_thread_clone_helper(buf, sc_used.clone)
     cg_emit_atomic_helpers(buf, sc_used.atomics)
 
