@@ -2203,7 +2203,7 @@ fn type_call(c0: parser::Call, expected: @Type() | null, env: Env, table: TypeTa
                         }
                         vi++
                     }
-                    return TExpr { kind = TCall { overload_suffix = ov_suffix; callee = c.callee; args = targs; call_ns = resolved_ns; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = xtypes; ret_extra = [] }; type = subst_type(f.ret, s); line = 0; col = 0 }
+                    return TExpr { kind = TCall { overload_suffix = ov_suffix; callee = c.callee; args = reinterpret_generic_args(targs, f.params, s, table); call_ns = resolved_ns; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = xtypes; ret_extra = [] }; type = subst_type(f.ret, s); line = 0; col = 0 }
                 }
                 var s = Subst { params = all_tps; names = []; types = [] }
                 var gi = 0
@@ -2225,7 +2225,7 @@ fn type_call(c0: parser::Call, expected: @Type() | null, env: Env, table: TypeTa
                     null => { }
                 }
                 var inferred_type_args: []@Type() = mono_type_args_of(all_tps, s, ret_only_inferred)
-                return TExpr { kind = TCall { overload_suffix = ov_suffix; callee = c.callee; args = targs; call_ns = resolved_ns; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = inferred_type_args; ret_extra = [] }; type = subst_type(f.ret, s); line = 0; col = 0 }
+                return TExpr { kind = TCall { overload_suffix = ov_suffix; callee = c.callee; args = reinterpret_generic_args(targs, f.params, s, table); call_ns = resolved_ns; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = inferred_type_args; ret_extra = [] }; type = subst_type(f.ret, s); line = 0; col = 0 }
             }
             var args: [targs.len]TExpr = []
             var i = 0
@@ -4449,6 +4449,24 @@ fn coerce_value_into(v: TExpr, target: @Type(), table: TypeTable, what: str): TE
     match bytes_str_reinterpret(v, target) { TExpr as w => return w; null => { } }
     if literal_adopts(v, target) { return retype_literal(v, target) }
     teko::error::err_typed(error { message = what }, type_render(target), type_render(v.type))
+}
+
+fn reinterpret_generic_args(targs: []TExpr, params: []@Type(), s: Subst, table: TypeTable): []TExpr {
+    var out: [targs.len]TExpr = []
+    var i: u64 = 0
+    loop {
+        if i >= targs.len { break }
+        var a = targs[i]
+        if i < params.len {
+            var want = subst_type(params[i], s)
+            if !assignable_to(a.type, want, table) && bytes_str_convertible(a.type, want) {
+                a = TExpr { kind = TCast { expr = a }; type = want; line = a.line; col = a.col }
+            }
+        }
+        out[i] = a
+        i++
+    }
+    out
 }
 
 fn coerce_argument_into(a: TExpr, pt: @Type(), table: TypeTable): TExpr | error {
