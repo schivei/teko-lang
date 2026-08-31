@@ -55,7 +55,7 @@ fn project_frontend(dir: str): Frontend | error { project_frontend_sel(dir, fals
 
 fn project_frontend_sel(dir: str, include_tests: bool): Frontend | error {
     match teko::env::chdir(dir) { error => return error { message = "cannot enter project directory" }; null => { } }
-    frontend_body(include_tests, false, output_is_tty(false), false)
+    frontend_body(include_tests, false, output_is_tty(false), false, false)
 }
 
 fn target_os(m: Manifest): str {
@@ -201,13 +201,13 @@ fn append_diags(a: []str, b: []str): []str {
     [..a, ..b]
 }
 
-fn checked_program_of(selected: parser::Program, dep_prog: checker::TProgram, report: bool, tty: bool, parse_diags: []str, explicit: bool): checker::TProgram | error {
+fn checked_program_of(selected: parser::Program, dep_prog: checker::TProgram, report: bool, tty: bool, parse_diags: []str, explicit: bool, manual: bool): checker::TProgram | error {
     var mode = report_mode(!report, tty)
     var checker_phase = phase_begin("checker", count_unit_text(0, selected.items.len, "items"), mode)
     var last: u64 = 0
     var total_cell: u64 = selected.items.len
     var on_item = checker_tick_fn(checker_phase, last, total_cell)
-    var pre = match checker::type_program_with_deps_pre_mono(selected, dep_prog, on_item, explicit) {
+    var pre = match checker::type_program_with_deps_pre_mono(selected, dep_prog, on_item, explicit, manual) {
         checker::PreMono as p => p
         error as e => {
             var all = append_diags(parse_diags, [e.message])
@@ -409,7 +409,7 @@ fn patch_embed_consts(program: parser::Program, heaps: teko::embed::EmbedHeaps):
     parser::Program { items = out }
 }
 
-fn frontend_parse(include_tests: bool, quiet: bool, tty: bool): ParsedFront | error {
+fn frontend_parse(include_tests: bool, quiet: bool, tty: bool, manual: bool): ParsedFront | error {
     var mname = match find_manifest() { str as n => n; error as e => return e }
     var mtext = match teko::io::read_file(mname) { str as s => s; error => return error { message = "cannot read .tkp manifest" } }
     var m = match parse_manifest(mtext) { Manifest as x => x; error as e => return e }
@@ -421,7 +421,7 @@ fn frontend_parse(include_tests: bool, quiet: bool, tty: bool): ParsedFront | er
         error => { }
     }
 
-    if wants_base_prelude(m.artifact) {
+    if !manual && wants_base_prelude(m.artifact) {
         files = match inject_runtime_prelude(files, m.artifact) { []SourceFile as f => f; error as e => return e }
     }
 
@@ -451,7 +451,7 @@ fn frontend_parse(include_tests: bool, quiet: bool, tty: bool): ParsedFront | er
     ParsedFront { parsed = prog; manifest = m; diags = all_diags; embeds = embed_result }
 }
 
-fn frontend_check(pf: ParsedFront, quiet: bool, tty: bool, explicit: bool): Frontend | error {
+fn frontend_check(pf: ParsedFront, quiet: bool, tty: bool, explicit: bool, manual: bool): Frontend | error {
     match cc_validate_target(target_os(pf.manifest), target_arch(pf.manifest)) { error as e => return e; null => { } }
     var selected = prune_cc(pf.parsed, CcEnv { os = target_os(pf.manifest); arch = target_arch(pf.manifest); build_flags = [] }, PruneMode { keep_target_arms = c_backend_selected() })
 
@@ -459,16 +459,16 @@ fn frontend_check(pf: ParsedFront, quiet: bool, tty: bool, explicit: bool): Fron
 
     var dep_prog = match load_deps_program(pf.manifest) { checker::TProgram as p => p; error as e => return e }
 
-    var checked = match checked_program_of(expanded, dep_prog, !quiet, tty, pf.diags, explicit) { checker::TProgram as c => c; error as e => return e }
+    var checked = match checked_program_of(expanded, dep_prog, !quiet, tty, pf.diags, explicit, manual) { checker::TProgram as c => c; error as e => return e }
 
     _ = checker::divergence_analysis(checked)
 
     Frontend { prog = checked; manifest = pf.manifest }
 }
 
-fn frontend_body(include_tests: bool, quiet: bool, tty: bool, explicit: bool): Frontend | error {
-    var pf = match frontend_parse(include_tests, quiet, tty) { ParsedFront as x => x; error as e => return e }
-    frontend_check(pf, quiet, tty, explicit)
+fn frontend_body(include_tests: bool, quiet: bool, tty: bool, explicit: bool, manual: bool): Frontend | error {
+    var pf = match frontend_parse(include_tests, quiet, tty, manual) { ParsedFront as x => x; error as e => return e }
+    frontend_check(pf, quiet, tty, explicit, manual)
 }
 
 fn filter_tkt(p: parser::Program): parser::Program {
@@ -2482,8 +2482,8 @@ fn report_pt_census(prog: checker::TProgram) {
     teko::io::println(checker::pt_census_line(c))
 }
 
-fn build_ungated(dir: str, out_dir: str, opt: i32, tty: bool, start: i64, backend: Backend, debug: DebugInfo, explicit: bool): i32 {
-    var fe = match frontend_body(false, false, tty, explicit) { Frontend as f => f; error as e => return fail(dir, e.message) }
+fn build_ungated(dir: str, out_dir: str, opt: i32, tty: bool, start: i64, backend: Backend, debug: DebugInfo, explicit: bool, manual: bool): i32 {
+    var fe = match frontend_body(false, false, tty, explicit, manual) { Frontend as f => f; error as e => return fail(dir, e.message) }
     codegen_and_report(dir, out_dir, fe.prog, with_backend(fe.manifest, backend), opt, tty, start, debug)
 }
 
@@ -2725,7 +2725,7 @@ fn native_gate_program(pf: ParsedFront, tty: bool): checker::TProgram | error {
         error as e => return e
     }
     var pf2 = ParsedFront { parsed = parser::Program { items = append_items(kept, harness_items) }; manifest = pf.manifest; diags = pf.diags; embeds = pf.embeds }
-    match frontend_check(pf2, false, tty, false) { Frontend as fe => native_gate_unmark_tests(fe.prog); error as e => e }
+    match frontend_check(pf2, false, tty, false, false) { Frontend as fe => native_gate_unmark_tests(fe.prog); error as e => e }
 }
 
 fn native_gate_build(dir: str, od: str, gp: GatePaths, pf: ParsedFront, m: Manifest, tty: bool): i32 {
@@ -2829,7 +2829,7 @@ fn cobertura_path_of(out_dir: str, gen_cov: bool): str {
 
 fn release_build_of(dir: str, out_dir: str, opt: i32, tty: bool, start: i64, backend: Backend, pf: ParsedFront, debug: DebugInfo): i32 {
     var pf_prod = ParsedFront { parsed = filter_tkt(pf.parsed); manifest = pf.manifest; diags = pf.diags; embeds = pf.embeds }
-    var rel = match frontend_check(pf_prod, false, tty, false) { Frontend as f => f; error as e => return fail(dir, e.message) }
+    var rel = match frontend_check(pf_prod, false, tty, false, false) { Frontend as f => f; error as e => return fail(dir, e.message) }
     codegen_and_report(dir, out_dir, strip_tests(rel.prog), with_backend(rel.manifest, backend), opt, tty, start, debug)
 }
 
@@ -2872,16 +2872,16 @@ fn run_gate(dir: str, out_dir: str, gen_cov: bool, fe: Frontend, pf: ParsedFront
 
 fn build_no_tests_present(dir: str, out_dir: str, fe: Frontend, opt: i32, tty: bool, start: i64, backend: Backend, debug: DebugInfo): i32 { codegen_and_report(dir, out_dir, fe.prog, with_backend(fe.manifest, backend), opt, tty, start, debug) }
 
-fn compile_project_g(dir: str, out_dir: str, gen_cov: bool, no_verify: bool, opt: i32, no_tty: bool, backend: Backend, cov_validation: bool, debug: DebugInfo, explicit: bool): i32 {
+fn compile_project_g(dir: str, out_dir: str, gen_cov: bool, no_verify: bool, opt: i32, no_tty: bool, backend: Backend, cov_validation: bool, debug: DebugInfo, explicit: bool, manual: bool): i32 {
     ensure_rt_dir_abs()
     match teko::env::chdir(dir) { error => return fail(dir, "cannot enter project directory"); null => { } }
     var tty = output_is_tty(no_tty)
     var start = now_ns()
     if no_verify {
-        return build_ungated(dir, out_dir, opt, tty, start, backend, debug, explicit)
+        return build_ungated(dir, out_dir, opt, tty, start, backend, debug, explicit, manual)
     }
-    var pf = match frontend_parse(true, false, tty) { ParsedFront as x => x; error as e => return fail(dir, e.message) }
-    match frontend_check(pf, false, tty, explicit) {
+    var pf = match frontend_parse(true, false, tty, manual) { ParsedFront as x => x; error as e => return fail(dir, e.message) }
+    match frontend_check(pf, false, tty, explicit, manual) {
         Frontend as fe => {
             if !has_tests(fe.prog) {
                 return build_no_tests_present(dir, out_dir, fe, opt, tty, start, backend, debug)
@@ -2968,6 +2968,16 @@ fn explicit_of(args: []str): bool {
     false
 }
 
+fn manual_of(args: []str): bool {
+    var i: u64 = 0
+    loop {
+        if i >= args.len { break }
+        if args[i] == "--manual" { return true }
+        i = i + 1
+    }
+    false
+}
+
 fn cov_validation_of(args: []str): bool {
     var i: u64 = 0
     loop {
@@ -3026,6 +3036,7 @@ fn project_arg_of(args: []str, start: u64): str {
         else if args[i] == "--native-gate" { i = i + 1 }
         else if args[i] == "--release" { i = i + 1 }
         else if args[i] == "--explicit" { i = i + 1 }
+        else if args[i] == "--manual" { i = i + 1 }
         else if args[i] == "--no-tty" { i = i + 1 }
         else if args[i] == "--analyzer" { i = i + 1 }
         else if args[i] == "--arith-cast-gate" { i = i + 1 }
@@ -3823,8 +3834,8 @@ fn test_stage_build(dir: str): i32 {
     ensure_rt_dir_abs()
     match teko::env::chdir(dir) { error => return fail(dir, "cannot enter project directory"); null => { } }
     var tty = output_is_tty(false)
-    var pf = match frontend_parse(true, false, tty) { ParsedFront as x => x; error as e => return fail(dir, e.message) }
-    var fe = match frontend_check(pf, false, tty, false) { Frontend as x => x; error as e => return fail(dir, e.message) }
+    var pf = match frontend_parse(true, false, tty, false) { ParsedFront as x => x; error as e => return fail(dir, e.message) }
+    var fe = match frontend_check(pf, false, tty, false, false) { Frontend as x => x; error as e => return fail(dir, e.message) }
     report_arith_cast_rate(fe)
     var smrc = emit_sitemap_file(dir, GATE_OUT_DIR, fe.manifest, fe.prog)
     if smrc != 0 { return smrc }
@@ -3915,7 +3926,7 @@ fn report_analyzer(dir: str): i32 {
 
 fn recheck_frontend_here(dir: str): Frontend | error {
     var phase = phase_begin("recheck", dir, report_mode(false, output_is_tty(false)))
-    match frontend_body(true, true, false, false) {
+    match frontend_body(true, true, false, false, false) {
         Frontend as fe => { phase_end_ok(phase, dir); fe }
         error as e => { phase_end_fail(phase, dir, e.message); e }
     }

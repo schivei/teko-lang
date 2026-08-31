@@ -5616,7 +5616,7 @@ pub type PreMono = struct {
 fn no_item_progress(done: u64, total: u64) { }
 
 pub fn type_program_with_deps(raw_program: parser::Program, dep_prog: TProgram): TProgram | error {
-    var pre = match type_program_with_deps_pre_mono(raw_program, dep_prog, no_item_progress, false) { PreMono as p => p; error as e => return e }
+    var pre = match type_program_with_deps_pre_mono(raw_program, dep_prog, no_item_progress, false, false) { PreMono as p => p; error as e => return e }
     if pre.diags.len > 0 { return error { message = join_checker_diags(pre.diags) } }
     var mono = match monomorphize(pre.prog, pre.table) { TProgram as mp => mp; error as e => return e }
     inline_consts(mono)
@@ -5659,11 +5659,11 @@ fn pre_mono_type_decl_items(ti: @TItem(), extra: TypeDeclExtra): []@TItem() {
     combined
 }
 
-pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: TProgram, on_item: ProgressFn, explicit: bool): PreMono | error {
+pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: TProgram, on_item: ProgressFn, explicit: bool, manual: bool): PreMono | error {
     var folded = fold_traits_collected(raw_program)
     if folded.diags.len > 0 { return PreMono { prog = TProgram { items = [] }; table = tt_empty(); diags = folded.diags } }
     var program = synthesize_mret_structs(canon_class_bases(folded.program))
-    var seed_empty = Collected { types = tt_empty(); env = with_explicit(env_empty(), explicit) }
+    var seed_empty = Collected { types = tt_set_manual(tt_empty(), manual); env = with_explicit(env_empty(), explicit) }
     var seed = match seed_from_dep(dep_prog, seed_empty.types, seed_empty.env) {
         Collected as s => s
         error as e => return e
