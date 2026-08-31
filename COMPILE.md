@@ -115,13 +115,19 @@ new PowerShell and build:
 .\teko.exe --version
 ```
 
-> **`fatal error: 'stdlib.h' file not found`** — standalone clang (the GNU-style driver)
-> does not read `%INCLUDE%` and relies on its own MSVC auto-detection, which fails on newer
-> VS layouts (e.g. VS 2026), so it fails even inside a VS developer shell. The script works
-> around this: it feeds the dev shell's `INCLUDE` paths to clang as `-isystem`, and
-> auto-enters a VS developer environment (via `vswhere`) when `INCLUDE` is unset. If no VS is
-> found it warns; run it then from a **"Developer PowerShell for VS"** (any version), or use
-> MSYS2/MinGW clang (Option B), whose clang carries its own headers.
+> The script sets up a 64-bit MSVC developer environment automatically (via `vswhere` +
+> `VsDevCmd.bat -arch=amd64`, forced fresh so it works even inside an already-open dev shell)
+> and feeds the resulting `INCLUDE` paths to clang as `-isystem`. This handles two common
+> failures:
+>
+> - **`fatal error: 'stdlib.h' file not found`** — standalone clang (the GNU-style driver)
+>   ignores `%INCLUDE%` and relies on its own MSVC auto-detection, which fails on newer VS
+>   layouts (e.g. VS 2026). Feeding `INCLUDE` as `-isystem` fixes it.
+> - **`libcmt.lib(chkstk.obj): machine type x86 conflicts with x64`** — the shell was set up
+>   for 32-bit, so `LIB` pointed at x86 libs. Forcing an `amd64` environment fixes the link.
+>
+> If no VS is found the script warns; run it then from the **"x64 Native Tools Command Prompt
+> for VS"**, or use MSYS2/MinGW clang (Option B), whose clang carries its own headers.
 
 ### Option B — MSYS2 / MinGW-w64
 

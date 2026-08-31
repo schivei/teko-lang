@@ -20,29 +20,30 @@ $Out  = if ($args.Count -ge 1) { $args[0] } else { Join-Path $Root "teko.exe" }
 $TekoC = Join-Path $Root "bootstrap\teko.c"
 if (-not (Test-Path $TekoC)) { Write-Error "comp_teko_win: missing $TekoC"; exit 1 }
 
-# Ensure the MSVC CRT / Windows SDK headers are reachable. If INCLUDE is unset (plain
-# PowerShell), find the VS install with vswhere and import its developer environment by
-# running VsDevCmd.bat in a cmd subshell and copying the resulting variables. -prerelease is
-# required to find preview/insider builds such as VS 2026.
-if (-not $env:INCLUDE) {
-    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
-    if (Test-Path $vswhere) {
-        $vsPath = (& $vswhere -latest -prerelease -products * -property installationPath 2>$null | Select-Object -First 1)
-        if ($vsPath) {
-            $vsDevCmd = Join-Path $vsPath "Common7\Tools\VsDevCmd.bat"
-            if (Test-Path $vsDevCmd) {
-                Write-Host "comp_teko_win: loading VS environment from $vsPath"
-                cmd /c "`"$vsDevCmd`" -arch=x64 -no_logo && set" | ForEach-Object {
-                    if ($_ -match '^([^=]+)=(.*)$') {
-                        Set-Item -Path "env:$($matches[1])" -Value $matches[2] -ErrorAction SilentlyContinue
-                    }
+# Set up a 64-bit MSVC developer environment: the CRT / Windows SDK headers AND the x64 import
+# libs. This is done ALWAYS (not only when INCLUDE is unset), because a shell that defaulted to
+# x86 leaves LIB pointing at 32-bit libs, and clang's x64 objects then fail to link with
+# "libcmt.lib(chkstk.obj): machine type x86 conflicts with x64". Running VsDevCmd in a cmd
+# subshell with VSCMD_VER cleared forces a fresh amd64 init even inside an already-open dev
+# shell. -prerelease finds preview/insider builds such as VS 2026. MSYS2/MinGW clang users who
+# have INCLUDE/LIB set up their own way can skip this by having no VS installed.
+$vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+if (Test-Path $vswhere) {
+    $vsPath = (& $vswhere -latest -prerelease -products * -property installationPath 2>$null | Select-Object -First 1)
+    if ($vsPath) {
+        $vsDevCmd = Join-Path $vsPath "Common7\Tools\VsDevCmd.bat"
+        if (Test-Path $vsDevCmd) {
+            Write-Host "comp_teko_win: loading x64 VS environment from $vsPath"
+            cmd /c "set `"VSCMD_VER=`" && `"$vsDevCmd`" -arch=amd64 -host_arch=amd64 -no_logo && set" | ForEach-Object {
+                if ($_ -match '^([^=]+)=(.*)$') {
+                    Set-Item -Path "env:$($matches[1])" -Value $matches[2] -ErrorAction SilentlyContinue
                 }
             }
         }
     }
 }
 if (-not $env:INCLUDE) {
-    Write-Warning "comp_teko_win: MSVC/Windows SDK headers not in environment. Run from a 'Developer PowerShell for VS' (any version), install VS Build Tools with the 'Desktop development with C++' workload, or use MSYS2/MinGW clang (see COMPILE.md)."
+    Write-Warning "comp_teko_win: MSVC/Windows SDK headers not in environment. Run from the 'x64 Native Tools Command Prompt for VS', install VS Build Tools with the 'Desktop development with C++' workload, or use MSYS2/MinGW clang (see COMPILE.md)."
 }
 
 $Ver = "0.0.0.0-dev"
