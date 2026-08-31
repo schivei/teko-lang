@@ -2048,6 +2048,27 @@ fn mono_type_args_of(names: []str, s: Subst, needed: bool): []@Type() {
     out
 }
 
+type NotFloorIntrinsic = struct { }
+
+fn floor_intrinsic_tag(resolved_ns: str, name: str): str {
+    if resolved_ns != "teko::base" { return "" }
+    if name == "sizeof" { return "teko::__sizeof" }
+    if name == "alignof" { return "teko::__alignof" }
+    ""
+}
+
+fn type_floor_intrinsic(c: parser::Call, resolved_ns: str, in_scope: bool, env: Env, table: TypeTable): TExpr | NotFloorIntrinsic | error {
+    if !in_scope { return NotFloorIntrinsic { } }
+    var name = c.callee.segments[c.callee.segments.len - 1].name
+    var tag = floor_intrinsic_tag(resolved_ns, name)
+    if tag == "" { return NotFloorIntrinsic { } }
+    if c.callee_type_args.len != 1 || c.args.len != 0 { return NotFloorIntrinsic { } }
+    var rt = match resolve_type(c.callee_type_args[0], table, env.cur_ns) { (@Type()) as t => t; error as e => return e }
+    match rt { Void => return error { message = $"`{name}<void>` is invalid — void has no size" }; _ => { } }
+    var xtypes = [rt]
+    TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = []; call_ns = tag; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = xtypes; ret_extra = [] }; type = Prim { kind = PrimKind::Usize }; line = 0; col = 0 }
+}
+
 fn type_call(c0: parser::Call, expected: @Type() | null, env: Env, table: TypeTable): TExpr | error {
     if c0.owner_type_args.len > max_generic_arity() || c0.callee_type_args.len > max_generic_arity() {
         return error { message = "at most 16 explicit type arguments" }
@@ -2097,6 +2118,11 @@ fn type_call(c0: parser::Call, expected: @Type() | null, env: Env, table: TypeTa
     var name = c.callee.segments[c.callee.segments.len - 1].name
     var in_scope = match lookup_call(env, c.callee) { (@Type()) as _gt6 => true; error => false }
     var resolved_ns = match lookup_call(env, c.callee) { (@Type()) as _gt7 => call_ns(env, c.callee); error => "" }
+    match type_floor_intrinsic(c, resolved_ns, in_scope, env, table) {
+        TExpr as te => return te
+        error as e => return e
+        NotFloorIntrinsic => { }
+    }
     var ft = match lookup_call(env, c.callee) {
         (@Type()) as t => t
         error => match builtin_fn(name) {
