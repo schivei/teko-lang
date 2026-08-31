@@ -21,24 +21,28 @@ $TekoC = Join-Path $Root "bootstrap\teko.c"
 if (-not (Test-Path $TekoC)) { Write-Error "comp_teko_win: missing $TekoC"; exit 1 }
 
 # Ensure the MSVC CRT / Windows SDK headers are reachable. If INCLUDE is unset (plain
-# PowerShell), find the VS install with vswhere and enter its developer shell for x64.
+# PowerShell), find the VS install with vswhere and import its developer environment by
+# running VsDevCmd.bat in a cmd subshell and copying the resulting variables. -prerelease is
+# required to find preview/insider builds such as VS 2026.
 if (-not $env:INCLUDE) {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
     if (Test-Path $vswhere) {
-        $vsPath = (& $vswhere -latest -products * -property installationPath 2>$null | Select-Object -First 1)
+        $vsPath = (& $vswhere -latest -prerelease -products * -property installationPath 2>$null | Select-Object -First 1)
         if ($vsPath) {
-            $devShell = Join-Path $vsPath "Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
-            if (Test-Path $devShell) {
-                Import-Module $devShell
-                Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation `
-                    -DevCmdArguments "-arch=x64 -no_logo" | Out-Null
-                Write-Host "comp_teko_win: entered VS dev shell at $vsPath"
+            $vsDevCmd = Join-Path $vsPath "Common7\Tools\VsDevCmd.bat"
+            if (Test-Path $vsDevCmd) {
+                Write-Host "comp_teko_win: loading VS environment from $vsPath"
+                cmd /c "`"$vsDevCmd`" -arch=x64 -no_logo && set" | ForEach-Object {
+                    if ($_ -match '^([^=]+)=(.*)$') {
+                        Set-Item -Path "env:$($matches[1])" -Value $matches[2] -ErrorAction SilentlyContinue
+                    }
+                }
             }
         }
     }
 }
 if (-not $env:INCLUDE) {
-    Write-Warning "comp_teko_win: MSVC/Windows SDK headers not in environment. Run from 'Developer PowerShell for VS 2022', or install VS Build Tools with the 'Desktop development with C++' workload, or use MSYS2/MinGW clang (see COMPILE.md)."
+    Write-Warning "comp_teko_win: MSVC/Windows SDK headers not in environment. Run from a 'Developer PowerShell for VS' (any version), install VS Build Tools with the 'Desktop development with C++' workload, or use MSYS2/MinGW clang (see COMPILE.md)."
 }
 
 $Ver = "0.0.0.0-dev"
