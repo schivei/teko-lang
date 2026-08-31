@@ -663,10 +663,15 @@ bool tk_str_contains(tk_str s, tk_str needle) {
 // are released through tk_chunk_free, so tk_region_drop's release on each is heap-correct (no
 // arena interior pointer is ever passed to the deallocator). NOTE: the seed is single-
 // threaded; the lazy root init (tk_g_root) is not synchronized — revisit at S8 (concurrency).
+// max_align_t is not portable in C mode: clang targeting MSVC defers <stddef.h>'s max_align_t
+// to the MSVC headers, which expose it only for C++, so a C build fails to see it. Name the
+// maximally-aligned fundamental types directly instead — the alignment is floored at 16 below,
+// so only the fundamental max alignment (<= 16 on every supported 64-bit target) matters.
+typedef union { long long tk_ll_; long double tk_ld_; void *tk_p_; } tk_max_align_t;
 #define TK_ARENA_ALIGN_FLOOR 16
 #define TK_ARENA_ALIGN                                                          \
-    (_Alignof(max_align_t) > TK_ARENA_ALIGN_FLOOR                               \
-         ? _Alignof(max_align_t)                                                \
+    (_Alignof(tk_max_align_t) > TK_ARENA_ALIGN_FLOOR                            \
+         ? _Alignof(tk_max_align_t)                                             \
          : (size_t)TK_ARENA_ALIGN_FLOOR)
 struct tk_chunk { struct tk_chunk *next; size_t cap; size_t used; _Alignas(TK_ARENA_ALIGN) unsigned char data[]; };
 // (W9.3b) `reg_next` is an INTRUSIVE link into the GLOBAL live-region registry (tk_g_regs) — no extra
