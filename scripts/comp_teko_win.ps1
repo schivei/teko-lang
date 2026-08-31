@@ -27,20 +27,34 @@ if (-not (Test-Path $TekoC)) { Write-Error "comp_teko_win: missing $TekoC"; exit
 # subshell with VSCMD_VER cleared forces a fresh amd64 init even inside an already-open dev
 # shell. -prerelease finds preview/insider builds such as VS 2026. MSYS2/MinGW clang users who
 # have INCLUDE/LIB set up their own way can skip this by having no VS installed.
-$vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
-if (Test-Path $vswhere) {
-    $vsPath = (& $vswhere -latest -prerelease -products * -property installationPath 2>$null | Select-Object -First 1)
-    if ($vsPath) {
-        $vsDevCmd = Join-Path $vsPath "Common7\Tools\VsDevCmd.bat"
-        if (Test-Path $vsDevCmd) {
-            Write-Host "comp_teko_win: loading x64 VS environment from $vsPath"
-            cmd /c "set `"VSCMD_VER=`" && `"$vsDevCmd`" -arch=amd64 -host_arch=amd64 -no_logo && set" | ForEach-Object {
-                if ($_ -match '^([^=]+)=(.*)$') {
-                    Set-Item -Path "env:$($matches[1])" -Value $matches[2] -ErrorAction SilentlyContinue
-                }
-            }
+# Locate the VS install. Prefer VSINSTALLDIR (always set inside any VS developer shell); fall
+# back to vswhere under both Program Files roots.
+$vsPath = $null
+if ($env:VSINSTALLDIR) { $vsPath = $env:VSINSTALLDIR.TrimEnd('\') }
+if (-not $vsPath) {
+    foreach ($vw in @((Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"),
+                       (Join-Path $env:ProgramFiles "Microsoft Visual Studio\Installer\vswhere.exe"))) {
+        if (Test-Path $vw) {
+            $p = (& $vw -latest -prerelease -products * -property installationPath 2>$null | Select-Object -First 1)
+            if ($p) { $vsPath = $p; break }
         }
     }
+}
+if ($vsPath) {
+    $vsDevCmd = Join-Path $vsPath "Common7\Tools\VsDevCmd.bat"
+    if (Test-Path $vsDevCmd) {
+        Write-Host "comp_teko_win: loading x64 VS environment from $vsPath"
+        cmd /c "set `"VSCMD_VER=`" && `"$vsDevCmd`" -arch=amd64 -host_arch=amd64 -no_logo && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$') {
+                Set-Item -Path "env:$($matches[1])" -Value $matches[2] -ErrorAction SilentlyContinue
+            }
+        }
+        Write-Host "comp_teko_win: target arch = $env:VSCMD_ARG_TGT_ARCH"
+    } else {
+        Write-Warning "comp_teko_win: found VS at $vsPath but no Common7\Tools\VsDevCmd.bat"
+    }
+} else {
+    Write-Warning "comp_teko_win: could not locate a Visual Studio installation (VSINSTALLDIR/vswhere)."
 }
 if (-not $env:INCLUDE) {
     Write-Warning "comp_teko_win: MSVC/Windows SDK headers not in environment. Run from the 'x64 Native Tools Command Prompt for VS', install VS Build Tools with the 'Desktop development with C++' workload, or use MSYS2/MinGW clang (see COMPILE.md)."
