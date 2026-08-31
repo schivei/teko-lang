@@ -448,6 +448,11 @@ fn find_instance_decl(table: TypeTable, name: str): parser::TypeDecl | null {
     }
 }
 
+fn mono_free_call_targets(cl: TCall, gf: TFunction): bool {
+    if cl.call_ns.len == 0 { return true }
+    teko::runtime::str_eq(cl.call_ns, gf.namespace)
+}
+
 fn is_generic_instance_method_call(gf: TFunction, call_ns: str, table: TypeTable): bool {
     if gf.type_params.len == 0 { return false }
     var stem = g_instance_base(call_ns)
@@ -542,6 +547,10 @@ fn mono_texpr(e: TExpr, s: Subst, items: []@TItem(), table: TypeTable): WExpr | 
                         var newcalleeM = rewrite_last_segment(cl.callee, mmangled)
                         var recM = MonoInst { fn_name = bare; mangled = mmangled; s = composed; owner_ns = cl.call_ns }
                         return WExpr { expr = TExpr { kind = TCall { overload_suffix = cl.overload_suffix; callee = newcalleeM; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args; ret_extra = cl.ret_extra }; type = nt; line = e.line; col = e.col }; insts = [..acc, recM] }
+                    }
+                    if !mono_free_call_targets(cl, gf) {
+                        var pt = TCall { overload_suffix = cl.overload_suffix; callee = mono_rekey_callee_qualifier(cl.callee, s); args = args; call_ns = mono_rekey_call_ns(cl.call_ns, s); is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args; ret_extra = cl.ret_extra }
+                        return WExpr { expr = TExpr { kind = rekey_iface_dispatch(pt, args, table); type = nt; line = e.line; col = e.col }; insts = acc }
                     }
                     var sub = match mono_call_subst(gf, cl, args, s, [], table) { Subst as x => x; error as er => return er }
                     var mangled = mono_mangle_name(bare, gf.type_params, sub)
