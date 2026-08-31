@@ -287,13 +287,18 @@ fn rekey_phantom_qualifier(callee: parser::Path, qual: str, s: Subst): parser::P
     rewrite_iface_segment(callee, concrete)
 }
 
+fn is_floor_intrinsic_template(f: TFunction): bool {
+    if !teko::runtime::str_eq(f.namespace, "teko::base") { return false }
+    teko::runtime::str_eq(f.name, "sizeof") || teko::runtime::str_eq(f.name, "alignof")
+}
+
 fn find_generic_fn(items: []@TItem(), name: str): TFunction | null {
     var i = 0
     loop {
         if i >= items.len { break }
         match items[i] {
             TFunction as f => {
-                if f.type_params.len > 0 {
+                if f.type_params.len > 0 && !is_floor_intrinsic_template(f) {
                     if teko::runtime::str_eq(f.name, name) { return f }
                 }
             }
@@ -462,6 +467,10 @@ fn compose_method_subst(inst_subst: Subst, msub: Subst): Subst {
     out
 }
 
+fn is_floor_intrinsic_ns(ns: str): bool {
+    ns == "teko::__sizeof" || ns == "teko::__alignof"
+}
+
 fn mono_texpr(e: TExpr, s: Subst, items: []@TItem(), table: TypeTable): WExpr | error {
     var nt = subst_type(e.type, s)
     match e.kind {
@@ -507,6 +516,17 @@ fn mono_texpr(e: TExpr, s: Subst, items: []@TItem(), table: TypeTable): WExpr | 
                 args[i] = wa.expr
                 acc = mono_inst_concat(acc, wa.insts)
                 i++
+            }
+            if is_floor_intrinsic_ns(cl.call_ns) {
+                var sta: [cl.type_args.len]@Type() = []
+                var ti = 0
+                loop {
+                    if ti >= cl.type_args.len { break }
+                    sta[ti] = subst_type(cl.type_args[ti], s)
+                    ti++
+                }
+                var floor = TCall { overload_suffix = cl.overload_suffix; callee = cl.callee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = sta; ret_extra = cl.ret_extra }
+                return WExpr { expr = TExpr { kind = floor; type = nt; line = e.line; col = e.col }; insts = acc }
             }
             var bare = if cl.callee.segments.len == 0 { "" } else { cl.callee.segments[cl.callee.segments.len - 1].name }
             match find_generic_fn(items, bare) {
