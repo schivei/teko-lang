@@ -3473,6 +3473,20 @@ fn cg_is_mem_value_call(p: parser::Path, user_declared: bool): bool {
     rooted && (last == "place" || last == "read" || last == "write")
 }
 
+fn emit_sizeof_intrinsic(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall) {
+    if c.type_args.len != 1 { panic("codegen: sizeof expects one type argument (internal)") }
+    buf.write("((uint64_t)sizeof(")
+    emit_type(buf, prog, c.type_args[0])
+    buf.write("))")
+}
+
+fn emit_alignof_intrinsic(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall) {
+    if c.type_args.len != 1 { panic("codegen: alignof expects one type argument (internal)") }
+    buf.write("((uint64_t)_Alignof(")
+    emit_type(buf, prog, c.type_args[0])
+    buf.write("))")
+}
+
 fn emit_place(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
     if c.args.len != 2 { panic("codegen: place expects two arguments (internal)") }
     var inner = match e.type {
@@ -4260,6 +4274,8 @@ fn emit_call_inner(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e
     if c.call_ns == "teko::__ptr_unwrap" { return emit_ptr_unwrap(buf, prog, e, c, escaping, regions, fn_body, dctx) }
     if c.call_ns == "teko::__ptr_wrap" { return emit_ptr_wrap(buf, prog, e, c, escaping, regions, fn_body, dctx) }
     if c.call_ns == "teko::__ref_word" { return emit_ref_word(buf, prog, c, escaping, regions, fn_body, dctx) }
+    if c.call_ns == "teko::__sizeof" { return emit_sizeof_intrinsic(buf, prog, c) }
+    if c.call_ns == "teko::__alignof" { return emit_alignof_intrinsic(buf, prog, c) }
     var p = c.callee
     var user_declared = cg_call_is_user_declared(prog, c)
     if cg_is_mem_value_call(p, user_declared) {

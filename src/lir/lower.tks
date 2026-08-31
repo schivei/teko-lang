@@ -1254,9 +1254,35 @@ fn lower_capture_frame(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Low
     error { message = "native backend N1: `capture` frame graceful-stop (arm the per-task capture slot, invoke the body, then `if panicking() { take_panic } else { null }`, mirrored by a per-call `if panicking() { run frame defers/drops; return sentinel }` guard) not yet lowered (N2) — the C route emits this control flow directly; the native mirror is the same flag test + cleanup + return, no unwind primitive" }
 }
 
+fn type_abi_bytes(t: @Type(), ctx: LowerCtx): u32 {
+    if is_fat_type(t) { return fat_slot_bytes() }
+    if is_register_value_type(t, ctx.enums) { return ltype_size(ltype_of(t, ctx.enums)) }
+    match aggregate_box_bytes(t, ctx) { u32 as n => n; null => ltype_size(ltype_of(t, ctx.enums)) }
+}
+
+fn type_abi_align(t: @Type(), ctx: LowerCtx): u32 {
+    if is_fat_type(t) { return ltype_align(LType::Ptr) }
+    if is_register_value_type(t, ctx.enums) { return ltype_align(ltype_of(t, ctx.enums)) }
+    match aggregate_box_align(t, ctx) { u32 as a => a; null => ltype_align(ltype_of(t, ctx.enums)) }
+}
+
+fn lower_sizeof_intrinsic(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | error {
+    if c.type_args.len != 1 { return error { message = "native: sizeof expects one type argument" } }
+    var r = ctx_alloc(ctx)
+    Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, type_abi_bytes(c.type_args[0], ctx) to i64, e.line, e.col)); vreg = r.vreg }
+}
+
+fn lower_alignof_intrinsic(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | error {
+    if c.type_args.len != 1 { return error { message = "native: alignof expects one type argument" } }
+    var r = ctx_alloc(ctx)
+    Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, type_abi_align(c.type_args[0], ctx) to i64, e.line, e.col)); vreg = r.vreg }
+}
+
 fn lower_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | error {
     if c.is_closure_call { return lower_closure_call(ctx, e, c) }
     if c.is_iface_dispatch { return lower_iface_call(ctx, e, c) }
+    if c.call_ns == "teko::__sizeof" { return lower_sizeof_intrinsic(ctx, e, c) }
+    if c.call_ns == "teko::__alignof" { return lower_alignof_intrinsic(ctx, e, c) }
     if c.call_ns.len == 0 && is_capture_panic_call(c.callee) { return lower_capture_frame(ctx, e, c) }
     if is_fat_type(e.type) { return lower_call_fat_as_scalar(ctx, e, c) }
     if c.call_ns.len == 0 && is_last_index_of_call(c.callee) { return lower_last_index_of_call(ctx, e, c) }
