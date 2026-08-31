@@ -435,6 +435,14 @@ fn parse_expr_no_struct(tokens: []lexer::Token, pos: u64): Parsed<Expr> | error 
 }
 
 
+fn build_slice_sugar(recv: Expr, from: Expr, len: Expr, line: u32, col: u32): Expr {
+    var segs: []Segment = [Segment { name = "teko" }, Segment { name = "slice" }]
+    var args = [recv, from, len]
+    var arg_names = ["", "", ""]
+    var call = Call { callee = Path { segments = segs }; args = args; arg_names = arg_names; owner_type_args = []; callee_type_args = [] }
+    Expr { kind = call; line = line; col = col }
+}
+
 fn parse_postfix(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr> | error {
     var prim = match parse_atom(tokens, pos, allow_struct) { Parsed<Expr> as x => x; error as e => return e }
     var node = prim.node
@@ -442,6 +450,15 @@ fn parse_postfix(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<E
     loop {
         if is_kind_at(tokens, p, lexer::TokenKind::LBracket) {
             var idx = match parse_expr(tokens, p + 1) { Parsed<Expr> as x => x; error as e => return e }
+            if is_kind_at(tokens, idx.next, lexer::TokenKind::DotDot) {
+                var len = match parse_expr(tokens, idx.next + 1) { Parsed<Expr> as x => x; error as e => return e }
+                if !is_kind_at(tokens, len.next, lexer::TokenKind::RBracket) {
+                    return err_at(tokens, len.next, "expected ']' to close a slice range")
+                }
+                node = build_slice_sugar(node, idx.node, len.node, tokens[pos].line, tokens[pos].col)
+                p = len.next + 1
+                continue
+            }
             if !is_kind_at(tokens, idx.next, lexer::TokenKind::RBracket) {
                 return err_at(tokens, idx.next, "expected ']' to close a subscript index")
             }
