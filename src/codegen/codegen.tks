@@ -845,7 +845,6 @@ fn cg_type_is_heap(t: @Type()): bool {
 fn cg_expr_allocs(e: checker::TExpr): bool {
     match e.kind {
         checker::TSliceOfLen => true
-        checker::TZeroOf => true
         checker::TArrayLit => true
         checker::TInterp => true
         checker::TLambda => true
@@ -3487,6 +3486,13 @@ fn emit_alignof_intrinsic(buf: teko::io::FileStream, prog: CgProg, c: checker::T
     buf.write("))")
 }
 
+fn emit_zero_intrinsic(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall) {
+    if c.type_args.len != 1 { panic("codegen: zero expects one type argument (internal)") }
+    buf.write("(")
+    emit_type(buf, prog, c.type_args[0])
+    buf.write("){0}")
+}
+
 fn emit_place(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
     if c.args.len != 2 { panic("codegen: place expects two arguments (internal)") }
     var inner = match e.type {
@@ -3667,7 +3673,6 @@ fn cg_dc_scan_expr(s: DcScan, e: checker::TExpr): DcScan | error {
         }
         checker::TArrayLit as al => { var i = 0; loop { if i >= al.elements.len { break }; s2 = match cg_dc_scan_expr(s2, al.elements[i].expr) { DcScan as x => x; error as err => return err }; i++ } }
         checker::TSliceOfLen as sol => { s2 = match cg_dc_scan_expr(s2, sol.size) { DcScan as x => x; error as err => return err } }
-        checker::TZeroOf => { }
         checker::TLambda as lam => { s2 = match cg_dc_scan_block(s2, lam.body) { DcScan as x => x; error as err => return err } }
         checker::TBorrow as bw => { s2 = match cg_dc_scan_expr(s2, bw.operand) { DcScan as x => x; error as err => return err } }
         checker::TBlockExpr as blk => { s2 = match cg_dc_scan_block(s2, blk.body) { DcScan as x => x; error as err => return err } }
@@ -4276,6 +4281,7 @@ fn emit_call_inner(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e
     if c.call_ns == "teko::__ref_word" { return emit_ref_word(buf, prog, c, escaping, regions, fn_body, dctx) }
     if c.call_ns == "teko::__sizeof" { return emit_sizeof_intrinsic(buf, prog, c) }
     if c.call_ns == "teko::__alignof" { return emit_alignof_intrinsic(buf, prog, c) }
+    if c.call_ns == "teko::__zero" { return emit_zero_intrinsic(buf, prog, c) }
     var p = c.callee
     var user_declared = cg_call_is_user_declared(prog, c)
     if cg_is_mem_value_call(p, user_declared) {
@@ -4753,12 +4759,6 @@ fn emit_slice_of_len(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr,
         buf.write(lenN)
     }
     buf.write(" }; })")
-}
-
-fn emit_zero_of(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, z: checker::TZeroOf, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
-    buf.write("(")
-    emit_type(buf, prog, z.element)
-    buf.write("){0}")
 }
 
 fn emit_array_lit(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, a: checker::TArrayLit, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
@@ -7102,7 +7102,6 @@ fn emit_expr_ctx(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e: 
         checker::TInExpr as ie => emit_in(buf, prog, ie, escaping, regions, fn_body, dctx)
         checker::TArrayLit as a => emit_array_lit(buf, prog, e, a, escaping, regions, fn_body, dctx)
         checker::TSliceOfLen as s => emit_slice_of_len(buf, prog, e, s, escaping, regions, fn_body, dctx)
-        checker::TZeroOf as z => emit_zero_of(buf, prog, e, z, escaping, regions, fn_body, dctx)
         checker::TPathExpr as pe => {
             if cg_named_is_flags(prog, pe.enum_name) {
                 mangle_type_name(buf, "", pe.enum_name)

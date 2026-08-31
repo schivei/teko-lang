@@ -790,34 +790,6 @@ fn type_compare(c: parser::Compare, env: Env, table: TypeTable): TExpr | error {
 
 type NotListBuiltin = struct { }
 
-type NotZeroBuiltin = struct { }
-
-fn call_is_zero_builtin(callee: parser::Path): bool {
-    if callee.segments.len == 1 { return callee.segments[0].name == "zero" }
-    if callee.segments.len == 2 { return callee.segments[0].name == "teko" && callee.segments[1].name == "zero" }
-    false
-}
-
-fn zero_builtin_element(c: parser::Call, expected: @Type() | null, env: Env, table: TypeTable): @Type() | error {
-    if c.callee_type_args.len == 1 { return resolve_type(c.callee_type_args[0], table, env.cur_ns) }
-    if c.callee_type_args.len == 0 {
-        match expected { (@Type()) as e => return e; null => { } }
-    }
-    error { message = "zero<T>() takes one explicit type argument" }
-}
-
-fn type_zero_builtin(c: parser::Call, expected: @Type() | null, env: Env, table: TypeTable): TExpr | NotZeroBuiltin | error {
-    if !call_is_zero_builtin(c.callee) { return NotZeroBuiltin { } }
-    var elem = match zero_builtin_element(c, expected, env, table) { (@Type()) as t => t; error as e => return e }
-    if c.args.len != 0 { return error { message = "zero<T>() takes no arguments" } }
-    match elem {
-        Reference => return error { message = "a reference has no zero value" }
-        Void => return error { message = "zero<void> is invalid — void is not a storable value" }
-        _ => { }
-    }
-    TExpr { kind = TZeroOf { element = elem }; type = elem; line = 0; col = 0 }
-}
-
 fn type_of_len_builtin(c: parser::Call, env: Env, table: TypeTable): TExpr | error {
     if c.callee_type_args.len != 1 { return error { message = "teko::list::of_len<T> takes one explicit type argument (the element type)" } }
     if c.args.len != 1 { return error { message = "teko::list::of_len<T> expects one argument (the length, a `u64`)" } }
@@ -2054,7 +2026,13 @@ fn floor_intrinsic_tag(resolved_ns: str, name: str): str {
     if resolved_ns != "teko::base" { return "" }
     if name == "sizeof" { return "teko::__sizeof" }
     if name == "alignof" { return "teko::__alignof" }
+    if name == "zero" { return "teko::__zero" }
     ""
+}
+
+fn floor_intrinsic_result(tag: str, rt: @Type()): @Type() {
+    if tag == "teko::__zero" { return rt }
+    Prim { kind = PrimKind::Usize }
 }
 
 fn type_floor_intrinsic(c: parser::Call, resolved_ns: str, in_scope: bool, env: Env, table: TypeTable): TExpr | NotFloorIntrinsic | error {
@@ -2064,9 +2042,9 @@ fn type_floor_intrinsic(c: parser::Call, resolved_ns: str, in_scope: bool, env: 
     if tag == "" { return NotFloorIntrinsic { } }
     if c.callee_type_args.len != 1 || c.args.len != 0 { return NotFloorIntrinsic { } }
     var rt = match resolve_type(c.callee_type_args[0], table, env.cur_ns) { (@Type()) as t => t; error as e => return e }
-    match rt { Void => return error { message = $"`{name}<void>` is invalid — void has no size" }; _ => { } }
+    match rt { Void => return error { message = $"`{name}<void>` is invalid — void is not a storable value" }; _ => { } }
     var xtypes = [rt]
-    TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = []; call_ns = tag; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = xtypes; ret_extra = [] }; type = Prim { kind = PrimKind::Usize }; line = 0; col = 0 }
+    TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = []; call_ns = tag; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = xtypes; ret_extra = [] }; type = floor_intrinsic_result(tag, rt); line = 0; col = 0 }
 }
 
 fn type_call(c0: parser::Call, expected: @Type() | null, env: Env, table: TypeTable): TExpr | error {
@@ -2086,14 +2064,6 @@ fn type_call(c0: parser::Call, expected: @Type() | null, env: Env, table: TypeTa
         TExpr as te => return te
         error as e => return e
         NotListBuiltin => { }
-    }
-    match lookup_call(env, c.callee) {
-        (@Type()) as _zero_shadow => { }
-        error => match type_zero_builtin(c, expected, env, table) {
-            TExpr as te => return te
-            error as e => return e
-            NotZeroBuiltin => { }
-        }
     }
     match type_ptr_unwrap(c, env, table) {
         TExpr as te => return te
