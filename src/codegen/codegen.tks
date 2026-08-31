@@ -2812,36 +2812,47 @@ fn cg_emit_slice_type_expr(buf: teko::io::FileStream, prog: CgProg, st: parser::
     }
 }
 
+fn cg_named_has_user_decl(prog: CgProg, path: parser::Path, ref_ns: str): bool {
+    match cg_find_decl_ns(prog, path, ref_ns) { parser::TypeDecl => true; error => false }
+}
+
+fn emit_builtin_ctype(buf: teko::io::FileStream, prog: CgProg, nt: parser::NamedType, last: str, ref_ns: str): bool {
+    if last == "u8" { buf.write("uint8_t"); return true }
+    else if last == "u16" { buf.write("uint16_t"); return true }
+    else if last == "u32" { buf.write("uint32_t"); return true }
+    else if last == "u64" { buf.write("uint64_t"); return true }
+    else if last == "i8" { buf.write("int8_t"); return true }
+    else if last == "i16" { buf.write("int16_t"); return true }
+    else if last == "i32" { buf.write("int32_t"); return true }
+    else if last == "i64" { buf.write("int64_t"); return true }
+    else if last == "f32" { buf.write("float"); return true }
+    else if last == "f64" { buf.write("double"); return true }
+    else if last == "bool" { buf.write("bool"); return true }
+    else if last == "usize" { buf.write("uint64_t"); return true }
+    else if last == "isize" { buf.write("int64_t"); return true }
+    else if last == "byte" { buf.write("uint8_t"); return true }
+    else if last == "char" { buf.write("tk_char"); return true }
+    else if last == "str" { buf.write("tk_str"); return true }
+    else if last == "error" { buf.write("tk_error"); return true }
+    else if last == "ptr" {
+        if nt.args.len > 0 { emit_type_expr(buf, prog, nt.args[0], ref_ns); buf.write(" *") }
+        else { buf.write("void *") }
+        return true
+    }
+    else if last == "uptr" { buf.write("uintptr_t"); return true }
+    else if last == "Ref" {
+        if nt.args.len > 0 { emit_type_expr(buf, prog, nt.args[0], ref_ns); buf.write(" *"); return true }
+        panic("`Ref<T>` needs a type argument")
+    }
+    false
+}
+
 fn emit_type_expr(buf: teko::io::FileStream, prog: CgProg, te: @TypeExpr(), ref_ns: str) {
     match te {
         parser::NamedType as nt => {
             var last = nt.path.segments[nt.path.segments.len - 1].name
-            if last == "u8" { buf.write("uint8_t"); return }
-            else if last == "u16" { buf.write("uint16_t"); return }
-            else if last == "u32" { buf.write("uint32_t"); return }
-            else if last == "u64" { buf.write("uint64_t"); return }
-            else if last == "i8" { buf.write("int8_t"); return }
-            else if last == "i16" { buf.write("int16_t"); return }
-            else if last == "i32" { buf.write("int32_t"); return }
-            else if last == "i64" { buf.write("int64_t"); return }
-            else if last == "f32" { buf.write("float"); return }
-            else if last == "f64" { buf.write("double"); return }
-            else if last == "bool" { buf.write("bool"); return }
-            else if last == "usize" { buf.write("uint64_t"); return }
-            else if last == "isize" { buf.write("int64_t"); return }
-            else if last == "byte" { buf.write("uint8_t"); return }
-            else if last == "char" { buf.write("tk_char"); return }
-            else if last == "str" { buf.write("tk_str"); return }
-            else if last == "error" { buf.write("tk_error"); return }
-            else if last == "ptr" {
-                if nt.args.len > 0 { emit_type_expr(buf, prog, nt.args[0], ref_ns); buf.write(" *") }
-                else { buf.write("void *") }
-                return
-            }
-            else if last == "uptr" { buf.write("uintptr_t"); return }
-            else if last == "Ref" {
-                if nt.args.len > 0 { emit_type_expr(buf, prog, nt.args[0], ref_ns); buf.write(" *"); return }
-                else { panic("`Ref<T>` needs a type argument") }
+            if !(prog.manual && cg_named_has_user_decl(prog, nt.path, ref_ns)) {
+                if emit_builtin_ctype(buf, prog, nt, last, ref_ns) { return }
             }
             var cdname = match cg_find_decl_ns(prog, nt.path, ref_ns) { parser::TypeDecl as d => d.name; error => last }
             match cg_find_decl_ns(prog, nt.path, ref_ns) {
@@ -10761,7 +10772,7 @@ fn tk_emit_c_body(prog0: checker::TProgram, mode: CgMode, buf: teko::io::FileStr
     var sc_used = cg_scan_syscall_arities(prog)
     cg_emit_syscall_helpers(buf, sc_used)
     cg_emit_cond_const_ladder(buf, prog)
-    cg_emit_arena_provider_ladder(buf)
+    if !prog.manual { cg_emit_arena_provider_ladder(buf) }
     cg_emit_thread_clone_helper(buf, sc_used.clone)
     cg_emit_atomic_helpers(buf, sc_used.atomics)
 
