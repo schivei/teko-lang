@@ -5,7 +5,7 @@
  *
  * @template T The type of the elements in the array.
  */
-exp global interface Array<T> : Collection<T>, Range<T> {
+exp global interface ArrayDef<T> : Collection<T>, Range<T> {
     /**
      * Creates a new fixed-size collection with the specified size.
      * Desugared form: `x: [size]T`
@@ -24,4 +24,69 @@ exp global interface Array<T> : Collection<T>, Range<T> {
      * @return A new fixed-size collection instance.
      */
     static fn new(size: usize, initial_values: []T): self
+}
+
+/**
+ * Trait representing a boxed array with a pointer and length.
+ */
+exp global trait ArrayBoxed<T: __type> {
+    exp const __SIZE_OF: usize = uptr::__SIZE_OF + usize::__SIZE_OF
+    exp const __V_KIND: ValueKind = .Array | T::__V_KIND
+    exp const __ALIGN_OF: usize = TypeSizes::S8
+    exp const __NAME: str = "[]" ~ T::__NAME
+
+    _ptr: uptr
+    _len: usize
+
+    exp static arena fn new(size: usize): self {
+        .{ _len = size, _ptr = @slot.alloc(T::__SIZE_OF * size) }
+    }
+
+    exp static arena fn new(size: usize, initial_values: []T): self {
+        var arr: self = .{ _len = size, _ptr = @slot.alloc(T::__SIZE_OF * size) }
+        @slot.copy(initial_values, arr._ptr)
+        arr
+    }
+
+    exp get len: usize {
+        self._len
+    }
+
+    exp fn slice(start: usize, count: usize): self {
+        if start + count > self.len {
+            count = self.len - start
+        }
+
+        if count == 0 || start >= self.len {
+            return []
+        }
+
+        var result: [count]T = []
+        loop i in 0..count {
+            result[i] = self[start + i]
+        }
+
+        result
+    }
+
+    exp fn contains(sub: T): bool {
+        loop i in 0..self.len {
+            if self[i] == sub {
+                return true
+            }
+        }
+        false
+    }
+
+    exp arena fn get_at(index: usize): T {
+        @slot.load<T>(self._ptr + index * T::__SIZE_OF)
+    }
+
+    exp arena fn set_at(index: usize, value: T) {
+        @slot.store<T>(self._ptr + index * T::__SIZE_OF, value)
+    }
+}
+
+exp global struct Array<T: __type> : ArrayDef<T> {
+    use ArrayBoxed<T>
 }
