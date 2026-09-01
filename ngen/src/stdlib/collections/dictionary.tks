@@ -1,0 +1,84 @@
+use teko::memory
+
+exp enum KVSlotState {
+    Empty
+    Occupied
+    Deleted
+}
+
+exp struct KVSlot<K: __type, V: __type> where K::_V_KIND == .Value {
+    state: KVSlotState
+    key: K
+    value: V
+
+    exp static fn new(): self {
+        .{ state = KVSlotState.Empty, key = undefined, value = undefined }
+    }
+
+    exp static fn new(key: K, value: V): self {
+        .{ state = KVSlotState.Occupied, key = key, value = value }
+    }
+
+    exp fn is_empty(): bool {
+        self.state == KVSlotState.Empty
+    }
+
+    exp fn is_occupied(): bool {
+        self.state == KVSlotState.Occupied
+    }
+
+    exp fn is_deleted(): bool {
+        self.state == KVSlotState.Deleted
+    }
+
+    exp fn delete() {
+        self.state = KVSlotState.Deleted
+    }
+}
+
+exp class Dictionary<K: Hashable & Equatable, V: __type> : Map<K, V>, Indexer<K, V>, __type where K::_V_KIND == .Value {
+    _slots: List<KVSlot<K, V>>
+
+    exp static fn new(size: usize = u8::MAX): self {
+        .{ _slots = List<KVSlot<K, V>>.new(size) }
+    }
+
+    exp static fn new<T: Collection<KeyValue<K, V>>>(collection: T): self {
+        var dict: self = .{ _slots = List<KVSlot<K, V>>.new(collection.len) }
+        loop i in 0..collection.len {
+            var kv = collection.get_at(i)
+            dict._slots.set_at(i, KVSlot::new(kv.key, kv.value))
+        }
+        dict
+    }
+
+    exp fn contains_key(key: K): bool {
+        loop i in 0.._slots.len {
+            if _slots.get_at(i).is_occupied() && _slots.get_at(i).key == key {
+                return true
+            }
+        }
+        false
+    }
+
+    exp fn get_at(index: K): V {
+        loop i in 0.._slots.len {
+            var slot = _slots.get_at(i)
+            if slot.is_occupied() && slot.key == index {
+                return slot.value
+            }
+        }
+        panic("Key not found")
+    }
+
+    exp fn set_at(key: K, value: V) {
+        loop i in 0.._slots.len {
+            var slot = _slots.get_at(i)
+            if slot.is_empty() || (slot.is_occupied() && slot.key == key) {
+                _slots.set_at(i, KVSlot::new(key, value))
+                return
+            }
+        }
+        panic("Dictionary is full")
+    }
+}
