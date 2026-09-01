@@ -1299,6 +1299,8 @@ fn lower_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | er
     if c.call_ns.len == 0 && is_store_u64_call(c.callee) { return lower_store_u64_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_load_u8_call(c.callee) { return lower_load_u8_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_store_u8_call(c.callee) { return lower_store_u8_call(ctx, e, c) }
+    if c.call_ns.len == 0 && is_syscall_call(c.callee) { return lower_syscall_call(ctx, e, c) }
+    if c.call_ns.len == 0 && is_word_reinterpret_call(c.callee) { return lower_word_reinterpret_call(ctx, e, c) }
     var sym = match call_symbol(c, ctx.externs, ctx.flat_symbols) { str as s => s; error as err => return err }
     if is_ffi_aggregate_return_symbol(sym) { return lower_ffi_aggregate_return_call(ctx, e, c, sym) }
     if is_str_arg_builtin(sym) { return lower_str_arg_call(ctx, e, sym, c) }
@@ -1889,6 +1891,45 @@ fn lower_store_u8_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Low
     var value = match lower_expr(addr.ctx, c.args[1]) { Lowered as x => x; error as err => return err }
     var with_store = ctx_append(value.ctx, store_inst(addr.vreg, value.vreg, LType::I8, e.line, e.col))
     Lowered { ctx = with_store; vreg = 0 to u32 }
+}
+
+fn is_syscall_call(callee: parser::Path): bool {
+    var segs = callee.segments
+    if segs.len == 0 { return false }
+    var name = segs[segs.len - 1].name
+    name == "syscall0" || name == "syscall1" || name == "syscall2" || name == "syscall3" ||
+    name == "syscall4" || name == "syscall5" || name == "syscall6"
+}
+
+fn lower_syscall_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | error {
+    var n = c.args.len
+    var vregs: [n]u32 = []
+    var cur = ctx
+    var i: u64 = 0
+    loop {
+        if i >= n { break }
+        var lo = match lower_expr(cur, c.args[i]) { Lowered as x => x; error as err => return err }
+        cur = lo.ctx
+        vregs[i] = lo.vreg
+        i++
+    }
+    var r = ctx_alloc(cur)
+    var with_syscall = ctx_append(r.ctx, syscall_inst(r.vreg, vregs, e.line, e.col))
+    Lowered { ctx = with_syscall; vreg = r.vreg }
+}
+
+fn is_word_reinterpret_call(callee: parser::Path): bool {
+    var segs = callee.segments
+    if segs.len == 0 { return false }
+    var name = segs[segs.len - 1].name
+    name == "ptr_word" || name == "word_ptr"
+}
+
+fn lower_word_reinterpret_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | error {
+    if c.args.len != 1 {
+        return error { message = "native backend N1: `ptr_word`/`word_ptr` expects exactly one argument (internal)" }
+    }
+    lower_expr(ctx, c.args[0])
 }
 
 pub fn is_str_arg_builtin(sym: str): bool {

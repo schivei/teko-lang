@@ -814,6 +814,32 @@ fn select_call_indirect(ctx0: SelCtx, inst: lir::LInst, ci: lir::LCallIndirect):
     select_call_result(ctx1, inst, ret_reg, ci.ret_type)
 }
 
+fn syscall_reg_arm64(index: u64): MReg {
+    if index == 0 { return preg(8, MRegClass::GPR) }
+    preg((index - 1) to u32, MRegClass::GPR)
+}
+
+fn pin_syscall_args(ctx0: SelCtx, args: []u32): PinnedArgs {
+    var ctx = ctx0
+    var uses: [args.len]MReg = []
+    var i: u64 = 0
+    loop {
+        if i >= args.len { break }
+        var reg = syscall_reg_arm64(i)
+        ctx = selctx_emit(ctx, mov_inst(true, reg, vreg(args[i], MRegClass::GPR)))
+        uses[i] = reg
+        i++
+    }
+    PinnedArgs { ctx = ctx; uses = uses }
+}
+
+fn select_syscall(ctx0: SelCtx, inst: lir::LInst, s: lir::LSyscall): SelCtx {
+    var pinned = pin_syscall_args(ctx0, s.args)
+    var ret_reg = preg(0, MRegClass::GPR)
+    var ctx1 = selctx_emit(pinned.ctx, syscall_inst(pinned.uses, ret_reg, inst.has_result))
+    select_call_result(ctx1, inst, ret_reg, lir::LType::I64)
+}
+
 fn select_inst(ctx: SelCtx, f: lir::LFunc, inst: lir::LInst): SelCtx | error {
     match inst.op {
         lir::LConstInt as c => select_const_int(ctx, inst, c)
@@ -832,6 +858,7 @@ fn select_inst(ctx: SelCtx, f: lir::LFunc, inst: lir::LInst): SelCtx | error {
         lir::LCallIndirect as ci => select_call_indirect(ctx, inst, ci)
         lir::LFuncAddr as fa => select_func_addr(ctx, inst, fa)
         lir::LCall as c => select_call(ctx, inst, c)
+        lir::LSyscall as s => select_syscall(ctx, inst, s)
     }
 }
 
