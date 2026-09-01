@@ -234,7 +234,12 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   estruturalmente e sempre falhará aqui. O seed do `bootstrap/teko.c` é a **alavancagem do self-host** —
   sozinho basta pra reconstruir o compilador inteiro, sem binário externo. É caminho **PRIMÁRIO, não
   fallback**: não se gasta uma tentativa no `fetch_teko.sh` antes.
-- **NATIVE É A ÚLTIMA ETAPA — gated em MEMÓRIA ESTÁVEL (dono 2026-08-19).** NÃO se toca no backend
+- **⚠️ SUPERSEDIDA POR D203 (dono 2026-09-01): o gate tríplice deste item NÃO vale mais.** O `/src` passa a
+  mirar **emissão de `.o` nativo direto + link** JÁ (superfície atual primeiro), sem esperar o marco de
+  memória — o native VEM PARA A FRENTE. Permanece só: ratchet D68 (não crescer o pico do que buildar) e o
+  alvo de memória `< 2 GB`. Trabalho ordenado em `docs/design/plano-emissao-objeto-nativo-0.3.1.md`; keystone
+  = `syscallN` native (`lower.tks:2154`). O texto abaixo fica como registro histórico da lei anterior.
+- **NATIVE É A ÚLTIMA ETAPA — gated em MEMÓRIA ESTÁVEL (dono 2026-08-19) — SUPERSEDIDA (ver acima, D203).** NÃO se toca no backend
   native (lowering, syscall, `.o`, endgame no-C, os stops de fronteira do gen2) enquanto a memória não
   estabilizar. O gatilho tríplice, TODO ele: **(1) build seco ≤ 1,5 GB · (2) fixpoint gen2==gen3
   byte-idêntico · (3) testes verdes.** Só então o native começa (M4). A campanha de memória (RM-C /
