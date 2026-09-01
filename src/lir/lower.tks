@@ -1304,6 +1304,7 @@ fn lower_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | er
     if c.call_ns.len == 0 && is_capture_longjmp_call(c.callee) { return lower_capture_longjmp_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_word_reinterpret_call(c.callee) { return lower_word_reinterpret_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_byte_ptr_call(c.callee) { return lower_byte_ptr_call(ctx, e, c) }
+    if c.call_ns.len == 0 && is_as_cstr_call(c.callee) { return lower_as_cstr_call(ctx, e, c) }
     var sym = match call_symbol(c, ctx.externs, ctx.flat_symbols) { str as s => s; error as err => return err }
     if is_ffi_aggregate_return_symbol(sym) { return lower_ffi_aggregate_return_call(ctx, e, c, sym) }
     if is_str_arg_builtin(sym) { return lower_str_arg_call(ctx, e, sym, c) }
@@ -1959,6 +1960,32 @@ fn lower_byte_ptr_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Low
     var r = ctx_alloc(idx.ctx)
     var with_add = ctx_append(r.ctx, bin_inst(r.vreg, LBinOp::IAdd, fatb.ptr, idx.vreg, e.line, e.col))
     Lowered { ctx = with_add; vreg = r.vreg }
+}
+
+fn is_as_cstr_call(callee: parser::Path): bool {
+    var segs = callee.segments
+    segs.len > 0 && segs[segs.len - 1].name == "as_cstr"
+}
+
+fn lower_as_cstr_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | error {
+    if c.args.len != 1 {
+        return error { message = "native backend N1: `as_cstr` expects exactly one str argument (internal)" }
+    }
+    var src = match lower_fat_expr(ctx, c.args[0]) { LoweredFat as x => x; error as err => return err }
+    var one_r = ctx_alloc(src.ctx)
+    var with_one = ctx_append(one_r.ctx, const_int_inst(one_r.vreg, 1, e.line, e.col))
+    var total_r = ctx_alloc(with_one)
+    var with_total = ctx_append(total_r.ctx, bin_inst(total_r.vreg, LBinOp::IAdd, src.len, one_r.vreg, e.line, e.col))
+    var region = region_current_vreg(with_total)
+    var dst_r = ctx_alloc(region.ctx)
+    var with_alloc = ctx_append(dst_r.ctx, call_inst(dst_r.vreg, "tk_region_alloc", two_args(region.vreg, total_r.vreg), false, e.line, e.col))
+    var with_copy = ctx_append(with_alloc, void_call_inst("tk_mem_copy", [..two_args(dst_r.vreg, src.ptr), src.len], false, e.line, e.col))
+    var end_r = ctx_alloc(with_copy)
+    var with_end = ctx_append(end_r.ctx, bin_inst(end_r.vreg, LBinOp::IAdd, dst_r.vreg, src.len, e.line, e.col))
+    var zero_r = ctx_alloc(with_end)
+    var with_zero = ctx_append(zero_r.ctx, const_int_inst(zero_r.vreg, 0, e.line, e.col))
+    var with_store = ctx_append(with_zero, store_inst(end_r.vreg, zero_r.vreg, LType::I8, e.line, e.col))
+    Lowered { ctx = with_store; vreg = dst_r.vreg }
 }
 
 pub fn is_str_arg_builtin(sym: str): bool {
