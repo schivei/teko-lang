@@ -883,6 +883,7 @@ fn lower_cast(ctx: LowerCtx, e: checker::TExpr, c: checker::TCast): Lowered | er
         checker::Variant => return lower_value_into_type(ctx, e.type, c.expr)
         null => { }
     }
+    if is_char_type(c.expr.type) && is_char_decode_dest(e.type) { return lower_char_decode_cast(ctx, e, c) }
     var ao = match lower_expr(ctx, c.expr) { Lowered as x => x; error as err => return err }
     if is_u64_ptr_byte_reinterpret_cast(c.expr.type, e.type) { return ao }
     var src = match prim_kind_of(c.expr.type, ctx.enums, "cast source") { checker::PrimKind as p => p; error as err => return err }
@@ -894,6 +895,129 @@ fn lower_cast(ctx: LowerCtx, e: checker::TExpr, c: checker::TCast): Lowered | er
     var r = ctx_alloc(ao.ctx)
     var inst = un_inst(r.vreg, op, ao.vreg, e.line, e.col)
     Lowered { ctx = ctx_append(r.ctx, inst); vreg = r.vreg }
+}
+
+fn is_char_decode_dest(t: @Type()): bool {
+    match t {
+        checker::Prim as p => p.kind == checker::PrimKind::U32 || p.kind == checker::PrimKind::U64 || p.kind == checker::PrimKind::I64
+        _ => false
+    }
+}
+
+fn lower_const_int(ctx: LowerCtx, v: i64, line: u32, col: u32): Lowered {
+    var r = ctx_alloc(ctx)
+    Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, v, line, col)); vreg = r.vreg }
+}
+
+fn lower_and_const(lo: Lowered, mask: i64, line: u32, col: u32): Lowered {
+    var m = lower_const_int(lo.ctx, mask, line, col)
+    var r = ctx_alloc(m.ctx)
+    Lowered { ctx = ctx_append(r.ctx, bin_inst(r.vreg, LBinOp::IAnd, lo.vreg, m.vreg, line, col)); vreg = r.vreg }
+}
+
+fn lower_shl_const(lo: Lowered, amount: i64, line: u32, col: u32): Lowered {
+    var a = lower_const_int(lo.ctx, amount, line, col)
+    var r = ctx_alloc(a.ctx)
+    Lowered { ctx = ctx_append(r.ctx, bin_inst(r.vreg, LBinOp::IShl, lo.vreg, a.vreg, line, col)); vreg = r.vreg }
+}
+
+fn lower_or_vreg(ctx: LowerCtx, a: u32, b: u32, line: u32, col: u32): Lowered {
+    var r = ctx_alloc(ctx)
+    Lowered { ctx = ctx_append(r.ctx, bin_inst(r.vreg, LBinOp::IOr, a, b, line, col)); vreg = r.vreg }
+}
+
+fn lower_len_eq(ctx: LowerCtx, len_vreg: u32, v: i64, line: u32, col: u32): Lowered {
+    var c = lower_const_int(ctx, v, line, col)
+    var r = ctx_alloc(c.ctx)
+    Lowered { ctx = ctx_append(r.ctx, bin_inst(r.vreg, LBinOp::ICmpEq, len_vreg, c.vreg, line, col)); vreg = r.vreg }
+}
+
+fn char_load_masked(ctx: LowerCtx, ptr: u32, offset: u32, mask: i64, line: u32, col: u32): Lowered {
+    var addr = ctx_alloc(ctx)
+    var with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, ptr, offset, line, col))
+    var bl = ctx_alloc(with_addr)
+    var with_load = ctx_append(bl.ctx, load_inst(bl.vreg, addr.vreg, LType::I8, line, col))
+    lower_and_const(Lowered { ctx = with_load; vreg = bl.vreg }, mask, line, col)
+}
+
+fn char_decode_two(ctx: LowerCtx, ptr: u32, b0m: u32, line: u32, col: u32): Lowered {
+    var hi = lower_shl_const(lower_and_const(Lowered { ctx = ctx; vreg = b0m }, 0x1F, line, col), 6, line, col)
+    var lo = char_load_masked(hi.ctx, ptr, 1, 0x3F, line, col)
+    lower_or_vreg(lo.ctx, hi.vreg, lo.vreg, line, col)
+}
+
+fn char_decode_three(ctx: LowerCtx, ptr: u32, b0m: u32, line: u32, col: u32): Lowered {
+    var hi = lower_shl_const(lower_and_const(Lowered { ctx = ctx; vreg = b0m }, 0x0F, line, col), 12, line, col)
+    var mid = lower_shl_const(char_load_masked(hi.ctx, ptr, 1, 0x3F, line, col), 6, line, col)
+    var lo = char_load_masked(mid.ctx, ptr, 2, 0x3F, line, col)
+    var hm = lower_or_vreg(lo.ctx, hi.vreg, mid.vreg, line, col)
+    lower_or_vreg(hm.ctx, hm.vreg, lo.vreg, line, col)
+}
+
+fn char_decode_four(ctx: LowerCtx, ptr: u32, b0m: u32, line: u32, col: u32): Lowered {
+    var hi = lower_shl_const(lower_and_const(Lowered { ctx = ctx; vreg = b0m }, 0x07, line, col), 18, line, col)
+    var c1 = lower_shl_const(char_load_masked(hi.ctx, ptr, 1, 0x3F, line, col), 12, line, col)
+    var c2 = lower_shl_const(char_load_masked(c1.ctx, ptr, 2, 0x3F, line, col), 6, line, col)
+    var c3 = char_load_masked(c2.ctx, ptr, 3, 0x3F, line, col)
+    var o1 = lower_or_vreg(c3.ctx, hi.vreg, c1.vreg, line, col)
+    var o2 = lower_or_vreg(o1.ctx, o1.vreg, c2.vreg, line, col)
+    lower_or_vreg(o2.ctx, o2.vreg, c3.vreg, line, col)
+}
+
+type CharDecodeBlocks = struct {
+    loadb0: u32
+    multi: u32
+    blk2: u32
+    multi3: u32
+    blk3: u32
+    blk4: u32
+    merge: u32
+    result: u32
+    func: LFunc
+}
+
+fn alloc_char_decode_blocks(f: LFunc): CharDecodeBlocks {
+    var loadb0 = alloc_block(f)
+    var multi = alloc_block(loadb0.func)
+    var blk2 = alloc_block(multi.func)
+    var multi3 = alloc_block(blk2.func)
+    var blk3 = alloc_block(multi3.func)
+    var blk4 = alloc_block(blk3.func)
+    var mergeb = alloc_block(blk4.func)
+    var mp = add_block_param(mergeb.func, mergeb.block_id)
+    CharDecodeBlocks {
+        loadb0 = loadb0.block_id; multi = multi.block_id; blk2 = blk2.block_id
+        multi3 = multi3.block_id; blk3 = blk3.block_id; blk4 = blk4.block_id
+        merge = mergeb.block_id; result = mp.vreg; func = mp.func
+    }
+}
+
+fn lower_char_decode_cast(ctx: LowerCtx, e: checker::TExpr, c: checker::TCast): Lowered | error {
+    var fat = match lower_fat_expr(ctx, c.expr) { LoweredFat as x => x; error as err => return err }
+    var line = e.line
+    var col = e.col
+    var b = alloc_char_decode_blocks(fat.ctx.func)
+    var entry = ctx_with(fat.ctx, b.func, fat.ctx.block_id, fat.ctx.env)
+    var zero = lower_const_int(entry, 0, line, col)
+    var is0 = lower_len_eq(zero.ctx, fat.len, 0, line, col)
+    var entry_done = ctx_append(is0.ctx, branch_inst(is0.vreg, b.merge, [zero.vreg], b.loadb0, [], line, col))
+    var l0 = char_load_masked(ctx_goto(entry_done, b.loadb0), fat.ptr, 0, 0xFF, line, col)
+    var b0m = l0.vreg
+    var m7f = lower_const_int(l0.ctx, 0x7F, line, col)
+    var ascii = ctx_alloc(m7f.ctx)
+    var with_cmp = ctx_append(ascii.ctx, bin_inst(ascii.vreg, LBinOp::ICmpLeU, b0m, m7f.vreg, line, col))
+    var l0_done = ctx_append(with_cmp, branch_inst(ascii.vreg, b.merge, [b0m], b.multi, [], line, col))
+    var is2 = lower_len_eq(ctx_goto(l0_done, b.multi), fat.len, 2, line, col)
+    var multi_done = ctx_append(is2.ctx, branch_inst(is2.vreg, b.blk2, [], b.multi3, [], line, col))
+    var v2 = char_decode_two(ctx_goto(multi_done, b.blk2), fat.ptr, b0m, line, col)
+    var blk2_done = ctx_append(v2.ctx, jump_inst(b.merge, [v2.vreg], line, col))
+    var is3 = lower_len_eq(ctx_goto(blk2_done, b.multi3), fat.len, 3, line, col)
+    var multi3_done = ctx_append(is3.ctx, branch_inst(is3.vreg, b.blk3, [], b.blk4, [], line, col))
+    var v3 = char_decode_three(ctx_goto(multi3_done, b.blk3), fat.ptr, b0m, line, col)
+    var blk3_done = ctx_append(v3.ctx, jump_inst(b.merge, [v3.vreg], line, col))
+    var v4 = char_decode_four(ctx_goto(blk3_done, b.blk4), fat.ptr, b0m, line, col)
+    var blk4_done = ctx_append(v4.ctx, jump_inst(b.merge, [v4.vreg], line, col))
+    Lowered { ctx = ctx_with(blk4_done, blk4_done.func, b.merge, entry.env); vreg = b.result }
 }
 
 fn is_int_to_narrow_float_cast(src: checker::PrimKind, dst: checker::PrimKind): bool {
