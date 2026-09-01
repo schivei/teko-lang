@@ -1303,6 +1303,7 @@ fn lower_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | er
     if c.call_ns.len == 0 && is_syscall_call(c.callee) { return lower_syscall_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_capture_longjmp_call(c.callee) { return lower_capture_longjmp_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_word_reinterpret_call(c.callee) { return lower_word_reinterpret_call(ctx, e, c) }
+    if c.call_ns.len == 0 && is_byte_ptr_call(c.callee) { return lower_byte_ptr_call(ctx, e, c) }
     var sym = match call_symbol(c, ctx.externs, ctx.flat_symbols) { str as s => s; error as err => return err }
     if is_ffi_aggregate_return_symbol(sym) { return lower_ffi_aggregate_return_call(ctx, e, c, sym) }
     if is_str_arg_builtin(sym) { return lower_str_arg_call(ctx, e, sym, c) }
@@ -1942,6 +1943,22 @@ fn lower_word_reinterpret_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCa
         return error { message = "native backend N1: `ptr_word`/`word_ptr` expects exactly one argument (internal)" }
     }
     lower_expr(ctx, c.args[0])
+}
+
+fn is_byte_ptr_call(callee: parser::Path): bool {
+    var segs = callee.segments
+    segs.len > 0 && segs[segs.len - 1].name == "byte_ptr"
+}
+
+fn lower_byte_ptr_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | error {
+    if c.args.len != 2 {
+        return error { message = "native backend N1: `byte_ptr` expects a []byte and an index (internal)" }
+    }
+    var fatb = match lower_fat_expr(ctx, c.args[0]) { LoweredFat as x => x; error as err => return err }
+    var idx = match lower_expr(fatb.ctx, c.args[1]) { Lowered as x => x; error as err => return err }
+    var r = ctx_alloc(idx.ctx)
+    var with_add = ctx_append(r.ctx, bin_inst(r.vreg, LBinOp::IAdd, fatb.ptr, idx.vreg, e.line, e.col))
+    Lowered { ctx = with_add; vreg = r.vreg }
 }
 
 pub fn is_str_arg_builtin(sym: str): bool {
