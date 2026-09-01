@@ -8,14 +8,18 @@ use teko::stdlib::operators
 exp global struct str : Array<char>, __type, Equatable {
     exp const __SIZE_OF: usize = uptr::__SIZE_OF + usize::__SIZE_OF
     exp const __V_KIND: ValueKind = .Array | .Value
-    exp const __ALIGN_OF: usize = 1
+    exp const __ALIGN_OF: usize = TypeSizes::S8
     exp const __NAME: str = "str"
 
     _len: usize
     _ptr: uptr
 
-    exp static arena fn new(values: []char): self {
-        @slot.swap<[]char, self>(values, self)
+    exp static fn new(values: []byte): self {
+        bitcast<[]byte, self>(values)
+    }
+
+    exp static fn new(values: []char): self {
+        bitcast<[]char, self>(values)
     }
 
     exp static arena fn new(size: usize): self {
@@ -29,8 +33,8 @@ exp global struct str : Array<char>, __type, Equatable {
         s
     }
 
-    exp arena get bytes: []byte {
-        @slot.swap<str, []byte>(self)
+    exp get bytes: []byte {
+        bitcast<self, []byte>(self)
     }
 
     exp get len: usize {
@@ -42,7 +46,7 @@ exp global struct str : Array<char>, __type, Equatable {
             return false
         }
 
-        var slice = self[self.len - suffix.len..suffix.len]
+        var slice = self::slice(self.len - suffix.len, suffix.len)
         if ignore_case {
             slice = slice.to_lowercase()
             suffix = suffix.to_lowercase()
@@ -56,7 +60,7 @@ exp global struct str : Array<char>, __type, Equatable {
             return false
         }
 
-        var slice = self[0..prefix.len]
+        var slice = self::slice(0, prefix.len)
         if ignore_case {
             slice = slice.to_lowercase()
             prefix = prefix.to_lowercase()
@@ -109,7 +113,7 @@ exp global struct str : Array<char>, __type, Equatable {
                 cl = cl.to_lowercase()
             }
             if cf == substring[0] && cl == substring[substring.len - 1] {
-                var slice = self[i..i + substring.len]
+                var slice = self::slice(i, substring.len)
                 if ignore_case {
                     slice = slice.to_lowercase()
                     substring = substring.to_lowercase()
@@ -130,6 +134,23 @@ exp global struct str : Array<char>, __type, Equatable {
         loop i in 0..self.len {
             result[i] = self[i].to_lowercase()
         }
+        self::new(result)
+    }
+
+    exp fn slice(start: usize, count: usize): self {
+        if start + count > self.len {
+            count = self.len - start
+        }
+
+        if count == 0 || start >= self.len {
+            return self::new([])
+        }
+
+        var result: [count]char = []
+        loop i in 0..count {
+            result[i] = self[start + i]
+        }
+
         self::new(result)
     }
 }
