@@ -1301,6 +1301,7 @@ fn lower_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | er
     if c.call_ns.len == 0 && is_load_u8_call(c.callee) { return lower_load_u8_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_store_u8_call(c.callee) { return lower_store_u8_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_syscall_call(c.callee) { return lower_syscall_call(ctx, e, c) }
+    if c.call_ns.len == 0 && is_atomic_rmw_call(c.callee) { return lower_atomic_rmw_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_capture_longjmp_call(c.callee) { return lower_capture_longjmp_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_word_reinterpret_call(c.callee) { return lower_word_reinterpret_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_byte_ptr_call(c.callee) { return lower_byte_ptr_call(ctx, e, c) }
@@ -1920,6 +1921,39 @@ fn lower_syscall_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowe
     var r = ctx_alloc(cur)
     var with_syscall = ctx_append(r.ctx, syscall_inst(r.vreg, vregs, e.line, e.col))
     Lowered { ctx = with_syscall; vreg = r.vreg }
+}
+
+fn atomic_rmw_kind(name: str): LAtomicKind | null {
+    if name == "atomic_cas_u32" { return LAtomicKind::Cas }
+    if name == "atomic_xchg_u32" { return LAtomicKind::Xchg }
+    if name == "atomic_add_u32" { return LAtomicKind::Add }
+    if name == "atomic_load_u32" { return LAtomicKind::Load }
+    null
+}
+
+fn is_atomic_rmw_call(callee: parser::Path): bool {
+    var segs = callee.segments
+    if segs.len == 0 { return false }
+    match atomic_rmw_kind(segs[segs.len - 1].name) { LAtomicKind => true; null => false }
+}
+
+fn lower_atomic_rmw_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | error {
+    var segs = c.callee.segments
+    var kind = match atomic_rmw_kind(segs[segs.len - 1].name) { LAtomicKind as k => k; null => return error { message = "native backend N1: unknown atomic RMW builtin (internal)" } }
+    var n = c.args.len
+    var vregs: [n]u32 = []
+    var cur = ctx
+    var i: u64 = 0
+    loop {
+        if i >= n { break }
+        var lo = match lower_expr(cur, c.args[i]) { Lowered as x => x; error as err => return err }
+        cur = lo.ctx
+        vregs[i] = lo.vreg
+        i++
+    }
+    var r = ctx_alloc(cur)
+    var with_atomic = ctx_append(r.ctx, atomic_rmw_inst(r.vreg, kind, vregs, e.line, e.col))
+    Lowered { ctx = with_atomic; vreg = r.vreg }
 }
 
 fn is_capture_longjmp_call(callee: parser::Path): bool {

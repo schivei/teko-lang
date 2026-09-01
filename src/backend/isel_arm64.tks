@@ -840,6 +840,39 @@ fn select_syscall(ctx0: SelCtx, inst: lir::LInst, s: lir::LSyscall): SelCtx {
     select_call_result(ctx1, inst, ret_reg, lir::LType::I64)
 }
 
+fn atomic_addr_reg_arm64(): MReg { preg(3, MRegClass::GPR) }
+
+fn atomic_a_reg_arm64(): MReg { preg(1, MRegClass::GPR) }
+
+fn atomic_b_reg_arm64(): MReg { preg(2, MRegClass::GPR) }
+
+fn pin_atomic_arg_arm64(ctx0: SelCtx, reg: MReg, arg: u32): SelCtx {
+    selctx_emit(ctx0, mov_inst(true, reg, vreg(arg, MRegClass::GPR)))
+}
+
+fn pin_atomic_args_arm64(ctx0: SelCtx, kind: lir::LAtomicKind, args: []u32): PinnedArgs {
+    var ctx = pin_atomic_arg_arm64(ctx0, atomic_addr_reg_arm64(), args[0])
+    match kind {
+        Load => return PinnedArgs { ctx = ctx; uses = [atomic_addr_reg_arm64()] }
+        Cas => {
+            var c1 = pin_atomic_arg_arm64(ctx, atomic_a_reg_arm64(), args[1])
+            var c2 = pin_atomic_arg_arm64(c1, atomic_b_reg_arm64(), args[2])
+            return PinnedArgs { ctx = c2; uses = [atomic_addr_reg_arm64(), atomic_a_reg_arm64(), atomic_b_reg_arm64()] }
+        }
+        _ => {
+            var c1 = pin_atomic_arg_arm64(ctx, atomic_b_reg_arm64(), args[1])
+            return PinnedArgs { ctx = c1; uses = [atomic_addr_reg_arm64(), atomic_b_reg_arm64()] }
+        }
+    }
+}
+
+fn select_atomic(ctx0: SelCtx, inst: lir::LInst, a: lir::LAtomicRmw): SelCtx {
+    var pinned = pin_atomic_args_arm64(ctx0, a.kind, a.args)
+    var ret_reg = preg(0, MRegClass::GPR)
+    var ctx1 = selctx_emit(pinned.ctx, atomic_inst(a.kind, pinned.uses, ret_reg, inst.has_result))
+    select_call_result(ctx1, inst, ret_reg, lir::LType::I64)
+}
+
 fn select_inst(ctx: SelCtx, f: lir::LFunc, inst: lir::LInst): SelCtx | error {
     match inst.op {
         lir::LConstInt as c => select_const_int(ctx, inst, c)
@@ -859,6 +892,7 @@ fn select_inst(ctx: SelCtx, f: lir::LFunc, inst: lir::LInst): SelCtx | error {
         lir::LFuncAddr as fa => select_func_addr(ctx, inst, fa)
         lir::LCall as c => select_call(ctx, inst, c)
         lir::LSyscall as s => select_syscall(ctx, inst, s)
+        lir::LAtomicRmw as a => select_atomic(ctx, inst, a)
     }
 }
 

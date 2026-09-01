@@ -744,6 +744,39 @@ fn select_syscall_x86(ctx0: SelCtxX86, inst: lir::LInst, s: lir::LSyscall): SelC
     select_call_result_x86(ctx1, inst, ret_reg, lir::LType::I64)
 }
 
+fn atomic_addr_reg_x86(): MReg { preg(1, MRegClass::GPR) }
+
+fn atomic_val_reg_x86(): MReg { preg(0, MRegClass::GPR) }
+
+fn atomic_desired_reg_x86(): MReg { preg(2, MRegClass::GPR) }
+
+fn pin_atomic_arg_x86(ctx0: SelCtxX86, reg: MReg, arg: u32): SelCtxX86 {
+    selctx_x86_emit(ctx0, mov_x86(reg, vreg(arg, MRegClass::GPR), true))
+}
+
+fn pin_atomic_args_x86(ctx0: SelCtxX86, kind: lir::LAtomicKind, args: []u32): PinnedArgsX86 {
+    var ctx = pin_atomic_arg_x86(ctx0, atomic_addr_reg_x86(), args[0])
+    match kind {
+        Load => return PinnedArgsX86 { ctx = ctx; uses = [atomic_addr_reg_x86()] }
+        Cas => {
+            var c1 = pin_atomic_arg_x86(ctx, atomic_val_reg_x86(), args[1])
+            var c2 = pin_atomic_arg_x86(c1, atomic_desired_reg_x86(), args[2])
+            return PinnedArgsX86 { ctx = c2; uses = [atomic_addr_reg_x86(), atomic_val_reg_x86(), atomic_desired_reg_x86()] }
+        }
+        _ => {
+            var c1 = pin_atomic_arg_x86(ctx, atomic_val_reg_x86(), args[1])
+            return PinnedArgsX86 { ctx = c1; uses = [atomic_addr_reg_x86(), atomic_val_reg_x86()] }
+        }
+    }
+}
+
+fn select_atomic_x86(ctx0: SelCtxX86, inst: lir::LInst, a: lir::LAtomicRmw): SelCtxX86 {
+    var pinned = pin_atomic_args_x86(ctx0, a.kind, a.args)
+    var ret_reg = RAX_X86
+    var ctx1 = selctx_x86_emit(pinned.ctx, atomic_x86(a.kind, pinned.uses, ret_reg, inst.has_result))
+    select_call_result_x86(ctx1, inst, ret_reg, lir::LType::I64)
+}
+
 fn select_inst_x86(abi: AbiDescriptor, ctx: SelCtxX86, f: lir::LFunc, inst: lir::LInst): SelCtxX86 | error {
     match inst.op {
         lir::LConstInt as c => select_const_int_x86(ctx, inst, c)
@@ -763,6 +796,7 @@ fn select_inst_x86(abi: AbiDescriptor, ctx: SelCtxX86, f: lir::LFunc, inst: lir:
         lir::LFuncAddr as fa => select_func_addr_x86(ctx, inst, fa)
         lir::LCall as c => select_call_x86(abi, ctx, inst, c)
         lir::LSyscall as s => select_syscall_x86(ctx, inst, s)
+        lir::LAtomicRmw as a => select_atomic_x86(ctx, inst, a)
     }
 }
 

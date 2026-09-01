@@ -379,6 +379,84 @@ fn encode_syscall(i: MSyscall): EncWord {
     plain_word(ARM64_SVC0)
 }
 
+fn atomic_gpr(id: u32): MReg {
+    preg(id, MRegClass::GPR)
+}
+
+fn atomic_ldaxr_word(addr: MReg, old: MReg): u32 {
+    ARM64_LDAXR_W | enc_rn(addr) | enc_rd(old)
+}
+
+fn atomic_stlxr_word(status: MReg, src: MReg, addr: MReg): u32 {
+    ARM64_STLXR_W | enc_rm(status) | enc_rn(addr) | enc_rd(src)
+}
+
+fn atomic_ldar_word(addr: MReg, old: MReg): u32 {
+    ARM64_LDAR_W | enc_rn(addr) | enc_rd(old)
+}
+
+fn atomic_cmp_word(old: MReg, expected: MReg): u32 {
+    ARM64_CMP_REG | sf_bit(false) | enc_rm(expected) | enc_rn(old)
+}
+
+fn atomic_add_word(dst: MReg, a: MReg, b: MReg): u32 {
+    alu_reg_base(MAluOp::Add) | sf_bit(false) | enc_rm(b) | enc_rn(a) | enc_rd(dst)
+}
+
+fn atomic_bcond_field(disp_words: i64): u32 {
+    twos_field(disp_words, ARM64_IMM19_BITS) << ARM64_BCOND_IMM19_SHIFT
+}
+
+fn atomic_bne_word(disp_words: i64): u32 {
+    (ARM64_BCOND | (ARM64_COND_NE & ARM64_COND_MASK)) | atomic_bcond_field(disp_words)
+}
+
+fn atomic_cbnz_word(status: MReg, disp_words: i64): u32 {
+    (ARM64_CBNZ | sf_bit(false) | enc_rd(status)) | atomic_bcond_field(disp_words)
+}
+
+fn atomic_cas_words(addr: MReg, old: MReg, expected: MReg, desired: MReg, status: MReg): []u32 {
+    [
+        atomic_ldaxr_word(addr, old),
+        atomic_cmp_word(old, expected),
+        atomic_bne_word(3),
+        atomic_stlxr_word(status, desired, addr),
+        atomic_cbnz_word(status, (0) - 4)
+    ]
+}
+
+fn atomic_xchg_words(addr: MReg, old: MReg, value: MReg, status: MReg): []u32 {
+    [
+        atomic_ldaxr_word(addr, old),
+        atomic_stlxr_word(status, value, addr),
+        atomic_cbnz_word(status, (0) - 2)
+    ]
+}
+
+fn atomic_add_words(addr: MReg, old: MReg, delta: MReg, temp: MReg, status: MReg): []u32 {
+    [
+        atomic_ldaxr_word(addr, old),
+        atomic_add_word(temp, old, delta),
+        atomic_stlxr_word(status, temp, addr),
+        atomic_cbnz_word(status, (0) - 3)
+    ]
+}
+
+fn atomic_words(kind: lir::LAtomicKind): []u32 {
+    var addr = atomic_gpr(3 to u32)
+    var old = atomic_gpr(0 to u32)
+    var a_reg = atomic_gpr(1 to u32)
+    var b_reg = atomic_gpr(2 to u32)
+    var status = atomic_gpr(4 to u32)
+    var temp = atomic_gpr(5 to u32)
+    match kind {
+        Cas => atomic_cas_words(addr, old, a_reg, b_reg, status)
+        Xchg => atomic_xchg_words(addr, old, b_reg, status)
+        Add => atomic_add_words(addr, old, b_reg, temp, status)
+        Load => [atomic_ldar_word(addr, old)]
+    }
+}
+
 type Saved = struct {
     gpr: []u32
     fpr: []u32
@@ -878,6 +956,7 @@ pub fn encode_inst_word(layout: FrameLayout, inst: @MInst()): EncWord | error {
         MCall as x => encode_call(x)
         MCallIndirect as x => encode_call_indirect(x)
         MSyscall as x => encode_syscall(x)
+        MAtomic => internal_atomic_word()
         MRet => encode_ret()
         MOutArg as x => encode_out_arg(x)
         MInArg as x => encode_in_arg(layout, x)
@@ -983,7 +1062,28 @@ fn encode_frame_addr_words(layout: FrameLayout, i: MFrameAddr): []EncWord | erro
     wrap_plain_words([], raw)
 }
 
+fn internal_atomic_word(): error {
+    error { message = "encode arm64: atomic RMW must expand to a word sequence (internal)" }
+}
+
+fn inst_is_atomic(inst: @MInst()): bool {
+    match inst {
+        MAtomic => true
+        _ => false
+    }
+}
+
+fn as_atomic_kind(inst: @MInst()): lir::LAtomicKind {
+    match inst {
+        MAtomic as x => x.kind
+        _ => lir::LAtomicKind::Load
+    }
+}
+
 fn encode_one(layout: FrameLayout, words0: []EncWord, inst: @MInst()): []EncWord | error {
+    if inst_is_atomic(inst) {
+        return wrap_plain_words(words0, atomic_words(as_atomic_kind(inst)))
+    }
     if inst_is_ret(inst) {
         match emit_epilogue(layout) {
             []u32 as epi => {
