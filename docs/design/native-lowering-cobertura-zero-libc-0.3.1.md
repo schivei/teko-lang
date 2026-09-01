@@ -119,7 +119,8 @@ O C que a campanha ELA MESMA passou a emitir e cujo espelho native precisa exist
 | entry `_start` + `stack_ptr` intrínseco per-OS | native: `lower.tks:6717` `native_entry_stub` (esqueleto existe); C-side `_start`/`stack_ptr` ainda NÃO em `codegen.tks` | `_start` LFunc + `stack_ptr`→`mov reg,%rsp`/`mov reg,sp` (isel) | **a ESCREVER** (crumb 0125 pendente) |
 | spawn mmap/VirtualAlloc glue (thread stack) | `thread.tks` (SYS_MMAP) / kernel32 | chamada extern/syscall — já lowerável | rides F7a |
 | símbolos do harness + cov | codegen `emit_cov_line:19`/`emit_cov_branch:30`; builtins `cov_*` dispatch | `builtin_cov_symbol` (`lower.tks:1970`) já mapeia os `cov_*` | **FEITO** (extern-call) |
-| `load_u8`/`store_u8`, syscallN, atomics | codegen intrínsecos | `lower_load_u8_call`/`lower_store_u8_call` (`lower.tks:1771`/`:1786`) | **FEITO** |
+| `load_u8`/`store_u8` | codegen intrínsecos | `lower_load_u8_call`/`lower_store_u8_call` (`lower.tks:1771`/`:1786`) | **FEITO** |
+| `syscallN`, atomics | codegen intrínsecos | honest-stop `unresolved_builtin_stop` (`lower.tks:2154`) — NÃO rebaixado | **NÃO FEITO** (corrigido 2026-09-01 — verdade empírica do build seco `TEKO_BACKEND=native`; era falso-positivo agrupado com load/store; ver `plano-emissao-objeto-nativo-0.3.1.md §2.1`) |
 
 **Verificação:** os `cov_*` e `load_u8/store_u8` **já** têm espelho native (confirmado). O eixo-A que FALTA:
 (1) o graceful-stop portável de capture/exit/cancel (0126, mac-blocker), (2) clone aarch64
