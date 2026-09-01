@@ -713,6 +713,37 @@ fn select_call_indirect_x86(abi: AbiDescriptor, ctx0: SelCtxX86, inst: lir::LIns
     select_call_result_x86(ctx1, inst, ret_reg, ci.ret_type)
 }
 
+fn syscall_reg_x86(index: u64): MReg {
+    if index == 0 { return preg(0, MRegClass::GPR) }
+    if index == 1 { return preg(7, MRegClass::GPR) }
+    if index == 2 { return preg(6, MRegClass::GPR) }
+    if index == 3 { return preg(2, MRegClass::GPR) }
+    if index == 4 { return preg(10, MRegClass::GPR) }
+    if index == 5 { return preg(8, MRegClass::GPR) }
+    preg(9, MRegClass::GPR)
+}
+
+fn pin_syscall_args_x86(ctx0: SelCtxX86, args: []u32): PinnedArgsX86 {
+    var ctx = ctx0
+    var uses: [args.len]MReg = []
+    var i: u64 = 0
+    loop {
+        if i >= args.len { break }
+        var reg = syscall_reg_x86(i)
+        ctx = selctx_x86_emit(ctx, mov_x86(reg, vreg(args[i], MRegClass::GPR), true))
+        uses[i] = reg
+        i++
+    }
+    PinnedArgsX86 { ctx = ctx; uses = uses }
+}
+
+fn select_syscall_x86(ctx0: SelCtxX86, inst: lir::LInst, s: lir::LSyscall): SelCtxX86 {
+    var pinned = pin_syscall_args_x86(ctx0, s.args)
+    var ret_reg = RAX_X86
+    var ctx1 = selctx_x86_emit(pinned.ctx, syscall_x86(pinned.uses, ret_reg, inst.has_result))
+    select_call_result_x86(ctx1, inst, ret_reg, lir::LType::I64)
+}
+
 fn select_inst_x86(abi: AbiDescriptor, ctx: SelCtxX86, f: lir::LFunc, inst: lir::LInst): SelCtxX86 | error {
     match inst.op {
         lir::LConstInt as c => select_const_int_x86(ctx, inst, c)
@@ -731,6 +762,7 @@ fn select_inst_x86(abi: AbiDescriptor, ctx: SelCtxX86, f: lir::LFunc, inst: lir:
         lir::LCallIndirect as ci => select_call_indirect_x86(abi, ctx, inst, ci)
         lir::LFuncAddr as fa => select_func_addr_x86(ctx, inst, fa)
         lir::LCall as c => select_call_x86(abi, ctx, inst, c)
+        lir::LSyscall as s => select_syscall_x86(ctx, inst, s)
     }
 }
 
