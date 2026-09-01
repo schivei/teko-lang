@@ -1049,23 +1049,6 @@ fn lower_str_compare(ctx: LowerCtx, e: checker::TExpr, cmp: checker::TCompare): 
     Lowered { ctx = ctx_append(r.ctx, bin_inst(r.vreg, pred, clean.vreg, zero.vreg, e.line, e.col)); vreg = r.vreg }
 }
 
-fn lower_char_compare(ctx: LowerCtx, e: checker::TExpr, cmp: checker::TCompare): Lowered | error {
-    if cmp.rest.len != 1 { return error { message = "native backend N1: a CHAINED `char` comparison (`a == b == c`) is not lowered (N2)" } }
-    var pred = match char_cmp_predicate(cmp.rest[0].op) { LBinOp as p => p; error as err => return err }
-    var lo = match lower_expr(ctx, cmp.first) { Lowered as x => x; error as err => return err }
-    var ro = match lower_expr(lo.ctx, cmp.rest[0].operand) { Lowered as x => x; error as err => return err }
-    var r = ctx_alloc(ro.ctx)
-    Lowered { ctx = ctx_append(r.ctx, bin_inst(r.vreg, pred, lo.vreg, ro.vreg, e.line, e.col)); vreg = r.vreg }
-}
-
-fn char_cmp_predicate(op: lexer::TokenKind): LBinOp | error {
-    match op {
-        lexer::TokenKind::EqEq => LBinOp::ICmpEq
-        lexer::TokenKind::Ne => LBinOp::ICmpNe
-        _ => error { message = "native backend N1: an ORDERED `char` comparison (`<`/`<=`/`>`/`>=`) is not lowered (N2)" }
-    }
-}
-
 pub type LSliceEqPlan = struct {
     rtfn: str
     needs_size: bool
@@ -1098,7 +1081,7 @@ fn slice_eq_call_args(ctx: LowerCtx, a: LoweredFat, b: LoweredFat, elem: @Type()
         a.ptr, a.len, b.ptr, b.len
     ]
     if !plan.needs_size { return SliceEqArgs { ctx = ctx; args = args } }
-    var esz = ltype_size(ltype_of(elem, enums)) to i64
+    var esz = elem_byte_stride(elem, enums) to i64
     var r = ctx_alloc(ctx)
     var with_c = ctx_append(r.ctx, const_int_inst(r.vreg, esz, line, col))
     SliceEqArgs { ctx = with_c; args = [..args, r.vreg] }
@@ -1224,7 +1207,7 @@ fn lower_variant_member_compare_dispatch(ctx: LowerCtx, e: checker::TExpr, cmp: 
 
 fn lower_compare(ctx: LowerCtx, e: checker::TExpr, cmp: checker::TCompare): Lowered | error {
     if cmp.rest.len > 0 && is_str_type(cmp.first.type) { return lower_str_compare(ctx, e, cmp) }
-    if cmp.rest.len > 0 && is_char_type(cmp.first.type) { return lower_char_compare(ctx, e, cmp) }
+    if cmp.rest.len > 0 && is_char_type(cmp.first.type) { return lower_str_compare(ctx, e, cmp) }
     if cmp.rest.len > 0 && is_fat_type(cmp.first.type) { return lower_slice_compare(ctx, e, cmp) }
     match lower_variant_member_compare_dispatch(ctx, e, cmp) {
         Lowered as r => return r
@@ -4561,6 +4544,7 @@ fn lower_match_subject_conveyed(ctx: LowerCtx, m: checker::TMatchExpr): MatchSub
 
 fn is_fat_type(t: @Type()): bool {
     if is_str_type(t) { return true }
+    if is_char_type(t) { return true }
     match t {
         checker::Slice => true
         _ => false
@@ -4572,6 +4556,7 @@ pub type LoweredFat = struct { ctx: LowerCtx; ptr: u32; len: u32 }
 pub fn lower_fat_expr(ctx: LowerCtx, e: checker::TExpr): LoweredFat | error {
     match e.kind {
         checker::TStrLit as s => lower_str_lit_fat(ctx, e, s)
+        checker::TCharLit as c => lower_char_lit_fat(ctx, e, c)
         checker::TByteStrLit as bs => lower_bytestr_lit_fat(ctx, e, bs)
         checker::TCast as c => lower_fat_cast(ctx, e, c)
         checker::TArrayLit as al => lower_array_lit_fat(ctx, e, al)
@@ -5964,37 +5949,13 @@ fn lower_path_expr(ctx: LowerCtx, e: checker::TExpr, p: checker::TPathExpr): Low
     Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, p.value to i64, e.line, e.col)); vreg = r.vreg }
 }
 
-fn utf8_codepoint2(s: str): u32 {
-    var b0 = s[0] to u32
-    var b1 = s[1] to u32
-    ((b0 & 0x1F) << 6) | (b1 & 0x3F)
-}
-
-fn utf8_codepoint3(s: str): u32 {
-    var b0 = s[0] to u32
-    var b1 = s[1] to u32
-    var b2 = s[2] to u32
-    ((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F)
-}
-
-fn utf8_codepoint4(s: str): u32 {
-    var b0 = s[0] to u32
-    var b1 = s[1] to u32
-    var b2 = s[2] to u32
-    var b3 = s[3] to u32
-    ((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F)
-}
-
-fn utf8_codepoint(s: str): i64 {
-    if s.len == 1 { return (s[0] to u32) to i64 }
-    if s.len == 2 { return utf8_codepoint2(s) to i64 }
-    if s.len == 3 { return utf8_codepoint3(s) to i64 }
-    utf8_codepoint4(s) to i64
-}
-
 fn lower_char_lit(ctx: LowerCtx, e: checker::TExpr, c: checker::TCharLit): Lowered {
-    var r = ctx_alloc(ctx)
-    Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, utf8_codepoint(c.bytes), e.line, e.col)); vreg = r.vreg }
+    var f = lower_char_lit_fat(ctx, e, c)
+    Lowered { ctx = f.ctx; vreg = f.ptr }
+}
+
+fn lower_char_lit_fat(ctx: LowerCtx, e: checker::TExpr, c: checker::TCharLit): LoweredFat {
+    lower_str_bytes_fat(ctx, c.bytes, e.line, e.col)
 }
 
 fn plain_op_of_compound(op: lexer::TokenKind): lexer::TokenKind | error {
