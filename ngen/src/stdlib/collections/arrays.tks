@@ -1,3 +1,5 @@
+use teko::stdlib::algo
+
 /**
  * Interface representing a fixed-size array.
  *
@@ -27,46 +29,41 @@ exp global interface ArrayDef<T> : Collection<T>, Range<T> {
 }
 
 /**
- * Trait representing a boxed array with a pointer and length.
+ * Trait representing the internal representation of a fixed-size array.
  */
-exp global trait ArrayBoxed<T: __type> {
+exp global trait ArrayRepr<T: __type, const N: usize> {
     exp const __SIZE_OF: usize = uptr::__SIZE_OF + usize::__SIZE_OF
     exp const __V_KIND: ValueKind = .Array | T::__V_KIND
     exp const __ALIGN_OF: usize = TypeSizes::S8
     exp const __NAME: str = "[]" ~ T::__NAME
 
-    _ptr: uptr
-    _len: usize
-
-    exp static arena fn new(size: usize): self {
-        .{ _len = size, _ptr = @slot.alloc(T::__SIZE_OF * size) }
+    exp static fn new(): self {
+        return zero()
     }
 
-    exp static arena fn new(size: usize, initial_values: []T): self {
-        var arr: self = .{ _len = size, _ptr = @slot.alloc(T::__SIZE_OF * size) }
-        @slot.copy(initial_values, arr._ptr)
-        arr
+    exp static fn new<const M: usize>(initial_values: [M]T): self where N >= M {
+        var arr: self = zero()
+        loop i in 0..M {
+            arr[i] = initial_values[i]
+        }
+        return arr
     }
 
     exp get len: usize {
-        self._len
+        return N
     }
 
-    exp fn slice(start: usize, count: usize): self {
-        if start + count > self.len {
-            count = self.len - start
-        }
-
+    exp fn slice<const start: usize, const count: usize>(): [count]T where N >= start + count {
         if count == 0 || start >= self.len {
-            return []
+            return zero()
         }
 
-        var result: [count]T = []
+        var result: [count]T = zero()
         loop i in 0..count {
             result[i] = self[start + i]
         }
 
-        result
+        return result
     }
 
     exp fn contains(sub: T): bool {
