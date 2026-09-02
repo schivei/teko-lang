@@ -1,0 +1,240 @@
+/**
+ * Fixed `LRodata` count per chunk. A chunk's backing is a `[RODATA_SEG_CHUNK]LRodata` allocated once
+ * and never regrown; `used`/`total` watermarks track fill (the FILTRO/count law), so no array header
+ * carries a capacity.
+ */
+const RODATA_SEG_CHUNK: u64 = 1024
+
+/**
+ * One segment of a `RodataSeg`: a once-allocated `[RODATA_SEG_CHUNK]LRodata` backing, a fill
+ * watermark, and a link to the next segment. Reference-semantic so the spine is a linked list that is
+ * never recopied on growth.
+ */
+pub type RodataSegNode = class {
+    /** The once-allocated backing chunk; slots `[0, used)` are live. */
+    intern data: []LRodata
+    /** The number of live slots written at the head of `data`. */
+    intern used: u64
+    /** The next segment, or `null` when this is the tail. */
+    intern next: RodataSegNode | null
+
+    /**
+     * Builds a fresh single-element segment holding `x` at slot 0.
+     *
+     * @param x  the first entry
+     * @return   a one-element segment
+     */
+    pub static fn with(x: LRodata): RodataSegNode {
+        var d: [RODATA_SEG_CHUNK]LRodata = []
+        d[0] = x
+        .{ data = d; used = 1; next = null }
+    }
+
+    /**
+     * The number of live slots in this segment.
+     *
+     * @return the fill watermark
+     */
+    pub fn used_count(): u64 { self.used }
+
+    /**
+     * True iff the chunk has a free slot at the tail.
+     *
+     * @return whether another entry fits without a new chunk
+     */
+    pub fn has_room(): bool { self.used < RODATA_SEG_CHUNK }
+
+    /**
+     * Reads the entry at chunk-local slot `i`.
+     *
+     * @param i  the local slot in `[0, used)`
+     * @return   the entry
+     */
+    pub fn at(i: u64): LRodata { self.data[i] }
+
+    /**
+     * Writes `x` into chunk-local slot `i`.
+     *
+     * @param i  the local slot
+     * @param x  the entry
+     */
+    pub fn put(i: u64, x: LRodata) { self.data[i] = x }
+
+    /**
+     * Advances the fill watermark by one.
+     */
+    pub fn bump() { self.used = self.used + 1 }
+
+    /**
+     * The next segment, or `null` when this is the tail.
+     *
+     * @return the link
+     */
+    pub fn next_or_null(): RodataSegNode | null { self.next }
+
+    /**
+     * Links `n` as the segment following this one.
+     *
+     * @param n  the new next segment
+     */
+    pub fn set_next(n: RodataSegNode) { self.next = n }
+}
+
+/**
+ * A chunked, append-only sequence of `LRodata` that never recopies an entry or the spine on growth:
+ * `append` writes at the tail watermark and links a fresh chunk when the current one fills (O(1), no
+ * amortized copy). Program-wide read-only data is interned into one of these so lowering the whole
+ * prelude stays O(n) instead of the O(n²) copy-grow it replaces. `flatten` materializes a contiguous
+ * `[]LRodata` only at the section-emission boundary.
+ */
+pub type RodataSeg = class {
+    /** The first segment, or `null` while empty. */
+    intern head: RodataSegNode | null
+    /** The last segment, or `null` while empty. */
+    intern tail: RodataSegNode | null
+    /** The number of entries appended so far. */
+    intern total: u64
+
+    /**
+     * Builds an empty sequence; no chunk is allocated until the first append.
+     *
+     * @return an empty `RodataSeg`
+     */
+    pub static fn make(): RodataSeg { .{ head = null; tail = null; total = 0 } }
+
+    /**
+     * Builds a sequence seeded with a copy of `xs`, in order.
+     *
+     * @param xs  the initial entries
+     * @return    a sequence holding `xs`
+     */
+    pub static fn from_array(xs: []LRodata): RodataSeg {
+        var s = RodataSeg::make()
+        var i: u64 = 0
+        loop {
+            if i >= xs.len { break }
+            s.append(xs[i])
+            i = i + 1
+        }
+        s
+    }
+
+    /**
+     * The number of entries appended so far.
+     *
+     * @return the entry count
+     */
+    pub fn len(): u64 { self.total }
+
+    /**
+     * Appends `x` at the tail in place, linking a fresh chunk when the current one is full. Never
+     * recopies an existing entry or chunk pointer.
+     *
+     * @param x  the entry to append
+     */
+    pub fn append(x: LRodata) {
+        match self.tail {
+            RodataSegNode as t => {
+                if t.has_room() {
+                    t.put(t.used_count(), x)
+                    t.bump()
+                    self.total = self.total + 1
+                    return
+                }
+            }
+            null => { }
+        }
+        var node = RodataSegNode::with(x)
+        self.link(node)
+        self.total = self.total + 1
+    }
+
+    /**
+     * Links `node` as the new tail, setting `head` on the first insertion.
+     *
+     * @param node  the fresh tail node
+     */
+    fn link(node: RodataSegNode) {
+        match self.tail {
+            RodataSegNode as t => { t.set_next(node) }
+            null => { self.head = node }
+        }
+        self.tail = node
+    }
+
+    /**
+     * The entry at index `i` in `[0, len())`, found by walking `i / RODATA_SEG_CHUNK` chunks.
+     *
+     * @param i  the index
+     * @return   the entry at `i`
+     */
+    pub fn get(i: u64): LRodata {
+        var node = self.head
+        var rem = i
+        loop {
+            match node {
+                RodataSegNode as n => {
+                    if rem < n.used_count() { return n.at(rem) }
+                    rem = rem - RODATA_SEG_CHUNK
+                    node = n.next_or_null()
+                }
+                null => { break }
+            }
+        }
+        var miss: [1]LRodata = []
+        miss[0]
+    }
+
+    /**
+     * The first entry whose `symbol` equals `sym`, or `null` if none. Walks the chunks in order.
+     *
+     * @param sym  the symbol to match
+     * @return     the matching entry, or `null`
+     */
+    pub fn find_by_symbol(sym: str): LRodata | null {
+        var node = self.head
+        loop {
+            match node {
+                RodataSegNode as n => {
+                    var j: u64 = 0
+                    loop {
+                        if j >= n.used_count() { break }
+                        if n.at(j).symbol == sym { return n.at(j) }
+                        j = j + 1
+                    }
+                    node = n.next_or_null()
+                }
+                null => { break }
+            }
+        }
+        null
+    }
+
+    /**
+     * A contiguous `[]LRodata` of exactly `len()` entries, in order. One allocation plus one
+     * index-copy pass over the chunks; the single copy happens only at this consumer boundary.
+     *
+     * @return  a fresh contiguous `[]LRodata`
+     */
+    pub fn flatten(): []LRodata {
+        var out: [self.total]LRodata = []
+        var i: u64 = 0
+        var node = self.head
+        loop {
+            match node {
+                RodataSegNode as n => {
+                    var j: u64 = 0
+                    loop {
+                        if j >= n.used_count() { break }
+                        out[i] = n.at(j)
+                        i = i + 1
+                        j = j + 1
+                    }
+                    node = n.next_or_null()
+                }
+                null => { break }
+            }
+        }
+        out
+    }
+}
