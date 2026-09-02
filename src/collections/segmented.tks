@@ -1,0 +1,230 @@
+/**
+ * Fixed element count per chunk. The backing of a chunk is a `[SEG_CHUNK]T` allocated once and
+ * never regrown; the container's `used`/`total` watermarks track fill (the FILTRO/count law), so no
+ * array header carries a capacity. 1024 balances per-node overhead against wasted tail slots.
+ */
+const SEG_CHUNK: u64 = 1024
+
+/**
+ * A single segment of a `Segmented<T>`: a once-allocated `[SEG_CHUNK]T` backing, a fill watermark,
+ * and a link to the next segment. Reference-semantic (class) so the spine is a linked list that is
+ * never recopied on growth. `global` so its name resolves bare wherever a monomorphized
+ * `Segmented<T>` constructor references the field type.
+ */
+exp global type SegNode<T> = class {
+    /** The once-allocated backing chunk; slots `[0, used)` are live, the rest zero-fill. */
+    intern data: []T
+    /** The number of live slots written at the head of `data`. */
+    intern used: u64
+    /** The next segment, or `null` when this is the tail. */
+    intern next: SegNode<T> | null
+
+    /**
+     * Builds a fresh single-element segment with `x` at slot 0 in a once-allocated chunk.
+     *
+     * @param x  the first element
+     * @return   a one-element segment
+     */
+    pub static fn with(x: T): SegNode<T> {
+        var d: [SEG_CHUNK]T = []
+        d[0] = x
+        .{ data = d; used = 1; next = null }
+    }
+
+    /**
+     * The number of live slots in this segment.
+     *
+     * @return the fill watermark
+     */
+    pub fn used_count(): u64 { self.used }
+
+    /**
+     * True iff the chunk has a free slot at the tail.
+     *
+     * @return whether another element fits without a new chunk
+     */
+    pub fn has_room(): bool { self.used < SEG_CHUNK }
+
+    /**
+     * Reads the element at chunk-local slot `i`.
+     *
+     * @param i  the local slot in `[0, used)`
+     * @return   the element
+     */
+    pub fn at(i: u64): T { self.data[i] }
+
+    /**
+     * Overwrites the element at chunk-local slot `i`.
+     *
+     * @param i  the local slot
+     * @param x  the replacement element
+     */
+    pub fn put(i: u64, x: T) { self.data[i] = x }
+
+    /**
+     * Advances the fill watermark by one after writing the next slot.
+     */
+    pub fn bump() { self.used = self.used + 1 }
+
+    /**
+     * The next segment, or `null` when this is the tail.
+     *
+     * @return the link
+     */
+    pub fn next_or_null(): SegNode<T> | null { self.next }
+
+    /**
+     * Links `n` as the segment following this one.
+     *
+     * @param n  the new next segment
+     */
+    pub fn set_next(n: SegNode<T>) { self.next = n }
+}
+
+/**
+ * A segmented (chunked) growable sequence of `T` that never recopies an element or the spine on
+ * growth: `append` writes at the tail watermark and links a fresh chunk when the current one fills.
+ * O(n) total memory even under an append-only arena (reclaim-0%). `flatten` materializes a
+ * contiguous `[]T` in two passes only where a consumer needs one (for example, writing an object
+ * section). `global` so its name resolves bare at any monomorphization site.
+ */
+exp global type Segmented<T> = class {
+    /** The first segment, or `null` while empty. */
+    intern head: SegNode<T> | null
+    /** The last segment, or `null` while empty. */
+    intern tail: SegNode<T> | null
+    /** The number of elements appended so far. */
+    intern total: u64
+
+    /**
+     * Builds an empty segmented sequence; no chunk is allocated until the first append.
+     *
+     * @return an empty `Segmented<T>`
+     */
+    pub static fn make(): Segmented<T> { .{ head = null; tail = null; total = 0 } }
+
+    /**
+     * The number of elements appended so far.
+     *
+     * @return the element count
+     */
+    pub fn len(): u64 { self.total }
+
+    /**
+     * True iff no element has been appended.
+     *
+     * @return whether the sequence is empty
+     */
+    pub fn is_empty(): bool { self.total == 0 }
+
+    /**
+     * Appends `x` at the tail in place, linking a fresh once-allocated chunk when the current one is
+     * full. Never recopies an existing element or chunk pointer (O(1), no amortized copy).
+     *
+     * @param x  the element to append
+     */
+    pub fn append(x: T) {
+        match self.tail {
+            SegNode<T> as t => {
+                if t.has_room() {
+                    t.put(t.used_count(), x)
+                    t.bump()
+                    self.total = self.total + 1
+                    return
+                }
+            }
+            null => { }
+        }
+        var node = SegNode<T>::with(x)
+        self.link(node)
+        self.total = self.total + 1
+    }
+
+    /**
+     * Links `node` as the new tail, setting `head` on the first insertion.
+     *
+     * @param node  the fresh tail node
+     */
+    fn link(node: SegNode<T>) {
+        match self.tail {
+            SegNode<T> as t => { t.set_next(node) }
+            null => { self.head = node }
+        }
+        self.tail = node
+    }
+
+    /**
+     * Reads the element at index `i` in `[0, len())` by walking `i / SEG_CHUNK` chunks. An index out
+     * of range panics (internal, unchecked path).
+     *
+     * @param i  the index
+     * @return   the element at `i`
+     */
+    pub fn get(i: u64): T {
+        var node = self.head
+        var rem = i
+        loop {
+            match node {
+                SegNode<T> as n => {
+                    if rem < n.used_count() { return n.at(rem) }
+                    rem = rem - SEG_CHUNK
+                    node = n.next_or_null()
+                }
+                null => { break }
+            }
+        }
+        teko::runtime::panic("segmented index out of range")
+        var miss: [1]T = []
+        miss[0]
+    }
+
+    /**
+     * Overwrites the element at index `i` in place; a no-op if `i >= len()`.
+     *
+     * @param i  the index
+     * @param x  the replacement element
+     */
+    pub fn set(i: u64, x: T) {
+        var node = self.head
+        var rem = i
+        loop {
+            match node {
+                SegNode<T> as n => {
+                    if rem < n.used_count() { n.put(rem, x); return }
+                    rem = rem - SEG_CHUNK
+                    node = n.next_or_null()
+                }
+                null => { return }
+            }
+        }
+    }
+
+    /**
+     * Materializes a contiguous `[]T` of exactly `len()` elements. The total is already tracked, so
+     * one allocation `[total]T` plus one index-copy pass over the chunks; zero element recopy during
+     * growth, the single copy happening only at this consumer boundary.
+     *
+     * @return  a fresh contiguous `[]T`
+     */
+    pub fn flatten(): []T {
+        var out: [self.total]T = []
+        var i: u64 = 0
+        var node = self.head
+        loop {
+            match node {
+                SegNode<T> as n => {
+                    var j: u64 = 0
+                    loop {
+                        if j >= n.used_count() { break }
+                        out[i] = n.at(j)
+                        i = i + 1
+                        j = j + 1
+                    }
+                    node = n.next_or_null()
+                }
+                null => { break }
+            }
+        }
+        out
+    }
+}
