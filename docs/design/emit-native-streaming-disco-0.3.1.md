@@ -195,14 +195,15 @@ segue válido). Coluna "Mec." = M1 (disco) / M2-fix (array-fixo) / M2-seg (chunk
 | 5 | `add_inst`/`add_block` | `lir/lir.tks:207,265`; `minst.tks:414,432,436`; `minst_x86.tks:334,352,356` | LOWER/ISEL | **M2-seg** | idem #4 (`Segmented<LInst>`/`<LBlock>`). |
 | 6 | `LEnv` binds (7 arrays paralelos) | `lir/lower.tks:20-24,33-63` | LOWER | **M2-seg** | 1 `Segmented<LBinding>` no lugar dos 7 `[..]`. |
 | 7 | encode byte-emit `text`/`push_byte`/`emit_u32_le` | `encode_x86_64.tks:35,835,868,+`; `encode_arm64.tks:57,+` | ENCODE | **M1** | por-função: buffer FIXO reusável (patch de branch in-place) → `append_prefix` no `text` SectionBuf + `text_off` corrente + relocs rebased. |
-| 8 | `emit_elf_object` `var b: []byte = []` (o `.o` inteiro) | `objfile_elf.tks:698-734` | MONTAGEM | **M1** | vira passada de montagem: escreve header + `copy_into` das seções + metadado direto no `.o` FileStream. Remove `write_file_bytes(obj)`. |
-| 9 | corpo de seção DWARF (`emit_elf_dwarf_body`) | `objfile_elf.tks:736-747` | MONTAGEM | **M1** | abbrev/info/line → SectionBufs (streamados no encode/lower do DWARF); montagem faz `copy_into`. |
-| 10 | headers/tabelas ELF (`syms`/`relas`/`strtab`/`shdrs`) | `objfile_elf.tks:118,232,462,473,+` | MONTAGEM | **M2-fix** | counts conhecidos na montagem → `[n]T`+índice (hoje `[..out,x]`). |
-| 11 | partition `elf_collect_const_entries` `[..starts,e]` | `objfile_elf.tks:559-565` | MONTAGEM | **M2-fix** | conta símbolos-rodata numa passada, `[n]ElfConstEntry`+índice. |
-| 12 | regalloc RPO/eventos/intervalos/pins/subst | `backend/regalloc.tks:61-1061`; `regalloc_x86.tks:86-397` | RA | **M2-fix** | derivados de stream de tamanho conhecido → array-fixo/FILTRO+watermark. |
-| 13 | objfile macho/coff/ar (mesmo `var b:[]byte`) | `objfile_macho.tks:492`; `objfile_coff.tks:350`; `objfile_ar.tks:130,161` | MONTAGEM | **M1**+**M2-fix** | espelha #8/#10 (monólito cross-emit — as 4 pernas). |
-| 14 | `copy_*_to_current_region`/`commit_rodata_delta` | `build/project.tks:1706-1830,1974-2018` | BUILD | **M2-fix** | copia array EXISTENTE (`.len` conhecido) → `[src.len]T`+índice. |
-| 15 | `str_to_bytes` `[..out, s[i]]` (já ARRAY-FIXO no tip) | `lir/lower.tks:5209-5217` | LOWER | — | JÁ convertido (`[s.len]byte`+índice, `lower.tks:5209`); verify-only. |
+| 8 | **FUNIL compartilhado** `finish_native_object(obj:[]byte)`→`write_file_bytes` + `finish_static_archive(obj:[]byte)`→`write_file_bytes`×2+`wrap_archive_bytes` | `build/project.tks:2199,2289,2281` | MONTAGEM | **M1** | KEYSTONE: recebe/abre o FileStream de saída; dispatch dos 3 emitters vira `write_*_object(out,…)`. Remove os `write_file_bytes(obj)`. |
+| 9 | `emit_elf_object` `var b: []byte = []` (o `.o` inteiro; layout up-front :711) + DWARF body | `objfile_elf.tks:698-747` | MONTAGEM | **M1** | passada de montagem: header + `copy_into` das seções + metadado direto no FileStream. |
+| 10 | `emit_macho` `var b: []byte = []` (layout up-front :495) | `objfile_macho.tks:492-…` | MONTAGEM | **M1** | idem #9 (header/segment/dwarf_segment/build_version + `copy_into`). |
+| 11 | `emit_coff` `var b: []byte = []` (layout up-front :358) | `objfile_coff.tks:350-…` | MONTAGEM | **M1** | idem #9 (header/sections + patched_text/rodata `copy_into` + relocs). |
+| 12 | os 3 `ar` `var b: []byte = []` (elf/macho/coff) | `objfile_ar.tks:130,136,161`; `objfile_ar_macho.tks:104,162,186`; `objfile_ar_coff.tks:134,148` | MONTAGEM | **M1**+**M2-fix** | `emit_static_archive_*` escrevem no `.a`/`.lib` FileStream; membro `.o` vem do `.o` já em disco via `copy_into`. |
+| 13 | headers/tabelas ELF (`syms`/`relas`/`strtab`/`shdrs`) + `elf_collect_const_entries` `[..starts,e]` | `objfile_elf.tks:118,232,462,473,559-565`; macho/coff equiv. | MONTAGEM | **M2-fix** | counts conhecidos na montagem → `[n]T`+índice (hoje `[..out,x]`), todos os formatos. |
+| 14 | regalloc RPO/eventos/intervalos/pins/subst | `backend/regalloc.tks:61-1061`; `regalloc_x86.tks:86-397` | RA | **M2-fix** | derivados de stream de tamanho conhecido → array-fixo/FILTRO+watermark. |
+| 15 | `copy_*_to_current_region`/`commit_rodata_delta` | `build/project.tks:1706-1830,1974-2018` | BUILD | **M2-fix** | copia array EXISTENTE (`.len` conhecido) → `[src.len]T`+índice. |
+| 16 | `str_to_bytes` `[..out, s[i]]` (já ARRAY-FIXO no tip) | `lir/lower.tks:5209-5217` | LOWER | — | JÁ convertido (`[s.len]byte`+índice, `lower.tks:5209`); verify-only. |
 
 **Cauda contável (todos M2-fix, array-fixo — do censo anterior §1):** `lower.tks:100,602,657,675,681,1459,
 1727,2216,2869-2874,3173-3553,5290,5301,5490-5494,6519-7092`; `lower_const.tks:31-637`; `frame_escape.tks:20,
@@ -306,54 +307,118 @@ exp type LRodataMeta = struct {
 - **Ritual:** GATE COMPLETO. Ratchet: latente no fixture, mas prova byte-idêntico; medir no self-emit
   quando C6 fechar.
 
-### C6 — `emit_elf_object` vira passada de montagem streaming (M1, #8/#9)
-- **Where:** `objfile_elf.tks:698-747` (`emit_elf_object`, `emit_elf_dwarf_body`); `project.tks:2199`
-  (`finish_native_object`), `:2290` (`finish_static_archive`).
-- **Assinatura:** `pub fn write_elf_object(o: teko::io::FileStream, obj: ElfObject): error | null`
-  (escreve direto no `.o` em vez de retornar `[]byte`); `ElfObject.text`/`.rodata` viram `SectionBuf`.
-  `finish_native_object` abre `open_write(objp)` e passa o stream (remove `write_file_bytes(obj)`).
-- **Fazer:** header (buffer fixo pequeno, do layout já computado) → `stream_write`; `text.copy_into(o)`;
-  pad; rodata na ordem do partition via `copy_range_into`; pad; symtab/strtab/shstrtab/relas/shdrs
-  (metadado de RAM) → `stream_write`; DWARF idem. `dispose()` nos secbufs.
-- **Fixture:** C1 + o `.o` do compilador-inteiro quando o subset native fechar.
-- **Ritual:** GATE COMPLETO. Ratchet: queda (remove o `.o` inteiro-em-RAM). **Determinismo:** §6.
+> **Fase de MONTAGEM — UM PADRÃO SÓ, não ELF-first-mirror-depois (revisão do dono).** Os 3 emitters de
+> objeto (elf/macho/coff) são PARALELOS, todos materializam `var b: []byte = []`, todos já computam o
+> layout up-front (`compute_elf_layout` :711 / `compute_macho_layout` :495 / `compute_coff_layout` :358),
+> e os 3 (+ os 3 `ar`) desaguam no MESMO funil `finish_native_object`/`finish_static_archive` →
+> `write_file_bytes`. O keystone C6 é o **funil compartilhado** (toca os três de uma vez); cada formato
+> entra LOGO em seguida (C7/C8/C9), o `ar` no C10. O monólito cross-compila TODOS os alvos (lei "emite
+> tudo, todos os alvos") — nenhum formato é deferido.
 
-### C7 — tabelas/headers de montagem → array-fixo (M2-fix, #10/#11/#12)
-- **Where:** `objfile_elf.tks:76-118,232-262,462-486,558-608`; `regalloc*.tks`.
-- **Assinatura:** `elf_build_symbols`/`elf_build_relas`/`build_elf_strtab`/`elf_collect_const_entries`
-  passam a contar (1ª passada) + `[n]T`+índice (hoje `[..out,x]`).
-- **Fazer:** counts conhecidos na montagem → duas-passadas/FILTRO+watermark (D207 iii).
-- **Fixture:** C1.
-- **Ritual:** GATE COMPLETO. Ratchet: queda.
+### C6 — KEYSTONE: funil compartilhado → FileStream (os 3 formatos de uma vez) (M1, #8)
+- **Where:** `project.tks:2199` (`finish_native_object`), `:2289` (`finish_static_archive`), `:2281`
+  (`wrap_archive_bytes`) + call-sites (`:1653-1657` arm64 fused, `:1965` elf x86, `:2186` coff, `:2203`,
+  `:2248-2269` archives, `:2290-2293`); `objfile_elf.tks:698`, `objfile_macho.tks:492`,
+  `objfile_coff.tks:350` (as 3 entradas de dispatch).
+- **Assinatura:** os 3 emitters trocam `: []byte` por escrita em stream:
+```teko
+/**
+ * Writes a fully-assembled object file for the target format directly to the output stream, instead
+ * of returning the whole object as an in-RAM `[]byte`. The shared funnel opens the `.o` FileStream
+ * and threads it here; each format's body is converted to a streaming assembly pass in C7/C8/C9.
+ *
+ * @param out the output object-file stream (opened by the funnel)
+ * @param enc the encoded module (text/rodata SectionBufs + metadata)
+ * @param dwarf the DWARF sink (ELF/Mach-O; COFF omits)
+ * @return null on success, or an I/O error
+ */
+pub fn write_elf_object(out: teko::io::FileStream, enc: EncodedModuleX86, dwarf: DwarfSink): error | null
+pub fn write_macho_object(out: teko::io::FileStream, enc: EncodedModule, dwarf: DwarfSink): error | null
+pub fn write_coff_object(out: teko::io::FileStream, enc: EncodedModuleX86): error | null
+```
+  e `fn finish_native_object(dir, od, stem, prog, m, emit: func<teko::io::FileStream, error|null>)` —
+  passa um closure que abre `open_write(objp)` e chama o `write_*_object` do formato (remove o
+  `obj: []byte` e o `write_file_bytes(obj)`).
+- **Fazer:** flipa o funil pra abrir o FileStream e despachar por stream aos 3 formatos DE UMA VEZ. O
+  CORPO de cada `write_*_object` neste crumb é um **shim byte-idêntico**: monta o `[]byte` interno como
+  hoje e faz `stream_write(out, b)` — a ARQUITETURA passa a stream, o ganho de memória vem C7-C10.
+- **Fixture:** os fixtures existentes de cada alvo (`sys_exit_group`/`sys_write_hello`) — o `.o`/`.a`
+  sai byte-idêntico ao de hoje (o shim prova a equivalência do flip de funil).
+- **Ritual:** GATE COMPLETO (rota C verde + os `.o` byte-idênticos por alvo). **Scaffold-class (flat
+  aceito, como C0)** — é refactor de threading, delta de memória ~0; os drops estritos vêm C7-C10.
 
-### C8 — macho/coff/ar espelham C5/C6/C7 (monólito cross-emit — as 4 pernas)
-- **Where:** `objfile_macho.tks:492`; `objfile_coff.tks:350`; `objfile_ar.tks:66,130,161`;
-  `encode_arm64.tks` (arm64 text stream).
-- **Assinatura:** `write_macho_object`/`write_coff_object`/`write_ar_archive` sobre FileStream, análogos a
-  `write_elf_object`.
-- **Fazer:** mesma passada de montagem streaming; o `ar` archive streama membro-a-membro.
-- **Fixture:** fixtures native arm64/macOS/coff quando o subset fechar; enquanto isso, byte-idêntico do
-  `.o` per-leg emitido pra os fixtures existentes.
-- **Ritual:** GATE COMPLETO por perna. Ratchet: queda (as pernas cross).
+### C7 — ELF `write_elf_object` streaming real (M1, #9)
+- **Where:** `objfile_elf.tks:698-747` (`emit_elf_object`→`write_elf_object`, `emit_elf_dwarf_body`,
+  partition `:628,686`). Alvos: x86_64 Linux + arm64 Linux (`emit_elf`/`emit_elf_arm64`).
+- **Fazer:** remove o `var b: []byte` (:712); header (buffer fixo do layout :711) → `stream_write(out)`;
+  `text.copy_into(out)`; pad; rodata na ordem do partition via `copy_range_into(out, e.start, e.end)`;
+  pad; symtab/strtab/shstrtab/relas/shdrs (metadado de RAM) → `stream_write`; DWARF body idem.
+  `dispose()` nos secbufs.
+- **Fixture:** `sys_exit_group`/`sys_write_hello` (x86_64 + arm64 Linux): `.o` reproduz byte-idêntico 2× +
+  roda sob MEM_PARANOID.
+- **Ritual:** GATE COMPLETO. Ratchet: queda (remove o `.o` ELF inteiro-em-RAM). **Determinismo:** §6.
 
-### C9 — cauda contável restante (M2-fix)
+### C8 — Mach-O `write_macho_object` streaming real (M1, #10)
+- **Where:** `objfile_macho.tks:492-…` (`emit_macho`→`write_macho_object`, `emit_header`/`emit_segment`/
+  `emit_dwarf_segment`/`emit_build_version`; `compute_macho_layout:194` já up-front). Alvo: arm64 macOS.
+- **Fazer:** remove o `var b: []byte` (:496); header+segment+dwarf_segment+build_version (do layout) →
+  `stream_write`; `text.copy_into`/`rodata.copy_into` (partição de relocs `macho_partition_relocs` sobre
+  metadado); relocs/strtab/symtab → `stream_write`. `dispose()`.
+- **Fixture:** fixture arm64 Mach-O: `.o` byte-idêntico 2× + roda (quando o subset arm64/macho alcançar;
+  enquanto isso, byte-idêntico do `.o` per-leg emitido pros fixtures atuais).
+- **Ritual:** GATE COMPLETO. Ratchet: queda (perna macOS).
+
+### C9 — COFF/PE `write_coff_object` streaming real (M1, #11)
+- **Where:** `objfile_coff.tks:350-…` (`emit_coff`→`write_coff_object`, `emit_coff_header`/
+  `emit_coff_sections`/`emit_coff_relocs`; `compute_coff_layout:249` já up-front; `coff_apply_rodata_
+  addends`/`coff_apply_data_reloc_addends` — os addends aplicam no fluxo de cópia). Alvo: x86_64 Windows.
+- **Fazer:** remove o `var b: []byte` (:359); header+sections (do layout) → `stream_write`;
+  `text.copy_into`/`rodata.copy_into` aplicando os addends de reloc durante a cópia (a patch é por-site,
+  offset conhecido); relocs → `stream_write`; symtab/strtab. `dispose()`.
+- **Fixture:** fixture x86_64 COFF: `.o` byte-idêntico 2× (quando o subset windows/coff alcançar).
+- **Ritual:** GATE COMPLETO. Ratchet: queda (perna Windows).
+
+### C10 — os 3 archives `ar` streaming (M1, #12)
+- **Where:** `objfile_ar.tks:130,136,161` (`emit_static_archive` gnu), `objfile_ar_macho.tks:104,162,186`
+  (`emit_static_archive_macho` bsd), `objfile_ar_coff.tks:134,148` (`emit_static_archive_coff`);
+  `project.tks:2281` (`wrap_archive_bytes`→`write_archive`), `:2289` (`finish_static_archive`).
+- **Assinatura:** `write_static_archive_{gnu,bsd,coff}(out: teko::io::FileStream, member_name: str,
+  obj_path: str, symbols: []Symbol): error | null` — escreve o header do `ar` + a symbol/ranlib table no
+  `.a`/`.lib` FileStream, e o membro `.o` vem do `.o` JÁ EM DISCO (C6) via `copy_into` (não re-materializa).
+- **Fazer:** remove os `var b: []byte` dos 3 `ar`; `wrap_archive_bytes` some. `finish_static_archive`
+  escreve o `.o` (via C6) e depois o `.a`/`.lib` streamando o membro do `.o` em disco.
+- **Fixture:** `.a`/`.lib` byte-idêntico 2× por formato (gate final quando o subset fechar).
+- **Ritual:** GATE COMPLETO por formato. Ratchet: queda (os 3 archives).
+
+### C11 — tabelas/headers de montagem → array-fixo (M2-fix, #13/#14, todos os formatos)
+- **Where:** ELF `objfile_elf.tks:76-118,232-262,462-486,558-608`; Mach-O `build_strtab`/reloc-partition;
+  COFF `coff_build_symbols`/`coff_build_relocs`/`build_coff_strtab`; `regalloc*.tks`.
+- **Assinatura:** `elf_build_symbols`/`elf_build_relas`/`build_elf_strtab`/`elf_collect_const_entries` (e
+  equivalentes macho/coff) contam (1ª passada) + `[n]T`+índice (hoje `[..out,x]`).
+- **Fazer:** counts conhecidos na montagem → duas-passadas/FILTRO+watermark (D207 iii), por formato.
+- **Fixture:** os fixtures dos alvos. **Ritual:** GATE COMPLETO. Ratchet: queda.
+
+### C12 — cauda contável restante (M2-fix) + `gen2.o==gen3.o` por alvo (gate FINAL)
 - **Where:** a lista de cauda do §4 (lower/lower_const/isel/abi/project).
 - **Fazer:** array-fixo por natureza (MAP/PARSE/FILTRO). Baratos, agrupáveis em 1-2 crumbs.
-- **Ritual:** GATE COMPLETO. Ratchet: queda residual. Depois: `gen2.o==gen3.o` do compilador-inteiro
-  quando o subset native self-hospedar (o gate FINAL, §6).
+- **Ritual:** GATE COMPLETO. Depois: `gen2.o==gen3.o` do compilador-inteiro POR ALVO (ELF/Mach-O/COFF),
+  quando o subset native self-hospedar (o gate FINAL, §6/§7).
 
 ---
 
 ## 6. Determinismo do `.o` sob streaming (`gen2.o==gen3.o`)
 
-O streaming é um refactor **byte-preservante** — o `.o` sai idêntico ao do `emit_elf_object` atual:
+O streaming é um refactor **byte-preservante** em CADA formato (ELF/Mach-O/COFF + os 3 `ar`) — o `.o`/`.a`
+sai idêntico ao do `emit_*_object`/`emit_static_archive_*` atual. O keystone C6 (funil→stream) é provado
+byte-idêntico pelos shims ANTES de qualquer conversão de corpo; C7-C10 preservam por formato:
 
 1. **Layout idêntico:** `compute_elf_layout` roda sobre os mesmos tamanhos de seção (agora contadores em
    vez de `.len` de `[]byte`), mesma aritmética → mesmos offsets.
 2. **Ordem de seções fixa:** a 2ª passada escreve header→text→rodata→(drr)→symtab→strtab→shstrtab→relas→
    (dwarf)→shdrs, a MESMA ordem do código atual (`objfile_elf.tks:713-733`).
 3. **Ordem de símbolos/relocs estável:** vem de chave ordenada / ordem de definição (inalterado); o
-   array-fixo do C7 preserva a ordem de inserção da 1ª passada.
+   array-fixo do C11 preserva a ordem de inserção da 1ª passada. Cada formato tem seu `compute_*_layout`
+   up-front (ELF :711 / Mach-O :495 / COFF :358) → a ordem/offsets de seção não mudam.
 4. **Sem timestamp / sem path absoluto:** já auditado (D203); os arquivos-de-seção são TEMP (paths
    `gensym`) e NUNCA entram no `.o` — só o conteúdo é copiado byte-a-byte. `objfile_ar` `mtime`/`mode`
    já zerados (D203).
@@ -373,8 +438,9 @@ FINAL, quando o subset native self-hospeda (ladder gen0/gen1 rota-C, gen2/gen3 n
   harnesses); native `.o` do fixture byte-idêntico 2× + roda (MEM_PARANOID); **pico do build seco native
   `≤ pico_C × 1.10`** (D206) e trajetória rumo a `< 2 GB` (D203); ratchet estrito (cada crumb BAIXA o
   pico native, D68 análogo).
-- **Final:** `gen2.o == gen3.o` byte-idêntico (compilador-inteiro emitido native), quando o subset
-  N1/N2 fechar e as pernas native do CI ficarem verdes.
+- **Final:** `gen2.o == gen3.o` byte-idêntico POR ALVO (ELF x86_64/arm64, Mach-O arm64, COFF x86_64 —
+  compilador-inteiro emitido native), quando o subset N1/N2 fechar e as pernas native do CI ficarem
+  verdes. Nenhum formato deferido (monólito cross-emit).
 
 ---
 
