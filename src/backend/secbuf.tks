@@ -116,3 +116,85 @@ pub type SectionBuf = class {
         teko::fs::remove_file(self.path)
     }
 }
+
+const RODATA_STR_REC: u64 = 16
+
+fn put_u64_le8(buf: ref []byte, off: u64, v: u64) {
+    var i: u64 = 0
+    loop {
+        if i >= 8 { break }
+        buf[off + i] = ((v >> (i * 8)) & 255) to byte
+        i++
+    }
+}
+
+fn u64_from_le8(buf: []byte, off: u64): u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= 8 { break }
+        v = v | ((buf[off + i] to u64) << (i * 8))
+        i++
+    }
+    v
+}
+
+pub fn rodata_str_symbol(index: u64): str {
+    teko::str::concat(".Lstr", teko::u64_to_str(index))
+}
+
+pub type RodataSink = class {
+    intern bytes: SectionBuf
+    intern str_meta: SectionBuf
+
+    pub static fn open(stem: str): RodataSink | error {
+        var b = match SectionBuf::open(stem, "rodata") { SectionBuf as s => s; error as e => return e }
+        var mm = match SectionBuf::open(stem, "rodata.meta") { SectionBuf as s => s; error as e => return e }
+        RodataSink { bytes = b; str_meta = mm }
+    }
+
+    pub fn string_count(): u64 { self.str_meta.size() / RODATA_STR_REC }
+
+    pub fn append_image(data: []byte): u64 | error {
+        self.bytes.append(data)
+    }
+
+    pub fn intern_string(data: []byte): u64 | error {
+        var off = match self.bytes.append(data) { u64 as o => o; error as e => return e }
+        var rec: [RODATA_STR_REC]byte = []
+        put_u64_le8(rec, 0, off)
+        put_u64_le8(rec, 8, data.len)
+        match self.str_meta.append(rec) { u64 => { }; error as e => return e }
+        off
+    }
+
+    pub fn read_range_into(dst: []byte, dst_off: u64, start: u64, len: u64): u64 | error {
+        self.bytes.read_range_into(dst, dst_off, start, len)
+    }
+
+    pub fn finish_writing(): error | null {
+        match self.bytes.finish_writing() { error as e => return e; null => { } }
+        self.str_meta.finish_writing()
+    }
+
+    pub fn finish_strings(): []teko::lir::LRodata | error {
+        var n = self.string_count()
+        var out: [n]teko::lir::LRodata = []
+        var rec: [RODATA_STR_REC]byte = []
+        var i: u64 = 0
+        loop {
+            if i >= n { break }
+            match self.str_meta.read_range_into(rec, 0, i * RODATA_STR_REC, RODATA_STR_REC) { u64 => { }; error as e => return e }
+            var off = u64_from_le8(rec, 0)
+            var len = u64_from_le8(rec, 8)
+            out[i] = teko::lir::LRodata { symbol = rodata_str_symbol(i); offset = off; len = len; relocs = [] }
+            i++
+        }
+        out
+    }
+
+    pub fn dispose(): error | null {
+        match self.bytes.dispose() { error as e => return e; null => { } }
+        self.str_meta.dispose()
+    }
+}
