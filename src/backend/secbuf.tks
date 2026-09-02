@@ -1,0 +1,53 @@
+pub type SectionBuf = class {
+    intern stream: teko::io::FileStream
+    intern path: str
+    intern size: u64
+
+    pub static fn open(stem: str, tag: str): SectionBuf | error {
+        var path = $"{stem}.{tag}.sect"
+        var s = match teko::io::open_write(path) { teko::io::FileStream as fs => fs; error as e => return e }
+        SectionBuf { stream = s; path = path; size = 0 }
+    }
+
+    pub fn append(data: []byte): u64 | error {
+        var n = match teko::io::stream_write(self.stream, data) { u64 as w => w; error as e => return e }
+        self.size = self.size + n
+        self.size
+    }
+
+    pub fn append_prefix(data: []byte, n: u64): u64 | error {
+        var w = match teko::io::stream_write_prefix(self.stream, data, n) { u64 as w => w; error as e => return e }
+        self.size = self.size + w
+        self.size
+    }
+
+    pub fn len(): u64 { self.size }
+
+    pub fn copy_range_into(out: teko::io::FileStream, start: u64, end: u64): u64 | error {
+        if start > end { return error { message = "teko::backend::SectionBuf::copy_range_into: start > end" } }
+        if end > self.size { return error { message = "teko::backend::SectionBuf::copy_range_into: range out of bounds" } }
+        match teko::io::stream_seek(self.stream, start to i64, teko::io::Whence::Start) { u64 => { }; error as e => return e }
+        var scratch: []byte = teko::mem::bytes_from_ptr(teko::mem::buf_ptr(teko::io::CHUNK), teko::io::CHUNK)
+        var pos = start
+        loop {
+            if pos >= end { break }
+            var want = end - pos
+            if want > teko::io::CHUNK { want = teko::io::CHUNK }
+            var view = teko::mem::bytes_from_ptr(teko::mem::byte_ptr(scratch, 0), want)
+            var got = match teko::io::stream_read(self.stream, view) { u64 as n => n; error as e => return e }
+            if got == 0 { return error { message = "teko::backend::SectionBuf::copy_range_into: unexpected end of section" } }
+            match teko::io::stream_write_prefix(out, scratch, got) { u64 => { }; error as e => return e }
+            pos = pos + got
+        }
+        pos - start
+    }
+
+    pub fn copy_into(out: teko::io::FileStream): u64 | error {
+        self.copy_range_into(out, 0, self.size)
+    }
+
+    pub fn dispose(): error | null {
+        match teko::io::stream_close(self.stream) { error as e => return e; null => { } }
+        teko::fs::remove_file(self.path)
+    }
+}
