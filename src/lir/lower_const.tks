@@ -192,7 +192,7 @@ fn const_image_absorb(img: ConstImage, member: FatMemberImage): ConstImage {
     }
 }
 
-fn append_rodata(a: []LRodata, b: []LRodata): []LRodata {
+fn append_rodata(a: []LRodataImage, b: []LRodataImage): []LRodataImage {
     var out = a
     var i: u64 = 0
     loop {
@@ -252,7 +252,7 @@ fn const_fat_member(owner: str, member_key: str, slot_off: u32, member_ty: @Type
     FatMemberImage {
         slot_bytes = slot
         reloc = data_reloc(slot_off, leaf_sym)
-        leaves = [..target.leaves, LRodata { symbol = leaf_sym; bytes = target.bytes; relocs = target.relocs }]
+        leaves = [..target.leaves, LRodataImage { symbol = leaf_sym; bytes = target.bytes; relocs = target.relocs }]
     }
 }
 
@@ -462,7 +462,12 @@ fn check_const_image_size(cd: checker::TConstDecl, img: ConstImage, layouts: []L
     }
 }
 
-fn intern_aggregate_const_decl(m: LModule, cd: checker::TConstDecl, layouts: []LStructLayout, variants: []LVariantDef, enums: []LEnumInfo): LModule | error {
+fn intern_rodata_image(secbuf: teko::backend::SectionBuf, img: LRodataImage): LRodata | error {
+    var off = match secbuf.append(img.bytes) { u64 as o => o; error as e => return e }
+    LRodata { symbol = img.symbol; offset = off; len = img.bytes.len; relocs = img.relocs }
+}
+
+fn intern_aggregate_const_decl(m: LModule, cd: checker::TConstDecl, layouts: []LStructLayout, variants: []LVariantDef, enums: []LEnumInfo, secbuf: teko::backend::SectionBuf): LModule | error {
     if const_decl_is_scalar(cd.ty) { return m }
     var img = match serialize_const(cd, layouts, variants, enums) { ConstImage as x => x; error as e => return e }
     match check_const_image_size(cd, img, layouts) { error as e => return e; null => { } }
@@ -470,25 +475,27 @@ fn intern_aggregate_const_decl(m: LModule, cd: checker::TConstDecl, layouts: []L
     var i: u64 = 0
     loop {
         if i >= img.leaves.len { break }
-        cur = add_rodata(cur, img.leaves[i])
+        var leaf = match intern_rodata_image(secbuf, img.leaves[i]) { LRodata as r => r; error as e => return e }
+        cur = add_rodata(cur, leaf)
         i++
     }
-    add_rodata(cur, LRodata { symbol = const_rodata_symbol(cd.name); bytes = img.bytes; relocs = img.relocs })
+    var top = match intern_rodata_image(secbuf, LRodataImage { symbol = const_rodata_symbol(cd.name); bytes = img.bytes; relocs = img.relocs }) { LRodata as r => r; error as e => return e }
+    add_rodata(cur, top)
 }
 
-fn intern_aggregate_const_item(m: LModule, it: @TItem(), layouts: []LStructLayout, variants: []LVariantDef, enums: []LEnumInfo): LModule | error {
+fn intern_aggregate_const_item(m: LModule, it: @TItem(), layouts: []LStructLayout, variants: []LVariantDef, enums: []LEnumInfo, secbuf: teko::backend::SectionBuf): LModule | error {
     match it {
-        checker::TConstDecl as cd => intern_aggregate_const_decl(m, cd, layouts, variants, enums)
+        checker::TConstDecl as cd => intern_aggregate_const_decl(m, cd, layouts, variants, enums, secbuf)
         _ => m
     }
 }
 
-fn intern_aggregate_consts(m: LModule, items: []@TItem(), layouts: []LStructLayout, variants: []LVariantDef, enums: []LEnumInfo): LModule | error {
+fn intern_aggregate_consts(m: LModule, items: []@TItem(), layouts: []LStructLayout, variants: []LVariantDef, enums: []LEnumInfo, secbuf: teko::backend::SectionBuf): LModule | error {
     var cur = m
     var i: u64 = 0
     loop {
         if i >= items.len { break }
-        cur = match intern_aggregate_const_item(cur, items[i], layouts, variants, enums) { LModule as x => x; error as e => return e }
+        cur = match intern_aggregate_const_item(cur, items[i], layouts, variants, enums, secbuf) { LModule as x => x; error as e => return e }
         i++
     }
     cur

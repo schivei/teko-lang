@@ -1675,44 +1675,7 @@ fn encode_lfunc_in_region_x86(f: teko::lir::LFunc): teko::backend::EncodedFuncX8
     teko::backend::encode_func_x86(teko::backend::SYSV64, col)
 }
 
-fn fold_lfunc_scoped_x86(mt: teko::backend::ModuleTextX86, f: teko::lir::LFunc): teko::backend::ModuleTextX86 | error {
-    var child = region_new(region_root())
-    region_enter(child)
-    var encoded = encode_lfunc_in_region_x86(f)
-    region_leave()
-    match encoded {
-        teko::backend::EncodedFuncX86 as ef => {
-            var out = teko::backend::fold_encoded_func_x86(mt, ef)
-            region_drop(child)
-            out
-        }
-        error as e => e
-    }
-}
-
-fn encode_module_fused_x86(entry: teko::lir::LModule): teko::backend::EncodedModuleX86 | error {
-    var mt = teko::backend::empty_module_text_x86()
-    var i: u64 = 0
-    loop {
-        if i >= entry.funcs.len { break }
-        mt = match fold_lfunc_scoped_x86(mt, entry.funcs[i]) { teko::backend::ModuleTextX86 as x => x; error as e => return e }
-        i++
-    }
-    teko::backend::finish_encoded_module_x86(mt, entry.rodata, entry.globals)
-}
-
 fn copy_str_to_current_region(s: str): str { teko::str::concat("", s) }
-
-fn copy_bytes_to_current_region(src: []byte): []byte {
-    var out: []byte = []
-    var i: u64 = 0
-    loop {
-        if i >= src.len { break }
-        out = [..out, src[i]]
-        i++
-    }
-    out
-}
 
 fn copy_reloc_to_current_region_x86(r: teko::backend::RelocX86): teko::backend::RelocX86 {
     var sym = copy_str_to_current_region(r.sym)
@@ -1777,9 +1740,8 @@ fn copy_ldata_relocs_to_current_region(relocs: []teko::lir::LDataReloc): []teko:
 
 fn copy_lrodata_to_current_region(r: teko::lir::LRodata): teko::lir::LRodata {
     var symbol = copy_str_to_current_region(r.symbol)
-    var bytes = copy_bytes_to_current_region(r.bytes)
     var relocs = copy_ldata_relocs_to_current_region(r.relocs)
-    teko::lir::LRodata { symbol = symbol; bytes = bytes; relocs = relocs }
+    teko::lir::LRodata { symbol = symbol; offset = r.offset; len = r.len; relocs = relocs }
 }
 
 fn commit_rodata_delta(robase: []teko::lir::LRodata, grown: []teko::lir::LRodata): []teko::lir::LRodata {
@@ -1850,7 +1812,7 @@ fn extend_lifted_placeholders(ph: []teko::lir::LFunc, count: u64): []teko::lir::
 
 fn fuse_lower_item_x86(robase: []teko::lir::LRodata, prelude: teko::lir::LowerPrelude, loose: []@TStatement(), it: @TItem(), lifted_ph: []teko::lir::LFunc): FusedItemOut | error {
     var seed = teko::lir::LModule { funcs = []; rodata = robase; globals = prelude.module.globals; layouts = prelude.module.layouts }
-    var step = match teko::lir::lower_item(seed, loose, it, prelude.layouts, prelude.enums, lifted_ph, prelude.externs, false, prelude.variants, prelude.table, prelude.ref_fns, prelude.field_decls) { teko::lir::LowerItemOut as x => x; error as e => return e }
+    var step = match teko::lir::lower_item(seed, loose, it, prelude.layouts, prelude.enums, lifted_ph, prelude.externs, false, prelude.variants, prelude.table, prelude.ref_fns, prelude.field_decls, prelude.rodata_secbuf) { teko::lir::LowerItemOut as x => x; error as e => return e }
     var new_lifted = lifted_suffix(step.lifted, lifted_ph.len)
     var item_funcs = concat_lfuncs(step.module.funcs, new_lifted)
     match frame_escape_window(item_funcs) { error as e => return e; null => { } }
@@ -1859,7 +1821,7 @@ fn fuse_lower_item_x86(robase: []teko::lir::LRodata, prelude: teko::lir::LowerPr
 }
 
 fn fuse_virtual_main_x86(loose: []@TStatement(), prelude: teko::lir::LowerPrelude, robase: []teko::lir::LRodata, lifted_ph: []teko::lir::LFunc): FusedItemOut | error {
-    var vmain = match teko::lir::lower_virtual_main(loose, prelude.layouts, prelude.enums, robase, lifted_ph, prelude.externs, false, prelude.variants, prelude.ref_fns, prelude.field_decls, prelude.table) { teko::lir::LoweredFunction as x => x; error as e => return e }
+    var vmain = match teko::lir::lower_virtual_main(loose, prelude.layouts, prelude.enums, robase, lifted_ph, prelude.externs, false, prelude.variants, prelude.ref_fns, prelude.field_decls, prelude.table, prelude.rodata_secbuf) { teko::lir::LoweredFunction as x => x; error as e => return e }
     var new_lifted = lifted_suffix(vmain.lifted, lifted_ph.len)
     var seed = teko::lir::LModule { funcs = [vmain.func]; rodata = vmain.rodata; globals = prelude.module.globals; layouts = prelude.module.layouts }
     var wrapped = match teko::lir::wrap_native_entry(seed) { teko::lir::LModule as x => x; error as e => return e }
@@ -1920,7 +1882,8 @@ fn native_item_label(i: u64, total: u64): str {
 }
 
 fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Manifest, debug: DebugInfo): i32 {
-    var prelude = match teko::lir::lower_prelude(prog, false) { teko::lir::LowerPrelude as x => x; error as e => return fail(dir, e.message) }
+    var prelude = match teko::lir::lower_prelude(prog, false, teko::str::concat(od, "/", stem)) { teko::lir::LowerPrelude as x => x; error as e => return fail(dir, e.message) }
+    defer { prelude.rodata_secbuf.dispose() }
     var robase = prelude.module.rodata
     var loose: []@TStatement() = []
     var lifted_ph: []teko::lir::LFunc = []
@@ -1959,7 +1922,8 @@ fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Man
             robase = commit_rodata_delta(robase, out.rodata)
             region_drop(vchild)
             trace_native_item_done(vt0)
-            match teko::backend::finish_encoded_module_x86(mt, robase, prelude.module.globals) {
+            match prelude.rodata_secbuf.finish_writing() { error as e => return fail(dir, e.message); null => { } }
+            match teko::backend::finish_encoded_module_x86(mt, robase, prelude.module.globals, prelude.rodata_secbuf) {
                 teko::backend::EncodedModuleX86 as enc => {
                     var dwarf = build_dwarf_sink_for(dir, prog, enc.symbols, enc.text.len, debug)
                     finish_native_object(dir, od, stem, teko::backend::emit_elf(enc, dwarf), prog, m)
@@ -2030,7 +1994,7 @@ type FusedItemOutArm64 = struct {
 
 fn fuse_lower_item_arm64(robase: []teko::lir::LRodata, prelude: teko::lir::LowerPrelude, loose: []@TStatement(), it: @TItem(), lifted_ph: []teko::lir::LFunc): FusedItemOutArm64 | error {
     var seed = teko::lir::LModule { funcs = []; rodata = robase; globals = prelude.module.globals; layouts = prelude.module.layouts }
-    var step = match teko::lir::lower_item(seed, loose, it, prelude.layouts, prelude.enums, lifted_ph, prelude.externs, false, prelude.variants, prelude.table, prelude.ref_fns, prelude.field_decls) { teko::lir::LowerItemOut as x => x; error as e => return e }
+    var step = match teko::lir::lower_item(seed, loose, it, prelude.layouts, prelude.enums, lifted_ph, prelude.externs, false, prelude.variants, prelude.table, prelude.ref_fns, prelude.field_decls, prelude.rodata_secbuf) { teko::lir::LowerItemOut as x => x; error as e => return e }
     var new_lifted = lifted_suffix(step.lifted, lifted_ph.len)
     var item_funcs = concat_lfuncs(step.module.funcs, new_lifted)
     match frame_escape_window(item_funcs) { error as e => return e; null => { } }
@@ -2039,7 +2003,7 @@ fn fuse_lower_item_arm64(robase: []teko::lir::LRodata, prelude: teko::lir::Lower
 }
 
 fn fuse_virtual_main_arm64(loose: []@TStatement(), prelude: teko::lir::LowerPrelude, robase: []teko::lir::LRodata, lifted_ph: []teko::lir::LFunc): FusedItemOutArm64 | error {
-    var vmain = match teko::lir::lower_virtual_main(loose, prelude.layouts, prelude.enums, robase, lifted_ph, prelude.externs, false, prelude.variants, prelude.ref_fns, prelude.field_decls, prelude.table) { teko::lir::LoweredFunction as x => x; error as e => return e }
+    var vmain = match teko::lir::lower_virtual_main(loose, prelude.layouts, prelude.enums, robase, lifted_ph, prelude.externs, false, prelude.variants, prelude.ref_fns, prelude.field_decls, prelude.table, prelude.rodata_secbuf) { teko::lir::LoweredFunction as x => x; error as e => return e }
     var new_lifted = lifted_suffix(vmain.lifted, lifted_ph.len)
     var seed = teko::lir::LModule { funcs = [vmain.func]; rodata = vmain.rodata; globals = prelude.module.globals; layouts = prelude.module.layouts }
     var wrapped = match teko::lir::wrap_native_entry(seed) { teko::lir::LModule as x => x; error as e => return e }
@@ -2052,7 +2016,8 @@ fn fuse_virtual_main_arm64(loose: []@TStatement(), prelude: teko::lir::LowerPrel
 type NativeObjectWriterArm64 = func<teko::backend::EncodedModule, teko::backend::DwarfSink, []byte>
 
 fn emit_native_arm64_fused(dir: str, od: str, stem: str, prog: checker::TProgram, m: Manifest, debug: DebugInfo, writer: NativeObjectWriterArm64): i32 {
-    var prelude = match teko::lir::lower_prelude(prog, false) { teko::lir::LowerPrelude as x => x; error as e => return fail(dir, e.message) }
+    var prelude = match teko::lir::lower_prelude(prog, false, teko::str::concat(od, "/", stem)) { teko::lir::LowerPrelude as x => x; error as e => return fail(dir, e.message) }
+    defer { prelude.rodata_secbuf.dispose() }
     var robase = prelude.module.rodata
     var loose: []@TStatement() = []
     var lifted_ph: []teko::lir::LFunc = []
@@ -2091,7 +2056,8 @@ fn emit_native_arm64_fused(dir: str, od: str, stem: str, prog: checker::TProgram
             robase = commit_rodata_delta(robase, out.rodata)
             region_drop(vchild)
             trace_native_item_done(vt0)
-            match teko::backend::finish_encoded_module(mt, robase, prelude.module.globals) {
+            match prelude.rodata_secbuf.finish_writing() { error as e => return fail(dir, e.message); null => { } }
+            match teko::backend::finish_encoded_module(mt, robase, prelude.module.globals, prelude.rodata_secbuf) {
                 teko::backend::EncodedModule as enc => {
                     var dwarf = build_dwarf_sink_for(dir, prog, enc.symbols, enc.text.len, debug)
                     finish_native_object(dir, od, stem, writer(enc, dwarf), prog, m)
@@ -2123,7 +2089,7 @@ pub fn encode_lfuncs_in_region_win(fs: []teko::lir::LFunc): []teko::backend::Enc
 
 fn fuse_lower_item_win(robase: []teko::lir::LRodata, prelude: teko::lir::LowerPrelude, loose: []@TStatement(), it: @TItem(), lifted_ph: []teko::lir::LFunc): FusedItemOut | error {
     var seed = teko::lir::LModule { funcs = []; rodata = robase; globals = prelude.module.globals; layouts = prelude.module.layouts }
-    var step = match teko::lir::lower_item(seed, loose, it, prelude.layouts, prelude.enums, lifted_ph, prelude.externs, false, prelude.variants, prelude.table, prelude.ref_fns, prelude.field_decls) { teko::lir::LowerItemOut as x => x; error as e => return e }
+    var step = match teko::lir::lower_item(seed, loose, it, prelude.layouts, prelude.enums, lifted_ph, prelude.externs, false, prelude.variants, prelude.table, prelude.ref_fns, prelude.field_decls, prelude.rodata_secbuf) { teko::lir::LowerItemOut as x => x; error as e => return e }
     var new_lifted = lifted_suffix(step.lifted, lifted_ph.len)
     var item_funcs = concat_lfuncs(step.module.funcs, new_lifted)
     match frame_escape_window(item_funcs) { error as e => return e; null => { } }
@@ -2132,7 +2098,7 @@ fn fuse_lower_item_win(robase: []teko::lir::LRodata, prelude: teko::lir::LowerPr
 }
 
 fn fuse_virtual_main_win(loose: []@TStatement(), prelude: teko::lir::LowerPrelude, robase: []teko::lir::LRodata, lifted_ph: []teko::lir::LFunc): FusedItemOut | error {
-    var vmain = match teko::lir::lower_virtual_main(loose, prelude.layouts, prelude.enums, robase, lifted_ph, prelude.externs, false, prelude.variants, prelude.ref_fns, prelude.field_decls, prelude.table) { teko::lir::LoweredFunction as x => x; error as e => return e }
+    var vmain = match teko::lir::lower_virtual_main(loose, prelude.layouts, prelude.enums, robase, lifted_ph, prelude.externs, false, prelude.variants, prelude.ref_fns, prelude.field_decls, prelude.table, prelude.rodata_secbuf) { teko::lir::LoweredFunction as x => x; error as e => return e }
     var new_lifted = lifted_suffix(vmain.lifted, lifted_ph.len)
     var seed = teko::lir::LModule { funcs = [vmain.func]; rodata = vmain.rodata; globals = prelude.module.globals; layouts = prelude.module.layouts }
     var wrapped = match teko::lir::wrap_native_entry(seed) { teko::lir::LModule as x => x; error as e => return e }
@@ -2143,7 +2109,8 @@ fn fuse_virtual_main_win(loose: []@TStatement(), prelude: teko::lir::LowerPrelud
 }
 
 fn emit_native_win(dir: str, od: str, stem: str, prog: checker::TProgram, m: Manifest): i32 {
-    var prelude = match teko::lir::lower_prelude(prog, false) { teko::lir::LowerPrelude as x => x; error as e => return fail(dir, e.message) }
+    var prelude = match teko::lir::lower_prelude(prog, false, teko::str::concat(od, "/", stem)) { teko::lir::LowerPrelude as x => x; error as e => return fail(dir, e.message) }
+    defer { prelude.rodata_secbuf.dispose() }
     var robase = prelude.module.rodata
     var loose: []@TStatement() = []
     var lifted_ph: []teko::lir::LFunc = []
@@ -2182,7 +2149,8 @@ fn emit_native_win(dir: str, od: str, stem: str, prog: checker::TProgram, m: Man
             robase = commit_rodata_delta(robase, out.rodata)
             region_drop(vchild)
             trace_native_item_done(vt0)
-            match teko::backend::finish_encoded_module_x86(mt, robase, prelude.module.globals) {
+            match prelude.rodata_secbuf.finish_writing() { error as e => return fail(dir, e.message); null => { } }
+            match teko::backend::finish_encoded_module_x86(mt, robase, prelude.module.globals, prelude.rodata_secbuf) {
                 teko::backend::EncodedModuleX86 as enc => finish_native_object(dir, od, stem, teko::backend::emit_coff(enc), prog, m)
                 error as e => fail(dir, e.message)
             }
@@ -2216,14 +2184,17 @@ fn emit_static_lib(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m
     }
     var od = strip_trailing_slash(out_dir)
     match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the output directory"); null => { } }
-    var raw_lmod = match teko::lir::lower_program(prog, true) { teko::lir::LModule as x => x; error as e => return fail(dir, e.message) }
-    var lmod = strip_virtual_main(raw_lmod)
+    var lowered = match teko::lir::lower_program(prog, true, teko::str::concat(od, "/", stem)) { teko::lir::LoweredProgram as x => x; error as e => return fail(dir, e.message) }
+    defer { lowered.rodata_secbuf.dispose() }
+    match lowered.rodata_secbuf.finish_writing() { error as e => return fail(dir, e.message); null => { } }
+    var lmod = strip_virtual_main(lowered.module)
+    var secbuf = lowered.rodata_secbuf
     var target = match native_target() { NativeTarget as t => t; error as e => return fail(dir, e.message) }
     var rc = match target {
-        NativeTarget::X8664Linux => emit_static_lib_x86(dir, od, stem, lmod)
-        NativeTarget::Arm64Macho => emit_static_lib_macho(dir, od, stem, lmod)
-        NativeTarget::Arm64Linux => emit_static_lib_arm64_linux(dir, od, stem, lmod)
-        NativeTarget::X8664Windows => emit_static_lib_coff(dir, od, stem, lmod)
+        NativeTarget::X8664Linux => emit_static_lib_x86(dir, od, stem, lmod, secbuf)
+        NativeTarget::Arm64Macho => emit_static_lib_macho(dir, od, stem, lmod, secbuf)
+        NativeTarget::Arm64Linux => emit_static_lib_arm64_linux(dir, od, stem, lmod, secbuf)
+        NativeTarget::X8664Windows => emit_static_lib_coff(dir, od, stem, lmod, secbuf)
     }
     if rc == 0 { write_tkh_sidecar(prog, teko::str::concat(od, "/", teko::str::concat(stem, ".tkh"))) }
     rc
@@ -2241,31 +2212,31 @@ fn strip_virtual_main(lmod: teko::lir::LModule): teko::lir::LModule {
     teko::lir::LModule { funcs = teko::collections::arr_slice(kept, 0, count); rodata = lmod.rodata; globals = lmod.globals; layouts = lmod.layouts }
 }
 
-fn emit_static_lib_x86(dir: str, od: str, stem: str, lmod: teko::lir::LModule): i32 {
+fn emit_static_lib_x86(dir: str, od: str, stem: str, lmod: teko::lir::LModule, secbuf: teko::backend::SectionBuf): i32 {
     var sel = match teko::backend::select_module_x86(teko::backend::SYSV64, lmod) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
     var col = match teko::backend::regalloc_module_x86(teko::backend::SYSV64, sel) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
-    var enc = match teko::backend::encode_module_x86(teko::backend::SYSV64, col) { teko::backend::EncodedModuleX86 as x => x; error as e => return fail(dir, e.message) }
+    var enc = match teko::backend::encode_module_x86(teko::backend::SYSV64, col, secbuf) { teko::backend::EncodedModuleX86 as x => x; error as e => return fail(dir, e.message) }
     finish_static_archive(dir, od, stem, teko::backend::emit_elf(enc, teko::backend::no_dwarf_sink()), enc.symbols, ArchiveFormat::Gnu)
 }
 
-fn emit_static_lib_macho(dir: str, od: str, stem: str, lmod: teko::lir::LModule): i32 {
+fn emit_static_lib_macho(dir: str, od: str, stem: str, lmod: teko::lir::LModule, secbuf: teko::backend::SectionBuf): i32 {
     var sel = match teko::backend::select_module(lmod) { teko::backend::MModule as x => x; error as e => return fail(dir, e.message) }
     var col = match teko::backend::regalloc_module(teko::backend::AAPCS64, sel) { teko::backend::MModule as x => x; error as e => return fail(dir, e.message) }
-    var enc = match teko::backend::encode_module(teko::backend::AAPCS64, col) { teko::backend::EncodedModule as x => x; error as e => return fail(dir, e.message) }
+    var enc = match teko::backend::encode_module(teko::backend::AAPCS64, col, secbuf) { teko::backend::EncodedModule as x => x; error as e => return fail(dir, e.message) }
     finish_static_archive(dir, od, stem, teko::backend::emit_macho(enc, teko::backend::no_dwarf_sink()), enc.symbols, ArchiveFormat::Bsd)
 }
 
-fn emit_static_lib_arm64_linux(dir: str, od: str, stem: str, lmod: teko::lir::LModule): i32 {
+fn emit_static_lib_arm64_linux(dir: str, od: str, stem: str, lmod: teko::lir::LModule, secbuf: teko::backend::SectionBuf): i32 {
     var sel = match teko::backend::select_module(lmod) { teko::backend::MModule as x => x; error as e => return fail(dir, e.message) }
     var col = match teko::backend::regalloc_module(teko::backend::AAPCS64, sel) { teko::backend::MModule as x => x; error as e => return fail(dir, e.message) }
-    var enc = match teko::backend::encode_module(teko::backend::AAPCS64, col) { teko::backend::EncodedModule as x => x; error as e => return fail(dir, e.message) }
+    var enc = match teko::backend::encode_module(teko::backend::AAPCS64, col, secbuf) { teko::backend::EncodedModule as x => x; error as e => return fail(dir, e.message) }
     finish_static_archive(dir, od, stem, teko::backend::emit_elf_arm64(enc, teko::backend::no_dwarf_sink()), enc.symbols, ArchiveFormat::Gnu)
 }
 
-fn emit_static_lib_coff(dir: str, od: str, stem: str, lmod: teko::lir::LModule): i32 {
+fn emit_static_lib_coff(dir: str, od: str, stem: str, lmod: teko::lir::LModule, secbuf: teko::backend::SectionBuf): i32 {
     var sel = match teko::backend::select_module_x86(teko::backend::WIN64, lmod) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
     var col = match teko::backend::regalloc_module_x86(teko::backend::WIN64, sel) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
-    var enc = match teko::backend::encode_module_x86(teko::backend::WIN64, col) { teko::backend::EncodedModuleX86 as x => x; error as e => return fail(dir, e.message) }
+    var enc = match teko::backend::encode_module_x86(teko::backend::WIN64, col, secbuf) { teko::backend::EncodedModuleX86 as x => x; error as e => return fail(dir, e.message) }
     finish_static_archive(dir, od, stem, teko::backend::emit_coff(enc), enc.symbols, ArchiveFormat::Coff)
 }
 
