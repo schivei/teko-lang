@@ -1,0 +1,161 @@
+/**
+ * A single object-file section streamed to a temp file on disk instead of accumulated in RAM: emit
+ * appends section content as produced; the assembly pass seek-reads byte ranges back afterward. Only
+ * the running byte count stays live — the payload never resides in memory. Built purely on the
+ * `teko::io` stream machinery (chunks of at most `teko::io::CHUNK` bytes, over syscalls, zero C — D148).
+ */
+exp type SectionBuf = class {
+    /** The open write-side handle, or `null` once `finish_writing` has run. */
+    intern wstream: teko::io::FileStream | null
+    /** The open read-side handle, or `null` before `finish_writing` has run. */
+    intern rstream: teko::io::FileStream | null
+    /** The temp file backing this section; never leaks into the emitted object. */
+    intern path: str
+    /** The running byte count produced so far. */
+    intern total: u64
+
+    /**
+     * Opens a fresh, empty section buffer backed by a deterministic temp path derived from `stem`
+     * and `tag` (`<stem>.<tag>.sect`); the temp path never leaks into the emitted object.
+     *
+     * @param stem the object stem (identifies the compile unit owning the section)
+     * @param tag  the section tag (`text`/`rodata`/`drr`/`dwinfo`/…)
+     * @return an open, empty section buffer, or an I/O error
+     */
+    pub static fn open(stem: str, tag: str): SectionBuf | error {
+        var path = $"{stem}.{tag}.sect"
+        var ws = match teko::io::open_write(path) { teko::io::FileStream as fs => fs; error as e => return e }
+        .{ wstream = ws; rstream = null; path = path; total = 0 }
+    }
+
+    /**
+     * Appends `data` at the tail, streamed in chunks with no payload copy.
+     *
+     * @param data the bytes to append, in emission order
+     * @return the offset `data` starts at within the section, or a write error
+     */
+    pub fn append(data: []byte): u64 | error {
+        var ws = match self.wstream {
+            teko::io::FileStream as fs => fs
+            null => panic($"teko::backend::secbuf: append after finish_writing ({self.path})")
+        }
+        var start = self.total
+        var written = match teko::io::stream_write(ws, data) { u64 as n => n; error as e => return e }
+        self.total = start + written
+        start
+    }
+
+    /**
+     * Appends the first `n` bytes of a reusable fixed buffer, for per-instruction emit that never
+     * allocates a growing array.
+     *
+     * @param data the reusable buffer (only its first `n` bytes are appended)
+     * @param n    the count of leading bytes to append
+     * @return the offset the appended bytes start at within the section, or a write error
+     */
+    pub fn append_prefix(data: []byte, n: u64): u64 | error {
+        var ws = match self.wstream {
+            teko::io::FileStream as fs => fs
+            null => panic($"teko::backend::secbuf: append_prefix after finish_writing ({self.path})")
+        }
+        var start = self.total
+        var written = match teko::io::stream_write_prefix(ws, data, n) { u64 as w => w; error as e => return e }
+        self.total = start + written
+        start
+    }
+
+    /**
+     * The section byte length produced so far (the only live-RAM datum).
+     *
+     * @return the running size in bytes
+     */
+    pub fn size(): u64 { self.total }
+
+    /**
+     * Closes the write side and reopens the section's temp file for reading, so `copy_range_into`/
+     * `copy_into` can seek-read it during the assembly pass. A write-only handle cannot be read back
+     * on any of the three targets, so the switch always goes through close-then-reopen.
+     *
+     * @return null on success, or an I/O error
+     */
+    pub fn finish_writing(): error | null {
+        match self.wstream {
+            teko::io::FileStream as ws => {
+                match teko::io::stream_close(ws) { error as e => return e; null => { } }
+            }
+            null => { }
+        }
+        self.wstream = null
+        var rs = match teko::io::open_read(self.path) { teko::io::FileStream as fs => fs; error as e => return e }
+        self.rstream = rs
+        null
+    }
+
+    /**
+     * Copies the byte range `[start, end)` of this section into `out`, chunked at most
+     * `teko::io::CHUNK` bytes per read via seek-read, so reordering a span never holds the section
+     * in RAM. Requires `finish_writing` to have run.
+     *
+     * @param out   the destination stream (the final object file)
+     * @param start the inclusive start offset within this section
+     * @param end   the exclusive end offset
+     * @return the bytes copied, or an out-of-range or I/O error
+     */
+    pub fn copy_range_into(out: teko::io::FileStream, start: u64, end: u64): u64 | error {
+        if start > end || end > self.total {
+            return error { message = $"teko::backend::secbuf: copy_range_into: range [{start},{end}) exceeds section size {self.total} ({self.path})" }
+        }
+        var rs = match self.rstream {
+            teko::io::FileStream as fs => fs
+            null => panic($"teko::backend::secbuf: copy_range_into before finish_writing ({self.path})")
+        }
+        match teko::io::stream_seek(rs, start to i64, teko::io::Whence::Start) { u64 => { }; error as e => return e }
+        var scratch: [teko::io::CHUNK]byte = []
+        var pos = start
+        loop {
+            if pos >= end { break }
+            var remain = end - pos
+            var want = if remain < teko::io::CHUNK { remain } else { teko::io::CHUNK }
+            var view = scratch.slice(0, want)
+            var got = match teko::io::stream_read(rs, view) { u64 as c => c; error as e => return e }
+            if got == 0 { return error { message = $"teko::backend::secbuf: copy_range_into: unexpected EOF at {pos} ({self.path})" } }
+            match teko::io::stream_write_prefix(out, scratch, got) { u64 => { }; error as e => return e }
+            pos = pos + got
+        }
+        end - start
+    }
+
+    /**
+     * Streams the whole section into `out` in order (the common case: no reordering).
+     *
+     * @param out the destination stream (the final object file)
+     * @return the bytes copied, or an I/O error
+     */
+    pub fn copy_into(out: teko::io::FileStream): u64 | error {
+        self.copy_range_into(out, 0, self.total)
+    }
+
+    /**
+     * Closes whichever side is still open and removes the temp file; called once the object is
+     * fully assembled.
+     *
+     * @return null on success, or an I/O error
+     */
+    pub fn dispose(): error | null {
+        match self.wstream {
+            teko::io::FileStream as ws => {
+                match teko::io::stream_close(ws) { error as e => return e; null => { } }
+            }
+            null => { }
+        }
+        self.wstream = null
+        match self.rstream {
+            teko::io::FileStream as rs => {
+                match teko::io::stream_close(rs) { error as e => return e; null => { } }
+            }
+            null => { }
+        }
+        self.rstream = null
+        teko::fs::remove_file(self.path)
+    }
+}
