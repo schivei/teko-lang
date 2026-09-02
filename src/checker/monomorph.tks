@@ -834,24 +834,127 @@ fn instance_type_subst(template: parser::TypeDecl, inst: parser::TypeDecl, table
     var tf = decl_fields(template)
     var inf = decl_fields(inst)
     if tf.len != inf.len { return s }
-    var ptable = type_param_table(template.type_params, template.type_constraints, "", table)
+    var visited: []str = [inst.name]
     var i = 0
     loop {
         if i >= tf.len { break }
-        s = unify_field_pair(s, tf[i].type_ann, inf[i].type_ann, ptable, table)
+        s = unify_inst_field(tf[i].type_ann, inf[i].type_ann, template.type_params, s, table, visited)
         i++
     }
     s
 }
 
-fn unify_field_pair(s: Subst, pat_ann: @TypeExpr(), con_ann: @TypeExpr(), ptable: TypeTable, table: TypeTable): Subst {
-    match resolve_type(pat_ann, ptable, "") {
-        (@Type()) as pat => match resolve_type(con_ann, table, "") {
-            (@Type()) as concrete => match unify(pat, concrete, s, table) { Subst as x => x; error => s }
-            error => s
-        }
-        error => s
+fn inst_texpr_is_null(te: @TypeExpr()): bool {
+    match te {
+        parser::NamedType as nt => nt.args.len == 0 && nt.path.segments.len == 1 && teko::runtime::str_eq(nt.path.segments[0].name, "null")
+        _ => false
     }
+}
+
+fn unify_inst_union(put: parser::UnionType, cut: parser::UnionType, params: []str, s: Subst, table: TypeTable, visited: []str): Subst {
+    var ss = s
+    var pi = 0
+    loop {
+        if pi >= put.members.len { break }
+        if inst_texpr_is_null(put.members[pi]) { pi++; continue }
+        var ci = 0
+        var matched = false
+        loop {
+            if ci >= cut.members.len { break }
+            if !inst_texpr_is_null(cut.members[ci]) && !matched {
+                ss = unify_inst_field(put.members[pi], cut.members[ci], params, ss, table, visited)
+                matched = true
+            }
+            ci++
+        }
+        pi++
+    }
+    ss
+}
+
+fn unify_inst_named(pnt: parser::NamedType, cnt: parser::NamedType, params: []str, s: Subst, table: TypeTable, visited: []str): Subst {
+    if pnt.args.len == 0 { return s }
+    if cnt.args.len == pnt.args.len {
+        var ss = s
+        var i = 0
+        loop {
+            if i >= pnt.args.len { break }
+            ss = unify_inst_field(pnt.args[i], cnt.args[i], params, ss, table, visited)
+            i++
+        }
+        return ss
+    }
+    if cnt.args.len != 0 { return s }
+    var cname = cnt.path.segments[cnt.path.segments.len - 1].name
+    var cargs = inst_recovered_args(cname, table, visited)
+    if cargs.len != pnt.args.len { return s }
+    var ss = s
+    var i = 0
+    loop {
+        if i >= pnt.args.len { break }
+        ss = unify_inst_field(pnt.args[i], type_to_texpr(cargs[i]), params, ss, table, visited)
+        i++
+    }
+    ss
+}
+
+fn unify_inst_field(pat: @TypeExpr(), con: @TypeExpr(), params: []str, s: Subst, table: TypeTable, visited: []str): Subst {
+    match pat {
+        parser::NamedType as pnt => {
+            if pnt.path.segments.len == 1 && pnt.args.len == 0 && is_type_param(pnt.path.segments[0].name, params) {
+                var nm = pnt.path.segments[0].name
+                match subst_find_inst(s, nm) { (@Type()) as _bound => return s; null => { } }
+                match resolve_type(con, table, "") {
+                    (@Type()) as ct => return Subst { params = s.params; names = [..s.names, nm]; types = [..s.types, ct] }
+                    error => return s
+                }
+            }
+            match con {
+                parser::NamedType as cnt => unify_inst_named(pnt, cnt, params, s, table, visited)
+                _ => s
+            }
+        }
+        parser::UnionType as put => match con {
+            parser::UnionType as cut => unify_inst_union(put, cut, params, s, table, visited)
+            _ => s
+        }
+        parser::SliceType as pst => match con { parser::SliceType as cst => unify_inst_field(pst.element, cst.element, params, s, table, visited); _ => s }
+        parser::SizedArrayType as psa => match con { parser::SizedArrayType as csa => unify_inst_field(psa.element, csa.element, params, s, table, visited); _ => s }
+        _ => s
+    }
+}
+
+fn inst_recovered_args(inst_name: str, table: TypeTable, visited: []str): []@Type() {
+    var split = split_generic_instance_name(name_last_segment(inst_name))
+    if !split.is_generic { return [] }
+    var vi = 0
+    loop {
+        if vi >= visited.len { break }
+        if teko::runtime::str_eq(visited[vi], inst_name) { return [] }
+        vi++
+    }
+    var tmpl = match find_generic_template(table, split.stem) { TemplateReg as tr => tr; null => return [] }
+    var idecl = match type_table_find(table, inst_name, "") { parser::TypeDecl as d => d; error => return [] }
+    var params = tmpl.decl.type_params
+    var tf = decl_fields(tmpl.decl)
+    var cf = decl_fields(idecl)
+    if tf.len != cf.len { return [] }
+    var nvisited = [..visited, inst_name]
+    var s = Subst { params = params; names = []; types = [] }
+    var i = 0
+    loop {
+        if i >= tf.len { break }
+        s = unify_inst_field(tf[i].type_ann, cf[i].type_ann, params, s, table, nvisited)
+        i++
+    }
+    var out: [params.len]@Type() = []
+    var k = 0
+    loop {
+        if k >= params.len { break }
+        out[k] = match subst_find_inst(s, params[k]) { (@Type()) as t => t; null => Named { name = params[k] } }
+        k++
+    }
+    out
 }
 
 fn decl_fields(d: parser::TypeDecl): []parser::Field {
