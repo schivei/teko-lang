@@ -71,6 +71,29 @@ pub type SectionBuf = class {
         end - start
     }
 
+    pub fn read_range_into(dst: []byte, dst_off: u64, start: u64, len: u64): u64 | error {
+        var end = start + len
+        if end > self.total {
+            return error { message = $"teko::backend::secbuf: read_range_into: range [{start},{end}) exceeds section size {self.total} ({self.path})" }
+        }
+        var rs = match self.rstream {
+            teko::io::FileStream as fs => fs
+            null => panic($"teko::backend::secbuf: read_range_into before finish_writing ({self.path})")
+        }
+        match teko::io::stream_seek(rs, start to i64, teko::io::Whence::Start) { u64 => { }; error as e => return e }
+        var pos = start
+        loop {
+            if pos >= end { break }
+            var remain = end - pos
+            var want = if remain < teko::io::CHUNK { remain } else { teko::io::CHUNK }
+            var view = slice(dst, dst_off + (pos - start), want)
+            var got = match teko::io::stream_read(rs, view) { u64 as c => c; error as e => return e }
+            if got == 0 { return error { message = $"teko::backend::secbuf: read_range_into: unexpected EOF at {pos} ({self.path})" } }
+            pos = pos + got
+        }
+        len
+    }
+
     pub fn copy_into(out: teko::io::FileStream): u64 | error {
         self.copy_range_into(out, 0, self.total)
     }
