@@ -1711,12 +1711,12 @@ pub fn encode_lfuncs_in_region_x86(fs: []teko::lir::LFunc): []teko::backend::Enc
     out
 }
 
-fn fold_encoded_funcs_x86(mt: teko::backend::ModuleTextX86, efs: []teko::backend::EncodedFuncX86): teko::backend::ModuleTextX86 {
+fn fold_encoded_funcs_x86(mt: teko::backend::ModuleTextX86, efs: []teko::backend::EncodedFuncX86): teko::backend::ModuleTextX86 | error {
     var acc = mt
     var i: u64 = 0
     loop {
         if i >= efs.len { break }
-        acc = teko::backend::fold_encoded_func_x86(acc, copy_encoded_func_to_current_region_x86(efs[i]))
+        acc = match teko::backend::fold_encoded_func_x86(acc, copy_encoded_func_to_current_region_x86(efs[i])) { teko::backend::ModuleTextX86 as x => x; error as e => return e }
         i++
     }
     acc
@@ -1867,10 +1867,12 @@ fn native_item_label(i: u64, total: u64): str {
 fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Manifest, debug: DebugInfo): i32 {
     var prelude = match teko::lir::lower_prelude(prog, false, teko::str::concat(od, "/", stem)) { teko::lir::LowerPrelude as x => x; error as e => return fail(dir, e.message) }
     defer { prelude.rodata_secbuf.dispose() }
+    var text_sect = match teko::backend::SectionBuf::open(teko::str::concat(od, "/", stem), "text") { teko::backend::SectionBuf as s => s; error as e => return fail(dir, e.message) }
+    defer { text_sect.dispose() }
     var robase = prelude.module.rodata
     var loose: []@TStatement() = []
     var lifted_ph: []teko::lir::LFunc = []
-    var mt = teko::backend::empty_module_text_x86()
+    var mt = teko::backend::empty_module_text_x86(text_sect)
     var i: u64 = 0
     loop {
         if i >= prog.items.len { break }
@@ -1882,7 +1884,7 @@ fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Man
         match outcome {
             FusedItemOut as out => {
                 match check_current_region_is_root(native_item_label(i, prog.items.len)) { error as e => return fail(dir, e.message); null => { } }
-                mt = fold_encoded_funcs_x86(mt, out.encoded)
+                mt = match fold_encoded_funcs_x86(mt, out.encoded) { teko::backend::ModuleTextX86 as x => x; error as e => return fail(dir, e.message) }
                 loose = commit_loose(loose, out.loose)
                 lifted_ph = extend_lifted_placeholders(lifted_ph, out.new_lifted_count)
                 region_drop(child)
@@ -1900,7 +1902,7 @@ fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Man
     match vmain_outcome {
         FusedItemOut as out => {
             match check_current_region_is_root("virtual-main") { error as e => return fail(dir, e.message); null => { } }
-            mt = fold_encoded_funcs_x86(mt, out.encoded)
+            mt = match fold_encoded_funcs_x86(mt, out.encoded) { teko::backend::ModuleTextX86 as x => x; error as e => return fail(dir, e.message) }
             region_drop(vchild)
             trace_native_item_done(vt0)
             match prelude.rodata_secbuf.finish_writing() { error as e => return fail(dir, e.message); null => { } }
@@ -1956,12 +1958,12 @@ pub fn encode_lfuncs_in_region_arm64(fs: []teko::lir::LFunc): []teko::backend::E
     out
 }
 
-fn fold_encoded_funcs_arm64(mt: teko::backend::ModuleText, efs: []teko::backend::EncodedFunc): teko::backend::ModuleText {
+fn fold_encoded_funcs_arm64(mt: teko::backend::ModuleText, efs: []teko::backend::EncodedFunc): teko::backend::ModuleText | error {
     var acc = mt
     var i: u64 = 0
     loop {
         if i >= efs.len { break }
-        acc = teko::backend::fold_encoded_func(acc, copy_encoded_func_to_current_region_arm64(efs[i]))
+        acc = match teko::backend::fold_encoded_func(acc, copy_encoded_func_to_current_region_arm64(efs[i])) { teko::backend::ModuleText as x => x; error as e => return e }
         i++
     }
     acc
@@ -1999,10 +2001,12 @@ type NativeObjectWriterArm64 = func<teko::backend::EncodedModule, teko::backend:
 fn emit_native_arm64_fused(dir: str, od: str, stem: str, prog: checker::TProgram, m: Manifest, debug: DebugInfo, writer: NativeObjectWriterArm64): i32 {
     var prelude = match teko::lir::lower_prelude(prog, false, teko::str::concat(od, "/", stem)) { teko::lir::LowerPrelude as x => x; error as e => return fail(dir, e.message) }
     defer { prelude.rodata_secbuf.dispose() }
+    var text_sect = match teko::backend::SectionBuf::open(teko::str::concat(od, "/", stem), "text") { teko::backend::SectionBuf as s => s; error as e => return fail(dir, e.message) }
+    defer { text_sect.dispose() }
     var robase = prelude.module.rodata
     var loose: []@TStatement() = []
     var lifted_ph: []teko::lir::LFunc = []
-    var mt = teko::backend::empty_module_text()
+    var mt = teko::backend::empty_module_text(text_sect)
     var i: u64 = 0
     loop {
         if i >= prog.items.len { break }
@@ -2014,7 +2018,7 @@ fn emit_native_arm64_fused(dir: str, od: str, stem: str, prog: checker::TProgram
         match outcome {
             FusedItemOutArm64 as out => {
                 match check_current_region_is_root(native_item_label(i, prog.items.len)) { error as e => return fail(dir, e.message); null => { } }
-                mt = fold_encoded_funcs_arm64(mt, out.encoded)
+                mt = match fold_encoded_funcs_arm64(mt, out.encoded) { teko::backend::ModuleText as x => x; error as e => return fail(dir, e.message) }
                 loose = commit_loose(loose, out.loose)
                 lifted_ph = extend_lifted_placeholders(lifted_ph, out.new_lifted_count)
                 region_drop(child)
@@ -2032,7 +2036,7 @@ fn emit_native_arm64_fused(dir: str, od: str, stem: str, prog: checker::TProgram
     match vmain_outcome {
         FusedItemOutArm64 as out => {
             match check_current_region_is_root("virtual-main") { error as e => return fail(dir, e.message); null => { } }
-            mt = fold_encoded_funcs_arm64(mt, out.encoded)
+            mt = match fold_encoded_funcs_arm64(mt, out.encoded) { teko::backend::ModuleText as x => x; error as e => return fail(dir, e.message) }
             region_drop(vchild)
             trace_native_item_done(vt0)
             match prelude.rodata_secbuf.finish_writing() { error as e => return fail(dir, e.message); null => { } }
@@ -2091,10 +2095,12 @@ fn fuse_virtual_main_win(loose: []@TStatement(), prelude: teko::lir::LowerPrelud
 fn emit_native_win(dir: str, od: str, stem: str, prog: checker::TProgram, m: Manifest): i32 {
     var prelude = match teko::lir::lower_prelude(prog, false, teko::str::concat(od, "/", stem)) { teko::lir::LowerPrelude as x => x; error as e => return fail(dir, e.message) }
     defer { prelude.rodata_secbuf.dispose() }
+    var text_sect = match teko::backend::SectionBuf::open(teko::str::concat(od, "/", stem), "text") { teko::backend::SectionBuf as s => s; error as e => return fail(dir, e.message) }
+    defer { text_sect.dispose() }
     var robase = prelude.module.rodata
     var loose: []@TStatement() = []
     var lifted_ph: []teko::lir::LFunc = []
-    var mt = teko::backend::empty_module_text_x86()
+    var mt = teko::backend::empty_module_text_x86(text_sect)
     var i: u64 = 0
     loop {
         if i >= prog.items.len { break }
@@ -2106,7 +2112,7 @@ fn emit_native_win(dir: str, od: str, stem: str, prog: checker::TProgram, m: Man
         match outcome {
             FusedItemOut as out => {
                 match check_current_region_is_root(native_item_label(i, prog.items.len)) { error as e => return fail(dir, e.message); null => { } }
-                mt = fold_encoded_funcs_x86(mt, out.encoded)
+                mt = match fold_encoded_funcs_x86(mt, out.encoded) { teko::backend::ModuleTextX86 as x => x; error as e => return fail(dir, e.message) }
                 loose = commit_loose(loose, out.loose)
                 lifted_ph = extend_lifted_placeholders(lifted_ph, out.new_lifted_count)
                 region_drop(child)
@@ -2124,7 +2130,7 @@ fn emit_native_win(dir: str, od: str, stem: str, prog: checker::TProgram, m: Man
     match vmain_outcome {
         FusedItemOut as out => {
             match check_current_region_is_root("virtual-main") { error as e => return fail(dir, e.message); null => { } }
-            mt = fold_encoded_funcs_x86(mt, out.encoded)
+            mt = match fold_encoded_funcs_x86(mt, out.encoded) { teko::backend::ModuleTextX86 as x => x; error as e => return fail(dir, e.message) }
             region_drop(vchild)
             trace_native_item_done(vt0)
             match prelude.rodata_secbuf.finish_writing() { error as e => return fail(dir, e.message); null => { } }
@@ -2194,30 +2200,38 @@ fn strip_virtual_main(lmod: teko::lir::LModule): teko::lir::LModule {
 }
 
 fn emit_static_lib_x86(dir: str, od: str, stem: str, lmod: teko::lir::LModule, secbuf: teko::backend::RodataSink): i32 {
+    var text_sect = match teko::backend::SectionBuf::open(teko::str::concat(od, "/", stem), "text") { teko::backend::SectionBuf as s => s; error as e => return fail(dir, e.message) }
+    defer { text_sect.dispose() }
     var sel = match teko::backend::select_module_x86(teko::backend::SYSV64, lmod) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
     var col = match teko::backend::regalloc_module_x86(teko::backend::SYSV64, sel) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
-    var enc = match teko::backend::encode_module_x86(teko::backend::SYSV64, col, secbuf) { teko::backend::EncodedModuleX86 as x => x; error as e => return fail(dir, e.message) }
+    var enc = match teko::backend::encode_module_x86(teko::backend::SYSV64, col, secbuf, text_sect) { teko::backend::EncodedModuleX86 as x => x; error as e => return fail(dir, e.message) }
     finish_static_archive(dir, od, stem, teko::backend::emit_elf(enc, teko::backend::no_dwarf_sink()), enc.symbols, ArchiveFormat::Gnu)
 }
 
 fn emit_static_lib_macho(dir: str, od: str, stem: str, lmod: teko::lir::LModule, secbuf: teko::backend::RodataSink): i32 {
+    var text_sect = match teko::backend::SectionBuf::open(teko::str::concat(od, "/", stem), "text") { teko::backend::SectionBuf as s => s; error as e => return fail(dir, e.message) }
+    defer { text_sect.dispose() }
     var sel = match teko::backend::select_module(lmod) { teko::backend::MModule as x => x; error as e => return fail(dir, e.message) }
     var col = match teko::backend::regalloc_module(teko::backend::AAPCS64, sel) { teko::backend::MModule as x => x; error as e => return fail(dir, e.message) }
-    var enc = match teko::backend::encode_module(teko::backend::AAPCS64, col, secbuf) { teko::backend::EncodedModule as x => x; error as e => return fail(dir, e.message) }
+    var enc = match teko::backend::encode_module(teko::backend::AAPCS64, col, secbuf, text_sect) { teko::backend::EncodedModule as x => x; error as e => return fail(dir, e.message) }
     finish_static_archive(dir, od, stem, teko::backend::emit_macho(enc, teko::backend::no_dwarf_sink()), enc.symbols, ArchiveFormat::Bsd)
 }
 
 fn emit_static_lib_arm64_linux(dir: str, od: str, stem: str, lmod: teko::lir::LModule, secbuf: teko::backend::RodataSink): i32 {
+    var text_sect = match teko::backend::SectionBuf::open(teko::str::concat(od, "/", stem), "text") { teko::backend::SectionBuf as s => s; error as e => return fail(dir, e.message) }
+    defer { text_sect.dispose() }
     var sel = match teko::backend::select_module(lmod) { teko::backend::MModule as x => x; error as e => return fail(dir, e.message) }
     var col = match teko::backend::regalloc_module(teko::backend::AAPCS64, sel) { teko::backend::MModule as x => x; error as e => return fail(dir, e.message) }
-    var enc = match teko::backend::encode_module(teko::backend::AAPCS64, col, secbuf) { teko::backend::EncodedModule as x => x; error as e => return fail(dir, e.message) }
+    var enc = match teko::backend::encode_module(teko::backend::AAPCS64, col, secbuf, text_sect) { teko::backend::EncodedModule as x => x; error as e => return fail(dir, e.message) }
     finish_static_archive(dir, od, stem, teko::backend::emit_elf_arm64(enc, teko::backend::no_dwarf_sink()), enc.symbols, ArchiveFormat::Gnu)
 }
 
 fn emit_static_lib_coff(dir: str, od: str, stem: str, lmod: teko::lir::LModule, secbuf: teko::backend::RodataSink): i32 {
+    var text_sect = match teko::backend::SectionBuf::open(teko::str::concat(od, "/", stem), "text") { teko::backend::SectionBuf as s => s; error as e => return fail(dir, e.message) }
+    defer { text_sect.dispose() }
     var sel = match teko::backend::select_module_x86(teko::backend::WIN64, lmod) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
     var col = match teko::backend::regalloc_module_x86(teko::backend::WIN64, sel) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
-    var enc = match teko::backend::encode_module_x86(teko::backend::WIN64, col, secbuf) { teko::backend::EncodedModuleX86 as x => x; error as e => return fail(dir, e.message) }
+    var enc = match teko::backend::encode_module_x86(teko::backend::WIN64, col, secbuf, text_sect) { teko::backend::EncodedModuleX86 as x => x; error as e => return fail(dir, e.message) }
     finish_static_archive(dir, od, stem, teko::backend::emit_coff(enc), enc.symbols, ArchiveFormat::Coff)
 }
 

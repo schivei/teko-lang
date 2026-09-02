@@ -1181,17 +1181,6 @@ fn honest_globals(): error {
     error { message = "A4-globals: __data section + GOT data relocs deferred (the N2 subset lowers no LGlobal)" }
 }
 
-fn append_words_le(buf: []byte, ws: []u32): []byte {
-    var b = buf
-    var i: u64 = 0
-    loop {
-        if i >= ws.len { break }
-        b = emit_u32_le(b, ws[i])
-        i++
-    }
-    b
-}
-
 fn rebase_relocs(acc: []Reloc, relocs: []Reloc, base_off: u32): []Reloc {
     var out: [relocs.len]Reloc = []
     var i: u64 = 0
@@ -1205,14 +1194,14 @@ fn rebase_relocs(acc: []Reloc, relocs: []Reloc, base_off: u32): []Reloc {
 }
 
 pub type ModuleText = struct {
-    text: []byte
+    text_sect: SectionBuf
     relocs: []Reloc
     syms: []Symbol
     text_off: u32
 }
 
-pub fn empty_module_text(): ModuleText {
-    ModuleText { text = []; relocs = []; syms = []; text_off = 0 to u32 }
+pub fn empty_module_text(text_sect: SectionBuf): ModuleText {
+    ModuleText { text_sect = text_sect; relocs = []; syms = []; text_off = 0 to u32 }
 }
 
 fn fold_func_into_text(abi: AbiDescriptor, acc: ModuleText, f: MFunc): ModuleText | error {
@@ -1220,17 +1209,34 @@ fn fold_func_into_text(abi: AbiDescriptor, acc: ModuleText, f: MFunc): ModuleTex
     fold_encoded_func(acc, ef)
 }
 
-pub fn fold_encoded_func(acc: ModuleText, ef: EncodedFunc): ModuleText {
+fn words_to_bytes_le(ws: []u32): []byte {
+    var wb: u64 = ARM64_WORD_BYTES to u64
+    var out: [ws.len * wb]byte = []
+    var i: u64 = 0
+    loop {
+        if i >= ws.len { break }
+        var w = ws[i]
+        var bo = i * wb
+        out[bo] = (w & ARM64_BYTE_MASK) to byte
+        out[bo + 1] = ((w >> ((1 to u32) * ARM64_BITS_PER_BYTE)) & ARM64_BYTE_MASK) to byte
+        out[bo + 2] = ((w >> ((2 to u32) * ARM64_BITS_PER_BYTE)) & ARM64_BYTE_MASK) to byte
+        out[bo + 3] = ((w >> ((3 to u32) * ARM64_BITS_PER_BYTE)) & ARM64_BYTE_MASK) to byte
+        i++
+    }
+    out
+}
+
+pub fn fold_encoded_func(acc: ModuleText, ef: EncodedFunc): ModuleText | error {
     var sym = Symbol { name = ef.symbol; defined = true; sect = 1 to u8; offset = acc.text_off; local = false }
-    var text = append_words_le(acc.text, ef.words)
+    match acc.text_sect.append(words_to_bytes_le(ef.words)) { u64 => { }; error as e => return e }
     var relocs = rebase_relocs(acc.relocs, ef.relocs, acc.text_off)
     var syms = [..acc.syms, sym]
     var text_off = acc.text_off + ((ef.words.len to u32) * ARM64_WORD_BYTES)
-    ModuleText { text = text; relocs = relocs; syms = syms; text_off = text_off }
+    ModuleText { text_sect = acc.text_sect; relocs = relocs; syms = syms; text_off = text_off }
 }
 
-fn encode_functions(abi: AbiDescriptor, funcs: []MFunc): ModuleText | error {
-    var acc = empty_module_text()
+fn encode_functions(abi: AbiDescriptor, funcs: []MFunc, text_sect: SectionBuf): ModuleText | error {
+    var acc = empty_module_text(text_sect)
     var i: u64 = 0
     loop {
         if i >= funcs.len { break }
@@ -1406,17 +1412,19 @@ fn rodata_relocs_arm64(rs: []lir::LDataReloc): []Reloc {
     out
 }
 
-pub fn encode_module(abi: AbiDescriptor, m: MModule, secbuf: RodataSink): EncodedModule | error {
+pub fn encode_module(abi: AbiDescriptor, m: MModule, secbuf: RodataSink, text_sect: SectionBuf): EncodedModule | error {
     if m.globals.len > (0 to u64) { return honest_globals() }
-    var mt = match encode_functions(abi, m.funcs) { ModuleText as x => x; error as e => return e }
+    var mt = match encode_functions(abi, m.funcs, text_sect) { ModuleText as x => x; error as e => return e }
     finish_encoded_module(mt, m.rodata, m.globals, secbuf)
 }
 
 pub fn finish_encoded_module(mt: ModuleText, rodata: []lir::LRodata, globals: []lir::LGlobal, secbuf: RodataSink): EncodedModule | error {
     if globals.len > (0 to u64) { return honest_globals() }
+    match mt.text_sect.finish_writing() { error as e => return e; null => { } }
+    var textblob = match mt.text_sect.read_all() { []byte as b => b; error as e => return e }
     var rod = match encode_rodata(rodata, secbuf) { ModuleRodata as x => x; error as e => return e }
     var defined = [..rod.syms, ..mt.syms]
     var undef = collect_undefined(defined, mt.relocs)
     var symbols = [..defined, ..undef]
-    EncodedModule { text = mt.text; rodata = rod.bytes; symbols = symbols; relocs = [..mt.relocs, ..rodata_relocs_arm64(rod.relocs)] }
+    EncodedModule { text = textblob; rodata = rod.bytes; symbols = symbols; relocs = [..mt.relocs, ..rodata_relocs_arm64(rod.relocs)] }
 }

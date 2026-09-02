@@ -1116,9 +1116,12 @@ static unsigned long long tk_obs_miss[5], tk_obs_miss_big[5];
 static tk_obs_site tk_obs_mstr[TK_OBS_CAP];
 static unsigned long long tk_obs_mstr_bytes = 0, tk_obs_mstr_count = 0;
 static void tk_obs_add(tk_obs_site *tab, void *ra, size_t n);   // fwd — defined just below
+static void tk_obs_dump(void);
+static unsigned long long tk_obs_mstr_next_dump = 512ull * 1024 * 1024;
 static void tk_obs_mstr_note(size_t n, void *ra) {
     tk_obs_mstr_bytes += n; tk_obs_mstr_count += 1;
     tk_obs_add(tk_obs_mstr, ra, n);
+    if (tk_obs_mstr_bytes > tk_obs_mstr_next_dump) { tk_obs_mstr_next_dump += 512ull * 1024 * 1024; tk_obs_dump(); }
 }
 static unsigned long long tk_obs_root_bytes = 0, tk_obs_scoped_bytes = 0;
 static unsigned long long tk_obs_drop_bytes = 0;     // bytes reclaimed by tk_region_drop (chunk `used` sums)

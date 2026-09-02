@@ -927,14 +927,14 @@ pub fn encode_func_x86(abi: AbiDescriptor, f: MFuncX86): EncodedFuncX86 | error 
 }
 
 pub type ModuleTextX86 = struct {
-    text: []byte
+    text_sect: SectionBuf
     relocs: []RelocX86
     syms: []Symbol
     text_off: u32
 }
 
-pub fn empty_module_text_x86(): ModuleTextX86 {
-    ModuleTextX86 { text = []; relocs = []; syms = []; text_off = 0 to u32 }
+pub fn empty_module_text_x86(text_sect: SectionBuf): ModuleTextX86 {
+    ModuleTextX86 { text_sect = text_sect; relocs = []; syms = []; text_off = 0 to u32 }
 }
 
 fn rebase_relocs_x86(acc: []RelocX86, relocs: []RelocX86, base_off: u32): []RelocX86 {
@@ -954,17 +954,17 @@ fn fold_func_into_text_x86(abi: AbiDescriptor, acc: ModuleTextX86, f: MFuncX86):
     fold_encoded_func_x86(acc, ef)
 }
 
-pub fn fold_encoded_func_x86(acc: ModuleTextX86, ef: EncodedFuncX86): ModuleTextX86 {
+pub fn fold_encoded_func_x86(acc: ModuleTextX86, ef: EncodedFuncX86): ModuleTextX86 | error {
     var sym = Symbol { name = ef.symbol; defined = true; sect = 1 to u8; offset = acc.text_off; local = false }
-    var text = append_bytes(acc.text, ef.bytes)
+    match acc.text_sect.append(ef.bytes) { u64 => { }; error as e => return e }
     var relocs = rebase_relocs_x86(acc.relocs, ef.relocs, acc.text_off)
     var syms = [..acc.syms, sym]
     var text_off = acc.text_off + (ef.bytes.len to u32)
-    ModuleTextX86 { text = text; relocs = relocs; syms = syms; text_off = text_off }
+    ModuleTextX86 { text_sect = acc.text_sect; relocs = relocs; syms = syms; text_off = text_off }
 }
 
-fn encode_functions_x86(abi: AbiDescriptor, funcs: []MFuncX86): ModuleTextX86 | error {
-    var acc = empty_module_text_x86()
+fn encode_functions_x86(abi: AbiDescriptor, funcs: []MFuncX86, text_sect: SectionBuf): ModuleTextX86 | error {
+    var acc = empty_module_text_x86(text_sect)
     var i: u64 = 0
     loop {
         if i >= funcs.len { break }
@@ -1012,17 +1012,19 @@ fn append_relocs_x86(a: []RelocX86, b: []RelocX86): []RelocX86 {
     out
 }
 
-pub fn encode_module_x86(abi: AbiDescriptor, m: MModuleX86, secbuf: RodataSink): EncodedModuleX86 | error {
+pub fn encode_module_x86(abi: AbiDescriptor, m: MModuleX86, secbuf: RodataSink, text_sect: SectionBuf): EncodedModuleX86 | error {
     if m.globals.len > (0 to u64) { return honest_globals_x86() }
-    var mt = match encode_functions_x86(abi, m.funcs) { ModuleTextX86 as x => x; error as e => return e }
+    var mt = match encode_functions_x86(abi, m.funcs, text_sect) { ModuleTextX86 as x => x; error as e => return e }
     finish_encoded_module_x86(mt, m.rodata, m.globals, secbuf)
 }
 
 pub fn finish_encoded_module_x86(mt: ModuleTextX86, rodata: []lir::LRodata, globals: []lir::LGlobal, secbuf: RodataSink): EncodedModuleX86 | error {
     if globals.len > (0 to u64) { return honest_globals_x86() }
+    match mt.text_sect.finish_writing() { error as e => return e; null => { } }
+    var textblob = match mt.text_sect.read_all() { []byte as b => b; error as e => return e }
     var rod = match encode_rodata(rodata, secbuf) { ModuleRodata as x => x; error as e => return e }
     var defined = concat_symbols(rod.syms, mt.syms)
     var undef = collect_undefined_x86(defined, mt.relocs)
     var symbols = concat_symbols(defined, undef)
-    EncodedModuleX86 { text = mt.text; rodata = rod.bytes; symbols = symbols; relocs = append_relocs_x86(mt.relocs, rodata_relocs_x86(rod.relocs)) }
+    EncodedModuleX86 { text = textblob; rodata = rod.bytes; symbols = symbols; relocs = append_relocs_x86(mt.relocs, rodata_relocs_x86(rod.relocs)) }
 }
