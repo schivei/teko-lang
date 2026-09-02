@@ -1,79 +1,122 @@
-# Plano — emit native com saída-direta-em-disco (streaming-com-passada-de-montagem) (0.3.1)
+# Desenho — emit native WRITE-THROUGH (não aloca nada; um-arquivo-por-seção; offsets = math) (0.3.1)
 
-> **Papel:** arquiteto (SÓ design/levantamento; nenhuma linha de produto tocada). Base:
-> `origin/fix/retirement` HEAD `90bcc4f1` (D208 landado). Branch `arch/emit-native-streaming`.
-> Recon 100% ESTÁTICO (nenhum build-probe — o verificador builda à parte).
+> **Papel:** arquiteto (SÓ design; nenhuma linha de produto tocada). Base: `origin/fix/retirement`.
+> Branch `arch/emit-native-streaming`. **Desenho WHOLESALE (uma unidade), não ladder de crumbs** — pra
+> um implementer Opus executar numa passada, com a metodologia do expurgo (§7).
 >
-> **Reframe (D208, dono 2026-09-01):** o OOM native (~11,5 GB, VmHWM ~12,1 GB, exit 137) NÃO é
-> problema de container. É que o **emit native ACUMULA as seções do `.o` inteiras em RAM** pra montar
-> o binário no fim — nunca recebeu a campanha de I/O-STREAMING (D 2026-08-19), a mesma que fez a rota C
-> parar de montar o `teko.c` de 22 MB em RAM e **gravar direto em disco** por chunks ≤1024 B. O fix é
-> **NÃO SEGURAR A MONTANHA — gravar conforme produz.** O container (Segmented/Paged/chunked/geométrico —
-> D207) fica só como referência residual (§4-M2).
+> **PRINCÍPIO ÚNICO (dono, LEI):** **write-direct = NÃO ALOCA NADA.** Igual ao codegen C: o stream direto
+> pra disco não *otimizou* o acumulador, **ELIMINOU** — não há mais o que crescer/copiar/vazar. O
+> "copy-grow da lista de metadado" (os 13,5 GB medidos no C1) **NÃO é um eixo rival** do streaming — é a
+> MESMA cura: se escreve direto, não acumula, e a lista simplesmente DEIXA DE EXISTIR. Um princípio só:
+> **não alocar / escrever direto.** O container chunked/`Segmented` está **DESCARTADO** (não é mais o
+> caminho) — a cura é as 4 regras abaixo, não um container novo.
 >
-> **Vocabulário (correção do dono):** "streaming" AQUI = saída-direta-em-disco por chunk (D 2026-08-19),
-> NÃO "acumulador de tamanho desconhecido".
+> **CONTINUA do C1 (seed), NÃO reverte.** O C1 (rodata já grava os BYTES direto na section) é o começo
+> certo — o SEED. Falta o RESTO (a lista de metadado da rodata que ainda copy-grow, o LIR, o LEnv, as
+> demais seções, a montagem do `.o`). Este doc descreve a conversão INTEIRA.
 >
-> **Gate (D206):** `pico_native ≤ pico_C × 1.10`. Alvo/marco da campanha `< 2 GB` (D203). Fixpoint native
-> = `gen2.o == gen3.o` byte-idêntico (D203/D205).
+> **Endgame:** gen2-native COMPLETA → `gen2==gen3` native (fixpoint) → `teko.c` APOSENTA → reseed muda pra
+> objeto native → sweep da emissão C. Região=param (D130), ZERO C (D148).
 
 ---
 
-## 1. O que a rota C já faz (o modelo a espelhar) — e o que o native faz de errado
+## 1. As 4 regras da arquitetura (dono — governam TODO o desenho)
 
-**Rota C (CERTA — streaming):** `codegen.tks` recebe `buf: teko::io::FileStream` aberto sobre o path de
-saída (`tk_emit_c_file(prog, out_path, meta)` — `project.tks:2458`) e emite tudo com `buf.write_byte(…)`/
-`buf.write(…)` DIRETO no stream (`cb_i64`, `cb_cstr_escaped`, `emit_type`, … — `codegen.tks:60-410`+).
-Nada acumula: o `teko.c` de 22 MB nunca existe inteiro em RAM. `FileStream` já corta em chunks ≤`CHUNK`
-(1024 B) sobre syscalls, ZERO `teko_rt` (`io/file_stream.tks`).
-
-**Rota native (ERRADA — acumula):** três camadas montam o `.o` inteiro em RAM antes do único write:
-
-1. **LOWER — `intern_rodata` (`lir/lower.tks:5223`)** guarda cada string interna num `LRodata{bytes}` e
-   faz `[..ctx.rodata, entry]` (copy-grow O(n²): cada append recopia a lista TODA **incluindo os bytes**,
-   e cada cópia intermediária VAZA sob reclaim-0%). É o hog #1 — o prelúdio inteiro é lowerizado até pra
-   um `main` mínimo (milhares de strings) → **os ~11,5 GB são a recópia O(n²) dos bytes**, não o tamanho
-   final do rodata.
-2. **ENCODE — `text: []byte`** montado por `append_bytes` (`[..buf,b]`) inst-a-inst, func-a-func, módulo
-   (`encode_x86_64.tks:35,835,868,+`; `encode_arm64.tks:57,+`). Latente no reprodutor (`.o` minúsculo),
-   HOT no self-emit (o `.text` do compilador é MB).
-3. **EMIT/MONTAGEM — `emit_elf_object` (`objfile_elf.tks:698`)** constrói o `.o` inteiro num único
-   `var b: []byte = []` por `append_bytes`/`emit_*` copy-grow, e `finish_native_object`
-   (`project.tks:2199`) faz `write_file_bytes(objp, obj)` de UM buffer materializado inteiro.
-
-**Achado que habilita o fix (barato):** `emit_elf_object` **já roda `compute_elf_layout` PRIMEIRO**
-(`objfile_elf.tks:711`) — todos os offsets/tamanhos das seções são conhecidos ANTES de escrever o corpo.
-O layout up-front já existe → a montagem já é "calcula tudo, depois escreve em ordem", que é exatamente a
-forma de uma **passada de montagem streaming**. E o `elf_partition_data_rel_ro` (`:686`) opera sobre
-**metadado** (`symbols` + offsets de reloc); só `elf_build_partition_blob` (`:628`) toca bytes de rodata —
-via `elf_append_byte_range(start,end)`, que sob streaming vira **seek-read** do buffer-de-seção.
+1. **N É CONHECIDO — não acumular pra descobrir.** Se o emit sabe O QUE grava e a ORDEM, sabe EXATAMENTE
+   quantos itens. Se algum ponto não sabe N, o defeito está num estágio ANTERIOR da pipeline → **conserta o
+   upstream pra tornar N conhecido**, NÃO contorna com acumulador/chunked.
+2. **ANOTA O OFFSET NA PRÓPRIA ESTRUTURA ITERADA, IN-PLACE.** Ao gravar, itera a estrutura de entrada que
+   JÁ existe e grava no MESMO item (`estrutura[i].offset = onde_gravou`, index-assign). NÃO se constrói uma
+   segunda lista de metadado que cresce. NO-PUSHES: index-assign, nunca `[..lista,x]`.
+3. **OFFSETS = MATEMÁTICA PURA.** Com cada endereço registrado, todo cross-reference do `.o` (header,
+   section offsets, symtab, relocs) é aritmética sobre tamanhos conhecidos. Zero acumulação pra calcular.
+4. **UM ARQUIVO POR SEÇÃO DO `.o`, JUNTA NO FIM.** Cada seção (text/rodata/data/symtab/strtab/relocs/DWARF)
+   grava DIRETO no seu próprio arquivo-de-seção conforme produzida. No fim, todos os tamanhos são conhecidos
+   → os offsets do header são math → **concatena os arquivos-de-seção no `.o` final**. Nenhum `[]byte` do
+   `.o` inteiro em RAM; a passada de montagem = juntar arquivos + calcular header.
 
 ---
 
-## 2. O modelo: streaming-com-passada-de-montagem
+## 2. A arquitetura resultante (3 movimentos)
 
-Duas mecânicas, aplicadas por natureza do dado (§4 classifica cada acumulador):
+O pipeline HOJE materializa o programa inteiro em cada estágio: `lower_program → LModule` (funcs+rodata+
+globals+layouts, TODOS em RAM, `lower.tks:6550`); `encode_module → EncodedModule` (text/rodata `[]byte`,
+`encode_x86_64.tks:1015`); `emit_*_object → []byte` (o `.o` inteiro); `finish_native_object(obj:[]byte) →
+write_file_bytes` (`project.tks:2199`). Cada `[..lista,x]`/`append_bytes`/`var b:[]byte=[]` é acumulação.
 
-- **M1 — SAÍDA-DIRETA-EM-DISCO** para o **conteúdo de seção do `.o`** (bytes de `.text`/`.rodata`/DWARF) e
-  para o **`.o` final**. Grava conforme produz; em RAM fica só **contador de tamanho** por seção.
-- **M2 — NÃO-COPY-GROW EM RAM** para o **IR e metadado que fases posteriores CONSOMEM** (não dá pra
-  jogar em disco e descartar: LIR `LFunc/LInst/LBlock`, `LEnv` binds, tabela de símbolos, relocs, strtab).
-  Mecanismo D207 (o container que D208 preserva como residual): **array-fixo `[n]T`** onde `n` é contável
-  numa 1ª passada barata (a maioria, no tempo de montagem os counts JÁ são conhecidos); **chunked
-  `Segmented<T>`** (nunca recopia elemento) só no residual genuinamente streaming (`n` irredutível até o
-  fim). **PROIBIDO geométrico** (D207).
+O write-through reorganiza em 3 movimentos:
 
-### 2.1 O buffer-de-seção-em-disco (scaffold M1)
+### M-A — UM ARQUIVO POR SEÇÃO (`SectionBuf`, regra 4)
+O `SectionBuf` do C0, **generalizado pra TODAS as seções** (não só rodata): `text.sect`, `rodata.sect`,
+`data.sect`, `symtab.meta`, `strtab.sect`, `relocs.meta`, `dwarf_{abbrev,info,line}.sect`. Cada byte de
+conteúdo escreve DIRETO no arquivo da sua seção conforme produzido — **qualquer tamanho, mesmo 1 bit** (a
+rodata de 165 KB inclusa; não se pula streaming por ser pequena). Em RAM: só o **contador de tamanho** por
+seção (o `.len` do `SectionBuf`). (Contrato do `SectionBuf` no §4.)
 
-Um wrapper fino sobre `FileStream` (reuso puro do D 2026-08-19 — ZERO C, D148) que representa UMA seção
-do `.o` como um arquivo temporário append-only com seek-read para a passada de montagem. Contrato:
+### M-B — PIPELINE PER-FUNÇÃO (mata a acumulação module-wide de LIR: funcs/insts/blocks)
+O driver itera as funções do programa (N_funcs é CONHECIDO — a `TProgram` lista todas as decls +
+instâncias monomorfizadas; regra 1). Para CADA função: `lower → isel → regalloc → encode` num **buffer
+POR-FUNÇÃO limitado** (reusável entre funções; patch de branch in-place DENTRO da função), depois
+`text.sect.append_prefix(fnbuf, fnlen)`; registra o **offset do símbolo da função = tamanho corrente de
+text.sect** (math, regra 3); rebase + write-through das relocs da função pra `relocs.meta`. A LIR daquela
+função é DESCARTADA antes da próxima. **O módulo NUNCA segura todas as funções em RAM** — some o
+`add_func`/`add_inst`/`add_block` program-wide. (Regalloc precisa da função inteira p/ liveness — OK, é
+per-função, limitado à MAIOR função, não ao módulo.)
+
+### M-C — MONTAGEM POR CONCATENAÇÃO + MATH (mata o `var b:[]byte=[]` do `.o` inteiro)
+Fechadas todas as section-files, os tamanhos são conhecidos → o layout (offsets de seção no header,
+`sh_offset`/`sh_size`/load-commands/COFF-header, `sh_info`=1º símbolo global) é **math puro** (regra 3;
+os 3 formatos já têm `compute_*_layout` up-front — `elf:711`/`macho:495`/`coff:358`). A passada de
+montagem abre o `.o` (`open_write(objp)`), escreve o **header** (buffer fixo pequeno, do layout), e
+**concatena** cada section-file em ordem via `SectionBuf.copy_into(o)` (chunked ≤1024, seek-read→write),
+com `copy_range_into` onde o rodata-partition reordena spans. Symtab/relocs: lidas de `symtab.meta`/
+`relocs.meta` (§5). NENHUM `[]byte` do `.o` em RAM.
+
+**O funil compartilhado (keystone dos 4 formatos):** `finish_native_object` (`project.tks:2199`) e
+`finish_static_archive` (`:2289`) deixam de receber `obj:[]byte`; ABREM o FileStream de saída e o passam
+aos `write_{elf,macho,coff}_object(out, …)` / `write_static_archive_{gnu,bsd,coff}(out, …)`. Os 4 formatos
+(ELF/Mach-O/COFF/ar) sob o MESMO funil — monólito cross-emit, nenhum deferido (lei "emite tudo, todos os
+alvos").
+
+---
+
+## 3. O caso da rodata (aplicação canônica das 4 regras — mata os 13,5 GB, CONTINUA do C1)
+
+**O defeito atual:** `intern_rodata` (`lower.tks:5225`) faz `[..ctx.rodata, entry]` — uma SEGUNDA lista
+que cresce só pra guardar {symbol, bytes, relocs} de cada string, e serve pra (a) numerar `.LstrN`
+(`rodata_symbol(ctx.rodata.len)`) e (b) o encode calcular offsets iterando-a. O C1 já mandou os BYTES pra
+`rodata.sect`; a LISTA (24000×48 B recopiada N vezes, vazando = 13,8 GB) ficou. **Aplicando as regras:**
+
+- **Regra 4:** os bytes já vão direto pra `rodata.sect` (C1) — mantém. O `offset` de cada string = tamanho
+  de `rodata.sect` ANTES do append (math, regra 3), conhecido no ato do intern.
+- **Regra 2 (anota in-place, sem 2ª lista):** no ato do intern, o símbolo `.LstrN` e seu `offset`/`len`
+  são um SÍMBOLO do `.o` → escreve-se a entrada de símbolo DIRETO em `symtab.meta` (write-through, regra 4),
+  NÃO numa lista de rodata em RAM. A "lista de metadado" DEIXA DE EXISTIR — o que sobra é: (i) `rodata.sect`
+  (conteúdo, já C1); (ii) uma entrada em `symtab.meta` por `.LstrN` (write-through). Zero acumulação.
+- **Regra 1 (N conhecido — numeração `.LstrN`):** o `N` de `rodata_symbol` (o índice sequencial) é um
+  **contador `u64` no `LowerCtx`** (`ctx.rodata_count`, incrementado no intern), NÃO `ctx.rodata.len` de
+  uma lista. Um contador não acumula. Se algum consumidor precisa "achar a rodata de nome X"
+  (`find_const_rodata:778` — dedup de const), isso é LOOKUP: hoje varre a lista; passa a um `symtab.meta`
+  já-suficiente OU (se o dedup for hot) um índice pequeno pré-dimensionado pelo contável upstream — investigar
+  no scout (o `find_const_rodata` é usado só p/ const globais nomeadas, N pequeno; provável array-fixo).
+
+**Resultado:** a rodata vira 100% write-through (bytes→`rodata.sect`, símbolo→`symtab.meta`, número→
+contador). Nenhuma lista. Os 13,5 GB somem por CONSTRUÇÃO (nada a recopiar/vazar). É a continuação natural
+do C1 (que já fez os bytes) — o passo que falta é matar a lista-de-metadado via regra 2+4.
+
+---
+
+## 4. `SectionBuf` — um-arquivo-por-seção (regra 4; generaliza o C0; Teko puro, zero C)
+
+Wrapper fino sobre `FileStream` (I/O-stream D 2026-08-19; chunks ≤1024 B sobre syscalls, zero `teko_rt`).
 
 ```teko
 /**
- * A single object-file section streamed to a temp file on disk instead of accumulated in RAM: emit
- * appends section content as produced; the assembly pass seek-reads byte ranges back. Only the byte
- * count is kept live; the payload never resides in memory. Reuses the D-2026-08-19 I/O-stream
- * machinery (`FileStream`, chunks <=1024 B, over syscalls, zero `teko_rt`).
+ * One `.o` section streamed to its own temp file instead of accumulated in RAM: emit appends content as
+ * produced (any size, even one byte); the assembly pass seek-reads/concatenates it into the final `.o`.
+ * Only the running byte size stays live. Applies to EVERY section: text/rodata/data/symtab/strtab/
+ * relocs/DWARF. Reuses the D-2026-08-19 I/O machinery (FileStream, <=1024 B chunks, syscalls, zero
+ * teko_rt).
  */
 exp type SectionBuf = class {
     intern stream: teko::io::FileStream
@@ -81,399 +124,214 @@ exp type SectionBuf = class {
     intern size: u64
 
     /**
-     * Opens a fresh empty section buffer backed by a deterministic-free temp path derived from
-     * `stem` and `tag` (e.g. `<stem>.<tag>.sect`); the temp path never leaks into the emitted `.o`.
-     *
-     * @param stem the object stem (for a unique temp path)
-     * @param tag  the section tag (`text`/`rodata`/`drr`/`dwinfo`/…)
-     * @return an open, empty section buffer, or an I/O error
+     * Opens a fresh empty section buffer over a temp path derived from `stem`+`tag`; the temp path never
+     * leaks into the emitted `.o`.
+     * @param stem the object stem (unique temp path)
+     * @param tag  the section tag (text/rodata/data/symtab/strtab/rela/dwinfo/…)
+     * @return an open empty section buffer, or an I/O error
      */
     pub static fn open(stem: str, tag: str): SectionBuf | error
 
     /**
-     * Appends `data` at the tail (streamed in chunks); advances the running size. No payload copy.
-     *
+     * Appends `data` at the tail (chunked); advances the running size. No payload copy.
      * @param data the bytes to append, in emission order
-     * @return the new section size, or a write error
+     * @return the new running size, or a write error
      */
     pub fn append(data: []byte): u64 | error
 
     /**
-     * Appends the first `n` bytes of a reusable fixed buffer (partly filled), for per-instruction
-     * emit that never allocates a growing array.
-     *
+     * Appends the first `n` bytes of a reusable fixed buffer (partly filled) — per-instruction/word emit
+     * that never allocates a growing array.
      * @param data the reusable buffer
-     * @param n    the count of leading bytes to append
-     * @return the new section size, or a write error
+     * @param n    the count of leading bytes
+     * @return the new running size, or a write error
      */
     pub fn append_prefix(data: []byte, n: u64): u64 | error
 
     /**
-     * The section byte length produced so far (the only live-RAM datum).
-     *
+     * The section byte length produced so far (the only live-RAM datum for content) — the input to
+     * every offset computation (rule 3).
      * @return the running size in bytes
      */
     pub fn len(): u64 { self.size }
 
     /**
-     * Copies the byte range `[start, end)` of this section into `out` (the assembly-pass sink),
-     * chunked <=1024 B via seek-read; used by rodata partitioning to reorder spans without holding
-     * the section in RAM. Zero net allocation beyond one reusable <=1024 B scratch.
-     *
-     * @param out   the destination stream (the final `.o`)
-     * @param start the inclusive start offset within this section
-     * @param end   the exclusive end offset
-     * @return the bytes copied, or an I/O error
-     */
-    pub fn copy_range_into(out: teko::io::FileStream, start: u64, end: u64): u64 | error
-
-    /**
-     * Streams the whole section into `out` in order (the common case: no reordering), chunked.
-     *
+     * Concatenates the whole section into `out` in order (assembly pass), chunked.
      * @param out the destination stream (the final `.o`)
      * @return the bytes copied, or an I/O error
      */
     pub fn copy_into(out: teko::io::FileStream): u64 | error
 
     /**
-     * Closes and removes the temp file; called once the `.o` is fully assembled.
-     *
+     * Copies byte range `[start,end)` into `out` via seek-read (rodata partition reorders spans without
+     * holding the section in RAM).
+     * @param out   the destination stream
+     * @param start inclusive start offset
+     * @param end   exclusive end offset
+     * @return the bytes copied, or an I/O error
+     */
+    pub fn copy_range_into(out: teko::io::FileStream, start: u64, end: u64): u64 | error
+
+    /**
+     * Reopens the section for record read-back (assembly pass reads symtab.meta/relocs.meta records).
+     * @return null on success, or an I/O error
+     */
+    pub fn rewind_for_read(): error | null
+
+    /**
+     * Reads the next `n` bytes into `into` (a fixed record); 0 at EOF.
+     * @param into the fixed destination buffer
+     * @param n    the record size
+     * @return bytes read, or an I/O error
+     */
+    pub fn read_record(into: []byte, n: u64): u64 | error
+
+    /**
+     * Closes and removes the temp file, once the `.o` is assembled.
      * @return null on success, or an I/O error
      */
     pub fn dispose(): error | null
 }
 ```
 
-Todas as primitivas já existem: `open_write`/`open_append` + `stream_write`/`stream_write_prefix` +
-`stream_seek(Whence)` + `stream_size` + `stream_read` + `stream_close` (`io/file_stream.tks:272-520`),
-mais `gensym` pra path único (`file_stream.tks:124`). `copy_range_into` = `stream_seek(start)` no arquivo
-da seção + laço de `stream_read(scratch≤1024)`→`stream_write(out)` até `end`. O `scratch` é UM buffer fixo
-reusável (natureza BUFFER-DE-SAÍDA, 4-naturezas).
-
-### 2.2 As três fases
-
-1. **PRODUZIR (1ª passada, streaming):** `lower → isel → regalloc → encode`. Conforme cada byte de
-   `.rodata`/`.text` nasce, `SectionBuf.append` grava no arquivo-de-seção. Em RAM sobra: **contadores**
-   de tamanho por seção; **tabela de símbolos** (nome→offset+len+sect — metadado, O(#símbolos)); **relocs**
-   (O(#referências)); **índice do rodata** (símbolo→offset — pra o partition/symtab).
-2. **LAYOUT (metadado puro):** `compute_elf_layout` a partir dos contadores de seção (já conhecidos) —
-   **inalterado**, é aritmética de offsets. Idem `elf_partition_data_rel_ro` (opera sobre símbolos+relocs).
-3. **MONTAR (2ª passada, streaming):** abre o `.o` como `FileStream` (`open_write`); escreve o header ELF
-   (do layout, buffer fixo pequeno); `text_secbuf.copy_into(o)`; pad; para rodata, se houver partition,
-   `rodata_secbuf.copy_range_into(o, e.start, e.end)` por entrada NA ORDEM da partição (senão `copy_into`);
-   pad; escreve symtab/strtab/shstrtab/relas/shdrs (metadado de RAM, pequeno). `dispose()` nos secbufs.
-
-O `.o` sai **byte-idêntico** ao que `emit_elf_object` produz hoje — porque o algoritmo de layout, a ordem
-de seções e o conteúdo são os mesmos; muda só ONDE os bytes moram (disco vs RAM) e QUANDO são escritos.
-Isso é o que garante o `gen2.o==gen3.o` de graça (§6).
+Primitivas já existem (`io/file_stream.tks:272-520`): `open_write`/`stream_write`/`stream_write_prefix`/
+`stream_seek`/`stream_size`/`stream_read`/`stream_close` + `gensym`. Buffer de coalescência FIXO ≤1024 por
+`SectionBuf` amortiza appends pequenos (natureza BUFFER-DE-SAÍDA), sem acumular.
 
 ---
 
-## 3. Por que M1 não é one-pass puro (a passada de montagem)
+## 5. Metadado que persiste até a montagem (símbolos, relocs) — write-through + array-fixo, nunca copy-grow
 
-As referências-cruzadas do header ELF/Mach-O/COFF (offsets de seção em `shdr`, `sh_offset`/`sh_size`,
-índices de símbolo nas relas) precisam dos **tamanhos finais de todas as seções** antes de escrever o
-header. Como os tamanhos só fecham ao fim da 1ª passada, é **streaming-COM-passada-de-montagem**: 1ª
-passada grava conteúdo (streaming) + coleta contadores/metadado; 2ª passada escreve header+tabelas lendo
-os buffers-de-seção-em-disco. Não se recorre a `stream_seek` de patch-para-trás no `.o` final (o layout
-up-front torna a escrita em-ordem suficiente); o `seek` só é usado para **ler** spans dos secbufs no
-reordenamento do rodata-partition.
+Alguns dados precisam sobreviver da produção até a passada de montagem (o header/symtab/relocs referenciam
+tamanhos e índices finais). REGRA: write-through na produção; na montagem, lê de volta pra um array-fixo
+**pré-dimensionado pelo N conhecido** (regra 1) — nunca `[..lista,x]`.
 
----
+- **Símbolos** (`.LstrN` locais + funções + globais + undefined): cada símbolo definido → uma entrada
+  fixa `{name_off, value, size, sect, bind}` write-through em `symtab.meta` no ato da definição (regra 2/4).
+  `name` → `strtab.sect` (write-through; `name_off` = tamanho corrente de strtab = math). Na montagem: N_sym
+  = tamanho(`symtab.meta`)/record_size (conhecido) → lê pra `[N_sym]SymMeta`, **ordena locais-antes-de-
+  globais** (exigência ELF; ordenação de N pequeno, array pré-dimensionado, O(N log N), NÃO copy-grow),
+  emite o symtab no formato do alvo (Elf64_Sym 24 B / Mach-O nlist 16 B / COFF 18 B) por index-assign, e
+  `sh_info` = 1º índice global (math).
+- **Relocs** `{sect, offset, sym_ref, kind, addend}`: cada reloc → write-through em `relocs.meta` no ato
+  da emissão da instrução/dado. Na montagem: N_rel conhecido → `[N_rel]RelMeta`, resolve `symidx` (lookup na
+  tabela de símbolos ordenada — busca, não acumulação), emite as relas por index-assign.
 
-## 4. Censo dos acumuladores do emit native — classificado M1/M2 + plano por-um
-
-Reaproveita o censo de `plano-memoria-native-0.3.1.md` (SUPERSEDIDO no enquadramento; o censo de sítios
-segue válido). Coluna "Mec." = M1 (disco) / M2-fix (array-fixo) / M2-seg (chunked).
-
-| # | Acumulador | arquivo:linha | Fase | Mec. | Plano por-um |
-|---|---|---|---|---|---|
-| 1 | `intern_rodata` `[..ctx.rodata, entry]` (+`str_to_bytes` bytes) | `lir/lower.tks:5223-5227` | LOWER | **M1** | bytes → `rodata` SectionBuf conforme intern; `LRodata` perde `bytes`, ganha `offset`/`len`. HOG #1 (11,5 GB). |
-| 2 | índice de rodata (a lista de metadado que sobra do #1) | idem #1 | LOWER | **M2-seg** | `n` de strings irredutível até o fim → `Segmented<LRodataMeta>` (nunca recopia); ou índice-em-disco. Residual pequeno que D208 preserva. |
-| 3 | merge rodata `add_rodata`/`with_rodata` | `lir/lir.tks:247,254`; `lower.tks:6565,6984` | LOWER | **M1** | unifica com #1 (mesmo SectionBuf + índice). |
-| 4 | `add_func` (+ lambdas/thunks liftados) | `lir/lir.tks:235`; `minst.tks:465`; `minst_x86.tks:385` | LOWER/ISEL | **M2-seg** | consumido por isel → fica em RAM; funcs liftadas dinâmicas, `n` irredutível → `Segmented<LFunc>`. |
-| 5 | `add_inst`/`add_block` | `lir/lir.tks:207,265`; `minst.tks:414,432,436`; `minst_x86.tks:334,352,356` | LOWER/ISEL | **M2-seg** | idem #4 (`Segmented<LInst>`/`<LBlock>`). |
-| 6 | `LEnv` binds (7 arrays paralelos) | `lir/lower.tks:20-24,33-63` | LOWER | **M2-seg** | 1 `Segmented<LBinding>` no lugar dos 7 `[..]`. |
-| 7 | encode byte-emit `text`/`push_byte`/`emit_u32_le` | `encode_x86_64.tks:35,835,868,+`; `encode_arm64.tks:57,+` | ENCODE | **M1** | por-função: buffer FIXO reusável (patch de branch in-place) → `append_prefix` no `text` SectionBuf + `text_off` corrente + relocs rebased. |
-| 8 | **FUNIL compartilhado** `finish_native_object(obj:[]byte)`→`write_file_bytes` + `finish_static_archive(obj:[]byte)`→`write_file_bytes`×2+`wrap_archive_bytes` | `build/project.tks:2199,2289,2281` | MONTAGEM | **M1** | KEYSTONE: recebe/abre o FileStream de saída; dispatch dos 3 emitters vira `write_*_object(out,…)`. Remove os `write_file_bytes(obj)`. |
-| 9 | `emit_elf_object` `var b: []byte = []` (o `.o` inteiro; layout up-front :711) + DWARF body | `objfile_elf.tks:698-747` | MONTAGEM | **M1** | passada de montagem: header + `copy_into` das seções + metadado direto no FileStream. |
-| 10 | `emit_macho` `var b: []byte = []` (layout up-front :495) | `objfile_macho.tks:492-…` | MONTAGEM | **M1** | idem #9 (header/segment/dwarf_segment/build_version + `copy_into`). |
-| 11 | `emit_coff` `var b: []byte = []` (layout up-front :358) | `objfile_coff.tks:350-…` | MONTAGEM | **M1** | idem #9 (header/sections + patched_text/rodata `copy_into` + relocs). |
-| 12 | os 3 `ar` `var b: []byte = []` (elf/macho/coff) | `objfile_ar.tks:130,136,161`; `objfile_ar_macho.tks:104,162,186`; `objfile_ar_coff.tks:134,148` | MONTAGEM | **M1**+**M2-fix** | `emit_static_archive_*` escrevem no `.a`/`.lib` FileStream; membro `.o` vem do `.o` já em disco via `copy_into`. |
-| 13 | headers/tabelas ELF (`syms`/`relas`/`strtab`/`shdrs`) + `elf_collect_const_entries` `[..starts,e]` | `objfile_elf.tks:118,232,462,473,559-565`; macho/coff equiv. | MONTAGEM | **M2-fix** | counts conhecidos na montagem → `[n]T`+índice (hoje `[..out,x]`), todos os formatos. |
-| 14 | regalloc RPO/eventos/intervalos/pins/subst | `backend/regalloc.tks:61-1061`; `regalloc_x86.tks:86-397` | RA | **M2-fix** | derivados de stream de tamanho conhecido → array-fixo/FILTRO+watermark. |
-| 15 | `copy_*_to_current_region`/`commit_rodata_delta` | `build/project.tks:1706-1830,1974-2018` | BUILD | **M2-fix** | copia array EXISTENTE (`.len` conhecido) → `[src.len]T`+índice. |
-| 16 | `str_to_bytes` `[..out, s[i]]` (já ARRAY-FIXO no tip) | `lir/lower.tks:5209-5217` | LOWER | — | JÁ convertido (`[s.len]byte`+índice, `lower.tks:5209`); verify-only. |
-
-**Cauda contável (todos M2-fix, array-fixo — do censo anterior §1):** `lower.tks:100,602,657,675,681,1459,
-1727,2216,2869-2874,3173-3553,5290,5301,5490-5494,6519-7092`; `lower_const.tks:31-637`; `frame_escape.tks:20,
-145`; `isel_x86_64.tks:582,664`; `isel_arm64.tks:24-26,775`; `abi_*`/`objfile_ar*` insert-sorted;
-`project.tks:170,529,550,703-951,1524-1639`. `lir_print.tks:11-35` = debug `--emit-lir`, frio, deixar.
-
-**Dominância:** o gate mede o build seco de `sys_exit_group` native (dominado pelo LOWER do prelúdio) →
-**#1(+#3)** movem a agulha do gate; **#7/#8/#9** são latentes no reprodutor mas HOT no self-emit → curar
-antes do `gen2.o==gen3.o`.
+Isto é a regra 4 aplicada ao bookkeeping: o metadado é ele mesmo uma section-file write-through; o único
+momento em RAM é a leitura pra um array-fixo dimensionado pelo N-do-arquivo (contável), pra ordenar/resolver.
 
 ---
 
-## 5. Crumb-sequence ordenada (bisectável; cada crumb baixa o ratchet; começa por `intern_rodata`)
+## 6. Censo COMPLETO — cada acumulador classificado (a)/(b)/(c) + cura pelas 4 regras
 
-Cada crumb: **Where** (sítios), **Assinatura** (shape Teko a adicionar/tocar), **Fazer**, **Fixture**,
-**Ritual** (onde o gate completo roda). Gate por crumb, SEPARADO POR ROTA (D203):
-- **Rota C:** reseed + fixpoint gen0→gen1 (`teko.c` re-emitido byte-idêntico) + ASan+UBSan (D166) + 3
-  harnesses `scripts/*_test.sh` (D185).
-- **Rota native:** `*San` NÃO se aplica (D203); prova = `.o` do fixture reproduz byte-idêntico 2× + roda
-  (exit code) sob **MEM_PARANOID**; pico do build seco native `TEKO_BACKEND=native` medido, gate `≤C+10%`.
-- **Varredura de árvore inteira** (D191): `src/`+`cases/`+`examples/`+`tklib/`+`tooling/`+raiz quando um
-  símbolo/assinatura muda.
+- **(a)** estrutura que JÁ existe → anota offset in-place (regra 2), nenhuma lista nova.
+- **(b)** `[..lista,x]` que existe só pra descobrir N → torna N conhecido upstream (regra 1) + `[N]T`+
+  index-assign; OU write-through se é bookkeeping que persiste (regra 4, §5).
+- **(c)** conteúdo de seção materializado → arquivo-por-seção (regra 4, §4).
 
-### C0 — scaffold `SectionBuf` (compila hoje, não-fiado)
-- **Where:** novo `src/backend/secbuf.tks` (§2.1). Só reusa `teko::io` (D148, zero C).
-- **Assinatura:** `exp type SectionBuf` (o contrato §2.1).
-- **Fazer:** implementar sobre `open_write`/`stream_write`/`stream_write_prefix`/`stream_seek`/
-  `stream_read`/`stream_close` + `gensym`. `copy_range_into` = seek+laço de read≤1024→write.
-- **Fixture:** nenhuma nova (self-build não exercita ainda — não escrever teste tautológico, lei de
-  testes). Módulo-folha novo, sem consumidor → NÃO exige reseed.
-- **Ritual:** build seco compila (rota C verde). Ratchet: flat (sem consumidor).
+| # | Acumulador | arquivo:linha | Classe | Cura (regra) |
+|---|---|---|---|---|
+| 1 | `intern_rodata` `[..ctx.rodata, entry]` | `lower.tks:5225` (+`ctx_with_rodata:478`, `add_rodata` `lir.tks:247`, `with_rodata:254`, merges `:6565,6984`) | **(b)** existe só p/ numerar `.LstrN`+offset | contador `u64` (N via contador, R1) + símbolo write-through em `symtab.meta` (R2/4); bytes já em `rodata.sect` (C1). §3 |
+| 2 | `find_const_rodata` varre a lista | `lower.tks:778` | (b) lookup | N pequeno (const globais) → array-fixo pré-dim. ou consulta `symtab.meta` |
+| 3 | `add_func` `[..m.funcs, f]` | `lir.tks:235` | **(b)** module-wide | pipeline PER-FUNÇÃO (M-B): N_funcs conhecido (TProgram); função lowerizada→encodada→`text.sect`→descartada. Some a lista |
+| 4 | `add_inst` `[..b.insts, inst]` | `lir.tks:207` | (b) per-função | dentro da função (M-B): insts vivem só na função corrente (buffer limitado); OU `[N_inst]` se contável do stmt. Não module-wide |
+| 5 | `add_block` `[..f.blocks, b]` (+`add_block_param:283`) | `lir.tks:265` | (b) per-função | idem #4, per-função |
+| 6 | `LEnv` 7 arrays paralelos (`lenv_bind*`) | `lower.tks:18-63` | **(b)** per-função | N_binds da função = conhecido do checker (locais/params) → `[N_binds]LBinding`+index-assign (R1/2); lookup = varredura (como hoje) |
+| 7 | `add_global`/`add_layout` | `lir.tks:243,251` | (b) | N conhecido (globais/tipos do prog) → `[N]T`+índice |
+| 8 | `str_to_bytes` `[..out, s[i]]` (JÁ array-fixo) | `lower.tks:5209` | (c) | **JÁ** `[s.len]byte`+índice — verify-only |
+| 9 | encode `text` `append_bytes`/`push_byte`/`emit_u32_le` | `encode_x86_64.tks:35,+`; `encode_arm64.tks:57,+` | **(c)** | buffer POR-FUNÇÃO (patch in-place) → `text.sect.append_prefix` (M-A/B) |
+| 10 | rodata section content | `encode_*.tks encode_rodata` | (c) | `rodata.sect` (já C1) |
+| 11 | `emit_elf_object` `var b:[]byte=[]` | `objfile_elf.tks:712` | **(c)** o `.o` inteiro | montagem por concatenação (M-C): header math + `copy_into` das sections |
+| 12 | `emit_macho` `var b:[]byte=[]` | `objfile_macho.tks:496` | (c) | idem #11 (arm64 macOS) |
+| 13 | `emit_coff` `var b:[]byte=[]` | `objfile_coff.tks:359` | (c) | idem #11 (x86_64 Windows) |
+| 14 | os 3 `ar` `var b:[]byte=[]` | `objfile_ar.tks:136,161`; `_macho:104,162,186`; `_coff:134,148` | (c) | archive escreve DIRETO no `.a`/`.lib`; membro `.o` via `copy_into` do `.o` em disco |
+| 15 | FUNIL `finish_native_object(obj:[]byte)`/`finish_static_archive` → `write_file_bytes` | `project.tks:2199,2289,2281` | **(c)** keystone | abre/recebe o FileStream; dispatch → `write_*_object(out,…)`. Remove `write_file_bytes(obj)` |
+| 16 | DWARF body (abbrev/info/line) | `objfile_elf.tks:736-747`; `dwarf.tks:53-623` | (c) | `dwarf_*.sect` write-through; montagem `copy_into` |
+| 17 | symtab/strtab/relas metadata lists (`elf_build_symbols`/`_relas`/`build_*_strtab`/`elf_collect_const_entries`) | `objfile_elf.tks:76-118,232,462,559`; macho/coff equiv. | **(b)** | write-through `symtab.meta`/`strtab.sect`/`relocs.meta` + array-fixo na montagem (§5) |
+| 18 | env-snapshots / arg-lists / layout-por-tipo (cauda) | `lower.tks:2216,2869-2874,3173-3553,6519-7092`; `lower_const.tks:31-637` | (b) | derivam de N conhecido → `[N]T`+índice (MAP/FILTRO+watermark) |
+| 19 | regalloc RPO/eventos/intervalos/pins/subst | `regalloc.tks:61-1061`; `regalloc_x86.tks:86-397` | (b) per-função | derivados de N conhecido → array-fixo/FILTRO+watermark |
+| 20 | `copy_*_to_current_region`/`commit_rodata_delta` | `project.tks:1706-1830,1974-2018` | (b/c) | copia array de `.len` conhecido → `[src.len]T`; com M-C some (a rodata já está em `rodata.sect`) |
 
-### C1 — `intern_rodata` grava bytes no `rodata` SectionBuf (HOG #1, D208)
-- **Where:** `lir/lower.tks:5209-5227` (`intern_rodata`, `str_to_bytes`, `InternedRodata`, `LRodata`);
-  `encode_*.tks` `encode_rodata` (`encode_arm64.tks:1277`, `encode_x86_64.tks` equiv.); `objfile_elf.tks`
-  partition (`:628,686`) que lê bytes de rodata.
-- **Assinatura (shape novo do metadado):**
-```teko
-/**
- * A rodata entry as metadata only: its symbol and its byte span within the streamed rodata section.
- * The bytes live on disk (the `rodata` SectionBuf), never in this record — killing the O(n^2) byte
- * recopy that the old `LRodata{bytes}` list incurred on every append.
- *
- * @see SectionBuf
- */
-exp type LRodataMeta = struct {
-    symbol: str
-    offset: u64
-    len: u64
-    relocs: []teko::lir::LReloc
-}
-```
-- **Fazer:** `intern_rodata` faz `rodata_secbuf.append(str_to_bytes(text))` e guarda `LRodataMeta{symbol,
-  offset=size_antes, len=text.len, relocs}` — SEM `[..ctx.rodata, entry]` de bytes. `encode_rodata` e o
-  partition passam a ler spans via `SectionBuf.copy_range_into`/offset+len em vez de `LRodata.bytes`. O
-  índice de metadado ainda pode crescer no C1 (vira M2-seg no C2); o ganho de C1 é matar a recópia de
-  BYTES (a montanha).
-- **Fixture:** `sys_exit_group` native (já existe, D206/Crumb 9) — o `.o` emitido reproduz byte-idêntico
-  2× (nível-fixture, D203). Adicionar `sys_write_hello` se ainda não estiver (native, exit + stdout).
-- **Ritual:** GATE COMPLETO (rota C: reseed+fixpoint+ASan+3 harnesses; native: `.o` byte-idêntico 2× +
-  build seco native mede pico, gate `≤C+10%`). **Este é o crumb que derruba os ~11,5 GB.** Ratchet: queda
-  massiva medida no build native de `sys_exit_group`.
-
-### C2 — índice de rodata → `Segmented` (dissolve o `[..]` residual, "sem lista crescente" D208)
-- **Where:** o `ctx.rodata` de `lower.tks` (agora `[]LRodataMeta`); `add_rodata`/`with_rodata`
-  (`lir.tks:247,254`; `lower.tks:6565,6984`); `ctx_with_rodata`.
-- **Assinatura:** `intern rodata: teko::backend::Segmented<LRodataMeta>` no `LowerCtx`/`LModule` (o
-  chunked D207, blessed como residual por D208; `Segmented` já esboçado em `plano-memoria-native-0.3.1.md`
-  §2 — reusar, ZERO geométrico).
-- **Fazer:** trocar `[..ctx.rodata, entry]` por `ctx.rodata.append(entry)` in-place; consumidores leem por
-  `get(i)`/`flatten()` só na fronteira (encode). Se `Segmented` ainda não existir na árvore, este crumb o
-  introduz (módulo `backend/segmented.tks`, D148).
-- **Fixture:** reusa C1 (`sys_exit_group`/`sys_write_hello`).
-- **Ritual:** GATE COMPLETO. Ratchet: queda estrita (mata o O(n²) de metadado remanescente).
-
-### C3 — LIR `add_func`/`add_inst`/`add_block` → `Segmented` (M2-seg)
-- **Where:** `lir.tks:207,235,265`; `minst.tks:414,432,436,465`; `minst_x86.tks:334,352,356,385`.
-- **Assinatura:** campos `funcs`/`insts`/`blocks` viram `Segmented<LFunc>`/`<LInst>`/`<LBlock>`;
-  `add_*` = `.append(x)` in-place.
-- **Fazer:** trocar copy-grow por append chunked; isel/regalloc/encode iteram por `len()`+`get(i)`.
-- **Fixture:** C1.
-- **Ritual:** GATE COMPLETO. Ratchet: queda (O(n²) do LOWER do prelúdio).
-
-### C4 — `LEnv` 7 arrays paralelos → 1 `Segmented<LBinding>` (M2-seg)
-- **Where:** `lower.tks:20-24,33-63`.
-- **Assinatura:** `type LBinding = struct { … }` (agrega os 7 campos hoje paralelos); `LEnv` guarda
-  `Segmented<LBinding>` (+ shadowing por índice, como hoje).
-- **Fazer:** unifica os 7 `[..]` num append de struct; lookups por varredura/índice como hoje.
-- **Fixture:** C1.
-- **Ritual:** GATE COMPLETO. Ratchet: queda.
-
-### C5 — ENCODE `.text` → `text` SectionBuf (M1, #7)
-- **Where:** `encode_x86_64.tks` (`FuncEmitX86`/`encode_func_x86:930+`, `append_enc_inst_x86`,
-  `emit_block_x86`, `ModuleTextX86`); `encode_arm64.tks` equiv.
-- **Assinatura:** o encode de função escreve num buffer FIXO reusável (natureza BUFFER-DE-SAÍDA; patch de
-  branch in-place DENTRO da função, `patch_branches_x86` inalterado); depois `text_secbuf.append_prefix
-  (fnbuf, fnlen)`; `ModuleTextX86` perde `text: []byte`, ganha `text_len: u64` + `text: SectionBuf`.
-- **Fazer:** por-função (buffer limitado ao tamanho da maior função — patch local), streama pro secbuf;
-  `text_off` corrente + relocs rebased (`rebase_relocs_x86`). Bytes do módulo nunca acumulam.
-- **Fixture:** C1 (o `.o` reproduz byte-idêntico — prova que o stream = o `[]byte` anterior).
-- **Ritual:** GATE COMPLETO. Ratchet: latente no fixture, mas prova byte-idêntico; medir no self-emit
-  quando C6 fechar.
-
-> **Fase de MONTAGEM — UM PADRÃO SÓ, não ELF-first-mirror-depois (revisão do dono).** Os 3 emitters de
-> objeto (elf/macho/coff) são PARALELOS, todos materializam `var b: []byte = []`, todos já computam o
-> layout up-front (`compute_elf_layout` :711 / `compute_macho_layout` :495 / `compute_coff_layout` :358),
-> e os 3 (+ os 3 `ar`) desaguam no MESMO funil `finish_native_object`/`finish_static_archive` →
-> `write_file_bytes`. O keystone C6 é o **funil compartilhado** (toca os três de uma vez); cada formato
-> entra LOGO em seguida (C7/C8/C9), o `ar` no C10. O monólito cross-compila TODOS os alvos (lei "emite
-> tudo, todos os alvos") — nenhum formato é deferido.
-
-### C6 — KEYSTONE: funil compartilhado → FileStream (os 3 formatos de uma vez) (M1, #8)
-- **Where:** `project.tks:2199` (`finish_native_object`), `:2289` (`finish_static_archive`), `:2281`
-  (`wrap_archive_bytes`) + call-sites (`:1653-1657` arm64 fused, `:1965` elf x86, `:2186` coff, `:2203`,
-  `:2248-2269` archives, `:2290-2293`); `objfile_elf.tks:698`, `objfile_macho.tks:492`,
-  `objfile_coff.tks:350` (as 3 entradas de dispatch).
-- **Assinatura:** os 3 emitters trocam `: []byte` por escrita em stream:
-```teko
-/**
- * Writes a fully-assembled object file for the target format directly to the output stream, instead
- * of returning the whole object as an in-RAM `[]byte`. The shared funnel opens the `.o` FileStream
- * and threads it here; each format's body is converted to a streaming assembly pass in C7/C8/C9.
- *
- * @param out the output object-file stream (opened by the funnel)
- * @param enc the encoded module (text/rodata SectionBufs + metadata)
- * @param dwarf the DWARF sink (ELF/Mach-O; COFF omits)
- * @return null on success, or an I/O error
- */
-pub fn write_elf_object(out: teko::io::FileStream, enc: EncodedModuleX86, dwarf: DwarfSink): error | null
-pub fn write_macho_object(out: teko::io::FileStream, enc: EncodedModule, dwarf: DwarfSink): error | null
-pub fn write_coff_object(out: teko::io::FileStream, enc: EncodedModuleX86): error | null
-```
-  e `fn finish_native_object(dir, od, stem, prog, m, emit: func<teko::io::FileStream, error|null>)` —
-  passa um closure que abre `open_write(objp)` e chama o `write_*_object` do formato (remove o
-  `obj: []byte` e o `write_file_bytes(obj)`).
-- **Fazer:** flipa o funil pra abrir o FileStream e despachar por stream aos 3 formatos DE UMA VEZ. O
-  CORPO de cada `write_*_object` neste crumb é um **shim byte-idêntico**: monta o `[]byte` interno como
-  hoje e faz `stream_write(out, b)` — a ARQUITETURA passa a stream, o ganho de memória vem C7-C10.
-- **Fixture:** os fixtures existentes de cada alvo (`sys_exit_group`/`sys_write_hello`) — o `.o`/`.a`
-  sai byte-idêntico ao de hoje (o shim prova a equivalência do flip de funil).
-- **Ritual:** GATE COMPLETO (rota C verde + os `.o` byte-idênticos por alvo). **Scaffold-class (flat
-  aceito, como C0)** — é refactor de threading, delta de memória ~0; os drops estritos vêm C7-C10.
-
-### C7 — ELF `write_elf_object` streaming real (M1, #9)
-- **Where:** `objfile_elf.tks:698-747` (`emit_elf_object`→`write_elf_object`, `emit_elf_dwarf_body`,
-  partition `:628,686`). Alvos: x86_64 Linux + arm64 Linux (`emit_elf`/`emit_elf_arm64`).
-- **Fazer:** remove o `var b: []byte` (:712); header (buffer fixo do layout :711) → `stream_write(out)`;
-  `text.copy_into(out)`; pad; rodata na ordem do partition via `copy_range_into(out, e.start, e.end)`;
-  pad; symtab/strtab/shstrtab/relas/shdrs (metadado de RAM) → `stream_write`; DWARF body idem.
-  `dispose()` nos secbufs.
-- **Fixture:** `sys_exit_group`/`sys_write_hello` (x86_64 + arm64 Linux): `.o` reproduz byte-idêntico 2× +
-  roda sob MEM_PARANOID.
-- **Ritual:** GATE COMPLETO. Ratchet: queda (remove o `.o` ELF inteiro-em-RAM). **Determinismo:** §6.
-
-### C8 — Mach-O `write_macho_object` streaming real (M1, #10)
-- **Where:** `objfile_macho.tks:492-…` (`emit_macho`→`write_macho_object`, `emit_header`/`emit_segment`/
-  `emit_dwarf_segment`/`emit_build_version`; `compute_macho_layout:194` já up-front). Alvo: arm64 macOS.
-- **Fazer:** remove o `var b: []byte` (:496); header+segment+dwarf_segment+build_version (do layout) →
-  `stream_write`; `text.copy_into`/`rodata.copy_into` (partição de relocs `macho_partition_relocs` sobre
-  metadado); relocs/strtab/symtab → `stream_write`. `dispose()`.
-- **Fixture:** fixture arm64 Mach-O: `.o` byte-idêntico 2× + roda (quando o subset arm64/macho alcançar;
-  enquanto isso, byte-idêntico do `.o` per-leg emitido pros fixtures atuais).
-- **Ritual:** GATE COMPLETO. Ratchet: queda (perna macOS).
-
-### C9 — COFF/PE `write_coff_object` streaming real (M1, #11)
-- **Where:** `objfile_coff.tks:350-…` (`emit_coff`→`write_coff_object`, `emit_coff_header`/
-  `emit_coff_sections`/`emit_coff_relocs`; `compute_coff_layout:249` já up-front; `coff_apply_rodata_
-  addends`/`coff_apply_data_reloc_addends` — os addends aplicam no fluxo de cópia). Alvo: x86_64 Windows.
-- **Fazer:** remove o `var b: []byte` (:359); header+sections (do layout) → `stream_write`;
-  `text.copy_into`/`rodata.copy_into` aplicando os addends de reloc durante a cópia (a patch é por-site,
-  offset conhecido); relocs → `stream_write`; symtab/strtab. `dispose()`.
-- **Fixture:** fixture x86_64 COFF: `.o` byte-idêntico 2× (quando o subset windows/coff alcançar).
-- **Ritual:** GATE COMPLETO. Ratchet: queda (perna Windows).
-
-### C10 — os 3 archives `ar` streaming (M1, #12)
-- **Where:** `objfile_ar.tks:130,136,161` (`emit_static_archive` gnu), `objfile_ar_macho.tks:104,162,186`
-  (`emit_static_archive_macho` bsd), `objfile_ar_coff.tks:134,148` (`emit_static_archive_coff`);
-  `project.tks:2281` (`wrap_archive_bytes`→`write_archive`), `:2289` (`finish_static_archive`).
-- **Assinatura:** `write_static_archive_{gnu,bsd,coff}(out: teko::io::FileStream, member_name: str,
-  obj_path: str, symbols: []Symbol): error | null` — escreve o header do `ar` + a symbol/ranlib table no
-  `.a`/`.lib` FileStream, e o membro `.o` vem do `.o` JÁ EM DISCO (C6) via `copy_into` (não re-materializa).
-- **Fazer:** remove os `var b: []byte` dos 3 `ar`; `wrap_archive_bytes` some. `finish_static_archive`
-  escreve o `.o` (via C6) e depois o `.a`/`.lib` streamando o membro do `.o` em disco.
-- **Fixture:** `.a`/`.lib` byte-idêntico 2× por formato (gate final quando o subset fechar).
-- **Ritual:** GATE COMPLETO por formato. Ratchet: queda (os 3 archives).
-
-### C11 — tabelas/headers de montagem → array-fixo (M2-fix, #13/#14, todos os formatos)
-- **Where:** ELF `objfile_elf.tks:76-118,232-262,462-486,558-608`; Mach-O `build_strtab`/reloc-partition;
-  COFF `coff_build_symbols`/`coff_build_relocs`/`build_coff_strtab`; `regalloc*.tks`.
-- **Assinatura:** `elf_build_symbols`/`elf_build_relas`/`build_elf_strtab`/`elf_collect_const_entries` (e
-  equivalentes macho/coff) contam (1ª passada) + `[n]T`+índice (hoje `[..out,x]`).
-- **Fazer:** counts conhecidos na montagem → duas-passadas/FILTRO+watermark (D207 iii), por formato.
-- **Fixture:** os fixtures dos alvos. **Ritual:** GATE COMPLETO. Ratchet: queda.
-
-### C12 — cauda contável restante (M2-fix) + `gen2.o==gen3.o` por alvo (gate FINAL)
-- **Where:** a lista de cauda do §4 (lower/lower_const/isel/abi/project).
-- **Fazer:** array-fixo por natureza (MAP/PARSE/FILTRO). Baratos, agrupáveis em 1-2 crumbs.
-- **Ritual:** GATE COMPLETO. Depois: `gen2.o==gen3.o` do compilador-inteiro POR ALVO (ELF/Mach-O/COFF),
-  quando o subset native self-hospedar (o gate FINAL, §6/§7).
+**Nenhum deixado pra trás:** os 3 emitters de objeto (#11/12/13), os 3 `ar` (#14), o funil (#15), o DWARF
+(#16), o LIR module-wide (#3/4/5), o LEnv (#6), a rodata (#1), o encode text (#9), o metadado de montagem
+(#17), e as caudas contáveis (#7/18/19/20). Os 4 formatos cobertos.
 
 ---
 
-## 6. Determinismo do `.o` sob streaming (`gen2.o==gen3.o`)
+## 7. Metodologia de execução WHOLESALE (não ladder — expurgo em uma passada)
 
-O streaming é um refactor **byte-preservante** em CADA formato (ELF/Mach-O/COFF + os 3 `ar`) — o `.o`/`.a`
-sai idêntico ao do `emit_*_object`/`emit_static_archive_*` atual. O keystone C6 (funil→stream) é provado
-byte-idêntico pelos shims ANTES de qualquer conversão de corpo; C7-C10 preservam por formato:
+Ordem (metodologia do expurgo D125/D181 — constrói a maquinaria, seed, o compilador ENUMERA o resto):
 
-1. **Layout idêntico:** `compute_elf_layout` roda sobre os mesmos tamanhos de seção (agora contadores em
-   vez de `.len` de `[]byte`), mesma aritmética → mesmos offsets.
-2. **Ordem de seções fixa:** a 2ª passada escreve header→text→rodata→(drr)→symtab→strtab→shstrtab→relas→
-   (dwarf)→shdrs, a MESMA ordem do código atual (`objfile_elf.tks:713-733`).
-3. **Ordem de símbolos/relocs estável:** vem de chave ordenada / ordem de definição (inalterado); o
-   array-fixo do C11 preserva a ordem de inserção da 1ª passada. Cada formato tem seu `compute_*_layout`
-   up-front (ELF :711 / Mach-O :495 / COFF :358) → a ordem/offsets de seção não mudam.
-4. **Sem timestamp / sem path absoluto:** já auditado (D203); os arquivos-de-seção são TEMP (paths
-   `gensym`) e NUNCA entram no `.o` — só o conteúdo é copiado byte-a-byte. `objfile_ar` `mtime`/`mode`
-   já zerados (D203).
-5. **Partition determinista:** `elf_assign_partition_offsets` opera sobre metadado ordenado; o
-   `copy_range_into` lê spans na mesma ordem que `elf_build_partition_blob` monta hoje.
+1. **CONSTRÓI a maquinaria (aditivo, convive com o velho):** `SectionBuf` generalizado (§4, todas as
+   seções) + o `symtab.meta`/`relocs.meta`/`strtab.sect` write-through (§5) + o driver PER-FUNÇÃO (M-B) +
+   a montagem por concatenação (M-C) + o funil FileStream (os 4 formatos, `write_*_object`/`write_static_
+   archive_*`). NÃO remove o velho ainda; NÃO varre.
+2. **SEED (gen0 ganha a maquinaria nova).** A superfície nova entra no `.tkh`/`teko.c`; reseed (rota C:
+   fixpoint gen0→gen1 + ASan/UBSan + 3 harnesses).
+3. **DESENSINA + REMOVE AS RAÍZES do estado velho:** `[..ctx.rodata,entry]`/`add_func`/`add_inst`/
+   `add_block`/`lenv_bind`-copy-grow/`emit_*_object → []byte`/`write_file_bytes(obj)`/`var b:[]byte=[]`.
+   A remoção faz o próprio compilador **ERRAR CRU** onde ainda referencia o velho.
+4. **SEED.** Com o seed novo, o compilador tenta se auto-compilar e **os erros SÃO a lista de limpezas** —
+   cada erro aponta um sítio a converter pro write-through/array-fixo. NÃO caçar à mão; **o compilador/
+   linker ENUMERA**. Corrige → seed → repete até verde.
+5. **VARREDURA (critério):** grep zero-ref dos removidos (`[..*.rodata`, `add_func(`, `add_inst(`, `var b:
+   []byte`, `write_file_bytes(obj`) em `src/` (o emit native não toca `cases/examples/tklib/tooling`, mas o
+   D191 manda conferir a árvore se algum símbolo `exp` mudou). Zero-ref = varrido.
+6. **UMA VALIDAÇÃO no fim (não per-crumb):** a ladder native — `scripts/fixpoint_gate.sh
+   TEKO_FIXPOINT_BACKEND=native` single-target host — com o **pico do passo-3 CAINDO** medido por
+   `scripts/native_dry_gate.sh`, até **gen2-native COMPLETAR** (hoje OOM 13,5 GB) → **`gen2.o == gen3.o`
+   byte-idêntico por-alvo**. Gate `native ≤ C+10%` (D206), marco `<2 GB` (D203). Rota native: `*San` N/A
+   (D203) — checador = MEM_PARANOID; o `.o` reproduz byte-idêntico 2× + roda.
 
-**Encenação do fixpoint (D203/D205):** por crumb, nível-fixture (`sys_exit_group`/`sys_write_hello`: o
-`.o` reproduz byte-idêntico 2× + roda sob MEM_PARANOID) + fixpoint-C transitório (reseed, `teko.c`
-byte-idêntico — o compilador-como-programa-C íntegro). O `gen2.o==gen3.o` do compilador-inteiro é o gate
-FINAL, quando o subset native self-hospeda (ladder gen0/gen1 rota-C, gen2/gen3 native — D203).
-
----
-
-## 7. Critério de gate (resumo)
-
-- **Por crumb (durante a campanha):** rota C verde (reseed + fixpoint gen0→gen1 + ASan+UBSan + 3
-  harnesses); native `.o` do fixture byte-idêntico 2× + roda (MEM_PARANOID); **pico do build seco native
-  `≤ pico_C × 1.10`** (D206) e trajetória rumo a `< 2 GB` (D203); ratchet estrito (cada crumb BAIXA o
-  pico native, D68 análogo).
-- **Final:** `gen2.o == gen3.o` byte-idêntico POR ALVO (ELF x86_64/arm64, Mach-O arm64, COFF x86_64 —
-  compilador-inteiro emitido native), quando o subset N1/N2 fechar e as pernas native do CI ficarem
-  verdes. Nenhum formato deferido (monólito cross-emit).
+O reseed é iterativo dentro do expurgo (passos 2/4), mas a CONVERSÃO é uma unidade (uma passada do
+implementer), não 12 crumbs bisectáveis. O funil dos 4 formatos + o keystone da rodata entram JUNTOS.
 
 ---
 
-## 8. Riscos + tensões de lei (resolução recomendada)
+## 8. Determinismo do `.o` (`gen2.o==gen3.o`) sob write-through
 
-1. **R1 — I/O de temp-file no meio do LOWER (C1):** o `rodata` SectionBuf abre um arquivo temp durante o
-   lowering (fase que hoje é pura-memória). Risco: overhead de syscall por-append. **Resolução:** o
-   `append` já corta em ≤1024 B e o volume total de rodata é modesto (KB-MB); o custo de I/O é trocado
-   pela ELIMINAÇÃO de GB de recópia+vazamento → net-win garantido. Um buffer de coalescência FIXO (≤1024)
-   por SectionBuf amortiza os appends pequenos (natureza BUFFER-DE-SAÍDA), sem acumular.
-2. **R2 — `Segmented` reintroduz "container" que D208 declarou moot:** tensão aparente. **Resolução
-   (law-first, D208 explícito):** D208 preserva o container "se restar algum acumulador pequeno genuíno";
-   o IR consumido downstream (#4/#5/#6) e o índice de rodata (#2) SÃO esse residual — não dá pra jogar em
-   disco (fases posteriores leem). A ESPINHA da campanha é M1 (disco); M2-seg é o residual blessed, ZERO
-   geométrico (D207). Sem HALT.
-3. **R3 — `Map`/`Dictionary` são copy-grow** (`collections/map.tks:31-33` `self.keys=[..self.keys,k]`;
-   idem `dictionary`/`hashset`). Se o dedup-map do rodata fosse um `Map`, reintroduziria O(n²).
-   **Resolução:** o `intern_rodata` de HOJE **NÃO dedupa** (sempre cria `.LstrN` novo, `lower.tks:5224`)
-   → não precisa de `Map`; o índice é sequencial (`Segmented`/offset corrente). **Achado adjacente
-   REPORTADO (não vira issue nova, lei):** `Map`/`Dictionary`/`Hashset` copy-grow são dívida NO-PUSHES da
-   rota C que "passou" a campanha (o sweep não os pegou) — fora do escopo D206/D208, reportar pro dono.
-4. **R4 — partition data_rel_ro reordena rodata (C1/C6):** o `.o` reordena spans de rodata que contêm
-   relocs pra uma seção `.data.rel.ro`. **Resolução:** a decisão de partição é metadado puro
-   (`elf_collect_const_entries`/`elf_assign_partition_offsets` sobre símbolos+relocs); a 2ª passada faz
-   `copy_range_into` por span NA ORDEM nova — o seek-read cobre exatamente o `elf_append_byte_range`
-   atual. Byte-preservante.
-5. **R5 — patch de branch precisa da função inteira em buffer (C5):** `patch_branches_x86` reescreve
-   deslocamentos após conhecer offsets de bloco. **Resolução:** o buffer é POR-FUNÇÃO (limitado à maior
-   função — não ao módulo), reusável entre funções; patch in-place ANTES de `append_prefix` no secbuf.
-   Não acumula módulo. (Idem arm64.)
-6. **R6 — determinismo do path temp:** se o path do temp-file vazasse pro `.o` (ex.: DWARF file-table),
-   quebraria `gen2.o==gen3.o`. **Resolução:** o SectionBuf temp é puramente conteúdo-copiado; o DWARF
-   file-table usa o path FONTE (não o temp). Auditar no C6/C9 que nenhum path temp entra no DWARF.
+Byte-preservante — muda ONDE os bytes moram, não a ORDEM nem o CONTEÚDO:
+1. **Ordem preservada:** `append`/`append_prefix`/`copy_into` gravam/concatenam em ordem de produção
+   (mesma que `append_bytes`/`[..x,e]`); o contador `.LstrN` numera igual; o pipeline per-função visita as
+   funções na MESMA ordem que o `lower_program` monta o `LModule` hoje.
+2. **Layout/offsets = math idêntica:** `compute_*_layout` sobre os mesmos tamanhos (agora `SectionBuf.len`)
+   → mesmos offsets; ordem de seções fixa; up-front nos 3 formatos.
+3. **Símbolos/relocs estáveis:** a ordenação locais-antes-globais (§5) é determinística (chave estável);
+   `symidx` = math da posição ordenada. `relocs.meta` lida em ordem de gravação.
+4. **Sem timestamp/path absoluto** (D203); os temp-paths dos `SectionBuf` NUNCA entram no `.o` (só conteúdo
+   copiado); `ar` `mtime`/`mode` já zerados.
 
-**Nenhuma tensão genuinamente aberta → sem HALT.** (Protocolo de fork checado: DECISION_LOG D208/D207/
-D206/D203, CLAUDE.md I/O-streaming — tudo deliberado; mais-recente D208 vence e é o que este plano segue.)
+Encenação (D203/D205): fixpoint-C transitório (reseed, `teko.c` byte-idêntico) durante a bootstrap via
+`teko.c`; `gen2.o==gen3.o` por-alvo = a validação final (§7.6) quando o subset native self-hospeda.
+
+---
+
+## 9. Riscos + tensões de lei (resolução recomendada)
+
+1. **R1 — "rodata é streaming de N-desconhecido" (premissa das minhas versões anteriores):** REFUTADA pela
+   regra 1 do dono. **Resolução:** o N do `.LstrN` é um CONTADOR (não `list.len`); os bytes vão pra
+   `rodata.sect` (C1) e o símbolo pra `symtab.meta` (write-through) — nenhuma lista, nenhum chunked. O
+   `Segmented` sai do desenho. Sem HALT (regras do dono deliberam).
+2. **R2 — N_funcs / N_binds realmente conhecidos upstream?** N_funcs = decls + instâncias monomorfizadas da
+   `TProgram` (o driver já as itera). N_binds = locais/params da função (checker). **Scout confirma** o
+   ponto exato onde a contagem é lida ANTES do lowering da função; se um estágio não expõe N, **conserta o
+   upstream** (regra 1) — não contorna. Baixo risco (a contagem existe na AST checada).
+3. **R3 — pipeline per-função quebra o whole-program lowering?** Alguns passos são whole-program (rodata
+   compartilhada, símbolos forward-ref). **Resolução:** rodata/símbolos são write-through GLOBAIS
+   (section-files acumulam no disco entre funções, regra 4); só a LIR/regalloc é per-função (liveness
+   local). Forward-refs entre funções = relocs por símbolo (resolvidas na montagem, §5) — já é assim.
+4. **R4 — superfície: `SectionBuf` record read-back, `[N]T` init via local, genéricos:** precedentes
+   existem (`[count]byte=[]` `rtio.tks:195`; read chunked `read_stream:503`). Scout valida; se faltar,
+   ensina AGORA (lei "ensino agora").
+5. **R5 — I/O temp-file no LOWER/ENCODE:** buffer de coalescência ≤1024 amortiza; troca GBs de recópia+
+   vazamento por I/O de KB-MB → net-win. Determinismo intacto (temp-path fora do `.o`).
+6. **R6 — partition data_rel_ro reordena rodata:** decisão = metadado puro (símbolos+relocs); montagem faz
+   `copy_range_into` por span na ordem nova. Byte-preservante.
+7. **R7 — ordenação de símbolos na montagem lê N_sym em RAM:** é array-fixo pré-dimensionado (N do arquivo),
+   O(N log N) de sort, NÃO copy-grow; N_sym ~dezenas de mil de records pequenos = MB, folgado sob 2 GB.
+8. **R8 — `Map`/`Dictionary`/`Hashset` copy-grow** (`collections/map.tks:31`): achado adjacente REPORTADO
+   (dívida NO-PUSHES da rota C, fora deste desenho; `intern_rodata` não dedupa).
+
+**Nenhuma tensão genuinamente aberta → sem HALT.** (Protocolo de fork: DECISION_LOG D182/D207/D208/D206/
+D203 + as 4 regras do dono + a medição do coordenador — convergem no desenho write-through UNIFICADO; o
+container chunked é descartado por decisão mais-recente do dono; continua do C1, não reverte.)
