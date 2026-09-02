@@ -438,7 +438,7 @@ pub type LoopTargets = struct { label: str; head: u32; exit: u32; defer_base: u6
 
 pub type LowerCtx = struct {
     func: LFunc; block_id: u32; env: LEnv
-    layouts: []LStructLayout; rodata: []LRodata; enums: []LEnumInfo; lifted: []LFunc
+    layouts: []LStructLayout; rodata: RodataSeg; rodata_base: RodataSeg; enums: []LEnumInfo; lifted: []LFunc
     defers: []checker::TDeferStmt; loop_targets: []LoopTargets; externs: []LExternFn
     flat_symbols: bool; ret_type: @Type()
     has_ret_len_slot: bool; ret_len_slot: u32
@@ -464,21 +464,7 @@ pub type LowerStmtOut = struct { ctx: LowerCtx; terminated: bool }
 fn ctx_with(ctx: LowerCtx, func: LFunc, block_id: u32, env: LEnv): LowerCtx {
     LowerCtx {
         func = func; block_id = block_id; env = env
-        layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
-        variants = ctx.variants
-        defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
-        flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
-        has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
-        ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
-        region_stack = ctx.region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
-        region_param = ctx.region_param; plan = ctx.plan
-    }
-}
-
-fn ctx_with_rodata(ctx: LowerCtx, rodata: []LRodata): LowerCtx {
-    LowerCtx {
-        func = ctx.func; block_id = ctx.block_id; env = ctx.env
-        layouts = ctx.layouts; rodata = rodata; enums = ctx.enums; lifted = ctx.lifted
+        layouts = ctx.layouts; rodata = ctx.rodata; rodata_base = ctx.rodata_base; enums = ctx.enums; lifted = ctx.lifted
         variants = ctx.variants
         defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
@@ -492,7 +478,7 @@ fn ctx_with_rodata(ctx: LowerCtx, rodata: []LRodata): LowerCtx {
 fn ctx_with_lifted(ctx: LowerCtx, lifted: []LFunc): LowerCtx {
     LowerCtx {
         func = ctx.func; block_id = ctx.block_id; env = ctx.env
-        layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = lifted
+        layouts = ctx.layouts; rodata = ctx.rodata; rodata_base = ctx.rodata_base; enums = ctx.enums; lifted = lifted
         variants = ctx.variants
         defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
@@ -506,7 +492,7 @@ fn ctx_with_lifted(ctx: LowerCtx, lifted: []LFunc): LowerCtx {
 fn ctx_with_defers(ctx: LowerCtx, defers: []checker::TDeferStmt): LowerCtx {
     LowerCtx {
         func = ctx.func; block_id = ctx.block_id; env = ctx.env
-        layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
+        layouts = ctx.layouts; rodata = ctx.rodata; rodata_base = ctx.rodata_base; enums = ctx.enums; lifted = ctx.lifted
         variants = ctx.variants
         defers = defers; loop_targets = ctx.loop_targets; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
@@ -520,7 +506,7 @@ fn ctx_with_defers(ctx: LowerCtx, defers: []checker::TDeferStmt): LowerCtx {
 fn ctx_with_loops(ctx: LowerCtx, loop_targets: []LoopTargets): LowerCtx {
     LowerCtx {
         func = ctx.func; block_id = ctx.block_id; env = ctx.env
-        layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
+        layouts = ctx.layouts; rodata = ctx.rodata; rodata_base = ctx.rodata_base; enums = ctx.enums; lifted = ctx.lifted
         variants = ctx.variants
         defers = ctx.defers; loop_targets = loop_targets; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
@@ -559,7 +545,7 @@ fn ctx_reassign(ctx: LowerCtx, name: str, vreg: u32): LowerCtx {
 fn ctx_with_regions(ctx: LowerCtx, region_stack: []NativeRegionFrame): LowerCtx {
     LowerCtx {
         func = ctx.func; block_id = ctx.block_id; env = ctx.env
-        layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
+        layouts = ctx.layouts; rodata = ctx.rodata; rodata_base = ctx.rodata_base; enums = ctx.enums; lifted = ctx.lifted
         variants = ctx.variants
         defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
@@ -577,7 +563,7 @@ fn region_from_param(ctx: LowerCtx): u32 {
 fn ctx_with_bracket_depth(ctx: LowerCtx, bracket_depth: u32): LowerCtx {
     LowerCtx {
         func = ctx.func; block_id = ctx.block_id; env = ctx.env
-        layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
+        layouts = ctx.layouts; rodata = ctx.rodata; rodata_base = ctx.rodata_base; enums = ctx.enums; lifted = ctx.lifted
         variants = ctx.variants
         defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
@@ -775,7 +761,7 @@ fn lower_var(ctx: LowerCtx, e: checker::TExpr, v: checker::TVar): Lowered | erro
     }
     var hit = lenv_lookup(ctx.env, v.name)
     if hit.found { return Lowered { ctx = ctx; vreg = hit.vreg } }
-    match find_const_rodata(ctx.rodata, v.name) {
+    match find_const_rodata(ctx, v.name) {
         LRodata as r => lower_const_addr(ctx, r.symbol, e.line, e.col)
         null => error { message = teko::str::concat("native backend N1: unbound local `", v.name, "` (internal)") }
     }
@@ -786,15 +772,13 @@ fn lower_const_addr(ctx: LowerCtx, symbol: str, line: u32, col: u32): Lowered {
     Lowered { ctx = ctx_append(r.ctx, global_addr_inst(r.vreg, symbol, line, col)); vreg = r.vreg }
 }
 
-fn find_const_rodata(rodata: []LRodata, name: str): LRodata | null {
+fn find_const_rodata(ctx: LowerCtx, name: str): LRodata | null {
     var sym = const_rodata_symbol(name)
-    var i: u64 = 0
-    loop {
-        if i >= rodata.len { break }
-        if rodata[i].symbol == sym { return rodata[i] }
-        i++
+    match ctx.rodata_base.find_by_symbol(sym) {
+        LRodata as r => return r
+        null => { }
     }
-    null
+    ctx.rodata.find_by_symbol(sym)
 }
 
 fn is_short_circuit_op(op: lexer::TokenKind): bool {
@@ -2738,7 +2722,7 @@ fn close_lambda_body(ctx: LowerCtx, line: u32, col: u32): LowerCtx | error {
     ctx_append(replayed, ret_void_inst(line, col))
 }
 
-pub type LoweredLambda = struct { func: LFunc; rodata: []LRodata; lifted: []LFunc }
+pub type LoweredLambda = struct { func: LFunc; rodata: RodataSeg; lifted: []LFunc }
 
 fn build_lambda_lfunc(lam: checker::TLambda, env_layout: LStructLayout, ctx: LowerCtx, line: u32, col: u32): LoweredLambda | error {
     var fat_ret = is_fat_type(lam.ret)
@@ -2755,7 +2739,7 @@ fn build_lambda_lfunc(lam: checker::TLambda, env_layout: LStructLayout, ctx: Low
     }
     var ctx0 = LowerCtx {
         func = seeded.func; block_id = 0; env = seeded.env
-        layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
+        layouts = ctx.layouts; rodata = ctx.rodata; rodata_base = ctx.rodata_base; enums = ctx.enums; lifted = ctx.lifted
         variants = ctx.variants
         defers = []; loop_targets = []; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = lam.ret
@@ -2777,7 +2761,7 @@ fn lower_lambda(ctx: LowerCtx, e: checker::TExpr, lam: checker::TLambda): Lowere
     var id = built.lifted.len
     var fn_sym = lift_lambda_symbol(id)
     var named = rename_lfunc(built.func, fn_sym)
-    var ctx2 = ctx_with_lifted(ctx_with_rodata(envo.ctx, built.rodata), [..built.lifted, named])
+    var ctx2 = ctx_with_lifted(envo.ctx, [..built.lifted, named])
     build_closure_literal(ctx2, fn_sym, envo.vreg, e.line, e.col)
 }
 
@@ -3596,7 +3580,7 @@ fn close_loop_body(ctx: LowerCtx, head: u32, names: []str, defer_base: u64): Low
 fn close_loop(outer: LowerCtx, body_done: LowerCtx, exit_block: u32, exit_env: LEnv): LowerCtx {
     LowerCtx {
         func = body_done.func; block_id = exit_block; env = exit_env
-        layouts = body_done.layouts; rodata = body_done.rodata; enums = body_done.enums; lifted = body_done.lifted
+        layouts = body_done.layouts; rodata = body_done.rodata; rodata_base = body_done.rodata_base; enums = body_done.enums; lifted = body_done.lifted
         variants = body_done.variants
         defers = outer.defers; loop_targets = outer.loop_targets; externs = body_done.externs
         flat_symbols = body_done.flat_symbols; ret_type = body_done.ret_type
@@ -5110,7 +5094,7 @@ fn lower_var_fat(ctx: LowerCtx, e: checker::TExpr, v: checker::TVar): LoweredFat
     if slot.found { return load_fat_slot(ctx, slot.slot, e.line, e.col) }
     var hit = lenv_lookup_fat(ctx.env, v.name)
     if hit.found && hit.has_len { return LoweredFat { ctx = ctx; ptr = hit.ptr; len = hit.len } }
-    match find_const_rodata(ctx.rodata, v.name) {
+    match find_const_rodata(ctx, v.name) {
         LRodata as r => lower_const_fat(ctx, e, r)
         null => error { message = teko::str::concat("native backend N1: `", v.name, "` is not a fat-pointer local (internal)") }
     }
@@ -5220,9 +5204,9 @@ fn str_to_bytes(s: str): []byte {
 pub type InternedRodata = struct { ctx: LowerCtx; symbol: str }
 
 fn intern_rodata(ctx: LowerCtx, text: str): InternedRodata {
-    var sym = rodata_symbol(ctx.rodata.len)
-    var entry = LRodata { symbol = sym; bytes = str_to_bytes(text); relocs = [] }
-    InternedRodata { ctx = ctx_with_rodata(ctx, [..ctx.rodata, entry]); symbol = sym }
+    var sym = rodata_symbol(ctx.rodata_base.len() + ctx.rodata.len())
+    ctx.rodata.append(LRodata { symbol = sym; bytes = str_to_bytes(text); relocs = [] })
+    InternedRodata { ctx = ctx; symbol = sym }
 }
 
 fn lower_str_bytes_fat(ctx: LowerCtx, text: str, line: u32, col: u32): LoweredFat {
@@ -6437,7 +6421,7 @@ fn bind_ret_len_slot(bound: ParamBind, line: u32, col: u32): ParamBind {
     ParamBind { func = with_inst; env = bound.env; next_reg = reg + 1 }
 }
 
-pub fn lower_function(f: checker::TFunction, table: checker::TypeTable, layouts: []LStructLayout = [], rodata: []LRodata = [], enums: []LEnumInfo = [], lifted: []LFunc = [], externs: []LExternFn = [], flat_symbols: bool = false, variants: []LVariantDef = [], ref_fns: []LRefFnInfo = [], field_decls: []LFieldDecls = []): LoweredFunction | error {
+pub fn lower_function(f: checker::TFunction, table: checker::TypeTable, layouts: []LStructLayout, rodata_base: RodataSeg, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, ref_fns: []LRefFnInfo, field_decls: []LFieldDecls): LoweredFunction | error {
     if f.type_params.len != 0 { return error { message = "native backend N1: generic function not yet lowered (N2)" } }
     if f.is_extern { return error { message = "native backend N1: extern function has no body to lower" } }
     var fat_ret = is_fat_type(f.return_type)
@@ -6449,7 +6433,7 @@ pub fn lower_function(f: checker::TFunction, table: checker::TypeTable, layouts:
     var with_slot = if fat_ret { bind_ret_len_slot(bound, f.line, f.col) } else { bound }
     var ctx0 = LowerCtx {
         func = with_slot.func; block_id = 0; env = with_slot.env
-        layouts = layouts; rodata = rodata; enums = enums; lifted = lifted
+        layouts = layouts; rodata = RodataSeg::make(); rodata_base = rodata_base; enums = enums; lifted = lifted
         variants = variants
         defers = []; loop_targets = []; externs = externs
         flat_symbols = flat_symbols; ret_type = f.return_type
@@ -6468,7 +6452,7 @@ fn stop_in_function(err: error, f: checker::TFunction): error {
     error { message = err.message ~ " [in `" ~ f.namespace ~ "::" ~ f.name ~ "`]" }
 }
 
-pub type LoweredFunction = struct { func: LFunc; rodata: []LRodata; lifted: []LFunc }
+pub type LoweredFunction = struct { func: LFunc; rodata: RodataSeg; lifted: []LFunc }
 
 fn close_function(ctx: LowerCtx, f: checker::TFunction): LowerCtx | error {
     if block_terminated(ctx.func, ctx.block_id) { return ctx }
@@ -6547,22 +6531,34 @@ pub fn lower_prelude(prog: checker::TProgram, flat_symbols: bool): LowerPrelude 
     LowerPrelude { module = m; layouts = layouts; enums = enums; externs = externs; variants = variants; ref_fns = ref_fns; field_decls = field_decls; table = table }
 }
 
+fn merge_rodata_delta(dst: RodataSeg, delta: RodataSeg) {
+    var k: u64 = 0
+    loop {
+        if k >= delta.len() { break }
+        dst.append(delta.get(k))
+        k = k + 1
+    }
+}
+
 pub fn lower_program(prog: checker::TProgram, flat_symbols: bool = false): LModule | error {
     var prelude = match lower_prelude(prog, flat_symbols) { LowerPrelude as x => x; error as e => return e }
     var m = prelude.module
+    var robase = RodataSeg::from_array(m.rodata)
     var loose: []@TStatement() = []
     var lifted: []LFunc = []
     var i: u64 = 0
     loop {
         if i >= prog.items.len { break }
-        var step = match lower_item(m, loose, prog.items[i], prelude.layouts, prelude.enums, lifted, prelude.externs, flat_symbols, prelude.variants, prelude.table, prelude.ref_fns, prelude.field_decls) { LowerItemOut as x => x; error as err => return err }
+        var step = match lower_item(m, loose, prog.items[i], prelude.layouts, prelude.enums, lifted, prelude.externs, flat_symbols, prelude.variants, prelude.table, prelude.ref_fns, prelude.field_decls, robase) { LowerItemOut as x => x; error as err => return err }
         m = step.module
+        merge_rodata_delta(robase, step.rodata_delta)
         loose = step.loose
         lifted = step.lifted
         i++
     }
-    var vmain = match lower_virtual_main(loose, prelude.layouts, prelude.enums, m.rodata, lifted, prelude.externs, flat_symbols, prelude.variants, prelude.ref_fns, prelude.field_decls, prelude.table) { LoweredFunction as x => x; error as err => return err }
-    var whole = fold_lifted_funcs(add_func(with_rodata(m, vmain.rodata), vmain.func), vmain.lifted)
+    var vmain = match lower_virtual_main(loose, prelude.layouts, prelude.enums, robase, lifted, prelude.externs, flat_symbols, prelude.variants, prelude.ref_fns, prelude.field_decls, prelude.table) { LoweredFunction as x => x; error as err => return err }
+    merge_rodata_delta(robase, vmain.rodata)
+    var whole = fold_lifted_funcs(add_func(with_rodata(m, robase.flatten()), vmain.func), vmain.lifted)
     match frame_escape_guard(whole) { error as e => return e; null => { } }
     whole
 }
@@ -6944,14 +6940,14 @@ fn collect_extern_fn(acc: []LExternFn, f: checker::TFunction): []LExternFn {
     [..acc, LExternFn { namespace = f.namespace; name = f.name; c_symbol = f.c_symbol }]
 }
 
-pub type LowerItemOut = struct { module: LModule; loose: []@TStatement(); lifted: []LFunc }
+pub type LowerItemOut = struct { module: LModule; loose: []@TStatement(); lifted: []LFunc; rodata_delta: RodataSeg }
 
-pub fn lower_item(m: LModule, loose: []@TStatement(), it: @TItem(), layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, table: checker::TypeTable, ref_fns: []LRefFnInfo, field_decls: []LFieldDecls): LowerItemOut | error {
+pub fn lower_item(m: LModule, loose: []@TStatement(), it: @TItem(), layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, table: checker::TypeTable, ref_fns: []LRefFnInfo, field_decls: []LFieldDecls, rodata_base: RodataSeg): LowerItemOut | error {
     match it {
-        checker::TFunction as f => lower_item_function(m, loose, f, layouts, enums, lifted, externs, flat_symbols, variants, table, ref_fns, field_decls)
-        (@TStatement()) as s => LowerItemOut { module = m; loose = [..loose, s]; lifted = lifted }
+        checker::TFunction as f => lower_item_function(m, loose, f, layouts, enums, lifted, externs, flat_symbols, variants, table, ref_fns, field_decls, rodata_base)
+        (@TStatement()) as s => LowerItemOut { module = m; loose = [..loose, s]; lifted = lifted; rodata_delta = RodataSeg::make() }
         checker::TConstDecl as cd => lower_const_item(m, loose, cd, lifted)
-        _ => LowerItemOut { module = m; loose = loose; lifted = lifted }
+        _ => LowerItemOut { module = m; loose = loose; lifted = lifted; rodata_delta = RodataSeg::make() }
     }
 }
 
@@ -6974,21 +6970,21 @@ fn const_decl_is_scalar(t: @Type()): bool {
 }
 
 fn lower_const_item(m: LModule, loose: []@TStatement(), cd: checker::TConstDecl, lifted: []LFunc): LowerItemOut | error {
-    LowerItemOut { module = m; loose = loose; lifted = lifted }
+    LowerItemOut { module = m; loose = loose; lifted = lifted; rodata_delta = RodataSeg::make() }
 }
 
-fn lower_item_function(m: LModule, loose: []@TStatement(), f: checker::TFunction, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, table: checker::TypeTable, ref_fns: []LRefFnInfo, field_decls: []LFieldDecls): LowerItemOut | error {
-    if f.is_test { return LowerItemOut { module = m; loose = loose; lifted = lifted } }
-    if f.is_extern { return LowerItemOut { module = m; loose = loose; lifted = lifted } }
-    var lf = match lower_function(f, table, layouts, m.rodata, enums, lifted, externs, flat_symbols, variants, ref_fns, field_decls) { LoweredFunction as x => x; error as err => return err }
-    LowerItemOut { module = add_func(with_rodata(m, lf.rodata), lf.func); loose = loose; lifted = lf.lifted }
+fn lower_item_function(m: LModule, loose: []@TStatement(), f: checker::TFunction, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, table: checker::TypeTable, ref_fns: []LRefFnInfo, field_decls: []LFieldDecls, rodata_base: RodataSeg): LowerItemOut | error {
+    if f.is_test { return LowerItemOut { module = m; loose = loose; lifted = lifted; rodata_delta = RodataSeg::make() } }
+    if f.is_extern { return LowerItemOut { module = m; loose = loose; lifted = lifted; rodata_delta = RodataSeg::make() } }
+    var lf = match lower_function(f, table, layouts, rodata_base, enums, lifted, externs, flat_symbols, variants, ref_fns, field_decls) { LoweredFunction as x => x; error as err => return err }
+    LowerItemOut { module = add_func(m, lf.func); loose = loose; lifted = lf.lifted; rodata_delta = lf.rodata }
 }
 
-pub fn lower_virtual_main(loose: []@TStatement(), layouts: []LStructLayout, enums: []LEnumInfo, rodata: []LRodata, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, ref_fns: []LRefFnInfo, field_decls: []LFieldDecls, table: checker::TypeTable): LoweredFunction | error {
+pub fn lower_virtual_main(loose: []@TStatement(), layouts: []LStructLayout, enums: []LEnumInfo, rodata_base: RodataSeg, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, ref_fns: []LRefFnInfo, field_decls: []LFieldDecls, table: checker::TypeTable): LoweredFunction | error {
     var fn0 = new_func("main", 0, [], LType::I32)
     var ctx0 = LowerCtx {
         func = fn0; block_id = 0; env = empty_lenv()
-        layouts = layouts; rodata = rodata; enums = enums; lifted = lifted
+        layouts = layouts; rodata = RodataSeg::make(); rodata_base = rodata_base; enums = enums; lifted = lifted
         variants = variants
         defers = []; loop_targets = []; externs = externs
         flat_symbols = flat_symbols; ret_type = checker::Prim { kind = checker::PrimKind::I32 }
