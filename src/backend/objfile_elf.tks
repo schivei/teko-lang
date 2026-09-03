@@ -13,14 +13,14 @@ type ElfStrtab = struct {
 
 fn build_elf_strtab(names: []str): ElfStrtab {
     var bytes: []byte = [0 to byte]
-    var strx: []u32 = []
+    var strx: [names.len]u32 = []
     var i: u64 = 0
     loop {
         if i >= names.len { break }
         if names[i].len == (0 to u64) {
-            strx = [..strx, 0 to u32]
+            strx[i] = 0 to u32
         } else {
-            strx = [..strx, bytes.len to u32]
+            strx[i] = bytes.len to u32
             bytes = emit_str_bytes(bytes, names[i])
             bytes = [..bytes, 0 to byte]
         }
@@ -73,59 +73,50 @@ fn elf_has_rodata_section(symbols: []Symbol): bool {
     false
 }
 
-fn elf_append_text_locals(out: []ElfSym, symbols: []Symbol): []ElfSym {
-    var acc = out
+fn elf_build_symbols(symbols: []Symbol): []ElfSym {
+    var out: [3 + symbols.len]ElfSym = []
+    var n: u64 = 0
+    out[n] = ElfSym { name = ""; info = 0 to u32; shndx = 0 to u32; value = 0 to u32 }
+    n++
+    if elf_has_rodata_section(symbols) {
+        out[n] = ElfSym { name = ""; info = st_info(STB_LOCAL, STT_SECTION) to u32; shndx = ELF_SHNDX_RODATA; value = 0 to u32 }
+        n++
+    }
+    if elf_has_data_rel_ro_section(symbols) {
+        out[n] = ElfSym { name = ""; info = st_info(STB_LOCAL, STT_SECTION) to u32; shndx = ELF_SHNDX_DATA_REL_RO; value = 0 to u32 }
+        n++
+    }
     var i: u64 = 0
     loop {
         if i >= symbols.len { break }
         var s = symbols[i]
         if s.defined && s.local && s.sect == (1 to u8) {
-            acc = [..acc, ElfSym { name = s.name; info = st_info(STB_LOCAL, STT_NOTYPE) to u32; shndx = 1 to u32; value = s.offset }]
+            out[n] = ElfSym { name = s.name; info = st_info(STB_LOCAL, STT_NOTYPE) to u32; shndx = 1 to u32; value = s.offset }
+            n++
         }
         i++
     }
-    acc
-}
-
-fn elf_append_globals(out: []ElfSym, symbols: []Symbol): []ElfSym {
-    var acc = out
-    var i: u64 = 0
+    var j: u64 = 0
     loop {
-        if i >= symbols.len { break }
-        var s = symbols[i]
+        if j >= symbols.len { break }
+        var s = symbols[j]
         if s.defined && !s.local {
-            acc = [..acc, ElfSym { name = s.name; info = st_info(STB_GLOBAL, STT_FUNC) to u32; shndx = 1 to u32; value = s.offset }]
+            out[n] = ElfSym { name = s.name; info = st_info(STB_GLOBAL, STT_FUNC) to u32; shndx = 1 to u32; value = s.offset }
+            n++
         }
-        i++
+        j++
     }
-    acc
-}
-
-fn elf_append_undefined(out: []ElfSym, symbols: []Symbol): []ElfSym {
-    var acc = out
-    var i: u64 = 0
+    var k: u64 = 0
     loop {
-        if i >= symbols.len { break }
-        var s = symbols[i]
+        if k >= symbols.len { break }
+        var s = symbols[k]
         if !s.defined {
-            acc = [..acc, ElfSym { name = s.name; info = st_info(STB_GLOBAL, STT_NOTYPE) to u32; shndx = 0 to u32; value = 0 to u32 }]
+            out[n] = ElfSym { name = s.name; info = st_info(STB_GLOBAL, STT_NOTYPE) to u32; shndx = 0 to u32; value = 0 to u32 }
+            n++
         }
-        i++
+        k++
     }
-    acc
-}
-
-fn elf_build_symbols(symbols: []Symbol): []ElfSym {
-    var out: []ElfSym = [ElfSym { name = ""; info = 0 to u32; shndx = 0 to u32; value = 0 to u32 }]
-    if elf_has_rodata_section(symbols) {
-        out = [..out, ElfSym { name = ""; info = st_info(STB_LOCAL, STT_SECTION) to u32; shndx = ELF_SHNDX_RODATA; value = 0 to u32 }]
-    }
-    if elf_has_data_rel_ro_section(symbols) {
-        out = [..out, ElfSym { name = ""; info = st_info(STB_LOCAL, STT_SECTION) to u32; shndx = ELF_SHNDX_DATA_REL_RO; value = 0 to u32 }]
-    }
-    out = elf_append_text_locals(out, symbols)
-    out = elf_append_globals(out, symbols)
-    elf_append_undefined(out, symbols)
+    out[0..n]
 }
 
 fn elf_has_data_rel_ro_section(symbols: []Symbol): bool {
@@ -556,16 +547,19 @@ type ElfDrrPartition = struct {
 }
 
 fn elf_collect_const_entries(symbols: []Symbol, rodata_len: u32): []ElfConstEntry {
-    var starts: []ElfConstEntry = []
+    var starts_buf: [symbols.len]ElfConstEntry = []
+    var sc: u64 = 0
     var i: u64 = 0
     loop {
         if i >= symbols.len { break }
         var s = symbols[i]
         if s.defined && s.local && s.sect == ELF_SECT_RODATA {
-            starts = [..starts, ElfConstEntry { name = s.name; start = s.offset; end = 0 to u32; to_drr = false; new_offset = 0 to u32 }]
+            starts_buf[sc] = ElfConstEntry { name = s.name; start = s.offset; end = 0 to u32; to_drr = false; new_offset = 0 to u32 }
+            sc++
         }
         i++
     }
+    var starts = starts_buf[0..sc]
     var out: [starts.len]ElfConstEntry = []
     var j: u64 = 0
     loop {
@@ -747,27 +741,35 @@ fn emit_elf_dwarf_body(buf: []byte, dwarf: ElfDwarfSections, info_relas: []ElfRe
 }
 
 fn x86_reloc_reqs(enc: EncodedModuleX86): []ElfRelocReq {
-    var out: []ElfRelocReq = []
+    var out: [enc.relocs.len]ElfRelocReq = []
+    var count: u64 = 0
     var i: u64 = 0
     loop {
         if i >= enc.relocs.len { break }
         var r = enc.relocs[i]
-        if r.sect == RelocSect::Text { out = [..out, ElfRelocReq { offset = r.offset; sym = r.sym; rtype = elf_reloc_type(r.kind); addend = r.addend }] }
+        if r.sect == RelocSect::Text {
+            out[count] = ElfRelocReq { offset = r.offset; sym = r.sym; rtype = elf_reloc_type(r.kind); addend = r.addend }
+            count++
+        }
         i++
     }
-    out
+    out[0..count]
 }
 
 fn x86_rodata_reloc_reqs(enc: EncodedModuleX86): []ElfRelocReq {
-    var out: []ElfRelocReq = []
+    var out: [enc.relocs.len]ElfRelocReq = []
+    var count: u64 = 0
     var i: u64 = 0
     loop {
         if i >= enc.relocs.len { break }
         var r = enc.relocs[i]
-        if r.sect == RelocSect::Rodata { out = [..out, ElfRelocReq { offset = r.offset; sym = r.sym; rtype = elf_reloc_type(r.kind); addend = r.addend }] }
+        if r.sect == RelocSect::Rodata {
+            out[count] = ElfRelocReq { offset = r.offset; sym = r.sym; rtype = elf_reloc_type(r.kind); addend = r.addend }
+            count++
+        }
         i++
     }
-    out
+    out[0..count]
 }
 
 pub fn emit_elf(enc: EncodedModuleX86, dwarf: DwarfSink): []byte {
@@ -803,27 +805,35 @@ fn elf_reloc_type_arm64(kind: MRelocKind): u32 {
 }
 
 fn arm64_reloc_reqs(enc: EncodedModule): []ElfRelocReq {
-    var out: []ElfRelocReq = []
+    var out: [enc.relocs.len]ElfRelocReq = []
+    var count: u64 = 0
     var i: u64 = 0
     loop {
         if i >= enc.relocs.len { break }
         var r = enc.relocs[i]
-        if r.sect == RelocSect::Text { out = [..out, ElfRelocReq { offset = r.offset; sym = r.sym; rtype = elf_reloc_type_arm64(r.kind); addend = 0 }] }
+        if r.sect == RelocSect::Text {
+            out[count] = ElfRelocReq { offset = r.offset; sym = r.sym; rtype = elf_reloc_type_arm64(r.kind); addend = 0 }
+            count++
+        }
         i++
     }
-    out
+    out[0..count]
 }
 
 fn arm64_rodata_reloc_reqs(enc: EncodedModule): []ElfRelocReq {
-    var out: []ElfRelocReq = []
+    var out: [enc.relocs.len]ElfRelocReq = []
+    var count: u64 = 0
     var i: u64 = 0
     loop {
         if i >= enc.relocs.len { break }
         var r = enc.relocs[i]
-        if r.sect == RelocSect::Rodata { out = [..out, ElfRelocReq { offset = r.offset; sym = r.sym; rtype = elf_reloc_type_arm64(r.kind); addend = 0 }] }
+        if r.sect == RelocSect::Rodata {
+            out[count] = ElfRelocReq { offset = r.offset; sym = r.sym; rtype = elf_reloc_type_arm64(r.kind); addend = 0 }
+            count++
+        }
         i++
     }
-    out
+    out[0..count]
 }
 
 pub fn emit_elf_arm64(enc: EncodedModule, dwarf: DwarfSink): []byte {
