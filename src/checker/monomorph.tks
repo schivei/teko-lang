@@ -214,13 +214,11 @@ fn mono_named_texpr(name: str): @TypeExpr() {
 fn subst_typeexpr(te: @TypeExpr(), s: Subst): @TypeExpr() {
     match te {
         parser::NamedType as nt => {
-            if nt.path.segments.len == 1 {
-                var nm = nt.path.segments[0].name
-                if is_type_param(nm, s.params) {
-                    match subst_find_inst(s, nm) {
-                        (@Type()) as ct => return type_to_texpr(ct)
-                        null => { }
-                    }
+            var probe = if nt.path.segments.len == 1 { nt.path.segments[0].name } else { path_qualifier(nt.path, nt.path.segments.len) }
+            if is_type_param(probe, s.params) {
+                match subst_find_inst(s, probe) {
+                    (@Type()) as ct => return type_to_texpr(ct)
+                    null => { }
                 }
             }
             parser::NamedType { path = nt.path; args = subst_typeexpr_args(nt.args, s) }
@@ -829,6 +827,23 @@ fn find_template_method(items: []@TItem(), stem: str, method: str): TFunction | 
     null
 }
 
+fn find_template_method_in_ns(items: []@TItem(), owner_ns: str, method: str): TFunction | null {
+    var i = 0
+    loop {
+        if i >= items.len { break }
+        match items[i] {
+            TFunction as f => {
+                if teko::runtime::str_eq(f.name, method) && teko::runtime::str_eq(f.namespace, owner_ns) && !f.is_extern {
+                    return f
+                }
+            }
+            _ => { }
+        }
+        i++
+    }
+    null
+}
+
 fn instance_type_subst(template: parser::TypeDecl, inst: parser::TypeDecl, table: TypeTable): Subst {
     var s = Subst { params = template.type_params; names = []; types = [] }
     var tf = decl_fields(template)
@@ -1013,8 +1028,13 @@ fn instance_method_subst_l5(template: parser::TypeDecl, template_ns: str, inst: 
 
 fn stamp_instance_methods(inst: parser::TypeDecl, items: []@TItem(), table: TypeTable): WFnList | error {
     var stem = g_instance_base(inst.name)
-    var template = match find_generic_template(table, stem) { TemplateReg as tr => tr; null => return WFnList { fns = []; insts = [] } }
+    var inst_ns = type_ns_of(table, inst.name)
+    var template = match find_generic_template_in_ns(table, stem, inst_ns) {
+        TemplateReg as tr => tr
+        null => match find_generic_template(table, stem) { TemplateReg as tr => tr; null => return WFnList { fns = []; insts = [] } }
+    }
     var s = instance_method_subst_l5(template.decl, template.namespace, inst, table)
+    var owner_ns = if template.namespace == "" { stem } else { teko::str::concat(teko::str::concat(template.namespace, "::"), stem) }
     var methods = mono_decl_methods(inst)
     var fns: [methods.len]TFunction = []
     var nfns: u64 = 0
@@ -1022,7 +1042,11 @@ fn stamp_instance_methods(inst: parser::TypeDecl, items: []@TItem(), table: Type
     var mi = 0
     loop {
         if mi >= methods.len { break }
-        match find_template_method(items, stem, methods[mi].name) {
+        var found_tmpl = match find_template_method_in_ns(items, owner_ns, methods[mi].name) {
+            TFunction as f => f
+            null => find_template_method(items, stem, methods[mi].name)
+        }
+        match found_tmpl {
             TFunction as tmpl => {
                 if tmpl.type_params.len == 0 {
                     var wf = match stamp_one_instance_method(inst.name, tmpl, s, items, table) { WFn as w => w; error as e => return e }
