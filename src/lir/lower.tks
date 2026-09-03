@@ -6531,19 +6531,21 @@ fn close_function(ctx: LowerCtx, f: checker::TFunction): LowerCtx | error {
 }
 
 fn block_terminated(f: LFunc, block_id: u32): bool {
-    var i: u64 = 0
+    var it = f.blocks.iter()
     loop {
-        if i >= f.blocks.len { break }
-        var b = f.blocks[i]
-        if b.id == block_id { return block_ends_in_terminator(b) }
-        i++
+        match it.next() {
+            LBlock as b => {
+                if b.id == block_id { return block_ends_in_terminator(b) }
+            }
+            null => break
+        }
     }
     false
 }
 
 fn block_ends_in_terminator(b: LBlock): bool {
-    if b.insts.len == 0 { return false }
-    inst_is_terminator(b.insts[b.insts.len - 1])
+    if b.insts.is_empty() { return false }
+    inst_is_terminator(b.insts.last())
 }
 
 fn inst_is_terminator(inst: LInst): bool {
@@ -7119,32 +7121,27 @@ fn close_virtual_main(tail: LowerMainTail): LowerCtx | error {
 const NATIVE_ENTRY_VMAIN_SYMBOL: str = "__teko_native_vmain"
 
 pub fn wrap_native_entry(m: LModule): LModule | error {
-    var renamed = match native_entry_rename_vmain(m.funcs) { []LFunc as fs => fs; error as e => return e }
-    var stubbed: [renamed.len + 1]LFunc = []
-    var i: u64 = 0
-    loop {
-        if i >= renamed.len { break }
-        stubbed[i] = renamed[i]
-        i++
-    }
-    stubbed[renamed.len] = native_entry_stub()
-    LModule { funcs = stubbed; rodata = m.rodata; globals = m.globals; layouts = m.layouts }
+    var renamed = match native_entry_rename_vmain(m.funcs) { teko::collections::Chunked<LFunc> as fs => fs; error as e => return e }
+    renamed.push(native_entry_stub())
+    LModule { funcs = renamed; rodata = m.rodata; globals = m.globals; layouts = m.layouts }
 }
 
-fn native_entry_rename_vmain(funcs: []LFunc): []LFunc | error {
-    var out: [funcs.len]LFunc = []
+fn native_entry_rename_vmain(funcs: teko::collections::Chunked<LFunc>): teko::collections::Chunked<LFunc> | error {
+    var out = teko::collections::Chunked<LFunc>::make()
     var found = false
-    var i: u64 = 0
+    var it = funcs.iter()
     loop {
-        if i >= funcs.len { break }
-        var f = funcs[i]
-        if f.symbol == "main" {
-            found = true
-            out[i] = rename_lfunc(f, NATIVE_ENTRY_VMAIN_SYMBOL)
-        } else {
-            out[i] = f
+        match it.next() {
+            LFunc as f => {
+                if f.symbol == "main" {
+                    found = true
+                    out.push(rename_lfunc(f, NATIVE_ENTRY_VMAIN_SYMBOL))
+                } else {
+                    out.push(f)
+                }
+            }
+            null => break
         }
-        i++
     }
     if !found { return error { message = "native backend: wrap_native_entry — no `main` entry function found in the lowered module (internal)" } }
     out

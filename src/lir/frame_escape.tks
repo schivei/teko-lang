@@ -13,14 +13,21 @@ pub fn frame_escape_guard(m: LModule): null | error {
 }
 
 fn frame_escaping_funcs(m: LModule): []str {
-    var found: []str = []
-    var i: u64 = 0
+    var found: [m.funcs.len()]str = []
+    var count: u64 = 0
+    var it = m.funcs.iter()
     loop {
-        if i >= m.funcs.len { break }
-        if func_returns_frame_address(m.funcs[i]) { found = [..found, m.funcs[i].symbol] }
-        i++
+        match it.next() {
+            LFunc as f => {
+                if func_returns_frame_address(f) {
+                    found[count] = f.symbol
+                    count++
+                }
+            }
+            null => break
+        }
     }
-    found
+    found[0..count]
 }
 
 fn frame_escape_lines(offenders: []str): str {
@@ -38,24 +45,30 @@ fn frame_escape_lines(offenders: []str): str {
 
 fn func_returns_frame_address(f: LFunc): bool {
     var marks = frame_marks_of(f)
-    var bi: u64 = 0
+    var it = f.blocks.iter()
     loop {
-        if bi >= f.blocks.len { break }
-        if block_returns_frame_address(f.blocks[bi], marks) { return true }
-        bi++
+        match it.next() {
+            LBlock as b => {
+                if block_returns_frame_address(b, marks) { return true }
+            }
+            null => break
+        }
     }
     false
 }
 
 fn block_returns_frame_address(b: LBlock, marks: []bool): bool {
-    var i: u64 = 0
+    var it = b.insts.iter()
     loop {
-        if i >= b.insts.len { break }
-        match b.insts[i].op {
-            LRet as r => if r.has_value && flag_at(marks, r.value) { return true }
-            _ => { }
+        match it.next() {
+            LInst as inst => {
+                match inst.op {
+                    LRet as r => if r.has_value && flag_at(marks, r.value) { return true }
+                    _ => { }
+                }
+            }
+            null => break
         }
-        i++
     }
     false
 }
@@ -71,22 +84,24 @@ fn frame_marks_of(f: LFunc): []bool {
 
 fn frame_sweep(f: LFunc, set: FrameSet): FrameSet {
     var acc = set
-    var bi: u64 = 0
+    var it = f.blocks.iter()
     loop {
-        if bi >= f.blocks.len { break }
-        acc = frame_sweep_block(f, acc, f.blocks[bi])
-        bi++
+        match it.next() {
+            LBlock as b => { acc = frame_sweep_block(f, acc, b) }
+            null => break
+        }
     }
     acc
 }
 
 fn frame_sweep_block(f: LFunc, set: FrameSet, b: LBlock): FrameSet {
     var acc = set
-    var i: u64 = 0
+    var it = b.insts.iter()
     loop {
-        if i >= b.insts.len { break }
-        acc = frame_sweep_inst(f, acc, b.insts[i])
-        i++
+        match it.next() {
+            LInst as inst => { acc = frame_sweep_inst(f, acc, inst) }
+            null => break
+        }
     }
     acc
 }
@@ -115,11 +130,14 @@ fn frame_pass_args(f: LFunc, set: FrameSet, target: u32, args: []u32): FrameSet 
 }
 
 fn block_params_of(f: LFunc, id: u32): []u32 | null {
-    var i: u64 = 0
+    var it = f.blocks.iter()
     loop {
-        if i >= f.blocks.len { break }
-        if f.blocks[i].id == id { return f.blocks[i].params }
-        i++
+        match it.next() {
+            LBlock as b => {
+                if b.id == id { return b.params }
+            }
+            null => break
+        }
     }
     null
 }

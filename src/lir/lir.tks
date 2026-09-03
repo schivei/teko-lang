@@ -69,9 +69,9 @@ macro LOp() { lowering { LConstInt | LConstFloat | LBin | LUn | LCall | LParam |
 
 pub type LInst = struct { result: u32; has_result: bool; op: @LOp(); line: u32; col: u32 }
 
-pub type LBlock = struct { id: u32; params: []u32; insts: []LInst }
+pub type LBlock = struct { id: u32; params: []u32; insts: teko::collections::Chunked<LInst> }
 
-pub type LFunc = struct { symbol: str; n_params: u32; param_types: []LType; ret_type: LType; blocks: []LBlock; next_vreg: u32 }
+pub type LFunc = struct { symbol: str; n_params: u32; param_types: []LType; ret_type: LType; blocks: teko::collections::Chunked<LBlock>; next_vreg: u32 }
 
 pub type LDataReloc = struct { offset: u32; target: str }
 
@@ -95,20 +95,28 @@ pub type FatMemberImage = struct {
 
 pub type LGlobal = struct { symbol: str; ty: LType; bytes: []byte }
 
-pub type LModule = struct { funcs: []LFunc; rodata: []LRodata; globals: []LGlobal; layouts: []LStructLayout }
+pub type LModule = struct { funcs: teko::collections::Chunked<LFunc>; rodata: []LRodata; globals: []LGlobal; layouts: []LStructLayout }
 
 pub fn empty_module(): LModule {
-    LModule { funcs = []; rodata = []; globals = []; layouts = [] }
+    LModule { funcs = teko::collections::Chunked<LFunc>::make(); rodata = []; globals = []; layouts = [] }
+}
+
+pub fn funcs_of(f: LFunc): teko::collections::Chunked<LFunc> {
+    var c = teko::collections::Chunked<LFunc>::make()
+    c.push(f)
+    c
 }
 
 pub fn new_func(symbol: str, n_params: u32, param_types: []LType, ret_type: LType): LFunc {
-    var entry = LBlock { id = 0; params = []; insts = [] }
+    var entry = LBlock { id = 0; params = []; insts = teko::collections::Chunked<LInst>::make() }
+    var blocks = teko::collections::Chunked<LBlock>::make()
+    blocks.push(entry)
     LFunc {
         symbol = symbol
         n_params = n_params
         param_types = param_types
         ret_type = ret_type
-        blocks = [entry]
+        blocks = blocks
         next_vreg = n_params
     }
 }
@@ -203,22 +211,17 @@ pub fn atomic_rmw_inst(result: u32, kind: LAtomicKind, args: []u32, line: u32, c
     LInst { result = result; has_result = true; op = LAtomicRmw { kind = kind; args = args }; line = line; col = col }
 }
 
-fn push_inst_block(b: LBlock, inst: LInst): LBlock {
-    LBlock { id = b.id; params = b.params; insts = [..b.insts, inst] }
-}
-
 pub fn append_inst(f: LFunc, block_id: u32, inst: LInst): LFunc {
-    var blocks = f.blocks
-    var i: u64 = 0
+    var it = f.blocks.iter()
     loop {
-        if i >= blocks.len { break }
-        if blocks[i].id == block_id {
-            blocks[i] = push_inst_block(blocks[i], inst)
-            break
+        match it.next() {
+            LBlock as b => {
+                if b.id == block_id { b.insts.push(inst); break }
+            }
+            null => break
         }
-        i++
     }
-    LFunc { symbol = f.symbol; n_params = f.n_params; param_types = f.param_types; ret_type = f.ret_type; blocks = blocks; next_vreg = f.next_vreg }
+    f
 }
 
 fn with_next_vreg(f: LFunc, next_vreg: u32): LFunc {
@@ -232,7 +235,8 @@ pub fn alloc_vreg(f: LFunc): FreshVReg {
 }
 
 pub fn add_func(m: LModule, f: LFunc): LModule {
-    LModule { funcs = [..m.funcs, f]; rodata = m.rodata; globals = m.globals; layouts = m.layouts }
+    m.funcs.push(f)
+    m
 }
 
 pub fn rename_lfunc(f: LFunc, symbol: str): LFunc {
@@ -258,13 +262,10 @@ pub fn with_rodata(m: LModule, rodata: []LRodata): LModule {
 pub type BlockRef = struct { func: LFunc; block_id: u32 }
 
 pub fn alloc_block(f: LFunc): BlockRef {
-    var id = f.blocks.len to u32
-    var b = LBlock { id = id; params = []; insts = [] }
-    var widened = LFunc {
-        symbol = f.symbol; n_params = f.n_params; param_types = f.param_types; ret_type = f.ret_type
-        blocks = [..f.blocks, b]; next_vreg = f.next_vreg
-    }
-    BlockRef { func = widened; block_id = id }
+    var id = f.blocks.len() to u32
+    var b = LBlock { id = id; params = []; insts = teko::collections::Chunked<LInst>::make() }
+    f.blocks.push(b)
+    BlockRef { func = f; block_id = id }
 }
 
 pub type BlockParam = struct { func: LFunc; vreg: u32 }
@@ -275,17 +276,18 @@ pub fn add_block_param(f: LFunc, block_id: u32): BlockParam {
 }
 
 fn set_block_param(f: LFunc, block_id: u32, vreg: u32): LFunc {
-    var blocks = f.blocks
+    var n = f.blocks.len()
     var i: u64 = 0
     loop {
-        if i >= blocks.len { break }
-        if blocks[i].id == block_id {
-            blocks[i] = LBlock { id = blocks[i].id; params = [..blocks[i].params, vreg]; insts = blocks[i].insts }
+        if i >= n { break }
+        var b = f.blocks.get(i)
+        if b.id == block_id {
+            f.blocks.set(i, LBlock { id = b.id; params = [..b.params, vreg]; insts = b.insts })
             break
         }
         i++
     }
-    LFunc { symbol = f.symbol; n_params = f.n_params; param_types = f.param_types; ret_type = f.ret_type; blocks = blocks; next_vreg = f.next_vreg }
+    f
 }
 
 pub type LStructLayout = struct { name: str; size: u32; align: u32; field_names: []str; field_offsets: []u32; field_types: []LType }
