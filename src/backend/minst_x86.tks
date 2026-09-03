@@ -186,20 +186,22 @@ pub type MCvtX86 = struct {
 
 macro MInstX86() { lowering { MMovImmX86 | MMovX86 | MAluRmX86 | MImulX86 | MDivSeqX86 | MShiftX86 | MCmpX86 | MSetccX86 | MJccX86 | MNegX86 | MNotX86 | MLoadX86 | MStoreX86 | MFrameAddrX86 | MLeaRipX86 | MJmpX86 | MCallX86 | MCallIndX86 | MSyscallX86 | MAtomicX86 | MRetX86 | MFAluX86 | MFMovX86 | MFCmpX86 | MSetPX86 | MCvtX86 | MOutArgX86 | MInArgX86 | MFSpillX86 } }
 
+pub type MInstX86Node = struct { op: @MInstX86() }
+
 pub type MBlockX86 = struct {
     id: u32
     params: []MReg
-    insts: []@MInstX86()
+    insts: teko::collections::Chunked<MInstX86Node>
 }
 
 pub type MFuncX86 = struct {
     symbol: str
-    blocks: []MBlockX86
+    blocks: teko::collections::Chunked<MBlockX86>
     frame: []lir::LAlloca
 }
 
 pub type MModuleX86 = struct {
-    funcs: []MFuncX86
+    funcs: teko::collections::Chunked<MFuncX86>
     rodata: []lir::LRodata
     globals: []lir::LGlobal
     layouts: []lir::LStructLayout
@@ -322,34 +324,32 @@ pub fn ret_x86(): @MInstX86() {
 }
 
 pub fn empty_mmodule_x86(): MModuleX86 {
-    MModuleX86 { funcs = []; rodata = []; globals = []; layouts = [] }
+    MModuleX86 { funcs = teko::collections::Chunked<MFuncX86>::make(); rodata = []; globals = []; layouts = [] }
 }
 
 pub fn new_mfunc_x86(symbol: str): MFuncX86 {
-    var entry = MBlockX86 { id = 0; params = []; insts = [] }
-    MFuncX86 { symbol = symbol; blocks = [entry]; frame = [] }
-}
-
-fn push_minst_block_x86(b: MBlockX86, inst: @MInstX86()): MBlockX86 {
-    MBlockX86 { id = b.id; params = b.params; insts = [..b.insts, inst] }
+    var entry = MBlockX86 { id = 0; params = []; insts = teko::collections::Chunked<MInstX86Node>::make() }
+    var blocks = teko::collections::Chunked<MBlockX86>::make()
+    blocks.push(entry)
+    MFuncX86 { symbol = symbol; blocks = blocks; frame = [] }
 }
 
 pub fn append_minst_x86(f: MFuncX86, block_id: u32, inst: @MInstX86()): MFuncX86 {
-    var blocks = f.blocks
-    var i: u64 = 0
+    var it = f.blocks.iter()
     loop {
-        if i >= blocks.len { break }
-        if blocks[i].id == block_id {
-            blocks[i] = push_minst_block_x86(blocks[i], inst)
-            break
+        match it.next() {
+            MBlockX86 as b => {
+                if b.id == block_id { b.insts.push(MInstX86Node { op = inst }); break }
+            }
+            null => break
         }
-        i++
     }
-    MFuncX86 { symbol = f.symbol; blocks = blocks; frame = f.frame }
+    f
 }
 
 pub fn append_block_x86(f: MFuncX86, blk: MBlockX86): MFuncX86 {
-    MFuncX86 { symbol = f.symbol; blocks = [..f.blocks, blk]; frame = f.frame }
+    f.blocks.push(blk)
+    f
 }
 
 pub fn append_frame_x86(f: MFuncX86, slot: lir::LAlloca): MFuncX86 {
@@ -368,21 +368,23 @@ fn mreg_list_set_x86(xs: []MReg, index: u32, reg: MReg): []MReg {
 }
 
 pub fn set_block_param_x86(f: MFuncX86, block_id: u32, index: u32, reg: MReg): MFuncX86 {
-    var blocks = f.blocks
+    var n = f.blocks.len()
     var i: u64 = 0
     loop {
-        if i >= blocks.len { break }
-        if blocks[i].id == block_id {
-            blocks[i] = MBlockX86 { id = blocks[i].id; params = mreg_list_set_x86(blocks[i].params, index, reg); insts = blocks[i].insts }
+        if i >= n { break }
+        var b = f.blocks.get(i)
+        if b.id == block_id {
+            f.blocks.set(i, MBlockX86 { id = b.id; params = mreg_list_set_x86(b.params, index, reg); insts = b.insts })
             break
         }
         i++
     }
-    MFuncX86 { symbol = f.symbol; blocks = blocks; frame = f.frame }
+    f
 }
 
 pub fn add_mfunc_x86(m: MModuleX86, f: MFuncX86): MModuleX86 {
-    MModuleX86 { funcs = [..m.funcs, f]; rodata = m.rodata; globals = m.globals; layouts = m.layouts }
+    m.funcs.push(f)
+    m
 }
 
 fn wide_suffix_x86(wide: bool): str {
@@ -634,22 +636,24 @@ fn print_mblock_x86(b: MBlockX86): str {
     var out = teko::str::concat("  #M", teko::u64_to_str(b.id to u64))
     if b.params.len != 0 { out = teko::str::concat(out, "(", print_regs_x86(b.params), ")") }
     out = teko::str::concat(out, ":\n")
-    var i: u64 = 0
+    var it = b.insts.iter()
     loop {
-        if i >= b.insts.len { break }
-        out = teko::str::concat(out, "    ", print_minst_x86(b.insts[i]), "\n")
-        i++
+        match it.next() {
+            MInstX86Node as n => { out = teko::str::concat(out, "    ", print_minst_x86(n.op), "\n") }
+            null => break
+        }
     }
     out
 }
 
 fn print_mfunc_x86(f: MFuncX86): str {
     var out = teko::str::concat("func @", f.symbol, " {\n")
-    var i: u64 = 0
+    var it = f.blocks.iter()
     loop {
-        if i >= f.blocks.len { break }
-        out = teko::str::concat(out, print_mblock_x86(f.blocks[i]))
-        i++
+        match it.next() {
+            MBlockX86 as b => { out = teko::str::concat(out, print_mblock_x86(b)) }
+            null => break
+        }
     }
     teko::str::concat(out, "}\n")
 }
@@ -657,11 +661,16 @@ fn print_mfunc_x86(f: MFuncX86): str {
 pub fn minst_print_x86(m: MModuleX86): str {
     var out = ""
     var i: u64 = 0
+    var it = m.funcs.iter()
     loop {
-        if i >= m.funcs.len { break }
-        if i > 0 { out = teko::str::concat(out, "\n") }
-        out = teko::str::concat(out, print_mfunc_x86(m.funcs[i]))
-        i++
+        match it.next() {
+            MFuncX86 as f => {
+                if i > 0 { out = teko::str::concat(out, "\n") }
+                out = teko::str::concat(out, print_mfunc_x86(f))
+                i++
+            }
+            null => break
+        }
     }
     out
 }

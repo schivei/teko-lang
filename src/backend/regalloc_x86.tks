@@ -57,25 +57,31 @@ fn terminator_target_x86(inst: @MInstX86()): TargetOpt {
     }
 }
 
-fn block_insts_of_x86(f: MFuncX86, id: u32): []@MInstX86() {
-    var i: u64 = 0
+fn block_insts_of_x86(f: MFuncX86, id: u32): teko::collections::Chunked<MInstX86Node> {
+    var it = f.blocks.iter()
     loop {
-        if i >= f.blocks.len { break }
-        if f.blocks[i].id == id { return f.blocks[i].insts }
-        i++
+        match it.next() {
+            MBlockX86 as b => {
+                if b.id == id { return b.insts }
+            }
+            null => break
+        }
     }
-    []
+    teko::collections::Chunked<MInstX86Node>::make()
 }
 
 fn block_successors_x86(f: MFuncX86, id: u32): []u32 {
     var insts = block_insts_of_x86(f, id)
     var out: []u32 = []
-    var i: u64 = 0
+    var it = insts.iter()
     loop {
-        if i >= insts.len { break }
-        var t = terminator_target_x86(insts[i])
-        if t.has { out = add_unique_u32(out, t.target) }
-        i++
+        match it.next() {
+            MInstX86Node as n => {
+                var t = terminator_target_x86(n.op)
+                if t.has { out = add_unique_u32(out, t.target) }
+            }
+            null => break
+        }
     }
     out
 }
@@ -94,36 +100,38 @@ fn rpo_visit_x86(f: MFuncX86, id: u32, st: RpoState): RpoState {
 }
 
 fn append_unvisited_x86(f: MFuncX86, order: []u32): []u32 {
-    var out: [order.len + f.blocks.len]u32 = []
+    var out: [order.len + f.blocks.len()]u32 = []
     var count: u64 = 0
     loop {
         if count >= order.len { break }
         out[count] = order[count]
         count++
     }
-    var i: u64 = 0
+    var it = f.blocks.iter()
     loop {
-        if i >= f.blocks.len { break }
-        var bid = f.blocks[i].id
-        if !u32_in(out[0..count], bid) {
-            out[count] = bid
-            count++
+        match it.next() {
+            MBlockX86 as b => {
+                if !u32_in(out[0..count], b.id) {
+                    out[count] = b.id
+                    count++
+                }
+            }
+            null => break
         }
-        i++
     }
     out[0..count]
 }
 
 fn rpo_block_order_x86(f: MFuncX86): []u32 {
-    if f.blocks.len == 0 { return [] }
-    var entry = f.blocks[0].id
+    if f.blocks.is_empty() { return [] }
+    var entry = f.blocks.first().id
     var st = rpo_visit_x86(f, entry, RpoState { visited = []; post = [] })
     append_unvisited_x86(f, reverse_u32(st.post))
 }
 
 fn reachable_blocks_x86(f: MFuncX86): []u32 {
-    if f.blocks.len == 0 { return [] }
-    var entry = f.blocks[0].id
+    if f.blocks.is_empty() { return [] }
+    var entry = f.blocks.first().id
     rpo_visit_x86(f, entry, RpoState { visited = []; post = [] }).visited
 }
 
@@ -132,7 +140,7 @@ fn number_insts_total_x86(f: MFuncX86, order: []u32): u64 {
     var bi: u64 = 0
     loop {
         if bi >= order.len { break }
-        total = total + block_insts_of_x86(f, order[bi]).len
+        total = total + block_insts_of_x86(f, order[bi]).len()
         bi++
     }
     total
@@ -146,14 +154,16 @@ fn number_insts_x86(f: MFuncX86, order: []u32): []NumberedInstX86 {
     loop {
         if bi >= order.len { break }
         var bid = order[bi]
-        var insts = block_insts_of_x86(f, bid)
-        var ii: u64 = 0
+        var iit = block_insts_of_x86(f, bid).iter()
         loop {
-            if ii >= insts.len { break }
-            out[k] = NumberedInstX86 { point = p; block_id = bid; inst = insts[ii] }
-            k++
-            p = p + 1
-            ii++
+            match iit.next() {
+                MInstX86Node as n => {
+                    out[k] = NumberedInstX86 { point = p; block_id = bid; inst = n.op }
+                    k++
+                    p = p + 1
+                }
+                null => break
+            }
         }
         bi++
     }
@@ -458,30 +468,21 @@ fn rewrite_inst_x86(abi: AbiDescriptor, sr: ScanResult, inst: @MInstX86(), frame
 }
 
 fn rewrite_block_x86(abi: AbiDescriptor, sr: ScanResult, b: MBlockX86, frame_base: u64): MBlockX86 {
-    var parts: [b.insts.len][]@MInstX86() = []
-    var total: u64 = 0
-    var ii: u64 = 0
+    var insts = teko::collections::Chunked<MInstX86Node>::make()
+    var it = b.insts.iter()
     loop {
-        if ii >= b.insts.len { break }
-        var part = rewrite_inst_x86(abi, sr, b.insts[ii], frame_base)
-        parts[ii] = part
-        total = total + part.len
-        ii++
-    }
-    var insts: [total]@MInstX86() = []
-    var k: u64 = 0
-    var pi: u64 = 0
-    loop {
-        if pi >= parts.len { break }
-        var part = parts[pi]
-        var pj: u64 = 0
-        loop {
-            if pj >= part.len { break }
-            insts[k] = part[pj]
-            k++
-            pj++
+        match it.next() {
+            MInstX86Node as n => {
+                var part = rewrite_inst_x86(abi, sr, n.op, frame_base)
+                var pj: u64 = 0
+                loop {
+                    if pj >= part.len { break }
+                    insts.push(MInstX86Node { op = part[pj] })
+                    pj++
+                }
+            }
+            null => break
         }
-        pi++
     }
     MBlockX86 { id = b.id; params = b.params; insts = insts }
 }
@@ -489,37 +490,43 @@ fn rewrite_block_x86(abi: AbiDescriptor, sr: ScanResult, b: MBlockX86, frame_bas
 fn rewrite_func_x86(abi: AbiDescriptor, f: MFuncX86, sr: ScanResult): MFuncX86 {
     var frame_base = f.frame.len
     var frame = append_spill_slots(abi, f.frame, count_spills(sr))
-    var blocks: [f.blocks.len]MBlockX86 = []
-    var bi: u64 = 0
+    var blocks = teko::collections::Chunked<MBlockX86>::make()
+    var it = f.blocks.iter()
     loop {
-        if bi >= f.blocks.len { break }
-        blocks[bi] = rewrite_block_x86(abi, sr, f.blocks[bi], frame_base)
-        bi++
+        match it.next() {
+            MBlockX86 as b => { blocks.push(rewrite_block_x86(abi, sr, b, frame_base)) }
+            null => break
+        }
     }
     MFuncX86 { symbol = f.symbol; blocks = blocks; frame = frame }
 }
 
 pub fn all_physical_x86(f: MFuncX86): bool {
-    var bi: u64 = 0
+    var bit = f.blocks.iter()
     loop {
-        if bi >= f.blocks.len { break }
-        var b = f.blocks[bi]
-        var ii: u64 = 0
-        loop {
-            if ii >= b.insts.len { break }
-            var ir = inst_regs_x86(b.insts[ii])
-            if ir.has_def {
-                if !ir.def_reg.is_phys { return false }
+        match bit.next() {
+            MBlockX86 as b => {
+                var iit = b.insts.iter()
+                loop {
+                    match iit.next() {
+                        MInstX86Node as n => {
+                            var ir = inst_regs_x86(n.op)
+                            if ir.has_def {
+                                if !ir.def_reg.is_phys { return false }
+                            }
+                            var ui: u64 = 0
+                            loop {
+                                if ui >= ir.uses.len { break }
+                                if !ir.uses[ui].is_phys { return false }
+                                ui++
+                            }
+                        }
+                        null => break
+                    }
+                }
             }
-            var ui: u64 = 0
-            loop {
-                if ui >= ir.uses.len { break }
-                if !ir.uses[ui].is_phys { return false }
-                ui++
-            }
-            ii++
+            null => break
         }
-        bi++
     }
     true
 }
@@ -537,16 +544,16 @@ pub fn regalloc_func_x86(abi: AbiDescriptor, f: MFuncX86): MFuncX86 | error {
 }
 
 pub fn regalloc_module_x86(abi: AbiDescriptor, m: MModuleX86): MModuleX86 | error {
-    var funcs: [m.funcs.len]MFuncX86 = []
-    var i: u64 = 0
+    var funcs = teko::collections::Chunked<MFuncX86>::make()
+    var it = m.funcs.iter()
     loop {
-        if i >= m.funcs.len { break }
-        var rf = match regalloc_func_x86(abi, m.funcs[i]) {
-            MFuncX86 as g => g
-            error as e => return e
+        match it.next() {
+            MFuncX86 as f => {
+                var rf = match regalloc_func_x86(abi, f) { MFuncX86 as g => g; error as e => return e }
+                funcs.push(rf)
+            }
+            null => break
         }
-        funcs[i] = rf
-        i++
     }
     MModuleX86 { funcs = funcs; rodata = m.rodata; globals = m.globals; layouts = m.layouts }
 }
