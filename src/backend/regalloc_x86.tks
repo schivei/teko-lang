@@ -94,15 +94,24 @@ fn rpo_visit_x86(f: MFuncX86, id: u32, st: RpoState): RpoState {
 }
 
 fn append_unvisited_x86(f: MFuncX86, order: []u32): []u32 {
-    var out = order
+    var out: [order.len + f.blocks.len]u32 = []
+    var count: u64 = 0
+    loop {
+        if count >= order.len { break }
+        out[count] = order[count]
+        count++
+    }
     var i: u64 = 0
     loop {
         if i >= f.blocks.len { break }
         var bid = f.blocks[i].id
-        if !u32_in(out, bid) { out = [..out, bid] }
+        if !u32_in(out[0..count], bid) {
+            out[count] = bid
+            count++
+        }
         i++
     }
-    out
+    out[0..count]
 }
 
 fn rpo_block_order_x86(f: MFuncX86): []u32 {
@@ -118,8 +127,20 @@ fn reachable_blocks_x86(f: MFuncX86): []u32 {
     rpo_visit_x86(f, entry, RpoState { visited = []; post = [] }).visited
 }
 
+fn number_insts_total_x86(f: MFuncX86, order: []u32): u64 {
+    var total: u64 = 0
+    var bi: u64 = 0
+    loop {
+        if bi >= order.len { break }
+        total = total + block_insts_of_x86(f, order[bi]).len
+        bi++
+    }
+    total
+}
+
 fn number_insts_x86(f: MFuncX86, order: []u32): []NumberedInstX86 {
-    var out: []NumberedInstX86 = []
+    var out: [number_insts_total_x86(f, order)]NumberedInstX86 = []
+    var k: u64 = 0
     var p: u32 = 0
     var bi: u64 = 0
     loop {
@@ -129,7 +150,8 @@ fn number_insts_x86(f: MFuncX86, order: []u32): []NumberedInstX86 {
         var ii: u64 = 0
         loop {
             if ii >= insts.len { break }
-            out = [..out, NumberedInstX86 { point = p; block_id = bid; inst = insts[ii] }]
+            out[k] = NumberedInstX86 { point = p; block_id = bid; inst = insts[ii] }
+            k++
             p = p + 1
             ii++
         }
@@ -138,20 +160,36 @@ fn number_insts_x86(f: MFuncX86, order: []u32): []NumberedInstX86 {
     out
 }
 
+fn collect_events_total_x86(stream: []NumberedInstX86): u64 {
+    var total: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= stream.len { break }
+        var ir = inst_regs_x86(stream[i].inst)
+        if ir.has_def { total = total + 1 }
+        total = total + ir.uses.len
+        i++
+    }
+    total
+}
+
 fn collect_events_x86(stream: []NumberedInstX86): []RegEvent {
-    var out: []RegEvent = []
+    var out: [collect_events_total_x86(stream)]RegEvent = []
+    var k: u64 = 0
     var i: u64 = 0
     loop {
         if i >= stream.len { break }
         var ni = stream[i]
         var ir = inst_regs_x86(ni.inst)
         if ir.has_def {
-            out = [..out, RegEvent { reg = ir.def_reg; point = ni.point; is_def = true }]
+            out[k] = RegEvent { reg = ir.def_reg; point = ni.point; is_def = true }
+            k++
         }
         var u: u64 = 0
         loop {
             if u >= ir.uses.len { break }
-            out = [..out, RegEvent { reg = ir.uses[u]; point = ni.point; is_def = false }]
+            out[k] = RegEvent { reg = ir.uses[u]; point = ni.point; is_def = false }
+            k++
             u++
         }
         i++
@@ -160,14 +198,18 @@ fn collect_events_x86(stream: []NumberedInstX86): []RegEvent {
 }
 
 fn call_points_of_x86(stream: []NumberedInstX86): []u32 {
-    var out: []u32 = []
+    var out: [stream.len]u32 = []
+    var count: u64 = 0
     var i: u64 = 0
     loop {
         if i >= stream.len { break }
-        if inst_regs_x86(stream[i].inst).is_call { out = [..out, stream[i].point] }
+        if inst_regs_x86(stream[i].inst).is_call {
+            out[count] = stream[i].point
+            count++
+        }
         i++
     }
-    out
+    out[0..count]
 }
 
 fn next_terminator_point_x86(stream: []NumberedInstX86, from: u32): u32 {
@@ -241,7 +283,8 @@ fn block_first_point_x86(stream: []NumberedInstX86, block_id: u32): u32 {
 }
 
 fn natural_loops_x86(stream: []NumberedInstX86, order: []u32, reachable: []u32): []NaturalLoop {
-    var out: []NaturalLoop = []
+    var out: [stream.len]NaturalLoop = []
+    var count: u64 = 0
     var i: u64 = 0
     loop {
         if i >= stream.len { break }
@@ -249,19 +292,28 @@ fn natural_loops_x86(stream: []NumberedInstX86, order: []u32, reachable: []u32):
         var t = terminator_target_x86(ni.inst)
         if t.has && u32_in(reachable, ni.block_id) {
             if block_pos(order, t.target) <= block_pos(order, ni.block_id) {
-                out = [..out, NaturalLoop { header_pt = block_first_point_x86(stream, t.target); latch_pt = ni.point }]
+                out[count] = NaturalLoop { header_pt = block_first_point_x86(stream, t.target); latch_pt = ni.point }
+                count++
             }
         }
         i++
     }
-    out
+    out[0..count]
 }
 
 fn compute_intervals_x86(stream: []NumberedInstX86, order: []u32, reachable: []u32): IntervalSet | error {
     var events = collect_events_x86(stream)
     var regs = distinct_regs(events)
     var cps = call_points_of_x86(stream)
-    var virt: []LiveInterval = []
+    var virt_n: u64 = 0
+    var vc: u64 = 0
+    loop {
+        if vc >= regs.len { break }
+        if !regs[vc].is_phys { virt_n = virt_n + 1 }
+        vc++
+    }
+    var virt: [virt_n]LiveInterval = []
+    var vk: u64 = 0
     var fixed: []LiveInterval = []
     var i: u64 = 0
     loop {
@@ -276,7 +328,8 @@ fn compute_intervals_x86(stream: []NumberedInstX86, order: []u32, reachable: []u
                 j++
             }
         } else {
-            virt = [..virt, virt_interval(events, r, cps)]
+            virt[vk] = virt_interval(events, r, cps)
+            vk++
         }
         i++
     }
@@ -329,7 +382,7 @@ fn minst_x86_cat(a: []@MInstX86(), b: []@MInstX86()): []@MInstX86() {
 fn emit_gpr_reload_x86(sv: MReg, slot: u64): []@MInstX86() {
     var fa = frame_addr_x86(sv, slot)
     var ld = load_x86(MMemSizeX86::Q, false, sv, MMem { base_reg = sv; offset = 0 to i32 })
-    [..minst_x86_single(fa), ld]
+    [fa, ld]
 }
 
 fn emit_spill_reload_x86(sv: MReg, slot: u64): []@MInstX86() {
@@ -345,7 +398,7 @@ fn emit_spill_store_x86(dsv: MReg, asv: MReg, slot: u64): []@MInstX86() {
 fn emit_gpr_store_x86(dsv: MReg, asv: MReg, slot: u64): []@MInstX86() {
     var fa = frame_addr_x86(asv, slot)
     var st = store_x86(MMemSizeX86::Q, dsv, MMem { base_reg = asv; offset = 0 to i32 })
-    [..minst_x86_single(fa), st]
+    [fa, st]
 }
 
 type UseAccX86 = struct {
@@ -405,12 +458,30 @@ fn rewrite_inst_x86(abi: AbiDescriptor, sr: ScanResult, inst: @MInstX86(), frame
 }
 
 fn rewrite_block_x86(abi: AbiDescriptor, sr: ScanResult, b: MBlockX86, frame_base: u64): MBlockX86 {
-    var insts: []@MInstX86() = []
+    var parts: [b.insts.len][]@MInstX86() = []
+    var total: u64 = 0
     var ii: u64 = 0
     loop {
         if ii >= b.insts.len { break }
-        insts = minst_x86_cat(insts, rewrite_inst_x86(abi, sr, b.insts[ii], frame_base))
+        var part = rewrite_inst_x86(abi, sr, b.insts[ii], frame_base)
+        parts[ii] = part
+        total = total + part.len
         ii++
+    }
+    var insts: [total]@MInstX86() = []
+    var k: u64 = 0
+    var pi: u64 = 0
+    loop {
+        if pi >= parts.len { break }
+        var part = parts[pi]
+        var pj: u64 = 0
+        loop {
+            if pj >= part.len { break }
+            insts[k] = part[pj]
+            k++
+            pj++
+        }
+        pi++
     }
     MBlockX86 { id = b.id; params = b.params; insts = insts }
 }
