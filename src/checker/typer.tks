@@ -1648,7 +1648,7 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr |
     }
     match recv_t {
         Named as rn => {
-            if name_is_phantom_instance(rn.name, table) {
+            if name_is_g_instance(rn.name) {
                 var psegs = method_dispatch_callee(rn.name, mc.method).segments
                 var pcargs: []parser::Expr = [mc.receiver, ..mc.args]
                 return type_call(parser::Call { callee = parser::Path { segments = psegs }; args = pcargs; arg_names = method_call_arg_names(mc); owner_type_args = []; callee_type_args = mc.type_args }, null, env, table)
@@ -1861,7 +1861,11 @@ fn type_phantom_instance_call(c: parser::Call, env: Env, table: TypeTable): TExp
     var phantom = c.callee.segments[nseg - 2].name
     var mname = c.callee.segments[nseg - 1].name
     var stem = split_generic_instance_name(phantom).stem
-    var template = match find_generic_template(table, stem) { TemplateReg as tr => tr; null => return error { message = $"unknown function: {mname}" } }
+    var inst_ns = match resolve_bare_g_instance(phantom, table) { TypeReg as r => r.namespace; null => "" }
+    var template = match find_generic_template_in_ns(table, stem, inst_ns) {
+        TemplateReg as tr => tr
+        null => match find_generic_template(table, stem) { TemplateReg as tr => tr; null => return error { message = $"unknown function: {mname}" } }
+    }
     var s = match phantom_owner_subst(phantom, template.decl, table, env.cur_ns) { Subst as sub => sub; error as e => return e }
     var methods = match template.decl.body {
         parser::ClassBody as cb => cb.methods
@@ -2089,7 +2093,7 @@ fn type_call(c0: parser::Call, expected: @Type() | null, env: Env, table: TypeTa
         var rc = match retarget_generic_static_callee(c0, table, env.cur_ns) { parser::Path as p => p; error as e => return e }
         c = parser::Call { callee = rc; args = c0.args; arg_names = c0.arg_names; owner_type_args = c0.owner_type_args; callee_type_args = c0.callee_type_args }
     }
-    if c.callee.segments.len >= 2 && name_is_phantom_instance(c.callee.segments[c.callee.segments.len - 2].name, table) {
+    if c.callee.segments.len >= 2 && name_is_g_instance(c.callee.segments[c.callee.segments.len - 2].name) {
         return type_phantom_instance_call(c, env, table)
     }
     match type_list_builtin(c, env, table) {
@@ -2753,7 +2757,10 @@ fn dot_construct_target(expected: @Type(), env: Env, table: TypeTable): Construc
         error => {
             if !name_is_g_instance(en.name) { return dot_no_target_error() }
             var stem = split_generic_instance_name(en.name).stem
-            var tmpl = match type_table_find(table, stem, "") { parser::TypeDecl as t => t; error => return dot_no_target_error() }
+            var tmpl = match stem_decl_in_ns(table, stem, env.cur_ns) {
+                parser::TypeDecl as t => t
+                null => match type_table_find(table, stem, "") { parser::TypeDecl as t => t; error => return dot_no_target_error() }
+            }
             ConstructTarget { name = en.name; decl = tmpl; is_self = dot_targets_owner(en.name, env) }
         }
     }
