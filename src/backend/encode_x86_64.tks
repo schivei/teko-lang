@@ -505,22 +505,24 @@ fn scan_inst_saved_x86(abi: AbiDescriptor, acc0: Saved, inst: @MInstX86()): Save
 
 fn scan_block_saved_x86(abi: AbiDescriptor, acc0: Saved, b: MBlockX86): Saved {
     var acc = acc0
-    var i: u64 = 0
+    var it = b.insts.iter()
     loop {
-        if i >= b.insts.len { break }
-        acc = scan_inst_saved_x86(abi, acc, b.insts[i])
-        i++
+        match it.next() {
+            MInstX86Node as n => { acc = scan_inst_saved_x86(abi, acc, n.op) }
+            null => break
+        }
     }
     acc
 }
 
 fn collect_callee_saved_x86(abi: AbiDescriptor, f: MFuncX86): Saved {
     var acc = Saved { gpr = []; fpr = [] }
-    var i: u64 = 0
+    var it = f.blocks.iter()
     loop {
-        if i >= f.blocks.len { break }
-        acc = scan_block_saved_x86(abi, acc, f.blocks[i])
-        i++
+        match it.next() {
+            MBlockX86 as b => { acc = scan_block_saved_x86(abi, acc, b) }
+            null => break
+        }
     }
     acc
 }
@@ -552,44 +554,48 @@ fn inst_is_call_x86(i: @MInstX86()): bool {
 
 fn block_makes_call_x86(b: MBlockX86): bool {
     var found = false
-    var i: u64 = 0
+    var it = b.insts.iter()
     loop {
-        if i >= b.insts.len { break }
-        if inst_is_call_x86(b.insts[i]) { found = true; break }
-        i++
+        match it.next() {
+            MInstX86Node as n => { if inst_is_call_x86(n.op) { found = true; break } }
+            null => break
+        }
     }
     found
 }
 
 fn func_makes_call_x86(f: MFuncX86): bool {
     var found = false
-    var i: u64 = 0
+    var it = f.blocks.iter()
     loop {
-        if i >= f.blocks.len { break }
-        if block_makes_call_x86(f.blocks[i]) { found = true; break }
-        i++
+        match it.next() {
+            MBlockX86 as b => { if block_makes_call_x86(b) { found = true; break } }
+            null => break
+        }
     }
     found
 }
 
 fn block_any_ret_x86(b: MBlockX86): bool {
     var found = false
-    var i: u64 = 0
+    var it = b.insts.iter()
     loop {
-        if i >= b.insts.len { break }
-        if is_ret_x86(b.insts[i]) { found = true; break }
-        i++
+        match it.next() {
+            MInstX86Node as n => { if is_ret_x86(n.op) { found = true; break } }
+            null => break
+        }
     }
     found
 }
 
 fn func_any_ret_x86(f: MFuncX86): bool {
     var found = false
-    var i: u64 = 0
+    var it = f.blocks.iter()
     loop {
-        if i >= f.blocks.len { break }
-        if block_any_ret_x86(f.blocks[i]) { found = true; break }
-        i++
+        match it.next() {
+            MBlockX86 as b => { if block_any_ret_x86(b) { found = true; break } }
+            null => break
+        }
     }
     found
 }
@@ -612,18 +618,23 @@ fn out_arg_bytes_x86(f: MFuncX86): u32 {
 
 fn max_out_arg_slots_x86(f: MFuncX86): u32 {
     var slots: u32 = 0
-    var bi: u64 = 0
+    var bit = f.blocks.iter()
     loop {
-        if bi >= f.blocks.len { break }
-        var b = f.blocks[bi]
-        var ii: u64 = 0
-        loop {
-            if ii >= b.insts.len { break }
-            var need = out_arg_slots_of_inst_x86(b.insts[ii])
-            if need > slots { slots = need }
-            ii++
+        match bit.next() {
+            MBlockX86 as b => {
+                var iit = b.insts.iter()
+                loop {
+                    match iit.next() {
+                        MInstX86Node as n => {
+                            var need = out_arg_slots_of_inst_x86(n.op)
+                            if need > slots { slots = need }
+                        }
+                        null => break
+                    }
+                }
+            }
+            null => break
         }
-        bi++
     }
     slots
 }
@@ -877,12 +888,14 @@ fn emit_one_x86(layout: FrameLayoutX86, acc: FuncEmitX86, inst: @MInstX86()): Fu
 
 fn emit_block_x86(layout: FrameLayoutX86, acc: FuncEmitX86, blk: MBlockX86): FuncEmitX86 | error {
     var cur = acc
-    var i: u64 = 0
+    var it = blk.insts.iter()
     loop {
-        if i >= blk.insts.len { break }
-        var next = match emit_one_x86(layout, cur, blk.insts[i]) { FuncEmitX86 as x => x; error as e => return e }
-        cur = next
-        i++
+        match it.next() {
+            MInstX86Node as n => {
+                cur = match emit_one_x86(layout, cur, n.op) { FuncEmitX86 as x => x; error as e => return e }
+            }
+            null => break
+        }
     }
     cur
 }
@@ -913,14 +926,15 @@ pub fn encode_func_x86(abi: AbiDescriptor, f: MFuncX86): EncodedFuncX86 | error 
     var layout = compute_frame_layout_x86(abi, f)
     var pro = match emit_prologue_x86(layout) { []byte as w => w; error as e => return e }
     var acc = FuncEmitX86 { bytes = pro; block_offsets = []; branch_fixups = []; relocs = [] }
-    var bi: u64 = 0
+    var it = f.blocks.iter()
     loop {
-        if bi >= f.blocks.len { break }
-        var blk = f.blocks[bi]
-        var with_off = record_block_offset_x86(acc, blk.id)
-        var next = match emit_block_x86(layout, with_off, blk) { FuncEmitX86 as x => x; error as e => return e }
-        acc = next
-        bi++
+        match it.next() {
+            MBlockX86 as blk => {
+                var with_off = record_block_offset_x86(acc, blk.id)
+                acc = match emit_block_x86(layout, with_off, blk) { FuncEmitX86 as x => x; error as e => return e }
+            }
+            null => break
+        }
     }
     var patched = match patch_branches_x86(acc.bytes, acc.branch_fixups, acc.block_offsets) { []byte as x => x; error as e => return e }
     EncodedFuncX86 { symbol = f.symbol; bytes = patched; relocs = acc.relocs }
@@ -969,14 +983,16 @@ pub fn fold_encoded_func_x86(acc: ModuleTextX86, ef: EncodedFuncX86): ModuleText
     ModuleTextX86 { text = text; relocs = relocs; syms = syms; text_off = text_off }
 }
 
-fn encode_functions_x86(abi: AbiDescriptor, funcs: []MFuncX86): ModuleTextX86 | error {
+fn encode_functions_x86(abi: AbiDescriptor, funcs: teko::collections::Chunked<MFuncX86>): ModuleTextX86 | error {
     var acc = empty_module_text_x86()
-    var i: u64 = 0
+    var it = funcs.iter()
     loop {
-        if i >= funcs.len { break }
-        var next = match fold_func_into_text_x86(abi, acc, funcs[i]) { ModuleTextX86 as x => x; error as e => return e }
-        acc = next
-        i++
+        match it.next() {
+            MFuncX86 as f => {
+                acc = match fold_func_into_text_x86(abi, acc, f) { ModuleTextX86 as x => x; error as e => return e }
+            }
+            null => break
+        }
     }
     acc
 }
