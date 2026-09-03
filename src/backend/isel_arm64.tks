@@ -530,34 +530,42 @@ fn count_in_inst(inst: lir::LInst, vreg: u32): u32 {
 
 fn count_uses(f: lir::LFunc, vreg: u32): u32 {
     var n: u32 = 0
-    var bi: u64 = 0
+    var bit = f.blocks.iter()
     loop {
-        if bi >= f.blocks.len { break }
-        var insts = f.blocks[bi].insts
-        var ii: u64 = 0
-        loop {
-            if ii >= insts.len { break }
-            n = n + count_in_inst(insts[ii], vreg)
-            ii++
+        match bit.next() {
+            lir::LBlock as b => {
+                var iit = b.insts.iter()
+                loop {
+                    match iit.next() {
+                        lir::LInst as inst => { n = n + count_in_inst(inst, vreg) }
+                        null => break
+                    }
+                }
+            }
+            null => break
         }
-        bi++
     }
     n
 }
 
 fn used_as_branch_cond(f: lir::LFunc, vreg: u32): bool {
-    var bi: u64 = 0
+    var bit = f.blocks.iter()
     loop {
-        if bi >= f.blocks.len { break }
-        var insts = f.blocks[bi].insts
-        var ii: u64 = 0
-        loop {
-            if ii >= insts.len { break }
-            var hit = match insts[ii].op { lir::LBranch as br => br.cond == vreg; _ => false }
-            if hit { return true }
-            ii++
+        match bit.next() {
+            lir::LBlock as b => {
+                var iit = b.insts.iter()
+                loop {
+                    match iit.next() {
+                        lir::LInst as inst => {
+                            var hit = match inst.op { lir::LBranch as br => br.cond == vreg; _ => false }
+                            if hit { return true }
+                        }
+                        null => break
+                    }
+                }
+            }
+            null => break
         }
-        bi++
     }
     false
 }
@@ -574,33 +582,40 @@ type DefCmp = struct {
 }
 
 fn find_cmp_def(f: lir::LFunc, vreg: u32): DefCmp {
-    var bi: u64 = 0
+    var bit = f.blocks.iter()
     loop {
-        if bi >= f.blocks.len { break }
-        var insts = f.blocks[bi].insts
-        var ii: u64 = 0
-        loop {
-            if ii >= insts.len { break }
-            var inst = insts[ii]
-            if inst.has_result && inst.result == vreg {
-                return match inst.op {
-                    lir::LBin as b => DefCmp { found = cmp_kind_of(b.op).is_cmp; op = b.op; a = b.a; bb = b.b }
-                    _ => DefCmp { found = false; op = lir::LBinOp::IAdd; a = 0; bb = 0 }
+        match bit.next() {
+            lir::LBlock as b => {
+                var iit = b.insts.iter()
+                loop {
+                    match iit.next() {
+                        lir::LInst as inst => {
+                            if inst.has_result && inst.result == vreg {
+                                return match inst.op {
+                                    lir::LBin as bo => DefCmp { found = cmp_kind_of(bo.op).is_cmp; op = bo.op; a = bo.a; bb = bo.b }
+                                    _ => DefCmp { found = false; op = lir::LBinOp::IAdd; a = 0; bb = 0 }
+                                }
+                            }
+                        }
+                        null => break
+                    }
                 }
             }
-            ii++
+            null => break
         }
-        bi++
     }
     DefCmp { found = false; op = lir::LBinOp::IAdd; a = 0; bb = 0 }
 }
 
 fn block_params_of(f: lir::LFunc, block_id: u32): []u32 {
-    var i: u64 = 0
+    var it = f.blocks.iter()
     loop {
-        if i >= f.blocks.len { break }
-        if f.blocks[i].id == block_id { return f.blocks[i].params }
-        i++
+        match it.next() {
+            lir::LBlock as b => {
+                if b.id == block_id { return b.params }
+            }
+            null => break
+        }
     }
     []
 }
@@ -896,14 +911,17 @@ fn select_inst(ctx: SelCtx, f: lir::LFunc, inst: lir::LInst): SelCtx | error {
     }
 }
 
-fn select_insts(ctx0: SelCtx, f: lir::LFunc, insts: []lir::LInst): SelCtx | error {
+fn select_insts(ctx0: SelCtx, f: lir::LFunc, insts: teko::collections::Chunked<lir::LInst>): SelCtx | error {
     var ctx = ctx0
-    var i: u64 = 0
+    var it = insts.iter()
     loop {
-        if i >= insts.len { break }
-        var stepped = match select_inst(ctx, f, insts[i]) { SelCtx as c => c; error as e => return e }
-        ctx = stepped
-        i++
+        match it.next() {
+            lir::LInst as inst => {
+                var stepped = match select_inst(ctx, f, inst) { SelCtx as c => c; error as e => return e }
+                ctx = stepped
+            }
+            null => break
+        }
     }
     ctx
 }
@@ -920,38 +938,45 @@ fn provisional_params(pids: []u32): []MReg {
 }
 
 fn build_mirror_blocks(f: lir::LFunc): MFunc {
-    var blocks: [f.blocks.len]MBlock = []
+    var blocks: [f.blocks.len()]MBlock = []
     var i: u64 = 0
+    var it = f.blocks.iter()
     loop {
-        if i >= f.blocks.len { break }
-        var lb = f.blocks[i]
-        blocks[i] = MBlock { id = lb.id; params = provisional_params(lb.params); insts = [] }
-        i++
+        match it.next() {
+            lir::LBlock as lb => {
+                blocks[i] = MBlock { id = lb.id; params = provisional_params(lb.params); insts = [] }
+                i++
+            }
+            null => break
+        }
     }
     MFunc { symbol = f.symbol; blocks = blocks; frame = [] }
 }
 
 fn max_block_id(f: lir::LFunc): u32 {
     var m: u32 = 0
-    var i: u64 = 0
+    var it = f.blocks.iter()
     loop {
-        if i >= f.blocks.len { break }
-        if f.blocks[i].id > m { m = f.blocks[i].id }
-        i++
+        match it.next() {
+            lir::LBlock as b => { if b.id > m { m = b.id } }
+            null => break
+        }
     }
     m
 }
 
 fn select_all_blocks(ctx0: SelCtx, f: lir::LFunc): SelCtx | error {
     var ctx = ctx0
-    var i: u64 = 0
+    var it = f.blocks.iter()
     loop {
-        if i >= f.blocks.len { break }
-        var lb = f.blocks[i]
-        var switched = selctx_switch(ctx, lb.id)
-        var stepped = match select_insts(switched, f, lb.insts) { SelCtx as c => c; error as e => return e }
-        ctx = stepped
-        i++
+        match it.next() {
+            lir::LBlock as lb => {
+                var switched = selctx_switch(ctx, lb.id)
+                var stepped = match select_insts(switched, f, lb.insts) { SelCtx as c => c; error as e => return e }
+                ctx = stepped
+            }
+            null => break
+        }
     }
     ctx
 }
@@ -964,12 +989,15 @@ pub fn select_lfunc(f: lir::LFunc): MFunc | error {
 
 pub fn select_module(m: lir::LModule): MModule | error {
     var out = MModule { funcs = []; rodata = m.rodata; globals = m.globals; layouts = m.layouts }
-    var i: u64 = 0
+    var it = m.funcs.iter()
     loop {
-        if i >= m.funcs.len { break }
-        var mf = match select_lfunc(m.funcs[i]) { MFunc as x => x; error as e => return e }
-        out = add_mfunc(out, mf)
-        i++
+        match it.next() {
+            lir::LFunc as f => {
+                var mf = match select_lfunc(f) { MFunc as x => x; error as e => return e }
+                out = add_mfunc(out, mf)
+            }
+            null => break
+        }
     }
     out
 }
