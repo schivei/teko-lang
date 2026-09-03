@@ -257,7 +257,7 @@ fn namespaces_declaring(table: TypeTable, name: str): str {
     out
 }
 
-fn type_ns_of(table: TypeTable, name: str): str {
+pub fn type_ns_of(table: TypeTable, name: str): str {
     var cands = tt_cands(table, name_last_segment(name))
     var i: u64 = 0
     loop {
@@ -1817,8 +1817,8 @@ fn scan_site_args(path: parser::Path, args: []@TypeExpr(), ref_ns: str, out: ref
 fn scan_call_site_args(call: parser::Call, ref_ns: str, out: ref []InstSite, idx: u64): u64 {
     if call.owner_type_args.len == 0 { return idx }
     if call.callee.segments.len < 2 { return idx }
-    var owner_name = call.callee.segments[call.callee.segments.len - 2].name
-    scan_site_args(parser::Path { segments = [parser::Segment { name = owner_name }] }, call.owner_type_args, ref_ns, out, idx)
+    var owner_idx = call.callee.segments.len - 2
+    scan_site_args(path_prefix_through(call.callee, owner_idx), call.owner_type_args, ref_ns, out, idx)
 }
 
 fn scan_expr_insts(e: parser::Expr, ref_ns: str, out: ref []InstSite, idx: u64): u64 {
@@ -1994,9 +1994,23 @@ fn resolve_inst_arg(arg: @TypeExpr(), table: TypeTable, ref_ns: str, template_ns
     match resolve_type(arg, table, template_ns) { (@Type()) as t => t; error => null }
 }
 
+fn generic_arg_texpr(t: @Type(), raw: @TypeExpr()): @TypeExpr() {
+    match t {
+        Named as n => parser::NamedType { path = name_to_path(n.name); args = [] }
+        _ => raw
+    }
+}
+
 fn stamped_instance_decl(template: TypeReg, mangled: str, nt: parser::NamedType, argtypes: []@Type(), table: TypeTable): parser::TypeDecl {
     var gen = template.decl
-    var nbody = subst_body_names(gen.body, gen.type_params, nt.args)
+    var qargs: [argtypes.len]@TypeExpr() = []
+    var i: u64 = 0
+    loop {
+        if i >= argtypes.len { break }
+        qargs[i] = generic_arg_texpr(argtypes[i], nt.args[i])
+        i++
+    }
+    var nbody = subst_body_names(gen.body, gen.type_params, qargs)
     parser::TypeDecl { name = mangled; type_params = []; type_constraints = []; body = nbody; vis = gen.vis; has_doc = false; doc = parser::docspan_none(); line = gen.line; col = gen.col; is_global = false }
 }
 
@@ -2049,6 +2063,34 @@ pub fn find_generic_template(table: TypeTable, stem: str): TemplateReg | null {
         if i >= cands.count { break }
         var reg = tt_cand_reg(table, cands, i)
         if reg.decl.type_params.len > 0 {
+            if teko::runtime::str_eq(reg.name, stem) || teko::runtime::str_eq(name_last_segment(reg.name), stem) {
+                return TemplateReg { decl = reg.decl; namespace = reg.namespace }
+            }
+        }
+        i++
+    }
+    null
+}
+
+pub fn stem_decl_in_ns(table: TypeTable, stem: str, ns: str): parser::TypeDecl | null {
+    var cands = tt_cands(table, stem)
+    var i: u64 = 0
+    loop {
+        if i >= cands.count { break }
+        var r = tt_cand_reg(table, cands, i)
+        if r.name == stem && r.namespace == ns { return r.decl }
+        i++
+    }
+    null
+}
+
+pub fn find_generic_template_in_ns(table: TypeTable, stem: str, ns: str): TemplateReg | null {
+    var cands = tt_cands(table, stem)
+    var i: u64 = 0
+    loop {
+        if i >= cands.count { break }
+        var reg = tt_cand_reg(table, cands, i)
+        if reg.decl.type_params.len > 0 && reg.namespace == ns {
             if teko::runtime::str_eq(reg.name, stem) || teko::runtime::str_eq(name_last_segment(reg.name), stem) {
                 return TemplateReg { decl = reg.decl; namespace = reg.namespace }
             }
