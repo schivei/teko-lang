@@ -13,19 +13,29 @@ pub fn empty_lenv(): LEnv {
 }
 
 fn lenv_prefix(env: LEnv, n: u64): LEnv {
-    var out = empty_lenv()
+    var names: [n]str = []
+    var vregs: [n]u32 = []
+    var len_vregs: [n]u32 = []
+    var has_len: [n]bool = []
+    var is_slot: [n]bool = []
+    var is_scalar_slot: [n]bool = []
+    var slot_ltype: [n]LType = []
     var i: u64 = 0
     loop {
         if i >= n { break }
-        out = LEnv {
-            names = [..out.names, env.names[i]]; vregs = [..out.vregs, env.vregs[i]]
-            len_vregs = [..out.len_vregs, env.len_vregs[i]]; has_len = [..out.has_len, env.has_len[i]]
-            is_slot = [..out.is_slot, env.is_slot[i]]
-            is_scalar_slot = [..out.is_scalar_slot, env.is_scalar_slot[i]]; slot_ltype = [..out.slot_ltype, env.slot_ltype[i]]
-        }
+        names[i] = env.names[i]
+        vregs[i] = env.vregs[i]
+        len_vregs[i] = env.len_vregs[i]
+        has_len[i] = env.has_len[i]
+        is_slot[i] = env.is_slot[i]
+        is_scalar_slot[i] = env.is_scalar_slot[i]
+        slot_ltype[i] = env.slot_ltype[i]
         i++
     }
-    out
+    LEnv {
+        names = names; vregs = vregs; len_vregs = len_vregs; has_len = has_len
+        is_slot = is_slot; is_scalar_slot = is_scalar_slot; slot_ltype = slot_ltype
+    }
 }
 
 pub fn lenv_bind(env: LEnv, name: str, vreg: u32): LEnv {
@@ -93,11 +103,11 @@ fn lenv_newest_index(env: LEnv, name: str): u64 {
 }
 
 fn list_set_u32(xs: []u32, idx: u64, v: u32): []u32 {
-    var out: []u32 = []
+    var out: [xs.len]u32 = []
     var i: u64 = 0
     loop {
         if i >= xs.len { break }
-        if i == idx { out = [..out, v] } else { out = [..out, xs[i]] }
+        if i == idx { out[i] = v } else { out[i] = xs[i] }
         i++
     }
     out
@@ -1457,20 +1467,24 @@ fn fn_has_ref_param(rf: []bool): bool {
 }
 
 fn collect_ref_fns(prog: checker::TProgram): []LRefFnInfo {
-    var out: []LRefFnInfo = []
+    var out: [prog.items.len]LRefFnInfo = []
+    var count: u64 = 0
     var i: u64 = 0
     loop {
         if i >= prog.items.len { break }
         match prog.items[i] {
             checker::TFunction as f => {
                 var rf = fn_ref_flags(f.params)
-                if fn_has_ref_param(rf) { out = [..out, LRefFnInfo { ns = f.namespace; name = f.name; ref_flags = rf }] }
+                if fn_has_ref_param(rf) {
+                    out[count] = LRefFnInfo { ns = f.namespace; name = f.name; ref_flags = rf }
+                    count++
+                }
             }
             _ => { }
         }
         i++
     }
-    out
+    out[0..count]
 }
 
 fn find_ref_flags(ref_fns: []LRefFnInfo, ns: str, name: str): []bool | null {
@@ -2217,12 +2231,18 @@ fn lower_args_from(ctx: LowerCtx, args: []checker::TExpr, params: []@Type(), sta
 }
 
 fn append_vregs(xs: []u32, more: []u32): []u32 {
-    var out = xs
+    var out: [xs.len + more.len]u32 = []
     var i: u64 = 0
     loop {
-        if i >= more.len { break }
-        out = [..out, more[i]]
+        if i >= xs.len { break }
+        out[i] = xs[i]
         i++
+    }
+    var j: u64 = 0
+    loop {
+        if j >= more.len { break }
+        out[xs.len + j] = more[j]
+        j++
     }
     out
 }
@@ -3168,7 +3188,8 @@ pub type PromotedEnv = struct { func: LFunc; env: LEnv; names: []str }
 fn promote_env(f: LFunc, block_id: u32, env: LEnv): PromotedEnv {
     var cur_f = f
     var new_env = empty_lenv()
-    var names: []str = []
+    var names: [env.names.len]str = []
+    var count: u64 = 0
     var i: u64 = 0
     loop {
         if i >= env.names.len { break }
@@ -3178,11 +3199,12 @@ fn promote_env(f: LFunc, block_id: u32, env: LEnv): PromotedEnv {
             var bp = add_block_param(cur_f, block_id)
             cur_f = bp.func
             new_env = rebind_promoted(new_env, env, i, bp.vreg)
-            names = [..names, env.names[i]]
+            names[count] = env.names[i]
+            count++
         }
         i++
     }
-    PromotedEnv { func = cur_f; env = new_env; names = names }
+    PromotedEnv { func = cur_f; env = new_env; names = names[0..count] }
 }
 
 fn rebind_promoted(out: LEnv, env: LEnv, i: u64, vreg: u32): LEnv {
@@ -3192,44 +3214,48 @@ fn rebind_promoted(out: LEnv, env: LEnv, i: u64, vreg: u32): LEnv {
 }
 
 fn env_scalar_vregs(env: LEnv): []u32 {
-    var out: []u32 = []
+    var out: [env.names.len]u32 = []
+    var count: u64 = 0
     var i: u64 = 0
     loop {
         if i >= env.names.len { break }
-        if !env.has_len[i] { out = [..out, env.vregs[i]] }
+        if !env.has_len[i] {
+            out[count] = env.vregs[i]
+            count++
+        }
         i++
     }
-    out
+    out[0..count]
 }
 
 fn jump_args_for_names(env: LEnv, names: []str): []u32 {
-    var out: []u32 = []
+    var out: [names.len]u32 = []
     var i: u64 = 0
     loop {
         if i >= names.len { break }
-        out = [..out, lenv_lookup(env, names[i]).vreg]
+        out[i] = lenv_lookup(env, names[i]).vreg
         i++
     }
     out
 }
 
 fn merge_scalar_indices(env: LEnv, names: []str): []u64 {
-    var out: []u64 = []
+    var out: [names.len]u64 = []
     var i: u64 = 0
     loop {
         if i >= names.len { break }
-        out = [..out, lenv_newest_index(env, names[i])]
+        out[i] = lenv_newest_index(env, names[i])
         i++
     }
     out
 }
 
 fn arm_scalar_args(arm_env: LEnv, indices: []u64): []u32 {
-    var out: []u32 = []
+    var out: [indices.len]u32 = []
     var i: u64 = 0
     loop {
         if i >= indices.len { break }
-        out = [..out, arm_env.vregs[indices[i]]]
+        out[i] = arm_env.vregs[indices[i]]
         i++
     }
     out
@@ -3458,28 +3484,36 @@ fn addr_taken_interp(ip: checker::TInterp, ref_fns: []LRefFnInfo, enums: []LEnum
 }
 
 fn append_all_u32(acc: []u32, xs: []u32): []u32 {
-    var out = acc
+    var out: [acc.len + xs.len]u32 = []
     var i: u64 = 0
     loop {
-        if i >= xs.len { break }
-        out = [..out, xs[i]]
+        if i >= acc.len { break }
+        out[i] = acc[i]
         i++
+    }
+    var j: u64 = 0
+    loop {
+        if j >= xs.len { break }
+        out[acc.len + j] = xs[j]
+        j++
     }
     out
 }
 
 fn reassigned_scalars(arms: []@TStatement(), env: LEnv): []str {
     var raw = collect_reassigned_stmts(arms, [])
-    var out: []str = []
+    var out: [env.names.len]str = []
+    var count: u64 = 0
     var i: u64 = 0
     loop {
         if i >= env.names.len { break }
-        if !env.has_len[i] && contains_str(raw, env.names[i]) && !contains_str(out, env.names[i]) {
-            out = [..out, env.names[i]]
+        if !env.has_len[i] && contains_str(raw, env.names[i]) && !contains_str(out[0..count], env.names[i]) {
+            out[count] = env.names[i]
+            count++
         }
         i++
     }
-    out
+    out[0..count]
 }
 
 fn reassigned_scalars_for_match(arms: []checker::TArm, env: LEnv): []str {
@@ -3514,24 +3548,25 @@ fn rebind_scalars(env: LEnv, names: []str, vregs: []u32): LEnv {
 
 fn add_merge_scalar_params(f: LFunc, block_id: u32, env: LEnv, names: []str): PromotedEnv {
     var cur_f = f
-    var param_vregs: []u32 = []
+    var param_vregs: [names.len]u32 = []
     var i: u64 = 0
     loop {
         if i >= names.len { break }
         var bp = add_block_param(cur_f, block_id)
         cur_f = bp.func
-        param_vregs = [..param_vregs, bp.vreg]
+        param_vregs[i] = bp.vreg
         i++
     }
     PromotedEnv { func = cur_f; env = rebind_scalars(env, names, param_vregs); names = names }
 }
 
 fn merge_value_args(value: u32, scalars: []u32): []u32 {
-    var out = [value]
+    var out: [1 + scalars.len]u32 = []
+    out[0] = value
     var i: u64 = 0
     loop {
         if i >= scalars.len { break }
-        out = [..out, scalars[i]]
+        out[1 + i] = scalars[i]
         i++
     }
     out
@@ -3539,18 +3574,32 @@ fn merge_value_args(value: u32, scalars: []u32): []u32 {
 
 fn if_arm_stmts(f: checker::TIfExpr): []@TStatement() {
     if !f.has_else { return f.then_blk }
-    var out = f.then_blk
+    var out: [f.then_blk.len + f.else_blk.len]@TStatement() = []
     var i: u64 = 0
     loop {
-        if i >= f.else_blk.len { break }
-        out = [..out, f.else_blk[i]]
+        if i >= f.then_blk.len { break }
+        out[i] = f.then_blk[i]
         i++
+    }
+    var j: u64 = 0
+    loop {
+        if j >= f.else_blk.len { break }
+        out[f.then_blk.len + j] = f.else_blk[j]
+        j++
     }
     out
 }
 
 fn match_arm_stmts(arms: []checker::TArm): []@TStatement() {
-    var out: []@TStatement() = []
+    var total: u64 = 0
+    var c: u64 = 0
+    loop {
+        if c >= arms.len { break }
+        total = total + arms[c].body.len
+        c++
+    }
+    var out: [total]@TStatement() = []
+    var k: u64 = 0
     var i: u64 = 0
     loop {
         if i >= arms.len { break }
@@ -3558,7 +3607,8 @@ fn match_arm_stmts(arms: []checker::TArm): []@TStatement() {
         var j: u64 = 0
         loop {
             if j >= body.len { break }
-            out = [..out, body[j]]
+            out[k] = body[j]
+            k++
             j++
         }
         i++
@@ -5494,21 +5544,15 @@ fn error_struct_name(): str { "error" }
 const ERROR_FIELD_NAMES: []str = ["message", "file", "line", "col", "expected", "actual"]
 
 fn error_field_types(): []LType {
-    var types: []LType = [LType::Ptr]
-    types = [..types, LType::Ptr]
-    types = [..types, LType::I32]
-    types = [..types, LType::I32]
-    types = [..types, LType::Ptr]
-    types = [..types, LType::Ptr]
-    types
+    [LType::Ptr, LType::Ptr, LType::I32, LType::I32, LType::Ptr, LType::Ptr]
 }
 
 fn error_field_sizes(types: []LType): []u32 {
-    var sizes: []u32 = []
+    var sizes: [types.len]u32 = []
     var i: u64 = 0
     loop {
         if i >= types.len { break }
-        sizes = [..sizes, error_field_size_of(types[i])]
+        sizes[i] = error_field_size_of(types[i])
         i++
     }
     sizes
@@ -5522,11 +5566,11 @@ fn error_field_size_of(t: LType): u32 {
 }
 
 fn error_field_aligns(types: []LType): []u32 {
-    var aligns: []u32 = []
+    var aligns: [types.len]u32 = []
     var i: u64 = 0
     loop {
         if i >= types.len { break }
-        aligns = [..aligns, ltype_align(types[i])]
+        aligns[i] = ltype_align(types[i])
         i++
     }
     aligns
@@ -6511,22 +6555,36 @@ fn inst_is_terminator(inst: LInst): bool {
     }
 }
 
+fn param_ltype_width(p: parser::Param, table: checker::TypeTable): u64 {
+    if typeexpr_is_fat(p.type_ann, table) { return 2 }
+    1
+}
+
 fn param_ltypes(params: []parser::Param, enums: []LEnumInfo, table: checker::TypeTable): []LType {
-    var out: []LType = []
+    var total: u64 = 0
+    var c: u64 = 0
+    loop {
+        if c >= params.len { break }
+        total = total + param_ltype_width(params[c], table)
+        c++
+    }
+    var out: [total]LType = []
+    var k: u64 = 0
     var i: u64 = 0
     loop {
         if i >= params.len { break }
-        out = append_param_ltypes(out, params[i], enums, table)
+        if typeexpr_is_fat(params[i].type_ann, table) {
+            out[k] = LType::Ptr
+            k++
+            out[k] = LType::I64
+            k++
+        } else {
+            out[k] = ltype_of_typeexpr(params[i].type_ann, enums)
+            k++
+        }
         i++
     }
     out
-}
-
-fn append_param_ltypes(out: []LType, p: parser::Param, enums: []LEnumInfo, table: checker::TypeTable): []LType {
-    if typeexpr_is_fat(p.type_ann, table) {
-        return [..out, LType::Ptr, LType::I64]
-    }
-    [..out, ltype_of_typeexpr(p.type_ann, enums)]
 }
 
 pub type LowerPrelude = struct {
@@ -6722,15 +6780,17 @@ fn class_instance_fields(name: str, cb: parser::ClassBody, table: checker::TypeT
 
 fn layout_of_fields(name: str, fields: []parser::Field, known: []LStructLayout, enums: []LEnumInfo, table: checker::TypeTable, dtable: checker::TypeTable, with_hdr: bool): LStructLayout {
     var ns = checker::name_qualifier(name)
-    var field_names: []str = []
-    var field_types: []LType = []
-    var field_sizes: []u32 = []
-    var field_aligns: []u32 = []
+    var hdr: u64 = if with_hdr { 1 } else { 0 }
+    var total = hdr + fields.len
+    var field_names: [total]str = []
+    var field_types: [total]LType = []
+    var field_sizes: [total]u32 = []
+    var field_aligns: [total]u32 = []
     if with_hdr {
-        field_names = [..field_names, struct_hdr_field_name()]
-        field_types = [..field_types, LType::Ptr]
-        field_sizes = [..field_sizes, ltype_size(LType::Ptr)]
-        field_aligns = [..field_aligns, ltype_align(LType::Ptr)]
+        field_names[0] = struct_hdr_field_name()
+        field_types[0] = LType::Ptr
+        field_sizes[0] = ltype_size(LType::Ptr)
+        field_aligns[0] = ltype_align(LType::Ptr)
     }
     var i: u64 = 0
     loop {
@@ -6739,10 +6799,10 @@ fn layout_of_fields(name: str, fields: []parser::Field, known: []LStructLayout, 
         var ft = ltype_of_typeexpr(te, enums)
         var rft = resolved_field_type(te, ns, dtable)
         var nested = struct_layout_of_resolved(rft, te, known)
-        field_names = [..field_names, fields[i].name]
-        field_types = [..field_types, ft]
-        field_sizes = [..field_sizes, field_layout_size(te, ft, nested, table, rft)]
-        field_aligns = [..field_aligns, field_layout_align(te, ft, nested, table, rft)]
+        field_names[hdr + i] = fields[i].name
+        field_types[hdr + i] = ft
+        field_sizes[hdr + i] = field_layout_size(te, ft, nested, table, rft)
+        field_aligns[hdr + i] = field_layout_align(te, ft, nested, table, rft)
         i++
     }
     layout_of_sized(name, field_names, field_types, field_sizes, field_aligns)
@@ -7060,12 +7120,19 @@ const NATIVE_ENTRY_VMAIN_SYMBOL: str = "__teko_native_vmain"
 
 pub fn wrap_native_entry(m: LModule): LModule | error {
     var renamed = match native_entry_rename_vmain(m.funcs) { []LFunc as fs => fs; error as e => return e }
-    var stubbed = [..renamed, native_entry_stub()]
+    var stubbed: [renamed.len + 1]LFunc = []
+    var i: u64 = 0
+    loop {
+        if i >= renamed.len { break }
+        stubbed[i] = renamed[i]
+        i++
+    }
+    stubbed[renamed.len] = native_entry_stub()
     LModule { funcs = stubbed; rodata = m.rodata; globals = m.globals; layouts = m.layouts }
 }
 
 fn native_entry_rename_vmain(funcs: []LFunc): []LFunc | error {
-    var out: []LFunc = []
+    var out: [funcs.len]LFunc = []
     var found = false
     var i: u64 = 0
     loop {
@@ -7073,9 +7140,9 @@ fn native_entry_rename_vmain(funcs: []LFunc): []LFunc | error {
         var f = funcs[i]
         if f.symbol == "main" {
             found = true
-            out = [..out, rename_lfunc(f, NATIVE_ENTRY_VMAIN_SYMBOL)]
+            out[i] = rename_lfunc(f, NATIVE_ENTRY_VMAIN_SYMBOL)
         } else {
-            out = [..out, f]
+            out[i] = f
         }
         i++
     }
@@ -7096,10 +7163,7 @@ fn native_entry_stub(): LFunc {
     var fn0 = new_func("main", 2, ptypes, LType::I32)
     var with_argc = append_inst(fn0, 0, param_inst(0, 0, 0, 0))
     var with_argv = append_inst(with_argc, 0, param_inst(1, 1, 0, 0))
-    var set_args_args: []u32 = []
-    set_args_args = [..set_args_args, 0]
-    set_args_args = [..set_args_args, 1]
-    var with_set = append_inst(with_argv, 0, void_call_inst("tk_set_args", set_args_args, false, 0, 0))
+    var with_set = append_inst(with_argv, 0, void_call_inst("tk_set_args", [0, 1], false, 0, 0))
     var called = alloc_vreg(with_set)
     var with_call = append_inst(called.func, 0, call_inst(called.vreg, NATIVE_ENTRY_VMAIN_SYMBOL, [], false, 0, 0))
     var status = append_exit_status_mask(with_call, called.vreg)
