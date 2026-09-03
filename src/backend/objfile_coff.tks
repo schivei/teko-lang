@@ -56,41 +56,34 @@ fn coff_has_rodata_section(symbols: []Symbol): bool {
     false
 }
 
-fn coff_append_globals(out: []CoffSymbol, symbols: []Symbol): []CoffSymbol {
-    var acc = out
+fn coff_build_symbols(symbols: []Symbol): []CoffSymbol {
+    var out: [1 + symbols.len]CoffSymbol = []
+    var n: u64 = 0
+    if coff_has_rodata_section(symbols) {
+        out[n] = CoffSymbol { name = ".rdata"; value = 0 to u32; section_number = 2 to u32; sym_type = 0 to u32; storage_class = 3 to u32 }
+        n++
+    }
     var i: u64 = 0
     loop {
         if i >= symbols.len { break }
         var s = symbols[i]
         if s.defined && !s.local {
-            acc = [..acc, CoffSymbol { name = s.name; value = s.offset; section_number = 1 to u32; sym_type = COFF_SYM_TYPE_FUNCTION; storage_class = IMAGE_SYM_CLASS_EXTERNAL }]
+            out[n] = CoffSymbol { name = s.name; value = s.offset; section_number = 1 to u32; sym_type = COFF_SYM_TYPE_FUNCTION; storage_class = IMAGE_SYM_CLASS_EXTERNAL }
+            n++
         }
         i++
     }
-    acc
-}
-
-fn coff_append_undefined(out: []CoffSymbol, symbols: []Symbol): []CoffSymbol {
-    var acc = out
-    var i: u64 = 0
+    var j: u64 = 0
     loop {
-        if i >= symbols.len { break }
-        var s = symbols[i]
+        if j >= symbols.len { break }
+        var s = symbols[j]
         if !s.defined {
-            acc = [..acc, CoffSymbol { name = s.name; value = 0 to u32; section_number = 0 to u32; sym_type = 0 to u32; storage_class = 2 to u32 }]
+            out[n] = CoffSymbol { name = s.name; value = 0 to u32; section_number = 0 to u32; sym_type = 0 to u32; storage_class = 2 to u32 }
+            n++
         }
-        i++
+        j++
     }
-    acc
-}
-
-fn coff_build_symbols(symbols: []Symbol): []CoffSymbol {
-    var out: []CoffSymbol = []
-    if coff_has_rodata_section(symbols) {
-        out = [..out, CoffSymbol { name = ".rdata"; value = 0 to u32; section_number = 2 to u32; sym_type = 0 to u32; storage_class = 3 to u32 }]
-    }
-    out = coff_append_globals(out, symbols)
-    coff_append_undefined(out, symbols)
+    out[0..n]
 }
 
 type CoffStrtab = struct {
@@ -100,15 +93,15 @@ type CoffStrtab = struct {
 
 fn build_coff_strtab(symbols: []CoffSymbol): CoffStrtab {
     var bytes: []byte = emit_zeros_coff([], 4 to u64)
-    var long_offset: []u32 = []
+    var long_offset: [symbols.len]u32 = []
     var i: u64 = 0
     loop {
         if i >= symbols.len { break }
         var nm = symbols[i].name
         if nm.len <= (8 to u64) {
-            long_offset = [..long_offset, 0]
+            long_offset[i] = 0
         } else {
-            long_offset = [..long_offset, bytes.len to u32]
+            long_offset[i] = bytes.len to u32
             bytes = emit_str_bytes(bytes, nm)
             bytes = [..bytes, 0 to byte]
         }

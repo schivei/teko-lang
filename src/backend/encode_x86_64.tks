@@ -938,12 +938,18 @@ pub fn empty_module_text_x86(): ModuleTextX86 {
 }
 
 fn rebase_relocs_x86(acc: []RelocX86, relocs: []RelocX86, base_off: u32): []RelocX86 {
-    var out = acc
+    var out: [acc.len + relocs.len]RelocX86 = []
+    var a: u64 = 0
+    loop {
+        if a >= acc.len { break }
+        out[a] = acc[a]
+        a++
+    }
     var i: u64 = 0
     loop {
         if i >= relocs.len { break }
         var r = relocs[i]
-        out = [..out, RelocX86 { offset = r.offset + base_off; sym = r.sym; kind = r.kind; addend = r.addend; sect = r.sect }]
+        out[acc.len + i] = RelocX86 { offset = r.offset + base_off; sym = r.sym; kind = r.kind; addend = r.addend; sect = r.sect }
         i++
     }
     out
@@ -976,37 +982,45 @@ fn encode_functions_x86(abi: AbiDescriptor, funcs: []MFuncX86): ModuleTextX86 | 
 }
 
 fn collect_undefined_x86(defined: []Symbol, relocs: []RelocX86): []Symbol {
-    var undef: []Symbol = []
+    var undef: [relocs.len]Symbol = []
+    var count: u64 = 0
     var i: u64 = 0
     loop {
         if i >= relocs.len { break }
         var name = relocs[i].sym
-        var known = name_in_symbols(defined, name) || name_in_symbols(undef, name)
+        var known = name_in_symbols(defined, name) || name_in_symbols(undef[0..count], name)
         if !known {
-            undef = [..undef, Symbol { name = name; defined = false; sect = 0 to u8; offset = 0 to u32; local = false }]
+            undef[count] = Symbol { name = name; defined = false; sect = 0 to u8; offset = 0 to u32; local = false }
+            count++
         }
         i++
     }
-    undef
+    undef[0..count]
 }
 
 fn rodata_relocs_x86(rs: []lir::LDataReloc): []RelocX86 {
-    var out: []RelocX86 = []
+    var out: [rs.len]RelocX86 = []
     var i: u64 = 0
     loop {
         if i >= rs.len { break }
-        out = [..out, RelocX86 { offset = rs[i].offset; sym = rs[i].target; kind = RelocKindX86::Abs64; addend = 0; sect = RelocSect::Rodata }]
+        out[i] = RelocX86 { offset = rs[i].offset; sym = rs[i].target; kind = RelocKindX86::Abs64; addend = 0; sect = RelocSect::Rodata }
         i++
     }
     out
 }
 
 fn append_relocs_x86(a: []RelocX86, b: []RelocX86): []RelocX86 {
-    var out = a
+    var out: [a.len + b.len]RelocX86 = []
+    var k: u64 = 0
+    loop {
+        if k >= a.len { break }
+        out[k] = a[k]
+        k++
+    }
     var i: u64 = 0
     loop {
         if i >= b.len { break }
-        out = [..out, b[i]]
+        out[a.len + i] = b[i]
         i++
     }
     out
