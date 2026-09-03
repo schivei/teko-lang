@@ -1704,11 +1704,11 @@ fn encode_module_fused_x86(entry: teko::lir::LModule): teko::backend::EncodedMod
 fn copy_str_to_current_region(s: str): str { teko::str::concat("", s) }
 
 fn copy_bytes_to_current_region(src: []byte): []byte {
-    var out: []byte = []
+    var out: [src.len]byte = []
     var i: u64 = 0
     loop {
         if i >= src.len { break }
-        out = [..out, src[i]]
+        out[i] = src[i]
         i++
     }
     out
@@ -1720,11 +1720,11 @@ fn copy_reloc_to_current_region_x86(r: teko::backend::RelocX86): teko::backend::
 }
 
 fn copy_relocs_to_current_region_x86(relocs: []teko::backend::RelocX86): []teko::backend::RelocX86 {
-    var out: []teko::backend::RelocX86 = []
+    var out: [relocs.len]teko::backend::RelocX86 = []
     var i: u64 = 0
     loop {
         if i >= relocs.len { break }
-        out = [..out, copy_reloc_to_current_region_x86(relocs[i])]
+        out[i] = copy_reloc_to_current_region_x86(relocs[i])
         i++
     }
     out
@@ -1732,8 +1732,20 @@ fn copy_relocs_to_current_region_x86(relocs: []teko::backend::RelocX86): []teko:
 
 fn copy_encoded_func_to_current_region_x86(ef: teko::backend::EncodedFuncX86): teko::backend::EncodedFuncX86 {
     var symbol = copy_str_to_current_region(ef.symbol)
+    var bytes = copy_bytes_to_current_region(ef.bytes)
     var relocs = copy_relocs_to_current_region_x86(ef.relocs)
-    teko::backend::EncodedFuncX86 { symbol = symbol; bytes = ef.bytes; relocs = relocs }
+    teko::backend::EncodedFuncX86 { symbol = symbol; bytes = bytes; relocs = relocs }
+}
+
+fn move_encoded_funcs_to_region_x86(efs: []teko::backend::EncodedFuncX86): []teko::backend::EncodedFuncX86 {
+    var out: [efs.len]teko::backend::EncodedFuncX86 = []
+    var i: u64 = 0
+    loop {
+        if i >= efs.len { break }
+        out[i] = copy_encoded_func_to_current_region_x86(efs[i])
+        i++
+    }
+    out
 }
 
 pub fn encode_lfuncs_in_region_x86(fs: []teko::lir::LFunc): []teko::backend::EncodedFuncX86 | error {
@@ -1765,11 +1777,11 @@ fn copy_ldata_reloc_to_current_region(r: teko::lir::LDataReloc): teko::lir::LDat
 }
 
 fn copy_ldata_relocs_to_current_region(relocs: []teko::lir::LDataReloc): []teko::lir::LDataReloc {
-    var out: []teko::lir::LDataReloc = []
+    var out: [relocs.len]teko::lir::LDataReloc = []
     var i: u64 = 0
     loop {
         if i >= relocs.len { break }
-        out = [..out, copy_ldata_reloc_to_current_region(relocs[i])]
+        out[i] = copy_ldata_reloc_to_current_region(relocs[i])
         i++
     }
     out
@@ -1848,25 +1860,23 @@ fn extend_lifted_placeholders(ph: []teko::lir::LFunc, count: u64): []teko::lir::
     out
 }
 
-fn fuse_lower_item_x86(robase: []teko::lir::LRodata, prelude: teko::lir::LowerPrelude, loose: []@TStatement(), it: @TItem(), lifted_ph: []teko::lir::LFunc): FusedItemOut | error {
-    var seed = teko::lir::LModule { funcs = []; rodata = robase; globals = prelude.module.globals; layouts = prelude.module.layouts }
-    var step = match teko::lir::lower_item(seed, loose, it, prelude.layouts, prelude.enums, lifted_ph, prelude.externs, false, prelude.variants, prelude.table, prelude.ref_fns, prelude.field_decls) { teko::lir::LowerItemOut as x => x; error as e => return e }
-    var new_lifted = lifted_suffix(step.lifted, lifted_ph.len)
-    var item_funcs = concat_lfuncs(step.module.funcs, new_lifted)
+fn fuse_lower_item_x86(rodata_base: u64, prelude: teko::lir::LowerPrelude, loose: []@TStatement(), it: @TItem(), lifted_base: u64): FusedItemOut | error {
+    var seed = teko::lir::LModule { funcs = []; rodata = []; globals = prelude.module.globals; layouts = prelude.module.layouts }
+    var step = match teko::lir::lower_item(seed, loose, it, prelude.layouts, prelude.enums, [], prelude.externs, false, prelude.variants, prelude.table, prelude.ref_fns, prelude.field_decls, rodata_base, prelude.module.rodata, lifted_base) { teko::lir::LowerItemOut as x => x; error as e => return e }
+    var item_funcs = concat_lfuncs(step.module.funcs, step.lifted)
     match frame_escape_window(item_funcs) { error as e => return e; null => { } }
     var encoded = match encode_lfuncs_in_region_x86(item_funcs) { []teko::backend::EncodedFuncX86 as x => x; error as e => return e }
-    FusedItemOut { encoded = encoded; rodata = step.module.rodata; loose = step.loose; new_lifted_count = new_lifted.len }
+    FusedItemOut { encoded = encoded; rodata = step.module.rodata; loose = step.loose; new_lifted_count = step.lifted.len }
 }
 
-fn fuse_virtual_main_x86(loose: []@TStatement(), prelude: teko::lir::LowerPrelude, robase: []teko::lir::LRodata, lifted_ph: []teko::lir::LFunc): FusedItemOut | error {
-    var vmain = match teko::lir::lower_virtual_main(loose, prelude.layouts, prelude.enums, robase, lifted_ph, prelude.externs, false, prelude.variants, prelude.ref_fns, prelude.field_decls, prelude.table) { teko::lir::LoweredFunction as x => x; error as e => return e }
-    var new_lifted = lifted_suffix(vmain.lifted, lifted_ph.len)
+fn fuse_virtual_main_x86(loose: []@TStatement(), prelude: teko::lir::LowerPrelude, rodata_base: u64, lifted_base: u64): FusedItemOut | error {
+    var vmain = match teko::lir::lower_virtual_main(loose, prelude.layouts, prelude.enums, [], [], prelude.externs, false, prelude.variants, prelude.ref_fns, prelude.field_decls, prelude.table, rodata_base, prelude.module.rodata, lifted_base) { teko::lir::LoweredFunction as x => x; error as e => return e }
     var seed = teko::lir::LModule { funcs = [vmain.func]; rodata = vmain.rodata; globals = prelude.module.globals; layouts = prelude.module.layouts }
     var wrapped = match teko::lir::wrap_native_entry(seed) { teko::lir::LModule as x => x; error as e => return e }
-    var all_funcs = concat_lfuncs(wrapped.funcs, new_lifted)
+    var all_funcs = concat_lfuncs(wrapped.funcs, vmain.lifted)
     match frame_escape_window(all_funcs) { error as e => return e; null => { } }
     var encoded = match encode_lfuncs_in_region_x86(all_funcs) { []teko::backend::EncodedFuncX86 as x => x; error as e => return e }
-    FusedItemOut { encoded = encoded; rodata = vmain.rodata; loose = []; new_lifted_count = new_lifted.len }
+    FusedItemOut { encoded = encoded; rodata = vmain.rodata; loose = []; new_lifted_count = vmain.lifted.len }
 }
 
 fn native_trace_items_enabled(): bool {
@@ -1919,27 +1929,193 @@ fn native_item_label(i: u64, total: u64): str {
     teko::str::concat("item ", teko::str::concat(teko::u64_to_str(i + 1), teko::str::concat("/", teko::u64_to_str(total))))
 }
 
+type ItemTextX86 = struct {
+    encoded: []teko::backend::EncodedFuncX86
+    rodata: []teko::lir::LRodata
+}
+
+fn move_rodata_to_region(rs: []teko::lir::LRodata): []teko::lir::LRodata {
+    var out: [rs.len]teko::lir::LRodata = []
+    var i: u64 = 0
+    loop {
+        if i >= rs.len { break }
+        out[i] = copy_lrodata_to_current_region(rs[i])
+        i++
+    }
+    out
+}
+
+fn count_rodata_total(prelude: []teko::lir::LRodata, results: []ItemTextX86): u64 {
+    var n: u64 = prelude.len
+    var i: u64 = 0
+    loop {
+        if i >= results.len { break }
+        n = n + results[i].rodata.len
+        i++
+    }
+    n
+}
+
+fn place_rodata(dst: ref []teko::lir::LRodata, src: []teko::lir::LRodata, at: u64): u64 {
+    var i: u64 = 0
+    var out = at
+    loop {
+        if i >= src.len { break }
+        dst[out] = src[i]
+        out++
+        i++
+    }
+    out
+}
+
+fn assemble_rodata(prelude: []teko::lir::LRodata, results: []ItemTextX86): []teko::lir::LRodata {
+    var total = count_rodata_total(prelude, results)
+    var out: [total]teko::lir::LRodata = []
+    var at = place_rodata(out, prelude, 0)
+    var i: u64 = 0
+    loop {
+        if i >= results.len { break }
+        at = place_rodata(out, results[i].rodata, at)
+        i++
+    }
+    out
+}
+
+fn count_funcs_x86(results: []ItemTextX86): u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= results.len { break }
+        n = n + results[i].encoded.len
+        i++
+    }
+    n
+}
+
+fn count_text_bytes_x86(results: []ItemTextX86): u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= results.len { break }
+        var efs = results[i].encoded
+        var f: u64 = 0
+        loop {
+            if f >= efs.len { break }
+            n = n + efs[f].bytes.len
+            f++
+        }
+        i++
+    }
+    n
+}
+
+fn count_relocs_x86(results: []ItemTextX86): u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= results.len { break }
+        var efs = results[i].encoded
+        var f: u64 = 0
+        loop {
+            if f >= efs.len { break }
+            n = n + efs[f].relocs.len
+            f++
+        }
+        i++
+    }
+    n
+}
+
+type AssemblyCursorX86 = struct {
+    text_off: u32
+    fi: u64
+    ti: u64
+    ri: u64
+}
+
+fn place_func_bytes_x86(text: ref []byte, ef: teko::backend::EncodedFuncX86, ti: u64): u64 {
+    var b: u64 = 0
+    var out = ti
+    loop {
+        if b >= ef.bytes.len { break }
+        text[out] = ef.bytes[b]
+        out++
+        b++
+    }
+    out
+}
+
+fn place_func_relocs_x86(relocs: ref []teko::backend::RelocX86, ef: teko::backend::EncodedFuncX86, ri: u64, base_off: u32): u64 {
+    var r: u64 = 0
+    var out = ri
+    loop {
+        if r >= ef.relocs.len { break }
+        var rr = ef.relocs[r]
+        relocs[out] = teko::backend::RelocX86 { offset = rr.offset + base_off; sym = rr.sym; kind = rr.kind; addend = rr.addend; sect = rr.sect }
+        out++
+        r++
+    }
+    out
+}
+
+fn func_symbol_x86(ef: teko::backend::EncodedFuncX86, off: u32): teko::backend::Symbol {
+    teko::backend::Symbol { name = ef.symbol; defined = true; sect = 1 to u8; offset = off; local = false }
+}
+
+fn assemble_item_text_x86(text: ref []byte, syms: ref []teko::backend::Symbol, relocs: ref []teko::backend::RelocX86, efs: []teko::backend::EncodedFuncX86, cur: AssemblyCursorX86): AssemblyCursorX86 {
+    var c = cur
+    var f: u64 = 0
+    loop {
+        if f >= efs.len { break }
+        var ef = efs[f]
+        syms[c.fi] = func_symbol_x86(ef, c.text_off)
+        var nt = place_func_bytes_x86(text, ef, c.ti)
+        var nr = place_func_relocs_x86(relocs, ef, c.ri, c.text_off)
+        c = AssemblyCursorX86 { text_off = c.text_off + (ef.bytes.len to u32); fi = c.fi + 1; ti = nt; ri = nr }
+        f++
+    }
+    c
+}
+
+fn assemble_module_text_x86(results: []ItemTextX86): teko::backend::ModuleTextX86 {
+    var nt = count_text_bytes_x86(results)
+    var nf = count_funcs_x86(results)
+    var nr = count_relocs_x86(results)
+    var text: [nt]byte = []
+    var syms: [nf]teko::backend::Symbol = []
+    var relocs: [nr]teko::backend::RelocX86 = []
+    var cur = AssemblyCursorX86 { text_off = 0 to u32; fi = 0; ti = 0; ri = 0 }
+    var i: u64 = 0
+    loop {
+        if i >= results.len { break }
+        cur = assemble_item_text_x86(text, syms, relocs, results[i].encoded, cur)
+        i++
+    }
+    teko::backend::ModuleTextX86 { text = text; relocs = relocs; syms = syms; text_off = cur.text_off }
+}
+
 fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Manifest, debug: DebugInfo): i32 {
     var prelude = match teko::lir::lower_prelude(prog, false) { teko::lir::LowerPrelude as x => x; error as e => return fail(dir, e.message) }
     var robase = prelude.module.rodata
     var loose: []@TStatement() = []
-    var lifted_ph: []teko::lir::LFunc = []
-    var mt = teko::backend::empty_module_text_x86()
+    var lifted_base: u64 = 0
+    var rodata_base: u64 = robase.len
+    var results: [prog.items.len + 1]ItemTextX86 = []
     var i: u64 = 0
     loop {
         if i >= prog.items.len { break }
         var t0 = trace_native_item(i, prog.items.len, prog.items[i])
         var child = region_new(region_root())
         region_enter(child)
-        var outcome = fuse_lower_item_x86(robase, prelude, loose, prog.items[i], lifted_ph)
+        var outcome = fuse_lower_item_x86(rodata_base, prelude, loose, prog.items[i], lifted_base)
         region_leave()
         match outcome {
             FusedItemOut as out => {
                 match check_current_region_is_root(native_item_label(i, prog.items.len)) { error as e => return fail(dir, e.message); null => { } }
-                mt = fold_encoded_funcs_x86(mt, out.encoded)
-                robase = commit_rodata_delta(robase, out.rodata)
+                results[i] = ItemTextX86 { encoded = move_encoded_funcs_to_region_x86(out.encoded); rodata = move_rodata_to_region(out.rodata) }
+                rodata_base = rodata_base + out.rodata.len
                 loose = commit_loose(loose, out.loose)
-                lifted_ph = extend_lifted_placeholders(lifted_ph, out.new_lifted_count)
+                lifted_base = lifted_base + out.new_lifted_count
                 region_drop(child)
                 trace_native_item_done(t0)
             }
@@ -1950,16 +2126,15 @@ fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Man
     var vt0 = trace_native_vmain()
     var vchild = region_new(region_root())
     region_enter(vchild)
-    var vmain_outcome = fuse_virtual_main_x86(loose, prelude, robase, lifted_ph)
+    var vmain_outcome = fuse_virtual_main_x86(loose, prelude, rodata_base, lifted_base)
     region_leave()
     match vmain_outcome {
         FusedItemOut as out => {
             match check_current_region_is_root("virtual-main") { error as e => return fail(dir, e.message); null => { } }
-            mt = fold_encoded_funcs_x86(mt, out.encoded)
-            robase = commit_rodata_delta(robase, out.rodata)
+            results[prog.items.len] = ItemTextX86 { encoded = move_encoded_funcs_to_region_x86(out.encoded); rodata = move_rodata_to_region(out.rodata) }
             region_drop(vchild)
             trace_native_item_done(vt0)
-            match teko::backend::finish_encoded_module_x86(mt, robase, prelude.module.globals) {
+            match teko::backend::finish_encoded_module_x86(assemble_module_text_x86(results), assemble_rodata(robase, results), prelude.module.globals) {
                 teko::backend::EncodedModuleX86 as enc => {
                     var dwarf = build_dwarf_sink_for(dir, prog, enc.symbols, enc.text.len, debug)
                     finish_native_object(dir, od, stem, teko::backend::emit_elf(enc, dwarf), prog, m)
