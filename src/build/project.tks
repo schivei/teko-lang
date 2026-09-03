@@ -1692,11 +1692,14 @@ fn fold_lfunc_scoped_x86(mt: teko::backend::ModuleTextX86, f: teko::lir::LFunc):
 
 fn encode_module_fused_x86(entry: teko::lir::LModule): teko::backend::EncodedModuleX86 | error {
     var mt = teko::backend::empty_module_text_x86()
-    var i: u64 = 0
+    var it = entry.funcs.iter()
     loop {
-        if i >= entry.funcs.len { break }
-        mt = match fold_lfunc_scoped_x86(mt, entry.funcs[i]) { teko::backend::ModuleTextX86 as x => x; error as e => return e }
-        i++
+        match it.next() {
+            teko::lir::LFunc as f => {
+                mt = match fold_lfunc_scoped_x86(mt, f) { teko::backend::ModuleTextX86 as x => x; error as e => return e }
+            }
+            null => break
+        }
     }
     teko::backend::finish_encoded_module_x86(mt, entry.rodata, entry.globals)
 }
@@ -1748,14 +1751,17 @@ fn move_encoded_funcs_to_region_x86(efs: []teko::backend::EncodedFuncX86): []tek
     out
 }
 
-pub fn encode_lfuncs_in_region_x86(fs: []teko::lir::LFunc): []teko::backend::EncodedFuncX86 | error {
+pub fn encode_lfuncs_in_region_x86(fs: teko::collections::Chunked<teko::lir::LFunc>): []teko::backend::EncodedFuncX86 | error {
     var out: []teko::backend::EncodedFuncX86 = []
-    var i: u64 = 0
+    var it = fs.iter()
     loop {
-        if i >= fs.len { break }
-        var ef = match encode_lfunc_in_region_x86(fs[i]) { teko::backend::EncodedFuncX86 as x => x; error as e => return e }
-        out = [..out, ef]
-        i++
+        match it.next() {
+            teko::lir::LFunc as f => {
+                var ef = match encode_lfunc_in_region_x86(f) { teko::backend::EncodedFuncX86 as x => x; error as e => return e }
+                out = [..out, ef]
+            }
+            null => break
+        }
     }
     out
 }
@@ -1834,18 +1840,17 @@ fn lifted_suffix(all: []teko::lir::LFunc, from: u64): []teko::lir::LFunc {
     out
 }
 
-fn concat_lfuncs(a: []teko::lir::LFunc, b: []teko::lir::LFunc): []teko::lir::LFunc {
-    var out = a
+fn concat_lfuncs(a: teko::collections::Chunked<teko::lir::LFunc>, b: []teko::lir::LFunc): teko::collections::Chunked<teko::lir::LFunc> {
     var i: u64 = 0
     loop {
         if i >= b.len { break }
-        out = [..out, b[i]]
+        a.push(b[i])
         i++
     }
-    out
+    a
 }
 
-fn frame_escape_window(fs: []teko::lir::LFunc): null | error {
+fn frame_escape_window(fs: teko::collections::Chunked<teko::lir::LFunc>): null | error {
     teko::lir::frame_escape_guard(teko::lir::LModule { funcs = fs; rodata = []; globals = []; layouts = [] })
 }
 
@@ -1861,7 +1866,7 @@ fn extend_lifted_placeholders(ph: []teko::lir::LFunc, count: u64): []teko::lir::
 }
 
 fn fuse_lower_item_x86(rodata_base: u64, prelude: teko::lir::LowerPrelude, loose: []@TStatement(), it: @TItem(), lifted_base: u64): FusedItemOut | error {
-    var seed = teko::lir::LModule { funcs = []; rodata = []; globals = prelude.module.globals; layouts = prelude.module.layouts }
+    var seed = teko::lir::LModule { funcs = teko::collections::Chunked<teko::lir::LFunc>::make(); rodata = []; globals = prelude.module.globals; layouts = prelude.module.layouts }
     var step = match teko::lir::lower_item(seed, loose, it, prelude.layouts, prelude.enums, [], prelude.externs, false, prelude.variants, prelude.table, prelude.ref_fns, prelude.field_decls, rodata_base, prelude.module.rodata, lifted_base) { teko::lir::LowerItemOut as x => x; error as e => return e }
     var item_funcs = concat_lfuncs(step.module.funcs, step.lifted)
     match frame_escape_window(item_funcs) { error as e => return e; null => { } }
@@ -1871,7 +1876,7 @@ fn fuse_lower_item_x86(rodata_base: u64, prelude: teko::lir::LowerPrelude, loose
 
 fn fuse_virtual_main_x86(loose: []@TStatement(), prelude: teko::lir::LowerPrelude, rodata_base: u64, lifted_base: u64): FusedItemOut | error {
     var vmain = match teko::lir::lower_virtual_main(loose, prelude.layouts, prelude.enums, [], [], prelude.externs, false, prelude.variants, prelude.ref_fns, prelude.field_decls, prelude.table, rodata_base, prelude.module.rodata, lifted_base) { teko::lir::LoweredFunction as x => x; error as e => return e }
-    var seed = teko::lir::LModule { funcs = [vmain.func]; rodata = vmain.rodata; globals = prelude.module.globals; layouts = prelude.module.layouts }
+    var seed = teko::lir::LModule { funcs = teko::lir::funcs_of(vmain.func); rodata = vmain.rodata; globals = prelude.module.globals; layouts = prelude.module.layouts }
     var wrapped = match teko::lir::wrap_native_entry(seed) { teko::lir::LModule as x => x; error as e => return e }
     var all_funcs = concat_lfuncs(wrapped.funcs, vmain.lifted)
     match frame_escape_window(all_funcs) { error as e => return e; null => { } }
@@ -2173,14 +2178,17 @@ fn encode_lfunc_in_region_arm64(f: teko::lir::LFunc): teko::backend::EncodedFunc
     teko::backend::encode_func(teko::backend::AAPCS64, col)
 }
 
-pub fn encode_lfuncs_in_region_arm64(fs: []teko::lir::LFunc): []teko::backend::EncodedFunc | error {
+pub fn encode_lfuncs_in_region_arm64(fs: teko::collections::Chunked<teko::lir::LFunc>): []teko::backend::EncodedFunc | error {
     var out: []teko::backend::EncodedFunc = []
-    var i: u64 = 0
+    var it = fs.iter()
     loop {
-        if i >= fs.len { break }
-        var ef = match encode_lfunc_in_region_arm64(fs[i]) { teko::backend::EncodedFunc as x => x; error as e => return e }
-        out = [..out, ef]
-        i++
+        match it.next() {
+            teko::lir::LFunc as f => {
+                var ef = match encode_lfunc_in_region_arm64(f) { teko::backend::EncodedFunc as x => x; error as e => return e }
+                out = [..out, ef]
+            }
+            null => break
+        }
     }
     out
 }
@@ -2204,7 +2212,7 @@ type FusedItemOutArm64 = struct {
 }
 
 fn fuse_lower_item_arm64(robase: []teko::lir::LRodata, prelude: teko::lir::LowerPrelude, loose: []@TStatement(), it: @TItem(), lifted_ph: []teko::lir::LFunc): FusedItemOutArm64 | error {
-    var seed = teko::lir::LModule { funcs = []; rodata = robase; globals = prelude.module.globals; layouts = prelude.module.layouts }
+    var seed = teko::lir::LModule { funcs = teko::collections::Chunked<teko::lir::LFunc>::make(); rodata = robase; globals = prelude.module.globals; layouts = prelude.module.layouts }
     var step = match teko::lir::lower_item(seed, loose, it, prelude.layouts, prelude.enums, lifted_ph, prelude.externs, false, prelude.variants, prelude.table, prelude.ref_fns, prelude.field_decls) { teko::lir::LowerItemOut as x => x; error as e => return e }
     var new_lifted = lifted_suffix(step.lifted, lifted_ph.len)
     var item_funcs = concat_lfuncs(step.module.funcs, new_lifted)
@@ -2216,7 +2224,7 @@ fn fuse_lower_item_arm64(robase: []teko::lir::LRodata, prelude: teko::lir::Lower
 fn fuse_virtual_main_arm64(loose: []@TStatement(), prelude: teko::lir::LowerPrelude, robase: []teko::lir::LRodata, lifted_ph: []teko::lir::LFunc): FusedItemOutArm64 | error {
     var vmain = match teko::lir::lower_virtual_main(loose, prelude.layouts, prelude.enums, robase, lifted_ph, prelude.externs, false, prelude.variants, prelude.ref_fns, prelude.field_decls, prelude.table) { teko::lir::LoweredFunction as x => x; error as e => return e }
     var new_lifted = lifted_suffix(vmain.lifted, lifted_ph.len)
-    var seed = teko::lir::LModule { funcs = [vmain.func]; rodata = vmain.rodata; globals = prelude.module.globals; layouts = prelude.module.layouts }
+    var seed = teko::lir::LModule { funcs = teko::lir::funcs_of(vmain.func); rodata = vmain.rodata; globals = prelude.module.globals; layouts = prelude.module.layouts }
     var wrapped = match teko::lir::wrap_native_entry(seed) { teko::lir::LModule as x => x; error as e => return e }
     var all_funcs = concat_lfuncs(wrapped.funcs, new_lifted)
     match frame_escape_window(all_funcs) { error as e => return e; null => { } }
@@ -2284,20 +2292,23 @@ fn encode_lfunc_in_region_win(f: teko::lir::LFunc): teko::backend::EncodedFuncX8
     teko::backend::encode_func_x86(teko::backend::WIN64, col)
 }
 
-pub fn encode_lfuncs_in_region_win(fs: []teko::lir::LFunc): []teko::backend::EncodedFuncX86 | error {
+pub fn encode_lfuncs_in_region_win(fs: teko::collections::Chunked<teko::lir::LFunc>): []teko::backend::EncodedFuncX86 | error {
     var out: []teko::backend::EncodedFuncX86 = []
-    var i: u64 = 0
+    var it = fs.iter()
     loop {
-        if i >= fs.len { break }
-        var ef = match encode_lfunc_in_region_win(fs[i]) { teko::backend::EncodedFuncX86 as x => x; error as e => return e }
-        out = [..out, ef]
-        i++
+        match it.next() {
+            teko::lir::LFunc as f => {
+                var ef = match encode_lfunc_in_region_win(f) { teko::backend::EncodedFuncX86 as x => x; error as e => return e }
+                out = [..out, ef]
+            }
+            null => break
+        }
     }
     out
 }
 
 fn fuse_lower_item_win(robase: []teko::lir::LRodata, prelude: teko::lir::LowerPrelude, loose: []@TStatement(), it: @TItem(), lifted_ph: []teko::lir::LFunc): FusedItemOut | error {
-    var seed = teko::lir::LModule { funcs = []; rodata = robase; globals = prelude.module.globals; layouts = prelude.module.layouts }
+    var seed = teko::lir::LModule { funcs = teko::collections::Chunked<teko::lir::LFunc>::make(); rodata = robase; globals = prelude.module.globals; layouts = prelude.module.layouts }
     var step = match teko::lir::lower_item(seed, loose, it, prelude.layouts, prelude.enums, lifted_ph, prelude.externs, false, prelude.variants, prelude.table, prelude.ref_fns, prelude.field_decls) { teko::lir::LowerItemOut as x => x; error as e => return e }
     var new_lifted = lifted_suffix(step.lifted, lifted_ph.len)
     var item_funcs = concat_lfuncs(step.module.funcs, new_lifted)
@@ -2309,7 +2320,7 @@ fn fuse_lower_item_win(robase: []teko::lir::LRodata, prelude: teko::lir::LowerPr
 fn fuse_virtual_main_win(loose: []@TStatement(), prelude: teko::lir::LowerPrelude, robase: []teko::lir::LRodata, lifted_ph: []teko::lir::LFunc): FusedItemOut | error {
     var vmain = match teko::lir::lower_virtual_main(loose, prelude.layouts, prelude.enums, robase, lifted_ph, prelude.externs, false, prelude.variants, prelude.ref_fns, prelude.field_decls, prelude.table) { teko::lir::LoweredFunction as x => x; error as e => return e }
     var new_lifted = lifted_suffix(vmain.lifted, lifted_ph.len)
-    var seed = teko::lir::LModule { funcs = [vmain.func]; rodata = vmain.rodata; globals = prelude.module.globals; layouts = prelude.module.layouts }
+    var seed = teko::lir::LModule { funcs = teko::lir::funcs_of(vmain.func); rodata = vmain.rodata; globals = prelude.module.globals; layouts = prelude.module.layouts }
     var wrapped = match teko::lir::wrap_native_entry(seed) { teko::lir::LModule as x => x; error as e => return e }
     var all_funcs = concat_lfuncs(wrapped.funcs, new_lifted)
     match frame_escape_window(all_funcs) { error as e => return e; null => { } }
@@ -2405,15 +2416,17 @@ fn emit_static_lib(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m
 }
 
 fn strip_virtual_main(lmod: teko::lir::LModule): teko::lir::LModule {
-    var kept: [lmod.funcs.len]teko::lir::LFunc = []
-    var count: u64 = 0
-    var i: u64 = 0
+    var kept = teko::collections::Chunked<teko::lir::LFunc>::make()
+    var it = lmod.funcs.iter()
     loop {
-        if i >= lmod.funcs.len { break }
-        if lmod.funcs[i].symbol != "main" { kept[count] = lmod.funcs[i]; count = count + 1 }
-        i++
+        match it.next() {
+            teko::lir::LFunc as f => {
+                if f.symbol != "main" { kept.push(f) }
+            }
+            null => break
+        }
     }
-    teko::lir::LModule { funcs = teko::collections::arr_slice(kept, 0, count); rodata = lmod.rodata; globals = lmod.globals; layouts = lmod.layouts }
+    teko::lir::LModule { funcs = kept; rodata = lmod.rodata; globals = lmod.globals; layouts = lmod.layouts }
 }
 
 fn emit_static_lib_x86(dir: str, od: str, stem: str, lmod: teko::lir::LModule): i32 {

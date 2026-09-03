@@ -800,14 +800,17 @@ fn select_inst_x86(abi: AbiDescriptor, ctx: SelCtxX86, f: lir::LFunc, inst: lir:
     }
 }
 
-fn select_insts_x86(abi: AbiDescriptor, ctx0: SelCtxX86, f: lir::LFunc, insts: []lir::LInst): SelCtxX86 | error {
+fn select_insts_x86(abi: AbiDescriptor, ctx0: SelCtxX86, f: lir::LFunc, insts: teko::collections::Chunked<lir::LInst>): SelCtxX86 | error {
     var ctx = ctx0
-    var i: u64 = 0
+    var it = insts.iter()
     loop {
-        if i >= insts.len { break }
-        var stepped = match select_inst_x86(abi, ctx, f, insts[i]) { SelCtxX86 as c => c; error as e => return e }
-        ctx = stepped
-        i++
+        match it.next() {
+            lir::LInst as inst => {
+                var stepped = match select_inst_x86(abi, ctx, f, inst) { SelCtxX86 as c => c; error as e => return e }
+                ctx = stepped
+            }
+            null => break
+        }
     }
     ctx
 }
@@ -824,38 +827,45 @@ fn provisional_params_x86(pids: []u32): []MReg {
 }
 
 fn build_mirror_blocks_x86(f: lir::LFunc): MFuncX86 {
-    var blocks: [f.blocks.len]MBlockX86 = []
+    var blocks: [f.blocks.len()]MBlockX86 = []
     var i: u64 = 0
+    var it = f.blocks.iter()
     loop {
-        if i >= f.blocks.len { break }
-        var lb = f.blocks[i]
-        blocks[i] = MBlockX86 { id = lb.id; params = provisional_params_x86(lb.params); insts = [] }
-        i++
+        match it.next() {
+            lir::LBlock as lb => {
+                blocks[i] = MBlockX86 { id = lb.id; params = provisional_params_x86(lb.params); insts = [] }
+                i++
+            }
+            null => break
+        }
     }
     MFuncX86 { symbol = f.symbol; blocks = blocks; frame = [] }
 }
 
 fn max_block_id_x86(f: lir::LFunc): u32 {
     var m: u32 = 0
-    var i: u64 = 0
+    var it = f.blocks.iter()
     loop {
-        if i >= f.blocks.len { break }
-        if f.blocks[i].id > m { m = f.blocks[i].id }
-        i++
+        match it.next() {
+            lir::LBlock as b => { if b.id > m { m = b.id } }
+            null => break
+        }
     }
     m
 }
 
 fn select_all_blocks_x86(abi: AbiDescriptor, ctx0: SelCtxX86, f: lir::LFunc): SelCtxX86 | error {
     var ctx = ctx0
-    var i: u64 = 0
+    var it = f.blocks.iter()
     loop {
-        if i >= f.blocks.len { break }
-        var lb = f.blocks[i]
-        var switched = selctx_x86_switch(ctx, lb.id)
-        var stepped = match select_insts_x86(abi, switched, f, lb.insts) { SelCtxX86 as c => c; error as e => return e }
-        ctx = stepped
-        i++
+        match it.next() {
+            lir::LBlock as lb => {
+                var switched = selctx_x86_switch(ctx, lb.id)
+                var stepped = match select_insts_x86(abi, switched, f, lb.insts) { SelCtxX86 as c => c; error as e => return e }
+                ctx = stepped
+            }
+            null => break
+        }
     }
     ctx
 }
@@ -868,12 +878,15 @@ pub fn select_lfunc_x86(abi: AbiDescriptor, f: lir::LFunc): MFuncX86 | error {
 
 pub fn select_module_x86(abi: AbiDescriptor, m: lir::LModule): MModuleX86 | error {
     var out = MModuleX86 { funcs = []; rodata = m.rodata; globals = m.globals; layouts = m.layouts }
-    var i: u64 = 0
+    var it = m.funcs.iter()
     loop {
-        if i >= m.funcs.len { break }
-        var mf = match select_lfunc_x86(abi, m.funcs[i]) { MFuncX86 as x => x; error as e => return e }
-        out = add_mfunc_x86(out, mf)
-        i++
+        match it.next() {
+            lir::LFunc as f => {
+                var mf = match select_lfunc_x86(abi, f) { MFuncX86 as x => x; error as e => return e }
+                out = add_mfunc_x86(out, mf)
+            }
+            null => break
+        }
     }
     out
 }
