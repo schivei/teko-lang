@@ -1786,14 +1786,24 @@ fn rewrite_segment_at(p: parser::Path, idx: u64, name: str): parser::Path {
     parser::Path { segments = segs }
 }
 
+fn path_prefix_through(p: parser::Path, idx: u64): parser::Path {
+    var segs: [idx + 1]parser::Segment = []
+    var i: u64 = 0
+    loop {
+        if i > idx { break }
+        segs[i] = p.segments[i]
+        i++
+    }
+    parser::Path { segments = segs }
+}
+
 fn retarget_generic_static_callee(c: parser::Call, table: TypeTable, ref_ns: str): parser::Path | error {
     if c.owner_type_args.len == 0 || c.callee.segments.len < 2 { return c.callee }
     var owner_idx = c.callee.segments.len - 2
-    var owner_name = c.callee.segments[owner_idx].name
-    var nt = parser::NamedType { path = single_seg_path(owner_name); args = c.owner_type_args }
+    var nt = parser::NamedType { path = path_prefix_through(c.callee, owner_idx); args = c.owner_type_args }
     var rt = match resolve_type(nt, table, ref_ns) { (@Type()) as t => t; error as e => return e }
     var inst = match rt { Named as n => n.name; _ => return c.callee }
-    rewrite_segment_at(c.callee, owner_idx, inst)
+    rewrite_segment_at(c.callee, owner_idx, name_last_segment(inst))
 }
 
 fn split_phantom_args(suffix: str): []str {
