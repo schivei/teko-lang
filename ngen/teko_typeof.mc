@@ -11,12 +11,13 @@
 //
 // Three sources answer, in this order:
 //
-//   1. the node table teko_struct.mc builds (`tk_xt_find`) -- a node THIS
-//      module produced, so its type is known exactly;
+//   1. the node table teko_struct.mc builds (`tk_xt_ty`) -- a node THIS module
+//      produced, so its type is known exactly, scalar fields included;
 //   2. the scope of the function being walked -- its N_PARAM list and the
 //      N_VAR of its body, which is what `pass()` makes readable;
-//   3. the callee's declared return type, for an N_CALL, and the type the core
-//      itself put on a literal or a cast.
+//   3. the callee's declared return type, for an N_CALL, the type the core
+//      itself put on a literal or a cast, and -- for a binary or a unary --
+//      the core's own rule over the operands.
 //
 // It does NOT read `tk_local` (teko_struct.mc): that table belongs to the parse,
 // and by the time the pass runs it is empty. It builds its own scope over the
@@ -144,10 +145,25 @@ void tk_ty_scope_params(i64 p) {
 }
 
 // ---- the static type of a node, under the scope currently entered ----
+i64 tk_ty_of(i64 n);
+
+// A composite expression answers by the CORE's own rule, the one codegen will
+// apply to the very same node (mc/src/gen_resolve.mc, res_binary and res_expr's
+// N_UNARY arm): a logical operator and a comparison are `i64`, and every other
+// binary keeps the LEFT operand's type -- which is the rule the divide and the
+// shift already read to pick their signed form. An operand nothing types makes
+// the whole expression untyped: -1 travels outward instead of being guessed at.
+i64 tk_ty_binary(i64 n) {
+    i64 op = nd_op(n);
+    if (op == K_ANDAND || op == K_OROR) return TY_I64;
+    if (cmp_cond(op) >= 0) return TY_I64;
+    return tk_ty_of(nd_a(n));
+}
+
 i64 tk_ty_of(i64 n) {
     if (n == 0) return 0 - 1;
-    i64 x = tk_xt_find(n);
-    if (x >= 0) return sr_ty_at(x);
+    i64 t = tk_xt_ty(n);
+    if (t >= 0) return t;
     i64 k = nd_kind(n);
     if (k == N_IDENT) return tk_ty_scope_find(nd_name(n));
     if (k == N_CALL) {
@@ -158,6 +174,11 @@ i64 tk_ty_of(i64 n) {
     if (k == N_INT) return nd_type(n);
     if (k == N_STR) return nd_type(n);
     if (k == N_CAST) return nd_type(n);
+    if (k == N_BINARY) return tk_ty_binary(n);
+    if (k == N_UNARY) {
+        if (nd_op(n) == K_BANG) return TY_I64;
+        return tk_ty_of(nd_a(n));
+    }
     return 0 - 1;
 }
 
@@ -261,16 +282,17 @@ i64 tk_defer_member(i64 left, uptr m, i64 line, uptr fl) {
 // The three below emit exactly what teko_expr.mc emits for a receiver it could
 // type: the load or store of the field's own width, a direct call to the
 // mangled Owner_method, the vtable call for a virtual one, and the itab call
-// for an interface. `prs`/`ppure` report the result's own type, so `a.b.c`
-// chains through a deferred link as well.
-i64 tk_pend_field(i64 pi, i64 fi, uptr prs, uptr ppure) {
+// for an interface. `pty`/`ppure` report the result's own TYPE -- a scalar one
+// as much as a struct one, so `a.b.c` chains through a deferred link and
+// `f(p.side)` has an argument type to be resolved by.
+i64 tk_pend_field(i64 pi, i64 fi, uptr pty, uptr ppure) {
     uptr m = pd_name_at(pi);
     if (pd_form_at(pi) == TK_PCALL)
         err_at2(tk_file, tk_line, "teko: the member is a field, not a method", m);
     i64 fty = fd_ty_at(fi);
     i64 addr = tk_bin(K_ADD, pd_recv_at(pi), tk_int(fd_off_at(fi)));
     if (pd_form_at(pi) == TK_PSTORE) return tk_call2(tk_stn(fty), addr, pd_arg_at(pi));
-    st64(prs, tk_struct_by_ty(fty));
+    st64(pty, fty);
     st64(ppure, 1);
     return tk_call(tk_ldn(fty), addr);
 }
@@ -279,10 +301,10 @@ i64 tk_pend_field(i64 pi, i64 fi, uptr prs, uptr ppure) {
 // carries the overload suffix, the arguments the site left out come from that
 // declaration's defaults, and a virtual one goes through the object's vtable --
 // the shapes teko_expr.mc's tk_emit_call produces for a receiver it could type
-i64 tk_pend_emit_method(i64 pi, i64 mi, uptr prs, uptr ppure) {
+i64 tk_pend_emit_method(i64 pi, i64 mi, uptr pty, uptr ppure) {
     uptr m = pd_name_at(pi);
     i64 args = tk_fill_defaults(pd_arg_at(pi), pd_na_at(pi), mt_np_at(mi), mt_nreq_at(mi), mt_d0_at(mi));
-    st64(prs, tk_struct_by_ty(mt_ret_at(mi)));
+    st64(pty, mt_ret_at(mi));
     st64(ppure, 0);
     i64 left = pd_recv_at(pi);
     i64 slot = mt_slot_at(mi);
@@ -297,16 +319,16 @@ i64 tk_pend_emit_method(i64 pi, i64 mi, uptr prs, uptr ppure) {
 // The arguments the site wrote decide WHICH signature of the name is called,
 // exactly as they do at parse time (teko_expr.mc's tk_call_method): the pick
 // answers the declaration, inside the receiver's own type and its bases.
-i64 tk_pend_method(i64 pi, i64 si, uptr prs, uptr ppure) {
+i64 tk_pend_method(i64 pi, i64 si, uptr pty, uptr ppure) {
     uptr m = pd_name_at(pi);
     if (pd_form_at(pi) != TK_PCALL)
         err_at2(tk_file, tk_line, "teko: the member is a method; call it with ()", m);
     i64 mi = tk_method_pick(si, m, pd_na_at(pi));
     if (mi < 0) tk_pick_refuse(mi, m, tk_line, tk_file);
-    return tk_pend_emit_method(pi, mi, prs, ppure);
+    return tk_pend_emit_method(pi, mi, pty, ppure);
 }
 
-i64 tk_pend_iface(i64 pi, i64 si, uptr prs, uptr ppure) {
+i64 tk_pend_iface(i64 pi, i64 si, uptr pty, uptr ppure) {
     uptr m = pd_name_at(pi);
     if (tk_ifmeth_find(si, m) < 0)
         err_at2(tk_file, tk_line, tk_join("teko: unknown member of ", sr_name_at(si)), m);
@@ -320,7 +342,7 @@ i64 tk_pend_iface(i64 pi, i64 si, uptr prs, uptr ppure) {
     i64 left = pd_recv_at(pi);
     if (!tk_pure(left))
         err_at2(tk_file, tk_line, "teko: an interface call needs a name or a field on the left", m);
-    st64(prs, tk_struct_by_ty(im_ret_at(k)));
+    st64(pty, im_ret_at(k));
     st64(ppure, 0);
     i64 vt = tk_call("ld64", tk_clone(left));
     i64 mt = tk_call2("tk_itab", vt, tk_int(si));
@@ -328,12 +350,12 @@ i64 tk_pend_iface(i64 pi, i64 si, uptr prs, uptr ppure) {
     return tk_call("callp", list_append(list_append(fnp, left), args));
 }
 
-i64 tk_pend_emit(i64 pi, i64 si, uptr prs, uptr ppure) {
+i64 tk_pend_emit(i64 pi, i64 si, uptr pty, uptr ppure) {
     uptr m = pd_name_at(pi);
-    if (tk_is_iface(si)) return tk_pend_iface(pi, si, prs, ppure);
+    if (tk_is_iface(si)) return tk_pend_iface(pi, si, pty, ppure);
     i64 fi = tk_field_find(si, m);
-    if (fi >= 0) return tk_pend_field(pi, fi, prs, ppure);
-    if (tk_method_named_find(si, m) >= 0) return tk_pend_method(pi, si, prs, ppure);
+    if (fi >= 0) return tk_pend_field(pi, fi, pty, ppure);
+    if (tk_method_named_find(si, m) >= 0) return tk_pend_method(pi, si, pty, ppure);
     err_at2(tk_file, tk_line, tk_join("teko: unknown member of ", sr_name_at(si)), m);
     return 0;
 }
@@ -344,22 +366,22 @@ i64 tk_pend_emit(i64 pi, i64 si, uptr prs, uptr ppure) {
 // ahead of a class, because its dispatch is the one that stays correct for every
 // conforming class -- the itab is walked at run time, so no vtable slot is
 // guessed.
-i64 tk_pend_by_name(i64 pi, uptr prs, uptr ppure) {
+i64 tk_pend_by_name(i64 pi, uptr pty, uptr ppure) {
     uptr m = pd_name_at(pi);
     i64 fi = tk_field_by_name(m);
     if (fi == 0 - 2)
         err_at2(tk_file, tk_line, "teko: the type of the left side of `.` is not known here", m);
-    if (fi >= 0) return tk_pend_field(pi, fi, prs, ppure);
+    if (fi >= 0) return tk_pend_field(pi, fi, pty, ppure);
     i64 si = tk_ifmeth_by_name(m);
     if (si == 0 - 2)
         err_at2(tk_file, tk_line, "teko: the type of the left side of `.` is not known here", m);
-    if (si >= 0) return tk_pend_iface(pi, si, prs, ppure);
+    if (si >= 0) return tk_pend_iface(pi, si, pty, ppure);
     if (!tk_method_has_name(m)) err_at2(tk_file, tk_line, "teko: unknown member", m);
     if (pd_form_at(pi) != TK_PCALL)
         err_at2(tk_file, tk_line, "teko: the member is a method; call it with ()", m);
     i64 mi = tk_method_by_name(m, pd_na_at(pi));
     if (mi < 0) tk_loose_refuse(mi, m, tk_line, tk_file);
-    return tk_pend_emit_method(pi, mi, prs, ppure);
+    return tk_pend_emit_method(pi, mi, pty, ppure);
 }
 
 // The rewrite is IN PLACE, so the node index stays what the parent points at
@@ -376,16 +398,16 @@ void tk_pend_do(i64 pi) {
     tk_line = pd_line_at(pi);
     tk_file = pd_file_at(pi);
     i64 si = tk_ty_struct_of(recv);
-    i64 rs = 0 - 1;
+    i64 rty = 0 - 1;
     i64 pure = 0;
     i64 r = 0;
-    if (si >= 0) r = tk_pend_emit(pi, si, &rs, &pure);
-    else         r = tk_pend_by_name(pi, &rs, &pure);
+    if (si >= 0) r = tk_pend_emit(pi, si, &rty, &pure);
+    else         r = tk_pend_by_name(pi, &rty, &pure);
     i64 n = pd_node_at(pi);
     i64 keep = nd_next(n);
     node_assign(n, r);
     set_nd_next(n, keep);
-    if (rs >= 0) tk_xt_add(n, rs, pure);
+    if (rty >= 0) tk_xt_put(n, tk_struct_by_ty(rty), rty, pure);
 }
 
 void tk_pend_visit(i64 n) {
