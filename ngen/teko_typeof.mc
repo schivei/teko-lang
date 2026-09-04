@@ -29,10 +29,14 @@
 // until two unrelated types declare the same member. Where it used to stop with
 // "the type of the left side of `.` is not known here", the access is now
 // RECORDED and rebuilt in the pass, in the same shapes teko_expr.mc emits
-// (field load, field store, direct call, vtable call, itab call). A program in
-// which nothing is deferred never enters the pass at all -- `tk_typeof_pass`
-// returns the root untouched -- so a tree that is not this pass's business is
-// not this pass's to move.
+// (field load, field store, direct call, vtable call, itab call). "The same
+// shapes" includes the two things a call resolves by: the SIGNATURE the
+// argument count picks, whose symbol carries the overload suffix, and the
+// arguments the site left out, which come from that same declaration's
+// defaults -- a rebuild that skipped either would call another method than the
+// one written. A program in which nothing is deferred never enters the pass at
+// all -- `tk_typeof_pass` returns the root untouched -- so a tree that is not
+// this pass's business is not this pass's to move.
 
 #define TK_MAXSCOPE 256               // names of one function: parameters and locals
 #define TK_MAXPEND  128               // member accesses waiting for the pass
@@ -45,6 +49,13 @@
 // the argument list of a deferred call is read at parse time, by the same
 // function teko_expr.mc uses for a call it can resolve at once
 i64 tk_args(uptr pn);
+
+// the two teko_expr.mc pieces a rebuilt call needs to be the SAME call the
+// parser would have produced: the arguments the site left out, taken from the
+// declaration the call resolves against, and the one refusal a resolution that
+// did not land on a single signature gets
+i64 tk_fill_defaults(i64 args, i64 na, i64 np, i64 nreq, i64 d0);
+void tk_call_refuse(i64 mi, uptr m, i64 line, uptr fl);
 
 uptr sc_name[TK_MAXSCOPE];            // one function's names, rebuilt per N_FUNC
 i64  sc_ty[TK_MAXSCOPE];              // its declared type, or -1 when two disagree
@@ -234,6 +245,27 @@ void tk_pend_add(i64 n, i64 recv, uptr m, i64 arg, i64 na, i64 form, i64 line, u
     tk_npend = tk_npend + 1;
 }
 
+// 1 when two unrelated classes declare a method under `name`, at ANY argument
+// count. teko_class.mc's tk_method_by_name answers the same question filtered by
+// how many arguments the site passes -- which the parser has not read yet when
+// the `.` handler has to decide whether to defer -- and an `override` is not a
+// second declaration, so candidates inside ONE chain do not make the name
+// ambiguous.
+i64 tk_method_name_ambiguous(uptr name) {
+    i64 found = 0 - 1;
+    i64 i = 0;
+    loop {
+        if (i >= tk_nmethod) break;
+        if (str_eq(mt_name_at(i), name)) {
+            if (found < 0) found = i;
+            else if (tk_is_ancestor(mt_cls_at(i), mt_cls_at(found))) found = i;
+            else if (!tk_is_ancestor(mt_cls_at(found), mt_cls_at(i))) return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 // 1 when the member's NAME cannot decide the type -- the exact case
 // teko_expr.mc's tk_member_by_name stops on, in the same order it tries them
 i64 tk_member_ambiguous(uptr m) {
@@ -243,7 +275,7 @@ i64 tk_member_ambiguous(uptr m) {
     i64 si = tk_ifmeth_by_name(m);
     if (si == 0 - 2) return 1;
     if (si >= 0) return 0;
-    return tk_method_by_name(m) == 0 - 2;
+    return tk_method_name_ambiguous(m);
 }
 
 // `left . m` with the rest of the access still unread: what follows decides the
@@ -286,33 +318,41 @@ i64 tk_pend_field(i64 pi, i64 fi, uptr prs, uptr ppure) {
     return tk_call(tk_ldn(fty), addr);
 }
 
-i64 tk_pend_method(i64 pi, i64 mi, uptr prs, uptr ppure) {
+// The arguments the site wrote decide WHICH signature of the name is called,
+// exactly as they do at parse time (teko_expr.mc's tk_call_method): the pick
+// answers the declaration, the declaration's own symbol carries the overload
+// suffix, and the arguments it left out come from that declaration's defaults.
+i64 tk_pend_method(i64 pi, i64 si, uptr prs, uptr ppure) {
     uptr m = pd_name_at(pi);
     if (pd_form_at(pi) != TK_PCALL)
         err_at2(tk_file, tk_line, "teko: the member is a method; call it with ()", m);
-    if (pd_na_at(pi) != mt_np_at(mi))
-        err_at2(tk_file, tk_line, "teko: wrong number of arguments", m);
+    i64 na = pd_na_at(pi);
+    i64 mi = tk_method_pick(si, m, na);
+    if (mi < 0) tk_call_refuse(mi, m, tk_line, tk_file);
+    i64 args = tk_fill_defaults(pd_arg_at(pi), na, mt_np_at(mi), mt_nreq_at(mi), mt_d0_at(mi));
     st64(prs, tk_struct_by_ty(mt_ret_at(mi)));
     st64(ppure, 0);
     i64 left = pd_recv_at(pi);
     i64 slot = mt_slot_at(mi);
-    if (slot < 0) return tk_call(mt_fn_at(mi), list_append(left, pd_arg_at(pi)));
+    if (slot < 0) return tk_call(mt_fn_at(mi), list_append(left, args));
     if (!tk_pure(left))
         err_at2(tk_file, tk_line, "teko: a virtual call needs a name or a field on the left", m);
     i64 vt = tk_call("ld64", tk_clone(left));
     i64 fnp = tk_call("ld64", tk_bin(K_ADD, vt, tk_int((TK_VT_FIXED + slot) * 8)));
-    return tk_call("callp", list_append(list_append(fnp, left), pd_arg_at(pi)));
+    return tk_call("callp", list_append(list_append(fnp, left), args));
 }
 
 i64 tk_pend_iface(i64 pi, i64 si, uptr prs, uptr ppure) {
     uptr m = pd_name_at(pi);
-    i64 j = tk_ifmeth_find(si, m);
-    if (j < 0) err_at2(tk_file, tk_line, tk_join("teko: unknown member of ", sr_name_at(si)), m);
+    if (tk_ifmeth_find(si, m) < 0)
+        err_at2(tk_file, tk_line, tk_join("teko: unknown member of ", sr_name_at(si)), m);
     if (pd_form_at(pi) != TK_PCALL)
         err_at2(tk_file, tk_line, "teko: the member is a method; call it with ()", m);
+    i64 na = pd_na_at(pi);
+    i64 j = tk_ifmeth_pick(si, m, na);
+    if (j < 0) tk_call_refuse(j, m, tk_line, tk_file);
     i64 k = sr_m0_at(si) + j;
-    if (pd_na_at(pi) != im_np_at(k))
-        err_at2(tk_file, tk_line, "teko: wrong number of arguments", m);
+    i64 args = tk_fill_defaults(pd_arg_at(pi), na, im_np_at(k), im_nreq_at(k), im_d0_at(k));
     i64 left = pd_recv_at(pi);
     if (!tk_pure(left))
         err_at2(tk_file, tk_line, "teko: an interface call needs a name or a field on the left", m);
@@ -321,7 +361,7 @@ i64 tk_pend_iface(i64 pi, i64 si, uptr prs, uptr ppure) {
     i64 vt = tk_call("ld64", tk_clone(left));
     i64 mt = tk_call2("tk_itab", vt, tk_int(si));
     i64 fnp = tk_call("ld64", tk_bin(K_ADD, mt, tk_int(j * 8)));
-    return tk_call("callp", list_append(list_append(fnp, left), pd_arg_at(pi)));
+    return tk_call("callp", list_append(list_append(fnp, left), args));
 }
 
 i64 tk_pend_emit(i64 pi, i64 si, uptr prs, uptr ppure) {
@@ -329,8 +369,7 @@ i64 tk_pend_emit(i64 pi, i64 si, uptr prs, uptr ppure) {
     if (tk_is_iface(si)) return tk_pend_iface(pi, si, prs, ppure);
     i64 fi = tk_field_find(si, m);
     if (fi >= 0) return tk_pend_field(pi, fi, prs, ppure);
-    i64 mi = tk_method_find(si, m);
-    if (mi >= 0) return tk_pend_method(pi, mi, prs, ppure);
+    if (tk_method_named_find(si, m) >= 0) return tk_pend_method(pi, si, prs, ppure);
     err_at2(tk_file, tk_line, tk_join("teko: unknown member of ", sr_name_at(si)), m);
     return 0;
 }
