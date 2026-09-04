@@ -47,6 +47,7 @@
 #include "teko_iface.mc"
 #include "teko_trait.mc"
 #include "teko_class.mc"
+#include "teko_typeof.mc"
 #include "teko_stmt.mc"
 #include "teko_expr.mc"
 #include "teko_params.mc"
@@ -76,4 +77,5 @@ void user_init() {
 
     on_stmt(&tk_on_stmt);
     pass(&tk_params_pass);
+    pass(&tk_typeof_pass);
 }
