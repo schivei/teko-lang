@@ -137,47 +137,39 @@ sobre saída do compilador ensinado. Compile sempre por `mc build DIR --config F
 (ver armadilha 1 do §5.1).
 
 
-## 5. Próximo passo — entrega 4: SUPERFÍCIE E COMPORTAMENTO BASE
+## 5. Entrega 4 em curso — estado e fila
 
-A entrega 3 (tipos) está **fechada**: `struct`, `class`, `interface` e `trait`
-ensinados, 9 fixtures verdes. Pela ordem do D214, o que vem é **crescer o ensino
-da superfície e do comportamento base**. O dono nomeou (2026-09-04) quatro itens:
+Plano executável em `docs/design/plano-ngen-entrega4.md` (leia §1 descobertas medidas,
+§6 correção de rota do escopo, §7-§8 C7b/C8/C7c e a fila revista).
 
-1. **parâmetros default** (`fn f(i64 x, i64 y = 10)`);
-2. **multiparâmetros à la C#** (`params`, lista variádica tipada);
-3. **sobrecarga** por assinatura (a **sobrescrita** já existe: `virtual`/`override`);
-4. **sobrecarga de operadores**.
+**Landados em `fix/retirement`** (13 fixtures verdes, cada crumb com verificação
+independente e revalidação pós-cherry-pick):
+- **C0** glob do CI aceita `surface_*.tk`; erratas do handoff.
+- **C1** default de parâmetro em MÉTODO (`i64 scale(self, i64 k = 2)`), inclusive em
+  assinatura de `interface`; só constante `fold()`-ável; nó clonado por sítio.
+- **C2** sobrecarga de MÉTODO por assinatura; slots virtuais chaveados por (nome,
+  assinatura); símbolo do 1º método preservado, sobrecargas com sufixo
+  (`shape_area__i64`). Resolução por **aridade nível a nível** na cadeia (não é o
+  hiding por nome do C#). Mesma aridade com tipos diferentes → erro até o oráculo
+  entrar nesse ponto (`tk_method_pick` devolve `-3`).
+- **C3** oráculo de tipo estático em `pass()` (`teko_typeof.mc`), consumido quando o
+  nome não decide o tipo; costurado com C1/C2; prova de no-op nas 11 anteriores.
+- **C7 + C7b** `params` (`i64 total(params xs)`): pacote alocado por sítio na arena,
+  `xs[i]` com guard `rt_panic` nos dois lados, reentrante; teto 10 fixos / 12 por sítio.
 
-**Nenhum dos quatro tem precedente no mc** — `examples/lang/README.md:243` diz
-que o `lx` não tem overloads, default arguments, properties nem static members,
-e tem teto de **8 parâmetros** (contando `self` e o ponteiro da vtable). Esse 8
-é do `lx`, não do core: o teto do mc é **`MAXPARAMS` = 12**
-(`mc/src/arena.mc:58`, 1..8 em registrador e 9..12 na pilha).
+**Em voo:** crumb de **escopo** (plano §6) — tabela de locais com escopo por bloco via
+`syntax_stmt("{")`/`p_blockdepth()`, busca de membro restrita ao tipo do receptor,
+`-2` desambiguado; fixture `surface_scope.tk`.
 
-**A DÍVIDA que os quatro compartilham:** o core do mc **só reporta o tipo
-declarado de um parâmetro DEPOIS de a declaração fechar** — as cinco `decl_*` do
-M31 (`decl_find`/`decl_ret`/`decl_nparams`/`decl_param_type`/`decl_valid`,
-`mc/docs/reference/hooks.md` § "Asking about a declaration the core already
-parsed") respondem, e `decl_param_type` preserva o id que `type_new` devolveu.
-O que não existe é a resposta DENTRO do corpo que está sendo parseado, onde a
-função ainda não entrou na unidade; por isso o `.` resolve o membro pelo NOME
-quando o receptor é opaco (e aborta com erro claro se dois tipos
-não-relacionados declararem o mesmo nome), e por isso o oráculo de tipo estático
-mora num `pass()`, onde a unidade inteira existe. Note ainda que
-`syntax_infix` é registro **único e global**: ensinar o mesmo operador duas vezes
-é erro declarado no mc (`lib/user_dupop.mc`), logo a resolução por tipo tem de
-acontecer DENTRO do handler único.
+**Fila (plano §8):** escopo → **C8** genéricos com constantes (record/replay) ∥ **C4**
+sobrecarga de função de topo → **C7c** `params` genérico em `N` (índice literal
+bloqueado em compile-time) e **C5** operadores por `pass()` → **C6** quando o mc der o
+hook de declaração de função (pedido feito à sessão do mc, sai como `0.10.N`).
 
-Os dois caminhos, **pendentes de decisão do dono**: (a) **ensinar o `fn` próprio**
-no `ngen`, como o `examples/lang` faz — destrava os quatro, mas reimplementa peça
-que o core já tem (arranha o D213); (b) **pedir suporte novo ao mc** (o core
-preservar o id do `type_new` no nó do parâmetro, ou expor algo como
-`type_of_param`). A pergunta está com a sessão local que desenvolve o mc (§6).
-
-**Também em aberto, menores:** `base.m()` (chamar a implementação da base — existe
-no `examples/lang/tests/01-inherit.lx`), construtor com argumentos (hoje só
-`new Nome`), e a forma genérica `<T>` de `wrap`/`unwrap`, que precisa de generics
-record/replay.
+**Dívidas conhecidas:** arena bump sem reclaim (`new` e `params` em loop quente
+esgotam 4 MiB ruidosamente — entrega de comportamento base); default em função de topo
+bloqueado (C6); `syntax_infix` sobre operador do core morre em silêncio (bug reportado
+ao mc; rota é `pass()`).
 
 ## 5.1 Armadilhas já pagas (não repita)
 
