@@ -170,3 +170,14 @@ uma `total(uptr, i64)` colidem na mesma ABI depois do lowering.
 sobrecargas da base, como em C#"; o que o código faz é **resolução por aridade,
 nível a nível na cadeia** (cai na base quando a aridade não bate no nível atual).
 Comportamento estável; a descrição é que está errada.
+
+**C7b (em verificação, `49546d45`):** forma (a) — pacote por `rt_alloc(N*8)` com
+`tk_va_put` encadeado na própria expressão; (b) local + `&` foi descartada com a doc:
+`&` só aceita nome direto (`core-language.md:440`) e um pass sobre expressão não
+insere statement antes de chamada que mora em condição/argumento/`return`. Guard nos
+dois lados de `[0, n)` com `rt_panic`; recusas de reentrância removidas.
+**Dívida nova, medida:** a arena bump do `rt.mc` não recupera — variádica de 2
+argumentos em loop quente esgota os 4 MiB em ~262k chamadas (`teko: arena exhausted`,
+exit 70). Falha **ruidosa**, nunca corrupção, mas é teto que o buffer estático não
+tinha. A cura é reclaim/escopo de região (entrega de comportamento base, D214 item 3),
+mesma dívida que o `new` já carrega — não deste crumb.
