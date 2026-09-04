@@ -127,6 +127,13 @@ reinventou (mal) o que a doc e o `lx` já ensinam: rastreio de escopo é
   até o oráculo (C3) responder;
 - o oráculo do C3 fica para o que o parse **não alcança** (parâmetro de função de
   topo), como desenhado.
+**Também no crumb do escopo (defeito de diagnóstico do C2, medido sem oráculo):**
+`tk_call_refuse` (`ngen/teko_expr.mc:91-97`) mapeia `-2` para "the type of the left
+side of `.` is not known here" — certo para `tk_method_by_name`, **errado** para
+`tk_method_pick`/`tk_ifmeth_pick`, onde `-2` é "nenhuma assinatura aceita essa
+quantidade de argumentos". `Alpha a; a.tally(1,2,3)` sem assinatura de 3 dá a frase
+errada. Não miscompila; separar os dois significados de `-2` no contrato.
+
 Esta correção entra como **crumb próprio, antes de C4/C5** — eles constroem em cima
 da mesma resolução. Prova: os dois programas acima (o 1º sai 1; o 2º é rejeitado)
 mais as fixtures existentes intactas e a prova de no-op do C3 preservada.
