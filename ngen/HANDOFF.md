@@ -142,7 +142,7 @@ sobre saída do compilador ensinado. Compile sempre por `mc build DIR --config F
 Plano executável em `docs/design/plano-ngen-entrega4.md` (leia §1 descobertas medidas,
 §6 correção de rota do escopo, §7-§8 C7b/C8/C7c e a fila revista).
 
-**Landados em `fix/retirement`** (13 fixtures verdes, cada crumb com verificação
+**Landados em `fix/retirement`** (15 fixtures verdes, cada crumb com verificação
 independente e revalidação pós-cherry-pick):
 - **C0** glob do CI aceita `surface_*.tk`; erratas do handoff.
 - **C1** default de parâmetro em MÉTODO (`i64 scale(self, i64 k = 2)`), inclusive em
@@ -157,13 +157,22 @@ independente e revalidação pós-cherry-pick):
 - **C7 + C7b** `params` (`i64 total(params xs)`): pacote alocado por sítio na arena,
   `xs[i]` com guard `rt_panic` nos dois lados, reentrante; teto 10 fixos / 12 por sítio.
 
-**Em voo:** crumb de **escopo** (plano §6) — tabela de locais com escopo por bloco via
-`syntax_stmt("{")`/`p_blockdepth()`, busca de membro restrita ao tipo do receptor,
-`-2` desambiguado; fixture `surface_scope.tk`.
+- **Escopo** (plano §6): tabela de locais com escopo por bloco via `syntax_stmt("{")`
+  + `p_blockdepth()` (sem `on_jump` — a pilha é de parse e o parser sempre chega ao
+  `}`); busca de membro restrita ao tipo do receptor (`unknown member of A: extra`);
+  `-2` desambiguado (`wrong number of arguments for X` ≠ tipo desconhecido); o oráculo
+  também com escopo por bloco. Fecha os dois defeitos silenciosos da entrega 3.
+- **C4** sobrecarga de FUNÇÃO DE TOPO por `pass()` (`teko_over.mc`, registrado depois
+  de `params` e do oráculo): **toda** sobrecarga é renomeada (`pick__i64`, `pick__Vec`),
+  nenhuma fica plana — sítio não reescrito vira erro de link, não fallback silencioso.
+  Guards: `&f`, colisão ABI com `params`, `extern`/`main`, ambiguidade.
 
-**Fila (plano §8):** escopo → **C8** genéricos com constantes (record/replay) ∥ **C4**
-sobrecarga de função de topo → **C7c** `params` genérico em `N` (índice literal
-bloqueado em compile-time) e **C5** operadores por `pass()` → **C6** quando o mc der o
+**Em voo:** **C3b** (oráculo tipa `N_BINARY`/`N_UNARY` pela regra do core `res_binary`
+e membro escalar; placeholder deferido vira símbolo inexistente → falha no link se
+nenhum pass o resolver) e **C8** genéricos com constantes (record/replay).
+
+**Fila (plano §9):** C3b ∥ C8 → **C5** operadores por `pass()` e **C7c** `params`
+genérico em `N` (índice literal bloqueado em compile-time) → **C6** quando o mc der o
 hook de declaração de função (pedido feito à sessão do mc, sai como `0.10.N`).
 
 **Dívidas conhecidas:** arena bump sem reclaim (`new` e `params` em loop quente
