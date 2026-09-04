@@ -46,9 +46,13 @@
 // instantiated per call site so the bound is a constant there too:
 //   i64 total(params xs) { ... xs_len ... xs[i] ... }          teko_params.mc
 //   total(1, 2)  ->  total__2(<two words>)                     one body per count
+// What entrega 4's C5 adds -- operator overloading, spelled as C++ and C# spell
+// it and dispatched by the LEFT operand's type (teko_ops.mc):
+//   T operator+(self, U b)  inside a class or struct body      a contextual word
+//   a + b  /  (a + b) == c                                     pass() over N_BINARY
 //
 // Everything else in docs/design/port-teko-mc.md §3 (types/classes,
-// generics, operator overload, error-union, `service`/DI, concurrency, the
+// generics, error-union, `service`/DI, concurrency, the
 // rest of the stdlib) is a later entrega and is not stubbed here: it does
 // not yet have a reserved word to stop on, so it simply is not part of the
 // language this compiler accepts.
@@ -65,6 +69,7 @@
 #include "teko_expr.mc"
 #include "teko_params.mc"
 #include "teko_over.mc"
+#include "teko_ops.mc"
 
 void user_init() {
     tk_types_init();
@@ -102,6 +107,12 @@ void user_init() {
     // `params` pass is about to take away.
     pass(&tk_params_pass);
     pass(&tk_typeof_pass);
+
+    // BEHIND the oracle, because it asks the oracle what the two operands of a
+    // `+` are, and AHEAD of the overload mangling, because the call it puts in
+    // the tree already names the method's own symbol -- the one teko_class.mc
+    // gave the declaration -- and has nothing left for a mangling pass to pick.
+    pass(&tk_ops_pass);
 
     // LAST, and behind both of the above: the overload mangling reads ordinary
     // parameter lists (a `params` list is gone by now, replaced by its

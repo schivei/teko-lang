@@ -1,0 +1,85 @@
+// surface_operator.tk -- operator overloading (entrega 4, crumb C5). The
+// spelling is C++'s and C#'s, with no introducing word (D215): the return type
+// first, then `operator` and the operator's own token, then the parameter list
+// a method always has. `operator` is CONTEXTUAL inside the body of a type, like
+// `virtual` and `override`, so nothing outside a type body loses the word.
+//
+// A declared operator becomes a method named `op_add`/`op_sub`/`op_eq`, keyed
+// and mangled by signature like any other, and a pass over N_BINARY rewrites
+// the sites: `a + b` is `vec_op_add(a, b)`. The route has to be a pass --
+// syntax_infix over an operator the core owns registers and never fires,
+// because parse_unit() rebuilds the infix table after user_init() ran.
+//
+// The chain is what the pass has to get right twice: `(a + b) == c` resolves
+// the `+` first and asks the `==` about the RETURN type of `operator+`, not
+// about the type of `a`.
+//
+// And the core keeps its own arithmetic: the `i64` sum and the `u8` comparison
+// below are the same nodes they were before this construct existed.
+//
+// expect-exit: 42
+
+#include "../lib/rt.mc"
+
+class Vec {
+    i64 x;
+    i64 y;
+
+    Vec operator+(self, Vec b) {
+        Vec r = new Vec;
+        r.x = self.x + b.x;
+        r.y = self.y + b.y;
+        return r;
+    }
+
+    Vec operator-(self, Vec b) {
+        Vec r = new Vec;
+        r.x = self.x - b.x;
+        r.y = self.y - b.y;
+        return r;
+    }
+
+    i64 operator==(self, Vec b) {
+        if (self.x != b.x) return 0;
+        if (self.y != b.y) return 0;
+        return 1;
+    }
+}
+
+// both operands are PARAMETERS: nothing types them while the body is parsed,
+// and the oracle answers from the pass, where the whole unit exists
+Vec combine(Vec a, Vec b) {
+    return a + b;
+}
+
+i64 main() {
+    Vec a = new Vec;
+    a.x = 10;
+    a.y = 4;
+
+    Vec b = new Vec;
+    b.x = 20;
+    b.y = 8;
+
+    Vec c = new Vec;
+    c.x = 30;
+    c.y = 12;
+
+    if (((a + b) == c) != 1) return 1;           // the chain: `+` resolved first
+    if (((b - a) == c) != 0) return 2;           // ...and a false one is a value too
+    if ((combine(a, b) == c) != 1) return 3;     // the operator over parameters
+
+    Vec d = b - a;
+    if (d.x != 10) return 4;
+    if (d.y != 4) return 5;
+
+    i64 n = 20 + 22;                             // the core's own sum
+    if (n != 42) return 6;
+
+    u8 p = 7;
+    u8 q = 7;
+    if ((p == q) != 1) return 7;                 // the core's own comparison
+
+    Vec s = a + b;
+    return s.x + s.y;
+}

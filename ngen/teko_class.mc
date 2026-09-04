@@ -48,6 +48,12 @@
 // What is NOT here, and stops with a message rather than a surprise: `type`,
 // `namespace`, `import` and `using` (docs/design/port-teko-mc.md §3).
 
+// teko_ops.mc is included after this file, because its pass reads the method
+// table built here; these two are what a member declaration has to ask it, the
+// name `operator+` resolves to and the shape such a declaration has to have
+uptr tk_op_name(uptr pisop);
+void tk_op_decl_check(i64 np, i64 nreq, i64 fty);
+
 #define TK_MAXMETHOD 128              // methods, summed across all classes
 #define TK_MAXVSLOT  128              // virtual slots, summed across all classes
 #define TK_MAXDFLT   64               // default arguments, summed across all signatures
@@ -533,8 +539,10 @@ i64 tk_member(i64 ci, uptr name, i64 off, i64 ti) {
     if (kind && !tk_is_class(ci))
         err_at(tk_file, tk_line, "teko: a struct has no vtable; `virtual`/`override` needs a class");
     i64 fty = tk_gen_ty();
-    uptr m = p_ident();
+    i64 isop = 0;
+    uptr m = tk_op_name(&isop);                  // `operator+` names the method `op_add`
     if (p_id() != K_LPAR) {
+        if (isop) err_at(tk_file, tk_line, "teko: an operator is a method; it takes a parameter list");
         if (kind) err_at2(tk_file, tk_line, "teko: virtual/override on a field", m);
         i64 nel = tk_field_dim();                // `T items[N]`: 0 when it is a scalar
         p_expect(K_SEMI, "expected ; after the field");
@@ -550,6 +558,7 @@ i64 tk_member(i64 ci, uptr name, i64 off, i64 ti) {
     i64 nreq = 0;
     i64 d0 = tk_ndflt;
     i64 params = tk_params(&np, &nreq, extra);   // the signature decides every gate below
+    if (isop) tk_op_decl_check(np, nreq, fty);
     uptr sig = tk_sig_of(params);
     kind = tk_member_gate(ci, m, sig, ti, kind);
     if (kind < 0) {
