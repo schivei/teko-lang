@@ -10,6 +10,11 @@
 // pointer is never read), the single one, and a list longer than any fixed
 // arity would allow.
 //
+// The list is allocated per call site (`tk_va_new`/`tk_va_put`, ngen/lib/rt.mc),
+// so there is nothing to share and nothing to reenter: a variadic call NESTED
+// in another one, in a fixed position or inside the packed tail, and a variadic
+// function whose body calls one, all compile and each keeps its own list.
+//
 // expect-exit: 42
 
 #include "../lib/rt.mc"
@@ -36,6 +41,19 @@ i64 offset_total(i64 base, params rest) {
     return s;
 }
 
+// a variadic whose own body calls a variadic, once per element: the two lists
+// are alive at the same time and neither disturbs the other
+i64 doubled_total(params xs) {
+    i64 s = 0;
+    i64 i = 0;
+    loop {
+        if (i >= xs_len) break;
+        s = s + total(xs[i], xs[i]);
+        i = i + 1;
+    }
+    return s;
+}
+
 i64 main() {
     if (total() != 0) return 1;
     if (total(7) != 7) return 2;
@@ -44,6 +62,13 @@ i64 main() {
 
     if (offset_total(10) != 10) return 5;
     if (offset_total(10, 1, 2, 3) != 16) return 6;
+
+    if (total(total(1, 2), 3) != 6) return 7;
+    if (total(total(1, 2), total(3, 4), 5) != 15) return 8;
+    if (offset_total(total(1, 2), total(3, 4)) != 10) return 9;
+
+    if (doubled_total(1, 2, 3) != 12) return 10;
+    if (doubled_total(total(2, 3)) != 10) return 11;
 
     return total(20, 20, 2);
 }
