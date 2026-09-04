@@ -1,13 +1,13 @@
-// teko_class.mc -- `class Name [: Base] { fields and methods }`, the second
-// construct of entrega 3 (D214), and the honest-stops for the top-level words
-// teko still owes. A class is a struct (teko_struct.mc's tables) plus three
-// things: word 0 of the object is the vtable, fields are laid out BASE-FIRST
-// (so a derived object is a valid base object), and methods take an implicit
-// `self` (`mc/examples/lang` § Layout, and `mc/examples/api/oop.mc` for the
-// generated declarations).
+// teko_class.mc -- `class Name [: Base] [, Interface...] { fields and methods }`,
+// the second construct of entrega 3 (D214), and the honest-stops for the
+// top-level words teko still owes. A class is a struct (teko_struct.mc's
+// tables) plus three things: word 0 of the object is the vtable, fields are
+// laid out BASE-FIRST (so a derived object is a valid base object), and methods
+// take an implicit `self` (`mc/examples/lang` § Layout, and
+// `mc/examples/api/oop.mc` for the generated declarations).
 //
-//   class Shape {                     u8 shape_vt[8]
-//       i64 side;                     #define SHAPE_SIDE 8   (word 0 = vtable)
+//   class Shape {                     u8 shape_vt[16] (word 0 = itab, then the slots)
+//       i64 side;                     #define SHAPE_SIDE 8   (object word 0 = vtable)
 //       virtual i64 area(self) {      i64 shape_area(uptr self)  -> vtable slot 0
 //           return self.side;         void shape_vt_init()
 //       }                             Shape shape_new()
@@ -22,18 +22,22 @@
 // `virtual` and `override` are CONTEXTUAL: this module does not reserve them
 // (lang's `lg_kw`), so they stay usable as ordinary names everywhere else. A
 // plain method is called directly, a virtual one through
-// `callp(ld64(ld64(obj) + slot*8), obj, ...)` -- teko_expr.mc, which is also
-// where `p.field` and `p.method(...)` are resolved.
+// `callp(ld64(ld64(obj) + (1 + slot) * 8), obj, ...)` -- teko_expr.mc, which is
+// also where `p.field` and `p.method(...)` are resolved.
+//
+// The names after `:` are one base class at most, first, and then the
+// interfaces the class conforms to: the tables that answer them, and the
+// conformance check itself, are here (teko_iface.mc holds the declaration).
 //
 // One limit, the same one `mc/examples/lang` has: names resolve in declaration
 // order, so a method may call the methods declared ABOVE it in the same body.
 //
-// What is NOT here, and stops with a message rather than a surprise:
-// `interface` (its own commit, with the itab), `type`, `namespace`, `import`
-// and `using` (docs/design/port-teko-mc.md §3).
+// What is NOT here, and stops with a message rather than a surprise: `type`,
+// `namespace`, `import` and `using` (docs/design/port-teko-mc.md §3).
 
 #define TK_MAXMETHOD 128              // methods, summed across all classes
 #define TK_MAXVSLOT  128              // virtual slots, summed across all classes
+#define TK_VT_FIXED  1                // vtable word 0 is the interface table; slots follow
 
 uptr mt_name[TK_MAXMETHOD];
 i64  mt_cls[TK_MAXMETHOD];
@@ -226,17 +230,83 @@ i64 tk_params(uptr pnp, i64 extra) {
     return head;
 }
 
-// void Name_vt_init() { st64(name_vt + k*8, &fn_k); ... }
-// Called by the constructor, as `oop.mc` does: the stores are idempotent, so no
-// program-start hook is needed for a table that never changes.
-i64 tk_vt_init(i64 ci, uptr vt) {
+// st64(name_vt + (TK_VT_FIXED + k) * 8, &fn_k) for every virtual slot
+i64 tk_vt_slots(i64 ci, uptr vt) {
     i64 stmts = 0;
     i64 i = 0;
     loop {
         if (i >= sr_nv_at(ci)) break;
-        i64 dst = tk_bin(K_ADD, tk_id(vt), tk_int(i * 8));
+        i64 dst = tk_bin(K_ADD, tk_id(vt), tk_int((TK_VT_FIXED + i) * 8));
         stmts = list_append(stmts, tk_stmt(tk_call2("st64", dst, tk_addr(vs_fn_at(sr_v0_at(ci) + i)))));
         i = i + 1;
+    }
+    return stmts;
+}
+
+// the function of `ci` answering the interface method `k` -- this is where
+// "interface method not implemented" comes from, and the two signature checks
+// with it: a class conforms only if every method is there, at the interface's
+// own arity and return type
+uptr tk_conform(i64 ci, i64 k, uptr iname) {
+    uptr m = im_name_at(k);
+    i64 mi = tk_method_find(ci, m);
+    if (mi < 0)
+        err_at2(tk_file, tk_line, tk_join3("teko: method of `", iname, "` not implemented"), m);
+    if (mt_np_at(mi) != im_np_at(k))
+        err_at2(tk_file, tk_line, "teko: method with an arity different from the interface", m);
+    if (mt_ret_at(mi) != im_ret_at(k))
+        err_at2(tk_file, tk_line, "teko: method with a return type different from the interface", m);
+    return mt_fn_at(mi);
+}
+
+// u8 class_iface_mt[n * 8], and the stores that fill it: the class's own
+// implementation of each method, in the interface's declaration order, so the
+// slot a dispatch indexes means the same thing for every conforming class
+i64 tk_mt_fill(i64 ci, uptr cls, i64 fi) {
+    uptr iname = sr_name_at(fi);
+    uptr mt = tk_mt_name(cls, iname);
+    i64 n = sr_mn_at(fi);
+    top_add(tk_glb(TY_U8, mt, n * 8));
+    i64 stmts = 0;
+    i64 j = 0;
+    loop {
+        if (j >= n) break;
+        i64 dst = tk_bin(K_ADD, tk_id(mt), tk_int(j * 8));
+        stmts = list_append(stmts, tk_stmt(tk_call2("st64", dst, tk_addr(tk_conform(ci, sr_m0_at(fi) + j, iname)))));
+        j = j + 1;
+    }
+    return stmts;
+}
+
+// u8 class_itab[8 + ni * 16] = { ni, (interface id, its method table)* }, the
+// table `tk_itab` walks at run time (ngen/lib/rt.mc)
+i64 tk_itab_fill(i64 ci, uptr cls, uptr itab) {
+    i64 ni = sr_ni_at(ci);
+    i64 stmts = tk_stmt(tk_call2("st64", tk_id(itab), tk_int(ni)));
+    i64 i = 0;
+    loop {
+        if (i >= ni) break;
+        i64 fi = ci_if_at(sr_i0_at(ci) + i);
+        stmts = list_append(stmts, tk_mt_fill(ci, cls, fi));
+        i64 idst = tk_bin(K_ADD, tk_id(itab), tk_int(8 + i * 16));
+        stmts = list_append(stmts, tk_stmt(tk_call2("st64", idst, tk_int(fi))));
+        i64 mdst = tk_bin(K_ADD, tk_id(itab), tk_int(16 + i * 16));
+        stmts = list_append(stmts, tk_stmt(tk_call2("st64", mdst, tk_id(tk_mt_name(cls, sr_name_at(fi))))));
+        i = i + 1;
+    }
+    return stmts;
+}
+
+// void Name_vt_init() { the vtable, the interface tables and the itab }
+// Called by the constructor, as `oop.mc` does: the stores are idempotent, so no
+// program-start hook is needed for a table that never changes.
+i64 tk_vt_init(i64 ci, uptr cls, uptr vt) {
+    i64 stmts = tk_vt_slots(ci, vt);
+    if (sr_ni_at(ci) > 0) {
+        uptr itab = tk_itab_name(cls);
+        top_add(tk_glb(TY_U8, itab, 8 + sr_ni_at(ci) * 16));
+        stmts = list_append(stmts, tk_stmt(tk_call2("st64", tk_id(vt), tk_id(itab))));
+        stmts = list_append(stmts, tk_itab_fill(ci, cls, itab));
     }
     return tk_func(TY_VOID, tk_join(vt, "_init"), 0, tk_blk(stmts));
 }
@@ -272,16 +342,35 @@ i64 tk_class_member(i64 ci, uptr name, i64 off) {
     return off;
 }
 
-// the base named after `:`, which has to be a class already declared -- its
-// name is a reserved word by then, so the raw lexeme is read and looked up
-i64 tk_class_base() {
-    uptr bname = p_name();
+// one name of the `:` list, whose word is reserved by then (type_new), so the
+// raw lexeme is read and looked up in the type table
+i64 tk_conf_name(i64 base) {
+    uptr nm = p_name();
     i64 line = p_line();
     uptr fl = p_file();
     p_next();
-    i64 base = tk_struct_find(bname);
-    if (base < 0) err_at2(fl, line, "teko: unknown base class", bname);
-    if (!sr_vt_at(base)) err_at2(fl, line, "teko: a base has to be a class, not a struct", bname);
+    i64 si = tk_struct_find(nm);
+    if (si < 0) err_at2(fl, line, "teko: unknown base class or interface", nm);
+    if (tk_is_iface(si)) {
+        tk_conf_add(si, line, fl, nm);
+        return base;
+    }
+    if (!tk_is_class(si)) err_at2(fl, line, "teko: a base has to be a class, not a struct", nm);
+    if (base >= 0) err_at2(fl, line, "teko: a class has one base class", nm);
+    if (tk_nconf > 0) err_at2(fl, line, "teko: the base class comes before the interfaces", nm);
+    return si;
+}
+
+// `: Base`, `: Iface`, `: Base, IfaceA, IfaceB` -- one base class at most, and
+// it comes first; everything else in the list is an interface. Returns the base
+// class's row, or -1, and leaves the interfaces in conf_if/tk_nconf.
+i64 tk_class_conf() {
+    i64 base = 0 - 1;
+    tk_nconf = 0;
+    loop {
+        base = tk_conf_name(base);
+        if (!p_accept(K_COMMA)) break;
+    }
     return base;
 }
 
@@ -294,10 +383,18 @@ void tk_class() {
     p_next();                                    // the `class` word
     uptr name = tk_newname("class");
     i64 base = 0 - 1;
-    if (p_accept(K_COLON)) base = tk_class_base();
+    tk_nconf = 0;
+    if (p_accept(K_COLON)) base = tk_class_conf();
     i64 ty = type_new(name, 8, 8, TK_INT);
-    i64 ci = tk_type_add(name, ty, base, 1);
+    i64 ci = tk_type_add(name, ty, base, TK_KCLASS);
     tk_slots_inherit(ci, base);
+    tk_impls_inherit(ci, base);                  // the base's interfaces are the derived class's
+    i64 c = 0;
+    loop {
+        if (c >= tk_nconf) break;
+        tk_impl_add(ci, conf_if_at(c));
+        c = c + 1;
+    }
     i64 off = 8;                                 // word 0 is the vtable
     if (base >= 0) off = sr_size_at(base);       // the base's fields keep their offsets
     p_expect(K_LBRACE, "expected { in the class body");
@@ -316,17 +413,14 @@ void tk_class() {
     set_sr_size_at(ci, size);
     def_add(tk_join(tk_case(name, 1), "_SIZE"), size, tk_line, tk_file);
     uptr vt = tk_join(tk_case(name, 0), "_vt");
-    i64 nv = sr_nv_at(ci);
-    if (nv == 0) nv = 1;                         // an empty global has no address to take
-    top_add(tk_glb(TY_U8, vt, nv * 8));
-    top_add(tk_vt_init(ci, vt));
+    top_add(tk_glb(TY_U8, vt, (TK_VT_FIXED + sr_nv_at(ci)) * 8));
+    top_add(tk_vt_init(ci, name, vt));
     i64 install = tk_stmt(tk_call(tk_join(vt, "_init"), 0));
     install = list_append(install, tk_stmt(tk_call2("st64", tk_id("p"), tk_id(vt))));
     top_add(tk_ctor(name, ty, size, install));
 }
 
 void tk_stop_type()      { i64 l = p_line(); uptr f = p_file(); p_next(); err_at(f, l, "teko: type not taught yet"); }
-void tk_stop_interface() { i64 l = p_line(); uptr f = p_file(); p_next(); err_at(f, l, "teko: interface not taught yet"); }
 void tk_stop_namespace() { i64 l = p_line(); uptr f = p_file(); p_next(); err_at(f, l, "teko: namespace not taught yet"); }
 void tk_stop_import()    { i64 l = p_line(); uptr f = p_file(); p_next(); err_at(f, l, "teko: import not taught yet"); }
 void tk_stop_using()     { i64 l = p_line(); uptr f = p_file(); p_next(); err_at(f, l, "teko: using not taught yet"); }

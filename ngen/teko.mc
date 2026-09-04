@@ -24,13 +24,15 @@
 //   f32 f64 (+ ldf64/ldf32/stf64/stf32/sqrt_f64/fabs/fmin/fmax) <float> (M24)
 //
 // What entrega 3 (tipos, D214) adds, one construct per commit -- `struct` (no
-// vtable, fields from offset 0) and `class` (vtable at word 0, base-first
-// fields, `virtual`/`override`):
+// vtable, fields from offset 0), `class` (vtable at word 0, base-first fields,
+// `virtual`/`override`) and `interface` (no object at all: a table, and itab
+// dispatch through the class's vtable):
 //   struct Name { type field; ... }                          syntax      (M12)
-//   class Name [: Base] { fields, methods, virtual/override } syntax      (M12)
+//   class Name [: Base][, Iface...] { fields, methods }      syntax      (M12)
+//   interface Name { T method(self, ...); ... }              syntax      (M12)
 //   new Name                                                  syntax_expr (M21)
 //   p.field, p.field = e, p.method(...)                       syntax_infix (M21)
-//   the N_VAR of a local of struct/class type                 on_stmt     (M21.5)
+//   the N_VAR of a local of struct/class/interface type       on_stmt     (M21.5)
 //
 // Everything else in docs/design/port-teko-mc.md §3 (types/classes,
 // generics, operator overload, error-union, `service`/DI, concurrency, the
@@ -41,6 +43,7 @@
 #include "teko_type.mc"
 #include "teko_float.mc"
 #include "teko_struct.mc"
+#include "teko_iface.mc"
 #include "teko_class.mc"
 #include "teko_stmt.mc"
 #include "teko_expr.mc"
@@ -50,8 +53,8 @@ void user_init() {
     tk_float_init();
 
     syntax("class",     &tk_class);
+    syntax("interface", &tk_interface);
     syntax("type",      &tk_stop_type);
-    syntax("interface", &tk_stop_interface);
     syntax("namespace", &tk_stop_namespace);
     syntax("import",    &tk_stop_import);
     syntax("using",     &tk_stop_using);
