@@ -50,53 +50,80 @@ D213, D214** do `DECISION_LOG.md`. Leia-as — são leis, não sugestões.
 - **Entrega 2 (primitivas) — LANDADA.** Ensinado por `type_alias` (identidade
   pura): **`char`** (`u32`), **`byte`** (`u8`), **`isize`/`usize`**,
   **`ptr`** (colapsa em `uptr`, o único ponteiro opaco do core), **`str`**
-  (`uptr`). **`f32`/`f64`**: a lib `<float>` do mc (M24) **já registra essas
-  mesmas palavras** — foi só **conectar** (`ngen/teko_float.mc`), não
-  reimplementar. `lib/rt.mc` ganhou as fns ordinárias (não-hook):
-  `tk_str_len`/`tk_str_slice` (**view por ponteiro, zero-cópia — D197**) e
-  `tk_f64_bits`/`tk_f64_from_bits` (o reinterpret concreto `f64↔u64`; a forma
-  genérica `<T>` do `wrap`/`unwrap` precisa de generics record/replay e fica
-  para a entrega de tipos).
+  (**NUL-terminated `uptr`** — D215 registra a forma). **`f32`/`f64`**: a lib
+  `<float>` do mc (M24) **já registra essas mesmas palavras** — foi só
+  **conectar** (`ngen/teko_float.mc`), não reimplementar. `lib/rt.mc` ganhou
+  as fns ordinárias (não-hook): `tk_str_len`/`tk_str_slice` (**view por
+  ponteiro, zero-cópia — D197**) e `tk_f64_bits`/`tk_f64_from_bits` (o
+  reinterpret concreto `f64↔u64`; a forma genérica `<T>` do `wrap`/`unwrap`
+  precisa de generics record/replay e fica para a entrega de tipos).
+- **Entrega 3 (tipos) — PARCIAL: `struct` e `class` LANDADOS** (SHAs
+  `984f268e` e `06db615d`). Cada um define a tabela de tipos compartilhada
+  (campos de offset/size/layout em registro, vtable para class). Registrados
+  com `type_new(nome, 8, 8, TK_INT)` — identidade estática preservada para `.`
+  resolver membro. `interface` e `trait` ainda são honest-stop.
 - **CI VERDE, com execução real** (Linux x86_64, ~15 s ponta-a-ponta): baixa
   `mc-0.10.0-linux-x86_64`, confere checksum, `mc build ngen` constrói o
-  compilador ensinado `build/mc-teko`, e **5 fixtures compilam, linkam e
-  RODAM**: `hello.tk` + `primitives_{float,ptr,scalar,str}.tk`, todas com
-  exit 42.
+  compilador ensinado `build/mc-teko`, e **7 fixtures compilam, linkam e
+  RODAM**: `hello.tk` + `primitives_{float,ptr,scalar,str}.tk` +
+  `types_{struct,class}.tk`, todas com exit 42.
 
-## 4. O que a sessão local pode fazer que a remota NÃO pode
+## 4. Loop local — baixar release do mc, compilar, testar
 
 A sandbox remota **não consegue rodar o `mc`**: a rede para o GitHub está
-bloqueada (403) e o `make bootstrap-linux` do mc exige um `mc` pré-existente
-como semente (chicken-and-egg documentado no próprio mc). Lá só dá para
-validar **estaticamente** com o `mc0` (o `make stage0` funciona) e depender do
-CI como gate real.
+bloqueada (403). **Localmente tu tens o `mc` completo** — então o loop é:
 
-**Localmente tu tens o `mc` de verdade** — então o loop é:
-
+**1. Instalação ÚNICA do `mc`:**
 ```sh
-mc build ngen        # da raiz do repo; ou `mc build` de dentro de ngen/
-ngen/build/teko-hello; echo $?    # tem que dar 42
+# Baixar a release de schivei/mc (latest ou pinada)
+gh release download --repo schivei/mc --pattern "mc-*-linux-x86_64" -D ~/.local/bin
+# (ou do SO teu: macos, windows, etc.)
+chmod +x ~/.local/bin/mc-*
+ln -sf ~/.local/bin/mc-* ~/.local/bin/mc   # symlink para "mc" simples
+# Verificar checksum publicado na release
 ```
 
-Comando e opções: `docs/build.md` do repo do mc (seção `[compiler]`).
-Isso remove o round-trip de push, e é onde a sessão local rende mais —
-sobretudo nos construtos que pedem muita iteração (classes/interfaces).
+**2. Compile-test local:**
+```sh
+# Da raiz do repo teko-lang
+mc build ngen        # compila o compilador ensinado
+ngen/build/mc-teko < ngen/tests/types_struct.tk > /tmp/out.c
+gcc -o /tmp/test /tmp/out.c
+/tmp/test; echo $?   # tem que dar 42
+```
 
-## 5. Próximo passo — entrega 3: TIPOS
+**3. Derivar config de host (se macOS ou Windows):**
+```sh
+# Arquivo: ngen/mc.macos.toml (não se committa)
+# Copiar ngen/mc.toml, trocar [target] pra o seu:
+#   [target]
+#   os = "macos"
+#   arch = "aarch64"    # arm64 (NOT aarch64 — ambos nomes)
+# Remover bloco [linker] (nativo precisa apenas do xcode-select)
+mc build ngen --config ngen/mc.macos.toml
+```
 
-**Nada em voo.** As entregas 1 e 2 estão drenadas para as duas branches e o CI
-está verde; a sessão remota **parou de despachar** trabalho de `ngen/` para a
-sessão local assumir sem colisão.
+**Ciclo:** ~1 s local (vs. 15 s no CI). Não-commitar `ngen/mc.macos.toml`,
+`ngen/build/`, ou artefatos derivados.
 
-**Entrega 3 (D214) — `class`, `struct`, `interface`, `trait`.**
-- Precedente a copiar: `examples/lang/lang_class.mc` e `lang_type.mc` no repo
-  do mc (classes single-inherit, `virtual`/`override`, interfaces, itab,
-  layout vtable@0 + campos base-first — ver `examples/lang/README.md §Layout`).
-- Hoje esses construtos estão como **honest-stop** em `ngen/teko_class.mc`;
-  é substituir a parada pelo handler real, um construto por commit.
-- Mapeamento e hook de cada um: `docs/design/port-teko-mc.md` §3.
-- Enquanto isso, a forma genérica `<T>` de `wrap`/`unwrap` também destrava
-  (precisa de generics record/replay, que vem junto dos tipos).
+## 5. Próximo passo — entrega 3: TIPOS (continuação)
+
+**Struct e class LANDADOS** (commits `984f268e` + `06db615d`); `interface` e
+`trait` seguem como honest-stop. A sessão remota **parou de despachar** ngen
+para a local assumir sem colisão.
+
+**Próxima fase: `interface`.**
+- Precedente: `examples/api/oop.mc` no repo do mc (~482 linhas,
+  classes+interfaces+methods sem generics pesadas — modelo limpo e certo).
+- Mapeamento e hook: `docs/design/port-teko-mc.md` §3.
+- `interface` traz **conformance automática** (`type conforms_to`) e
+  **dispatch via itab** (method indirection) — ambos já proven no mc.
+
+**`trait` — FORK ABERTO:** não há precedente no mc nem forma mapeada em
+port-teko-mc.md. Decisão e forma precisam de input do dono antes de iniciar.
+
+**Enquanto isso:** a forma genérica `<T>` de `wrap`/`unwrap` também destrava
+(precisa de generics record/replay — vem junto dos tipos; aguarda M41/M40 do mc).
 
 ## 5.1 Armadilhas já pagas (não repita)
 
@@ -113,18 +140,46 @@ sessão local assumir sem colisão.
    olhar depois já deixou as duas branches canônicas vermelhas uma vez.
 4. **`ld` avisa `missing .note.GNU-stack`** em todo `.o` emitido pelo mc → o
    binário sai com stack executável. É item do lado do mc, não do `ngen/`.
+5. **Registrar tipo SEM `type_new` = identidade colapsa.** Usar `type_alias`
+   num struct/class (ex.: `type_alias("Point", TY_UPTR)`) faz o id colar ao
+   `TY_UPTR` → `.` resolve membro por NOME cru, sem distinguir tipos
+   não-relacionados que declarem o mesmo campo. **Usar `type_new(name, 8, 8,
+   TK_INT)`** — preserva identidade estática; se dois tipos de-fato-não-ligados
+   declaram `x`, é error claro (`"type of the left side of '.' is not known"`).
+   Auditado contra `mc docs/reference/hooks.md:350`; SEM regressão de ABI
+   (8/8 = pointer).
+6. **O core NÃO reporta tipo de PARÂMETRO ao módulo.** Quando o tipo estático
+   do receptor é desconhecido (chamada cross-unit), o `.` resolve por NOME; dois
+   tipos não-relacionados com mesmo nome → erro de compilação limpo (não leitura
+   silenciosa em offset errado). Verificado com programa hostil.
+7. **Ordem de declaração:** método só chama métodos ACIMA dele (mesma limitação
+   do `examples/lang`); consertar exige record/replay. Planejado pra release
+   seguinte do mc.
+8. **Sem construtor com argumentos** (`new Nome` apenas) e sem `base.m()` —
+   ainda não ensinados. Fila de D215.
+9. **Achado no repo do mc (não confirmado):** `examples/lang/lang_expr.mc:42-44`
+   reutiliza nó do receptor em `ld64` vtable e na lista de args; método virtual
+   de aridade ≥1 quebraria. No `ngen/` está contornado por clonagem com guarda.
 
-## 6. Consultar a sessão remota
+## 6. Comunicação — coordenador remoto + sessão local
 
-A sessão remota coordenadora guarda o histórico completo da virada (por que o
-port existe, o que aposenta, o que já foi decidido) e é quem drena para as duas
-branches:
+**Coordenador remoto** (`fix/retirement`): dono, histórico do port, drenagem
+de changes às branches canônicas — <https://claude.ai/code/session_01VX6NuV7RoBLyW6tBCrwEde>
 
-<https://claude.ai/code/session_01VX6NuV7RoBLyW6tBCrwEde>
+**Sessão local** (mini_compiler, `/Users/schivei/projects/mini_compiler`):
+desenvolve o `mc` paralelo; repo **somente leitura** para o `ngen`. Regras:
 
-Consulte-a quando: (a) aparecer um **fork de design** que o `DECISION_LOG` e a
-doc de Port não resolvam; (b) houver dúvida sobre se algo **aposenta** ou se
-porta; (c) for preciso drenar/alinhar as branches.
+1. A sessão local **avisa quando sai release nova** do mc → o `ngen` baixa a
+   nova release, troca o symlink, reconfere o baseline (CI usa `latest`).
+2. Quando bater **tensão que o ferramental do mc não resolva** (ex.: sintaxe
+   de construto novo, capacidade de hook), a sessão local do `ngen` **pergunta
+   a ela** por onde se resolve ou se precisa de suporte novo.
+3. **Nenhuma edição direta do repo do mc por parte do `ngen`.** Tudo é hook ou
+   solicitação de feature ao dono via sessão local.
+
+Consulte o coordenador remoto quando: (a) aparecer um **fork de design** que o
+`DECISION_LOG` e `port-teko-mc.md` não resolvam; (b) houver dúvida sobre se
+algo **aposenta** ou se porta; (c) for preciso drenar/alinhar as branches.
 
 ## 7. Gate do fecho
 
