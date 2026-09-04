@@ -50,12 +50,14 @@
 // function teko_expr.mc uses for a call it can resolve at once
 i64 tk_args(uptr pn);
 
-// the two teko_expr.mc pieces a rebuilt call needs to be the SAME call the
-// parser would have produced: the arguments the site left out, taken from the
-// declaration the call resolves against, and the one refusal a resolution that
-// did not land on a single signature gets
+// the teko_expr.mc pieces a rebuilt call needs to be the SAME call the parser
+// would have produced: the arguments the site left out, taken from the
+// declaration the call resolves against, and the two refusals a resolution that
+// did not land on a single signature gets -- one for a pick inside a known type,
+// one for a pick by name alone
 i64 tk_fill_defaults(i64 args, i64 na, i64 np, i64 nreq, i64 d0);
-void tk_call_refuse(i64 mi, uptr m, i64 line, uptr fl);
+void tk_pick_refuse(i64 mi, uptr m, i64 line, uptr fl);
+void tk_loose_refuse(i64 mi, uptr m, i64 line, uptr fl);
 
 uptr sc_name[TK_MAXSCOPE];            // one function's names, rebuilt per N_FUNC
 i64  sc_ty[TK_MAXSCOPE];              // its declared type, or -1 when two disagree
@@ -98,19 +100,13 @@ void set_pd_file_at(i64 i, uptr v) { st64(pd_file + i * 8, v); }
 void set_pd_done_at(i64 i, i64 v)  { st64(pd_done + i * 8, v); }
 
 // ---- the scope of one function ----
-// A name that arrives twice under two different types is POISONED rather than
-// resolved to the last one seen: an inner block may shadow a parameter, and the
-// walk is flat, so the honest answer for that name is "not known here".
+// A STACK, marked at every N_BLOCK the walk enters and cut back when it leaves,
+// which is the same shape teko_struct.mc's table of locals has at parse time.
+// The newest entry wins, so a declaration inside a block shadows the parameter
+// of the same name only while that block is open -- and, once it closes, the
+// parameter answers with its own type again instead of being poisoned by a name
+// it has nothing to do with.
 void tk_ty_scope_add(uptr name, i64 ty) {
-    i64 i = 0;
-    loop {
-        if (i >= tk_nscope) break;
-        if (str_eq(sc_name_at(i), name)) {
-            if (sc_ty_at(i) != ty) set_sc_ty_at(i, 0 - 1);
-            return;
-        }
-        i = i + 1;
-    }
     if (tk_nscope == TK_MAXSCOPE) return;        // beyond the table: answers -1
     set_sc_name_at(tk_nscope, name);
     set_sc_ty_at(tk_nscope, ty);
@@ -118,30 +114,22 @@ void tk_ty_scope_add(uptr name, i64 ty) {
 }
 
 i64 tk_ty_scope_find(uptr name) {
-    i64 i = 0;
+    i64 i = tk_nscope - 1;
     loop {
-        if (i >= tk_nscope) break;
+        if (i < 0) break;
         if (str_eq(sc_name_at(i), name)) return sc_ty_at(i);
-        i = i + 1;
+        i = i - 1;
     }
     return 0 - 1;
 }
 
-// every N_VAR of the body, at any depth. `nd_val` is the array length, so
-// `Point tbl[4]` -- four references, not one object -- is skipped, exactly as
-// teko_struct.mc's on_stmt hook skips it.
-void tk_ty_scope_vars(i64 n) {
-    loop {
-        if (n == 0) break;
-        if (nd_kind(n) == N_VAR) {
-            if (nd_val(n) == 0) tk_ty_scope_add(nd_name(n), nd_type(n));
-        }
-        tk_ty_scope_vars(nd_a(n));
-        tk_ty_scope_vars(nd_b(n));
-        tk_ty_scope_vars(nd_c(n));
-        tk_ty_scope_vars(nd_d(n));
-        n = nd_next(n);
-    }
+// a local the body declares. `nd_val` is the array length, so `Point tbl[4]` --
+// four references, not one object -- is skipped, exactly as teko_struct.mc's
+// on_stmt hook skips it.
+void tk_ty_scope_var(i64 n) {
+    if (nd_kind(n) != N_VAR) return;
+    if (nd_val(n) != 0) return;
+    tk_ty_scope_add(nd_name(n), nd_type(n));
 }
 
 // the N_PARAM list carries the declared type as the parser read it -- the id
@@ -153,14 +141,6 @@ void tk_ty_scope_params(i64 p) {
         tk_ty_scope_add(nd_name(p), nd_type(p));
         p = nd_next(p);
     }
-}
-
-// the scope `fn`'s body is read under; returns how many names it holds
-i64 tk_ty_scope_enter(i64 fn) {
-    tk_nscope = 0;
-    tk_ty_scope_params(nd_a(fn));
-    tk_ty_scope_vars(nd_b(fn));
-    return tk_nscope;
 }
 
 // ---- the static type of a node, under the scope currently entered ----
@@ -191,18 +171,27 @@ i64 tk_ty_struct_of(i64 n) {
 }
 
 // ---- the walk a pass drives ----
-// `visit` is called on every node of every function body, with that function's
-// scope already entered. A visitor may rewrite the node it is given in place;
-// the walk reads its children afterwards, so what a rewrite produces is walked
-// as well.
+// `visit` is called on every node of every function body, in the order the
+// source wrote it and under the scope that holds AT that node: a block pushes a
+// mark and pops it, and a local joins the scope only after the statement that
+// declares it has been walked, so its own initializer still reads the outer
+// name. A visitor may rewrite the node it is given in place; the walk reads its
+// children afterwards, so what a rewrite produces is walked as well.
 void tk_ty_walk_list(i64 n, uptr visit) {
     loop {
         if (n == 0) break;
         callp(visit, n);
-        tk_ty_walk_list(nd_a(n), visit);
-        tk_ty_walk_list(nd_b(n), visit);
-        tk_ty_walk_list(nd_c(n), visit);
-        tk_ty_walk_list(nd_d(n), visit);
+        if (nd_kind(n) == N_BLOCK) {
+            i64 mark = tk_nscope;
+            tk_ty_walk_list(nd_a(n), visit);
+            tk_nscope = mark;
+        } else {
+            tk_ty_walk_list(nd_a(n), visit);
+            tk_ty_walk_list(nd_b(n), visit);
+            tk_ty_walk_list(nd_c(n), visit);
+            tk_ty_walk_list(nd_d(n), visit);
+            tk_ty_scope_var(n);
+        }
         n = nd_next(n);
     }
 }
@@ -212,7 +201,8 @@ void tk_ty_pass_walk(i64 root, uptr visit) {
     loop {
         if (f == 0) break;
         if (nd_kind(f) == N_FUNC) {
-            tk_ty_scope_enter(f);
+            tk_nscope = 0;
+            tk_ty_scope_params(nd_a(f));
             tk_ty_walk_list(nd_b(f), visit);
         }
         f = nd_next(f);
@@ -243,39 +233,6 @@ void tk_pend_add(i64 n, i64 recv, uptr m, i64 arg, i64 na, i64 form, i64 line, u
     set_pd_file_at(tk_npend, fl);
     set_pd_done_at(tk_npend, 0);
     tk_npend = tk_npend + 1;
-}
-
-// 1 when two unrelated classes declare a method under `name`, at ANY argument
-// count. teko_class.mc's tk_method_by_name answers the same question filtered by
-// how many arguments the site passes -- which the parser has not read yet when
-// the `.` handler has to decide whether to defer -- and an `override` is not a
-// second declaration, so candidates inside ONE chain do not make the name
-// ambiguous.
-i64 tk_method_name_ambiguous(uptr name) {
-    i64 found = 0 - 1;
-    i64 i = 0;
-    loop {
-        if (i >= tk_nmethod) break;
-        if (str_eq(mt_name_at(i), name)) {
-            if (found < 0) found = i;
-            else if (tk_is_ancestor(mt_cls_at(i), mt_cls_at(found))) found = i;
-            else if (!tk_is_ancestor(mt_cls_at(found), mt_cls_at(i))) return 1;
-        }
-        i = i + 1;
-    }
-    return 0;
-}
-
-// 1 when the member's NAME cannot decide the type -- the exact case
-// teko_expr.mc's tk_member_by_name stops on, in the same order it tries them
-i64 tk_member_ambiguous(uptr m) {
-    i64 fi = tk_field_by_name(m);
-    if (fi == 0 - 2) return 1;
-    if (fi >= 0) return 0;
-    i64 si = tk_ifmeth_by_name(m);
-    if (si == 0 - 2) return 1;
-    if (si >= 0) return 0;
-    return tk_method_name_ambiguous(m);
 }
 
 // `left . m` with the rest of the access still unread: what follows decides the
@@ -318,18 +275,13 @@ i64 tk_pend_field(i64 pi, i64 fi, uptr prs, uptr ppure) {
     return tk_call(tk_ldn(fty), addr);
 }
 
-// The arguments the site wrote decide WHICH signature of the name is called,
-// exactly as they do at parse time (teko_expr.mc's tk_call_method): the pick
-// answers the declaration, the declaration's own symbol carries the overload
-// suffix, and the arguments it left out come from that declaration's defaults.
-i64 tk_pend_method(i64 pi, i64 si, uptr prs, uptr ppure) {
+// the call itself, once the declaration is known: the declaration's own symbol
+// carries the overload suffix, the arguments the site left out come from that
+// declaration's defaults, and a virtual one goes through the object's vtable --
+// the shapes teko_expr.mc's tk_emit_call produces for a receiver it could type
+i64 tk_pend_emit_method(i64 pi, i64 mi, uptr prs, uptr ppure) {
     uptr m = pd_name_at(pi);
-    if (pd_form_at(pi) != TK_PCALL)
-        err_at2(tk_file, tk_line, "teko: the member is a method; call it with ()", m);
-    i64 na = pd_na_at(pi);
-    i64 mi = tk_method_pick(si, m, na);
-    if (mi < 0) tk_call_refuse(mi, m, tk_line, tk_file);
-    i64 args = tk_fill_defaults(pd_arg_at(pi), na, mt_np_at(mi), mt_nreq_at(mi), mt_d0_at(mi));
+    i64 args = tk_fill_defaults(pd_arg_at(pi), pd_na_at(pi), mt_np_at(mi), mt_nreq_at(mi), mt_d0_at(mi));
     st64(prs, tk_struct_by_ty(mt_ret_at(mi)));
     st64(ppure, 0);
     i64 left = pd_recv_at(pi);
@@ -342,6 +294,18 @@ i64 tk_pend_method(i64 pi, i64 si, uptr prs, uptr ppure) {
     return tk_call("callp", list_append(list_append(fnp, left), args));
 }
 
+// The arguments the site wrote decide WHICH signature of the name is called,
+// exactly as they do at parse time (teko_expr.mc's tk_call_method): the pick
+// answers the declaration, inside the receiver's own type and its bases.
+i64 tk_pend_method(i64 pi, i64 si, uptr prs, uptr ppure) {
+    uptr m = pd_name_at(pi);
+    if (pd_form_at(pi) != TK_PCALL)
+        err_at2(tk_file, tk_line, "teko: the member is a method; call it with ()", m);
+    i64 mi = tk_method_pick(si, m, pd_na_at(pi));
+    if (mi < 0) tk_pick_refuse(mi, m, tk_line, tk_file);
+    return tk_pend_emit_method(pi, mi, prs, ppure);
+}
+
 i64 tk_pend_iface(i64 pi, i64 si, uptr prs, uptr ppure) {
     uptr m = pd_name_at(pi);
     if (tk_ifmeth_find(si, m) < 0)
@@ -350,7 +314,7 @@ i64 tk_pend_iface(i64 pi, i64 si, uptr prs, uptr ppure) {
         err_at2(tk_file, tk_line, "teko: the member is a method; call it with ()", m);
     i64 na = pd_na_at(pi);
     i64 j = tk_ifmeth_pick(si, m, na);
-    if (j < 0) tk_call_refuse(j, m, tk_line, tk_file);
+    if (j < 0) tk_pick_refuse(j, m, tk_line, tk_file);
     i64 k = sr_m0_at(si) + j;
     i64 args = tk_fill_defaults(pd_arg_at(pi), na, im_np_at(k), im_nreq_at(k), im_d0_at(k));
     i64 left = pd_recv_at(pi);
@@ -374,6 +338,30 @@ i64 tk_pend_emit(i64 pi, i64 si, uptr prs, uptr ppure) {
     return 0;
 }
 
+// the LAST resort, and only after the oracle has said it does not know the
+// receiver's type: a global, or an expression whose type nothing reports. The
+// member's name then has to belong to exactly one type. An interface answers
+// ahead of a class, because its dispatch is the one that stays correct for every
+// conforming class -- the itab is walked at run time, so no vtable slot is
+// guessed.
+i64 tk_pend_by_name(i64 pi, uptr prs, uptr ppure) {
+    uptr m = pd_name_at(pi);
+    i64 fi = tk_field_by_name(m);
+    if (fi == 0 - 2)
+        err_at2(tk_file, tk_line, "teko: the type of the left side of `.` is not known here", m);
+    if (fi >= 0) return tk_pend_field(pi, fi, prs, ppure);
+    i64 si = tk_ifmeth_by_name(m);
+    if (si == 0 - 2)
+        err_at2(tk_file, tk_line, "teko: the type of the left side of `.` is not known here", m);
+    if (si >= 0) return tk_pend_iface(pi, si, prs, ppure);
+    if (!tk_method_has_name(m)) err_at2(tk_file, tk_line, "teko: unknown member", m);
+    if (pd_form_at(pi) != TK_PCALL)
+        err_at2(tk_file, tk_line, "teko: the member is a method; call it with ()", m);
+    i64 mi = tk_method_by_name(m, pd_na_at(pi));
+    if (mi < 0) tk_loose_refuse(mi, m, tk_line, tk_file);
+    return tk_pend_emit_method(pi, mi, prs, ppure);
+}
+
 // The rewrite is IN PLACE, so the node index stays what the parent points at
 // and the sibling list is put back untouched -- `mc` docs/reference/hooks.md
 // § pass(). A receiver that is itself deferred is resolved first, which is what
@@ -388,11 +376,11 @@ void tk_pend_do(i64 pi) {
     tk_line = pd_line_at(pi);
     tk_file = pd_file_at(pi);
     i64 si = tk_ty_struct_of(recv);
-    if (si < 0)
-        err_at2(tk_file, tk_line, "teko: the type of the left side of `.` is not known here", pd_name_at(pi));
     i64 rs = 0 - 1;
     i64 pure = 0;
-    i64 r = tk_pend_emit(pi, si, &rs, &pure);
+    i64 r = 0;
+    if (si >= 0) r = tk_pend_emit(pi, si, &rs, &pure);
+    else         r = tk_pend_by_name(pi, &rs, &pure);
     i64 n = pd_node_at(pi);
     i64 keep = nd_next(n);
     node_assign(n, r);
