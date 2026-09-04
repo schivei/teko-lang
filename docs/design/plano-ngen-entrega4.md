@@ -236,3 +236,21 @@ escalar do campo em `tk_pend_field`. **Entra antes do C5** (operadores precisam 
 `teko_expr.mc`). Fixture: `surface_typeof_expr.tk`.
 
 **Fila revista:** escopo → C4 → **C3b** → C8 ∥ C5 → C7c → C6.
+
+## 10. C3b em verificação; C3c — `.` sobre receptor escalar (2026-09-04)
+
+**C3b (`9b73cd1f`, em verificação):** `tk_ty_of` tipa `N_BINARY`/`N_UNARY` espelhando
+`res_binary` do core (usa o próprio `cmp_cond`); a tabela `xt` ganha `xt_ty` (tipo do
+nó, escalar incluído) ao lado de `xt_str`; o placeholder deferido vira
+`tk_call("tk_unresolved_member")` — sem o pass, o **`res_call` do core** recusa `call to
+unknown function` com `arquivo:linha` (antes do linker; melhor que o pedido).
+
+**C3c — achado adjacente, pré-existente:** `.` sobre receptor de tipo **escalar**
+(`b.side.x` com `side: i64`, `x` declarado só por `Vec`) ainda cai no último recurso
+por-nome e **compila**, emitindo load sobre um `i64`. Com o C3b o oráculo já distingue
+"sem tipo" de "tem tipo e não tem membros" → recusar com `teko: i64 has no members`.
+Entra junto do C5 (mesmos arquivos) ou como mini-crumb antes dele.
+
+Nota do C4: literal em posição direta de argumento usa a preferência exata/frouxa
+(`N_INT` sem tipo → desempata `i64`); literal dentro de binário (`pick(1 + 2)`) agora
+responde `i64` pela regra do core — coerente, documentado.
