@@ -128,7 +128,7 @@ for src in ngen/tests/*.tk; do
 done
 ```
 
-Hoje isso dá **11/11 em exit 42**. `ngen/mc.macos.toml`, os `ngen/mc.*.toml` transientes
+Hoje isso dá **16/16 em exit 42**. `ngen/mc.macos.toml`, os `ngen/mc.*.toml` transientes
 e `ngen/build/` **nunca se commitam**, e `ngen/mc.toml` fica **intacto** — alterá-lo
 quebra o CI.
 
@@ -142,7 +142,7 @@ sobre saída do compilador ensinado. Compile sempre por `mc build DIR --config F
 Plano executável em `docs/design/plano-ngen-entrega4.md` (leia §1 descobertas medidas,
 §6 correção de rota do escopo, §7-§8 C7b/C8/C7c e a fila revista).
 
-**Landados em `fix/retirement`** (15 fixtures verdes, cada crumb com verificação
+**Landados em `fix/retirement`** (16 fixtures verdes, cada crumb com verificação
 independente e revalidação pós-cherry-pick):
 - **C0** glob do CI aceita `surface_*.tk`; erratas do handoff.
 - **C1** default de parâmetro em MÉTODO (`i64 scale(self, i64 k = 2)`), inclusive em
@@ -167,13 +167,29 @@ independente e revalidação pós-cherry-pick):
   nenhuma fica plana — sítio não reescrito vira erro de link, não fallback silencioso.
   Guards: `&f`, colisão ABI com `params`, `extern`/`main`, ambiguidade.
 
+- **C8** genéricos com CONSTANTES por record/replay (`teko_generic.mc`):
+  `class`/`struct Name<T, const N: i64>` gravado por `p_skip_balanced` e re-parseado
+  por instância (`p_subst_name`/`p_subst_int` + `p_push_source`), memoizado por
+  (nome, argumentos), mangling `Box__Circle__4`; a instância entra na tabela de tipos
+  pelo mesmo `type_new` de uma classe qualquer. Nasce no primeiro uso: posição de
+  declaração (o nome do genérico vira `syntax_stmt`), tipo de campo/parâmetro/retorno,
+  e `new`. `>>` desmontado por `p_resplit_punct(1)`. Campo array inline `T items[N]`
+  faz o layout crescer com a constante, e `items[k]` com `k` literal fora de `[0, N)`
+  é **erro de compilação** na instância (índice não-literal recebe guard de runtime
+  `tk_ix`, emitido uma vez e só no programa que indexa).
+
 **Em voo:** **C3b** (oráculo tipa `N_BINARY`/`N_UNARY` pela regra do core `res_binary`
 e membro escalar; placeholder deferido vira símbolo inexistente → falha no link se
-nenhum pass o resolver) e **C8** genéricos com constantes (record/replay).
+nenhum pass o resolver).
 
-**Fila (plano §9):** C3b ∥ C8 → **C5** operadores por `pass()` e **C7c** `params`
-genérico em `N` (índice literal bloqueado em compile-time) → **C6** quando o mc der o
-hook de declaração de função (pedido feito à sessão do mc, sai como `0.10.N`).
+**Fila (plano §9):** C3b → **C5** operadores por `pass()` e **C7c** `params`
+genérico em `N` (índice literal bloqueado em compile-time, sobre o C8) → **C6** quando
+o mc der o hook de declaração de função (pedido feito à sessão do mc, sai como `0.10.N`).
+
+**Dívida do C8:** `p.items[i]` sobre um receptor que o parser NÃO tipa (um parâmetro,
+que só o oráculo do `pass()` resolve) não chega ao `[` de array — cai no `[` do `params`
+e é recusado com `teko: \`[\` indexes a \`params\` list only`. Recusa clara, nunca
+miscompilação; fechar isso é trabalho no `teko_typeof.mc` (C3b, em voo em paralelo).
 
 **Dívidas conhecidas:** arena bump sem reclaim (`new` e `params` em loop quente
 esgotam 4 MiB ruidosamente — entrega de comportamento base); default em função de topo

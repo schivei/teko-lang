@@ -235,4 +235,56 @@ escalar do campo em `tk_pend_field`. **Entra antes do C5** (operadores precisam 
 `a + b` com `a` composto) e depois do escopo (mesmos arquivos: `teko_typeof.mc`,
 `teko_expr.mc`). Fixture: `surface_typeof_expr.tk`.
 
-**Fila revista:** escopo → C4 → **C3b** → C8 ∥ C5 → C7c → C6.
+**Fila revista:** escopo → C4 → **C8** → **C3b** ∥ C5 → C7c → C6.
+
+## 10. C8 landado — o que ficou, e o que ele destrava (2026-09-04)
+
+**Landou** em `ngen/teko_generic.mc` (módulo próprio; `teko.mc` só ganhou o
+`#include`). O record é disparado no `class`/`struct` quando o nome é seguido de
+`<` (`teko_class.mc:617`, `teko_struct.mc:713`): a lista de parâmetros é parseada,
+tudo dali até o `}` é **gravado** por `p_skip_balanced`, nada é declarado, e o nome
+do genérico é registrado com `syntax_stmt` — a única posição de onde
+`Box<Circle, 4> b;` é alcançável, como o `lg_declstmt` do `examples/lang` faz.
+
+O replay monta `class Box__Circle__4 <texto gravado>;`, liga os parâmetros
+(`p_subst_name` para `T`, `p_subst_int` para `N`), empurra com `p_push_source` sob
+`Box__Circle__4 instantiated from prog.tk:16` e drena `top_add(parse_top())` até a
+profundidade voltar. Instância memoizada por `(nome, argumentos)`; ela entra na
+tabela de tipos pelo **mesmo `type_new`** de uma classe qualquer, então `.`, `new`,
+vtable e interface saem de graça. O `>>` de `Holder<Box<Circle, 2>>` é desmontado
+por `p_resplit_punct(1)`.
+
+**Três coisas medidas que o plano não previa:**
+
+1. **O `;` do replay é obrigatório.** O `p_accept(K_SEMI)` que fecha um corpo de
+   tipo roda depois do `}`; sem um `;` no fim do texto empurrado ele alcança o
+   token seguinte da fonte de FORA e come o `;` do `new Box<Circle, 4>;`. O texto
+   empurrado termina com `;` próprio.
+2. **O replay tem de SALVAR o scratch de declaração.** Uma instanciação pode
+   acontecer dentro do corpo de outro tipo (campo de tipo genérico, local numa
+   método) — o `tk_class` aninhado zeraria a fila de traits (`tk_ntu`/`tk_nud`) e a
+   lista de conformância (`tk_nconf`) do tipo de fora. `tk_gen_replay` salva e
+   restaura os dois, mais `tk_line`/`tk_file`/`tk_own_methods`. Verificado por probe:
+   classe com `use Counted;` + campo `Bag<Circle, 3>` + parâmetro e local genéricos.
+3. **Campo array inline teve de ser ensinado junto** (`T items[N]`), porque é ele
+   que faz a constante decidir o LAYOUT: `BOX__CIRCLE__2_SIZE` = 32 e
+   `BOX__CIRCLE__4_SIZE` = 48, do mesmo texto. `p.items` é o ENDEREÇO do array,
+   etiquetado com tipo do elemento e comprimento, e o `[` (`tk_bracket`) o consome
+   no parse — não vira `N_INDEX`, então não cruza com o `params`.
+
+**O bloqueio pelo tamanho constante — o que o dono pediu — está vivo:** `items[k]`
+com `k` literal fora de `[0, N)` é erro de COMPILAÇÃO na instância
+(`Box__Circle__4 instantiated from prog.tk:16:6: teko: index 5 is past the end of items[4]`).
+Índice não-literal recebe guard de runtime `tk_ix`, **emitido pelo módulo uma única
+vez e só no programa que indexa** — assim a prova de no-op continua exata (as 15
+fixtures anteriores dão `--dump-ast` byte-idêntico a `043455b8`); pô-lo em
+`lib/rt.mc` teria mudado a árvore de todo programa.
+
+**Dívida medida:** `p.items[i]` sobre receptor que o parser não tipa (um parâmetro,
+que só o oráculo resolve) não alcança o `[` de array e cai no `[` do `params`, que
+recusa com `teko: `[` indexes a `params` list only`. Recusa clara, nunca
+miscompilação; o fecho é no `teko_typeof.mc` (C3b).
+
+**C7c fica pronto para escrever:** a máquina de que ele precisa — corpo instanciado
+por sítio, `N` como literal substituído, índice literal barrado contra `N` — é
+exatamente a que o C8 deixou.
