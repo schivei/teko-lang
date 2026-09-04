@@ -84,6 +84,16 @@ D213, D214** do `DECISION_LOG.md`. Leia-as — são leis, não sugestões.
   RODAM**: `hello.tk` + `primitives_{float,ptr,scalar,str}.tk` +
   `types_{struct,class,interface,trait}.tk`, todas com exit 42.
 
+## 3.1 CI do repositório — só o `ngen` conta (dono 2026-09-04)
+
+O CI do compilador antigo (`pr.yml` fixpoint/self-host, nightly, seeds, `theory/*`,
+release do bootstrap, tag-on-version-bump) está **desativado** no GitHub — 17
+workflows em `disabled_manually`; os arquivos seguem no repo, `src/` está congelado.
+Ativos: **`ngen (mc) CI`**, CodeQL, Branch policy, Mirror PR. O ruleset `main` passou
+a exigir **só** o check `mc build ngen && run` (antes: "CI gate" e "Test suite gate" do
+`pr.yml`, que nunca mais fechariam). `fix/retirement` não tem proteção; o ruleset
+`others` só barra force-push fora de `main`/`fix/**`/`theory/**`/`f1/**`/`cargo/**`.
+
 ## 4. Loop local — o `mc` vem da RELEASE, não de submodule
 
 A sandbox remota **não consegue rodar o `mc`** (rede para o GitHub bloqueada, 403);
