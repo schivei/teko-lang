@@ -82,8 +82,7 @@ i64 tk_field_use(i64 left, i64 fi, i64 line, uptr fl) {
         return tk_call2(tk_stn(fty), addr, v);
     }
     i64 r = tk_call(tk_ldn(fty), addr);
-    i64 fs = tk_struct_by_ty(fty);
-    if (fs >= 0) tk_xt_add(r, fs, 1);            // a field of struct type: `a.b.c`
+    tk_xt_put(r, tk_struct_by_ty(fty), fty, 1);  // struct: `a.b.c`; scalar: its own type
     return r;
 }
 

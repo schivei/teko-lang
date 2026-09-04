@@ -68,7 +68,8 @@ i64  lv_str[TK_MAXLOCAL];
 i64  tk_nlocal = 0;
 
 i64  xt_node[TK_MAXXT];               // a node this module built, and its type
-i64  xt_str[TK_MAXXT];
+i64  xt_str[TK_MAXXT];                // the row of the type table, or -1 for a scalar
+i64  xt_ty[TK_MAXXT];                 // the type id itself, scalar ones included
 i64  xt_pure[TK_MAXXT];               // 1 when re-evaluating the node is free of effects
 i64  tk_nxt = 0;
 
@@ -97,6 +98,7 @@ uptr lv_name_at(i64 i)  { return ld64(lv_name + i * 8); }
 i64  lv_str_at(i64 i)   { return ld64(lv_str + i * 8); }
 i64  xt_node_at(i64 i)  { return ld64(xt_node + i * 8); }
 i64  xt_str_at(i64 i)   { return ld64(xt_str + i * 8); }
+i64  xt_ty_at(i64 i)    { return ld64(xt_ty + i * 8); }
 i64  xt_pure_at(i64 i)  { return ld64(xt_pure + i * 8); }
 
 void set_sr_name_at(i64 i, uptr v)  { st64(sr_name + i * 8, v); }
@@ -122,6 +124,7 @@ void set_lv_name_at(i64 i, uptr v)  { st64(lv_name + i * 8, v); }
 void set_lv_str_at(i64 i, i64 v)    { st64(lv_str + i * 8, v); }
 void set_xt_node_at(i64 i, i64 v)   { st64(xt_node + i * 8, v); }
 void set_xt_str_at(i64 i, i64 v)    { st64(xt_str + i * 8, v); }
+void set_xt_ty_at(i64 i, i64 v)     { st64(xt_ty + i * 8, v); }
 void set_xt_pure_at(i64 i, i64 v)   { st64(xt_pure + i * 8, v); }
 
 // ---- derived names ----
@@ -384,6 +387,16 @@ i64 tk_xt_find(i64 n) {
     return xt_str_at(x);
 }
 
+// the node's own type id, which a SCALAR one has as well: a field of `i64` is
+// no row of the type table, and answering -1 for it is what left `self.side`
+// untypable to whoever asks (teko_typeof.mc's tk_ty_of, and through it the
+// overload resolution)
+i64 tk_xt_ty(i64 n) {
+    i64 x = tk_xt_at(n);
+    if (x < 0) return 0 - 1;
+    return xt_ty_at(x);
+}
+
 // 1 when the node may be evaluated twice with no observable difference: a name,
 // or a field load this module built. A constructor and a method call answer 0,
 // so `new C().m()` is refused instead of allocating twice.
@@ -403,13 +416,20 @@ void tk_local_add(uptr name, i64 si) {
     tk_nlocal = tk_nlocal + 1;
 }
 
-void tk_xt_add(i64 n, i64 si, i64 pure) {
-    if (tk_nxt == TK_MAXXT) err_at(tk_file, tk_line, "teko: too many expressions of struct type");
+// the node's type as this module knows it: the row of the type table when the
+// type has one, and the type id in every case. `si` is -1 for a scalar, which
+// is the answer `.` and the oracle both need to tell "not a struct" from
+// "nothing known".
+void tk_xt_put(i64 n, i64 si, i64 ty, i64 pure) {
+    if (tk_nxt == TK_MAXXT) err_at(tk_file, tk_line, "teko: too many expressions whose type is known");
     set_xt_node_at(tk_nxt, n);
     set_xt_str_at(tk_nxt, si);
+    set_xt_ty_at(tk_nxt, ty);
     set_xt_pure_at(tk_nxt, pure);
     tk_nxt = tk_nxt + 1;
 }
+
+void tk_xt_add(i64 n, i64 si, i64 pure) { tk_xt_put(n, si, sr_ty_at(si), pure); }
 
 // appends the field and extends the owner's slice, so a method parsed further
 // down the same body already sees the fields declared above it
