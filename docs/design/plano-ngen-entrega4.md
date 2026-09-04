@@ -130,3 +130,36 @@ reinventou (mal) o que a doc e o `lx` já ensinam: rastreio de escopo é
 Esta correção entra como **crumb próprio, antes de C4/C5** — eles constroem em cima
 da mesma resolução. Prova: os dois programas acima (o 1º sai 1; o 2º é rejeitado)
 mais as fixtures existentes intactas e a prova de no-op do C3 preservada.
+
+## 7. C7 landado com ressalva → C7b (2026-09-04)
+
+**Landou** (`4521b3d8`): `i64 total(params xs)`, `xs[i]` por `syntax_infix("[")`
+próprio (o core **não** constrói `N_INDEX`), sítio reescrito em
+`total(tk_vaN(...), N)`. Teto real com `params`: 10 fixos e 12 argumentos por sítio.
+
+**Ressalva medida pelo verificador:** `tk_va_at` (`ngen/lib/rt.mc`) faz `ld64` sem
+guard — `xs[i]` fora do range devolve lixo do buffer em silêncio (provado: lê o
+resto da chamada anterior). Fere a lei de falhar ruidosamente (`CLAUDE.md`, guard de
+deref). **E a causa-raiz das duas restrições do crumb** (não-reentrância e lixo) é a
+mesma: o pacote de argumentos mora num **buffer ESTÁTICO global** (`tk_va_buf[96]`).
+
+**Orientação do dono:** o mc trabalha com **ponteiros 100% opacos** (`uptr`), e a
+única extração é o **`&`** (address-of de local/global/função, `mc/docs/core-language.md:62`),
+que os exemplos açucaram como **`ref`** (`examples/lang/README.md:55-75`, `lang.mc:72`).
+Os agentes não incorporaram isso. **C7b, a correção:** o pacote passa a ser
+**alocado por sítio** — na arena, por `rt_alloc(N*8)` (o mesmo caminho do `new`), ou
+local + `&` — e o ponteiro opaco viaja com `xs_len`. Consequências: (1) chamada
+variádica aninhada e variádica-dentro-de-variádica **deixam de ser recusadas** (não há
+mais estado compartilhado); (2) `tk_va_at(xs, len, i)` ganha **guard de bounds com
+`rt_panic`** (`arquivo:linha` no diagnóstico do pass onde couber); (3) `tk_va1..tk_va12`
+somem — o pass emite a gravação por índice no bloco alocado.
+
+**Ordem de passes (parecer do verificador):** registrar `pass(&tk_params_pass)`
+**ANTES** do futuro pass de mangling do C4 — assim o C4 vê `total(ptr, n)` uniformizado
+e não precisa saber o que é `params`. Guard que o C4 precisa: `total(params xs)` e
+uma `total(uptr, i64)` colidem na mesma ABI depois do lowering.
+
+**Errata de descrição (C2):** a mensagem de `fe750cdf` diz "a classe esconde as
+sobrecargas da base, como em C#"; o que o código faz é **resolução por aridade,
+nível a nível na cadeia** (cai na base quando a aridade não bate no nível atual).
+Comportamento estável; a descrição é que está errada.
