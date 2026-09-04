@@ -45,11 +45,10 @@
 //
 // The types come from the C3 oracle (teko_typeof.mc): `tk_ty_of` under the
 // scope `tk_ty_pass_walk` enters for each function, so a parameter, a local, a
-// literal, a cast and a call all answer. An argument it cannot type is an ERROR
-// naming that argument -- never a guess, since guessing means calling another
-// function than the one written. A composite argument (`pick(n - 1)`, an
-// arithmetic expression) is one of those: the oracle types names, calls,
-// literals and casts, not operators.
+// literal, a cast, a call and a binary or unary expression all answer -- the
+// last two by the core's own rule (`cmp_cond`, the divide/shift signed form).
+// An argument it cannot type is an ERROR naming that argument -- never a
+// guess, since guessing means calling another function than the one written.
 //
 // Order matters twice. The pass is registered AFTER `tk_params_pass`, which
 // rewrites `i64 total(params xs)` into `i64 total(uptr xs, i64 xs_len)`, so

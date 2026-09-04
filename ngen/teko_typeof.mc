@@ -182,13 +182,13 @@ i64 tk_ty_of(i64 n) {
     return 0 - 1;
 }
 
-// the row of teko_struct.mc's type table the node's type names, or -1
-i64 tk_ty_struct_of(i64 n) {
-    i64 x = tk_xt_find(n);
-    if (x >= 0) return x;
-    i64 t = tk_ty_of(n);
-    if (t < 0) return 0 - 1;
-    return tk_struct_by_ty(t);
+// a receiver whose type IS known but names no row of teko_struct.mc's type
+// table -- a scalar (`i64`, `uptr`, a field's own width, ...) -- declares no
+// member at all, so a `.` on it is always wrong. Distinguishing this from
+// "the type is not known" (where the member's own name gets to answer,
+// tk_pend_by_name) is the whole point of the oracle knowing `tk_ty_of`.
+void tk_reject_scalar_member(uptr fl, i64 line, i64 ty, uptr m) {
+    err_at2(fl, line, tk_join3("teko: ", type_name(ty), " has no members"), m);
 }
 
 // ---- the walk a pass drives ----
@@ -408,12 +408,15 @@ void tk_pend_do(i64 pi) {
     if (rp >= 0) tk_pend_do(rp);
     tk_line = pd_line_at(pi);
     tk_file = pd_file_at(pi);
-    i64 si = tk_ty_struct_of(recv);
+    i64 recv_ty = tk_ty_of(recv);
+    i64 si = 0 - 1;
+    if (recv_ty >= 0) si = tk_struct_by_ty(recv_ty);
     i64 rty = 0 - 1;
     i64 pure = 0;
     i64 r = 0;
-    if (si >= 0) r = tk_pend_emit(pi, si, &rty, &pure);
-    else         r = tk_pend_by_name(pi, &rty, &pure);
+    if (si >= 0)            r = tk_pend_emit(pi, si, &rty, &pure);
+    else if (recv_ty >= 0)  tk_reject_scalar_member(tk_file, tk_line, recv_ty, pd_name_at(pi));
+    else                    r = tk_pend_by_name(pi, &rty, &pure);
     i64 n = pd_node_at(pi);
     i64 keep = nd_next(n);
     node_assign(n, r);
