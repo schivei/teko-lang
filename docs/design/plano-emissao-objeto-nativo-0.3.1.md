@@ -5,7 +5,7 @@
 >
 > **Escopo:** o dono decidiu (2026-09-01) que o `/src` passa a mirar **emissão de `.o` nativo
 > direto + link → executável rodável**, na **superfície ATUAL** por ora (a superfície nova do
-> `ngen/` vem depois). Este doc é o LEVANTAMENTO do que falta, ponta-a-ponta, para o alvo do
+> `ngen/` vem depois (⚠️ SUPERSEDIDO por D212: `ngen/` descartado, vai pro mc)). Este doc é o LEVANTAMENTO do que falta, ponta-a-ponta, para o alvo do
 > fixpoint (**x86_64 Linux / ELF**), com os deltas anotados para arm64 / Mach-O / COFF / Windows.
 > NÃO é começar do zero: há andaime native substancial — este doc mapeia
 > **implementado / stub / dormente / ausente** com `arquivo:linha`.
