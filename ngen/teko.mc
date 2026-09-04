@@ -30,6 +30,7 @@
 //   struct Name { type field; ... }                          syntax      (M12)
 //   class Name [: Base][, Iface...] { fields, methods }      syntax      (M12)
 //   interface Name { T method(self, ...); ... }              syntax      (M12)
+//   trait Name { fields, methods }  +  use A, B;             syntax      (M12)
 //   new Name                                                  syntax_expr (M21)
 //   p.field, p.field = e, p.method(...)                       syntax_infix (M21)
 //   the N_VAR of a local of struct/class/interface type       on_stmt     (M21.5)
@@ -44,6 +45,7 @@
 #include "teko_float.mc"
 #include "teko_struct.mc"
 #include "teko_iface.mc"
+#include "teko_trait.mc"
 #include "teko_class.mc"
 #include "teko_stmt.mc"
 #include "teko_expr.mc"
@@ -54,6 +56,7 @@ void user_init() {
 
     syntax("class",     &tk_class);
     syntax("interface", &tk_interface);
+    syntax("trait",     &tk_trait);
     syntax("type",      &tk_stop_type);
     syntax("namespace", &tk_stop_namespace);
     syntax("import",    &tk_stop_import);

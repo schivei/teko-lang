@@ -1,0 +1,270 @@
+// teko_trait.mc -- `trait Name { fields and methods }` and `use A, B;`, the
+// fourth construct of entrega 3 (D214), in **PHP's model** (dono 2026-09-04):
+// a trait is not a type and has no run-time existence at all -- its members are
+// COPIED into the class that uses them, at compile time.
+//
+//   trait Counted {                   (nothing is generated here: the body is
+//       i64 n;                         recorded, not parsed -- p_skip_balanced)
+//       i64 bump(self, i64 k) { ... }
+//   }
+//
+//   class Widget : Base {             #define WIDGET_N 16   the trait's field, in
+//       use Counted;                                        the class's own layout
+//       i64 w;                        i64 widget_bump(uptr self, i64 k)
+//   }                                                       ...mangled as the CLASS's
+//
+// Flattening is the recorded body re-parsed once per using class
+// (`p_push_source`, docs/reference/hooks.md § 4 record and replay), through the
+// SAME member machine `class` uses -- which is why a trait field lands in the
+// class's layout by the same offset and alignment rules, and a trait method's
+// `self.field` resolves against the class it was copied into.
+//
+// The four rules that follow from PHP's model, and are what this file enforces:
+//
+//   1. A trait is NOT a type: no `type_new`, no vtable, no itab row, no
+//      `new Trait`, and it may not appear in a class's `:` list.
+//   2. The class's OWN member wins over the trait's, and the trait's wins over
+//      the base's. So the `use` list is applied AFTER the class's body is read
+//      (its position inside the body is irrelevant, as in PHP), a member the
+//      class declares itself is not copied at all, and a trait method that
+//      collides with an inherited virtual slot takes it, like `override`.
+//   3. Two traits bringing the same member name is a compile error: there is no
+//      last-one-wins, and `insteadof`/`as` is not taught yet.
+//   4. A trait may use a trait -- the flattening recurses -- and a cycle is a
+//      compile error rather than a compiler that never returns.
+//
+// A field is the one place where the class does not silently win: a trait field
+// colliding with a field of the class or of its base is refused (PHP 7+ is fatal
+// for an incompatible one, and this port has no notion of a compatible one).
+//
+// Not taught, and refused by name rather than by surprise: `abstract` in a
+// trait, static members, and member visibility.
+
+#define TK_MAXTRAIT 32                // traits declared in one source
+#define TK_MAXUSE   32                // `use` entries queued at any one time
+#define TK_MAXFLAT  16                // how deep a trait may use a trait
+
+uptr tr_name[TK_MAXTRAIT];
+uptr tr_text[TK_MAXTRAIT];            // the recorded body, braces included
+i64  tr_len[TK_MAXTRAIT];
+i64  tk_ntrait = 0;
+
+i64  tu_tr[TK_MAXUSE];                // queued by `use`, not yet flattened
+i64  tk_ntu = 0;
+
+i64  ud_tr[TK_MAXUSE];                // already applied to the class being read
+i64  tk_nud = 0;
+
+i64  fl_tr[TK_MAXFLAT];               // being flattened right now: the cycle guard
+i64  tk_nflat = 0;
+
+i64  tk_own_methods = 0;              // methods the class declared in its OWN body
+
+// ---- table accessors (no raw ld64/st64 outside this section) ----
+uptr tr_name_at(i64 i) { return ld64(tr_name + i * 8); }
+uptr tr_text_at(i64 i) { return ld64(tr_text + i * 8); }
+i64  tr_len_at(i64 i)  { return ld64(tr_len + i * 8); }
+i64  tu_tr_at(i64 i)   { return ld64(tu_tr + i * 8); }
+i64  ud_tr_at(i64 i)   { return ld64(ud_tr + i * 8); }
+i64  fl_tr_at(i64 i)   { return ld64(fl_tr + i * 8); }
+
+void set_tr_name_at(i64 i, uptr v) { st64(tr_name + i * 8, v); }
+void set_tr_text_at(i64 i, uptr v) { st64(tr_text + i * 8, v); }
+void set_tr_len_at(i64 i, i64 v)   { st64(tr_len + i * 8, v); }
+void set_tu_tr_at(i64 i, i64 v)    { st64(tu_tr + i * 8, v); }
+void set_ud_tr_at(i64 i, i64 v)    { st64(ud_tr + i * 8, v); }
+void set_fl_tr_at(i64 i, i64 v)    { st64(fl_tr + i * 8, v); }
+
+i64 tk_trait_find(uptr name) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_ntrait) break;
+        if (str_eq(tr_name_at(i), name)) return i;
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+// 1 when `ti` is one of the traits whose body is open right now
+i64 tk_flat_has(i64 ti) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nflat) break;
+        if (fl_tr_at(i) == ti) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+// 1 when `ti` was already applied to the class being read
+i64 tk_used_has(i64 ti) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nud) break;
+        if (ud_tr_at(i) == ti) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+void tk_used_add(i64 ti) {
+    if (tk_nud == TK_MAXUSE) err_at(tk_file, tk_line, "teko: too many traits used by one class");
+    set_ud_tr_at(tk_nud, ti);
+    tk_nud = tk_nud + 1;
+}
+
+void tk_queue_add(i64 ti) {
+    if (tk_ntu == TK_MAXUSE) err_at(tk_file, tk_line, "teko: too many traits in one `use`");
+    set_tu_tr_at(tk_ntu, ti);
+    tk_ntu = tk_ntu + 1;
+}
+
+// the class being read starts with no trait applied and nothing queued
+void tk_use_reset() {
+    tk_ntu = 0;
+    tk_nud = 0;
+}
+
+// the recorded bodies of the queued traits [mark, end), one after the other in a
+// NUL-terminated buffer: ONE pushed source, because only the token a handler
+// sits on may be spent on a push and a class has a single one to spend
+uptr tk_bodies(i64 mark, i64 end, uptr plen) {
+    i64 total = 0;
+    i64 i = mark;
+    loop {
+        if (i >= end) break;
+        total = total + tr_len_at(tu_tr_at(i));
+        i = i + 1;
+    }
+    uptr d = xalloc(total + 1);
+    i64 at = 0;
+    i = mark;
+    loop {
+        if (i >= end) break;
+        i64 ti = tu_tr_at(i);
+        mem_copy(d + at, tr_text_at(ti), tr_len_at(ti));
+        at = at + tr_len_at(ti);
+        i = i + 1;
+    }
+    st8(d + total, 0);
+    st64(plen, total);
+    return d;
+}
+
+// what every error inside the pushed bodies prints as its file. One `use` of
+// one trait -- which is the usual shape, and every nested one -- names it
+// exactly; a list has one frame for the whole concatenation.
+uptr tk_frame(i64 mark, i64 end, uptr cls) {
+    if (end - mark == 1)
+        return tk_join3("trait ", tr_name_at(tu_tr_at(mark)), tk_join(" used by ", cls));
+    return tk_join("traits used by ", cls);
+}
+
+// ---- trait Name { fields and methods } ----
+// The body is RECORDED and not parsed: a trait has no layout of its own, so
+// there is nothing to lay out until a class uses it.
+void tk_trait() {
+    tk_line = p_line();
+    tk_file = p_file();
+    p_next();                                    // the `trait` word
+    uptr name = tk_newname("trait");
+    if (tk_trait_find(name) >= 0) err_at2(tk_file, tk_line, "teko: duplicate trait", name);
+    if (tk_struct_find(name) >= 0) err_at2(tk_file, tk_line, "teko: the name is already a type", name);
+    if (tk_ntrait == TK_MAXTRAIT) err_at(tk_file, tk_line, "teko: too many traits");
+    if (p_id() != K_LBRACE) err_at2(p_file(), p_line(), "teko: expected { in the trait body", name);
+    i64 len = 0;
+    uptr text = p_skip_balanced(K_LBRACE, K_RBRACE, &len);
+    set_tr_name_at(tk_ntrait, name);
+    set_tr_text_at(tk_ntrait, text);
+    set_tr_len_at(tk_ntrait, len);
+    tk_ntrait = tk_ntrait + 1;
+    p_accept(K_SEMI);                            // a C programmer's trailing ;
+}
+
+// a method the class declares itself: its tokens are skipped whole, so the copy
+// that loses to the class is never even parsed
+void tk_skip_method() {
+    i64 n = 0;
+    p_skip_balanced(K_LPAR, K_RPAR, &n);
+    if (p_id() != K_LBRACE) err_at(tk_file, tk_line, "teko: expected { in the trait method body");
+    p_skip_balanced(K_LBRACE, K_RBRACE, &n);
+}
+
+// what a trait may not declare yet, said by name rather than left to fail
+// somewhere further in
+void tk_trait_gate() {
+    if (tk_kw("abstract"))  err_at(tk_file, tk_line, "teko: `abstract` in a trait not taught yet");
+    if (tk_kw("static"))    err_at(tk_file, tk_line, "teko: a static member not taught yet");
+    if (tk_kw("public"))    err_at(tk_file, tk_line, "teko: member visibility not taught yet");
+    if (tk_kw("private"))   err_at(tk_file, tk_line, "teko: member visibility not taught yet");
+    if (tk_kw("protected")) err_at(tk_file, tk_line, "teko: member visibility not taught yet");
+}
+
+// one recorded body, `{` to `}`, with every member of it placed on the class
+i64 tk_trait_block(i64 ci, uptr cls, i64 ti, i64 off) {
+    if (tk_nflat == TK_MAXFLAT) err_at(tk_file, tk_line, "teko: traits nested too deep");
+    set_fl_tr_at(tk_nflat, ti);
+    tk_nflat = tk_nflat + 1;
+    p_expect(K_LBRACE, "expected { in the trait body");
+    loop {
+        if (p_id() == K_RBRACE) break;
+        if (p_id() == T_EOF) err_at2(tk_file, tk_line, "teko: unterminated trait", tr_name_at(ti));
+        tk_line = p_line();                      // errors and nodes for this member
+        tk_file = p_file();
+        off = tk_member(ci, cls, off, ti);
+    }
+    p_next();                                    // }
+    tk_nflat = tk_nflat - 1;
+    return off;
+}
+
+// the queued traits [mark, tk_ntu) copied into the class. Their recorded bodies
+// become ONE pushed source, and the caller has to be sitting on the LAST token
+// of its own construct -- the `;` of a `use` inside a trait, the `}` of a class
+// body -- because the push spends exactly that token (hooks.md § 4).
+i64 tk_flatten(i64 ci, uptr cls, i64 mark, i64 off) {
+    i64 end = tk_ntu;
+    if (end == mark) return off;
+    i64 len = 0;
+    uptr text = tk_bodies(mark, end, &len);
+    p_push_source(tk_frame(mark, end, cls), text, len);
+    p_next();                                    // spends the token the caller sat on
+    i64 i = mark;
+    loop {
+        if (i >= end) break;
+        off = tk_trait_block(ci, cls, tu_tr_at(i), off);
+        i = i + 1;
+    }
+    tk_ntu = mark;
+    return off;
+}
+
+// `use A;` / `use A, B;` -- inside a CLASS body the traits are only queued,
+// because the class's own members have to be known before a copy can lose to
+// one of them; inside a TRAIT body they are flattened at once, which is what
+// makes a trait using a trait recurse. `use` is read as an identifier and never
+// registered, so the word stays the program's everywhere else.
+i64 tk_use(i64 ci, uptr cls, i64 off) {
+    i64 mark = tk_ntu;
+    p_next();                                    // the `use` word
+    loop {
+        i64 line = p_line();
+        uptr fl = p_file();
+        uptr nm = p_ident();
+        i64 ti = tk_trait_find(nm);
+        if (ti < 0) err_at2(fl, line, "teko: unknown trait", nm);
+        if (tk_flat_has(ti)) err_at2(fl, line, "teko: trait cycle", nm);
+        if (tk_used_has(ti)) err_at2(fl, line, "teko: the class already uses this trait", nm);
+        tk_used_add(ti);
+        tk_queue_add(ti);
+        if (!p_accept(K_COMMA)) break;
+    }
+    if (p_id() == K_LBRACE)
+        err_at(p_file(), p_line(), "teko: `insteadof`/`as` in a `use` block not taught yet");
+    if (p_id() != K_SEMI) err_at(p_file(), p_line(), "expected ; after the trait list");
+    if (tk_nflat == 0) {
+        p_next();                                // the class's own: flattened at its `}`
+        return off;
+    }
+    return tk_flatten(ci, cls, mark, off);       // sits on the `;`, as the push contract wants
+}

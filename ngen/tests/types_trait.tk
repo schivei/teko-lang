@@ -1,0 +1,79 @@
+// types_trait.tk -- `trait` (entrega 3, D214) in PHP's model: the members are
+// COPIED into the class at compile time, so the trait's field lands in the
+// class's own layout (WIDGET_N below) and its methods are the class's own.
+// The three precedences PHP fixes are what the returns check: the class's own
+// member wins over the trait's (`label`), the trait's wins over the one
+// inherited from the base (`kind`, which takes Base's virtual slot), and a
+// trait may use a trait (`Tagged` uses `Counted`).
+//
+// expect-exit: 42
+
+#include "../lib/rt.mc"
+
+trait Counted {
+    i64 n;
+
+    i64 bump(self, i64 k) {
+        self.n = self.n + k;
+        return self.n;
+    }
+
+    i64 kind(self) {
+        return 7;
+    }
+
+    i64 label(self) {
+        return 8;
+    }
+}
+
+trait Tagged {
+    use Counted;
+
+    i64 tag(self) {
+        return 10;
+    }
+}
+
+class Base {
+    virtual i64 kind(self) {
+        return 99;
+    }
+
+    virtual i64 label(self) {
+        return 98;
+    }
+}
+
+class Widget : Base {
+    use Tagged;
+
+    i64 w;
+
+    override i64 label(self) {
+        return 5;
+    }
+}
+
+i64 main() {
+    if (WIDGET_W != 8) return 1;                 // the class's own field, after the vtable
+    if (WIDGET_N != 16) return 2;                // the trait's, placed by the same machine
+    if (WIDGET_SIZE != 24) return 3;
+
+    Widget g = new Widget;
+    g.w = 2;
+    if (g.bump(3) != 3) return 4;                // the trait's method over the trait's field
+    if (g.bump(4) != 7) return 5;
+    if (g.tag() != 10) return 6;                 // the outer trait's own method
+    if (g.kind() != 7) return 7;                 // the trait wins over the base
+    if (g.label() != 5) return 8;                // the class wins over the trait
+
+    Base b = g;
+    if (b.kind() != 7) return 9;                 // ...both through the base's vtable slot
+    if (b.label() != 5) return 10;
+
+    Base p = new Base;
+    if (p.kind() != 99) return 11;               // the base still answers for itself
+
+    return g.bump(0) + g.tag() + g.kind() + g.label() + 13;
+}
