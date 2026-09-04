@@ -181,3 +181,33 @@ argumentos em loop quente esgota os 4 MiB em ~262k chamadas (`teko: arena exhaus
 exit 70). Falha **ruidosa**, nunca corrupção, mas é teto que o buffer estático não
 tinha. A cura é reclaim/escopo de região (entrega de comportamento base, D214 item 3),
 mesma dívida que o `new` já carrega — não deste crumb.
+
+## 8. C8 — genéricos com constantes; C7c — `params` sobre C8 (dono, 2026-09-04)
+
+**Ruling do dono:** o `params` com tamanho variável só se bloqueia pelo tamanho em
+compile-time se o corpo for **instanciado por sítio com `N` constante** — é para isso
+que ele pediu **genéricos com constantes** (`<T, const N: i64>`, provado no mc em
+`examples/lang`: `Box<Circle, 4>`, D212). Fica **inline** e o índice literal é checado
+contra `N` dentro da instância — sem análise interprocedural, sem guard de runtime
+para o caso literal.
+
+**C8 — genéricos com constantes (record/replay).** Precedente: `examples/lang/lang_class.mc:73-114`
+(`lg_gen_record`: lê `<T, const N: i64>`, `p_start()` + `p_skip_balanced` — **não cria
+a classe**) e `lang_type.mc:134-163` (`lg_replay`: monta `"class " + mangled + body`,
+`p_subst_reset`/`p_subst_name`/`p_subst_int`, `p_push_source`, laço `top_add(parse_top())`;
+`>>` por `p_resplit_punct(1)`, `lang_type.mc:91`). Guia: `mc/docs/guide/30-teaching.md`
+§"Record and replay". Superfície C-like (D215): `class Box<T, const N: i64> { T items[N]; … }`
+e `Box<Circle, 4> b = new Box<Circle, 4>;` — a forma do mc, sem `where` nesta fatia.
+Instância é chave `(nome, args)` → mangling `Box__Circle__4`, uma vez por tupla.
+Destrava também a forma genérica `<T>` de `wrap`/`unwrap` (handoff §5).
+
+**C7c — `params` reescrito sobre C8.** Função com `params` vira **genérica em `N`**:
+cada sítio com `k` argumentos instancia `total__k` com `N = k` substituído por
+`p_subst_int`; `xs_len` deixa de ser argumento e vira a constante `N`; `xs[lit]` com
+`lit < 0` ou `lit >= N` é **erro de compilação** na instância; índice não-literal
+mantém o guard de runtime (`rt_panic`). O pacote continua alocado por sítio na arena
+(C7b), até o reclaim. Teto `MAXPARAMS` = 12 permanece.
+
+**Ordem revista da fila:** escopo pela via do mc (§6, corretude) → **C8** ∥ **C4**
+(arquivos próprios: `teko_over.mc`) → **C7c** e **C5** (ambos tocam `teko_class.mc`
+depois do C8) → C6 quando o mc der o hook.
