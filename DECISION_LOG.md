@@ -1157,6 +1157,18 @@ Verificador reproduziu o crash instrumentando com ASan+UBSan (as flags do CI pro
 - **CONSERTO (dispatch):** `cg_emit_self_addr` tem que PARAR de escapar o endereço de um temp cujo escopo é o próprio statement-expression — hoist do `_rcvN` pra um escopo que sobrevive à chamada externa inteira, OU passar receptor tipo-valor por valor (Region/Arena são structs de 8B, métodos leem self). Root-cause, não workaround; conserta a CLASSE (todo receptor não-endereçável), não só o sítio arena.
 - **LEI DE PROCESSO (endurece D163/D164):** o fixpoint no sandbox NÃO pega UB que só crasha sob certos toolchains — **o gate de verificador de compiler-core passa a incluir um build ASan+UBSan** (`-fsanitize=address,undefined -fno-omit-frame-pointer -g`) do gen0 compilando o tip, além do fixpoint. Barato, pega stack-use-after-scope/UAF/OOB que o build seco esconde. (A ser gravado na CLAUDE.md.)
 
+### D216 · DONO: `trait` do `ngen/` funciona IGUAL AO DO PHP — flattening em compile-time, não é tipo (dono 2026-09-04) 🔧 SUPERFÍCIE
+Fecha o único fork aberto da entrega 3 (o `trait` não tinha precedente no mc nem mapeamento na §3 de `port-teko-mc.md`). **A forma é a do PHP**, com tudo que ela implica:
+- **Flattening em tempo de compilação:** `use A;` dentro do corpo da classe COPIA campos e métodos do trait para dentro dela, pela mesma máquina de layout (offset/alinhamento) do `class`. Não há vtable própria, itab, nem despacho dinâmico envolvido.
+- **Trait NÃO é um tipo:** não se declara variável dele, não há `new Trait`, não entra em lista de conformidade — logo não recebe `type_new` nem entrada na tabela de tipos. É o que o torna a construção mais BARATA das quatro da entrega 3, mais barata até que `interface`.
+- **Precedência (a do PHP):** membro da própria classe > membro vindo do trait > membro herdado da base.
+- **Conflito entre dois traits** com o mesmo nome de membro = erro de compilação claro (fatal em PHP). O `insteadof`/`as` fica **deferido** (honest-stop com mensagem).
+- **Trait usa trait:** flattening recursivo, com detecção de ciclo.
+- **Fora de escopo por ora** (honest-stop, não se inventa): `abstract` no trait, membros estáticos e visibilidade (`public`/`private`/`protected`) — nenhum dos três existe ainda no `ngen`.
+- **Palavra `use`:** lida DENTRO do parser de corpo, sem registro global, para não confiscar `use` do vocabulário do programa inteiro (`using` é outra palavra, já reservada como honest-stop).
+
+Coerente com o D215 (superfície C-like, não herda a sintaxe teko-clássica) e com o D213 (reusar a base, ensinar só o delta).
+
 ### D215 · DONO: rulings do port `ngen/` — superfície C-like (não herda a sintaxe teko-clássica); "ensinar" = ZERO toque no mc; mc por RELEASE; canal com a sessão local do mc (dono 2026-09-04) 🔧 PORT / método
 Dados na sessão local que assumiu o `ngen/`, no dia em que **`struct` e `class` landaram** (commits `984f268e` e `06db615d`, entrega 3 commits 1 e 2; 7 fixtures verdes — hello + 4 primitivas + `types_struct` + `types_class`, todas exit 42; check-run do CI verde; verificação independente aprovada).
 
