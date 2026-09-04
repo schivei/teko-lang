@@ -161,5 +161,6 @@ i64 tk_dot(i64 left) {
     uptr m = p_ident();                          // the member name, on the right
     i64 si = tk_struct_of_expr(left);
     if (si >= 0) return tk_member_of(left, si, m, line, fl);
+    if (tk_member_ambiguous(m)) return tk_defer_member(left, m, line, fl);
     return tk_member_by_name(left, m, line, fl);
 }

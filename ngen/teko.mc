@@ -47,6 +47,7 @@
 #include "teko_iface.mc"
 #include "teko_trait.mc"
 #include "teko_class.mc"
+#include "teko_typeof.mc"
 #include "teko_stmt.mc"
 #include "teko_expr.mc"
 
@@ -73,4 +74,5 @@ void user_init() {
     syntax_infix(".", 12, &tk_dot);
 
     on_stmt(&tk_on_stmt);
+    pass(&tk_typeof_pass);
 }
