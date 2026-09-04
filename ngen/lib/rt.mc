@@ -37,6 +37,27 @@ uptr rt_alloc(i64 n) {
     return p;
 }
 
+// the method table of interface `id` inside the class whose vtable is `vt`.
+// The vtable's word 0 is the class's interface table, `{ count, (id, methods)* }`
+// in declaration order (ngen/teko_iface.mc), and an interface call is
+// `callp(ld64(tk_itab(ld64(obj), ID) + j * 8), obj, ...)` -- a linear walk over
+// a table with one row per interface the class declares, so a class implements
+// an interface at any vtable slot and two unrelated classes answer the same
+// interface.
+uptr tk_itab(uptr vt, i64 id) {
+    uptr t = ld64(vt);
+    if (t == 0) rt_panic("interface dispatch on a class with no interface table");
+    i64 n = ld64(t);
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        if (ld64(t + 8 + i * 16) == id) return ld64(t + 16 + i * 16);
+        i = i + 1;
+    }
+    rt_panic("interface not implemented by this class");
+    return 0;
+}
+
 // length of a NUL-terminated `str`. teko's `str` names the same `uptr` mc
 // already gives a C string (`type_alias`, teko_type.mc) -- no separate
 // length field -- so this is `strlen` under teko's own spelling, call-

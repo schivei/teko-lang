@@ -27,6 +27,7 @@ i64 tk_new() {
     uptr name = p_name();                        // a type word is reserved: not T_IDENT
     i64 si = tk_struct_find(name);
     if (si < 0) err_at2(fl, line, "teko: unknown struct or class after `new`", name);
+    if (tk_is_iface(si)) err_at2(fl, line, "teko: an interface has no object to allocate", name);
     p_next();
     if (p_accept(K_LPAR)) p_expect(K_RPAR, "expected ) after the type name");
     tk_line = line;
@@ -85,7 +86,7 @@ i64 tk_call_method(i64 left, i64 mi, i64 line, uptr fl) {
         if (!tk_pure(left))
             err_at2(fl, line, "teko: a virtual call needs a name or a field on the left", mt_name_at(mi));
         i64 vt = tk_call("ld64", tk_clone(left));
-        i64 fnp = tk_call("ld64", tk_bin(K_ADD, vt, tk_int(slot * 8)));
+        i64 fnp = tk_call("ld64", tk_bin(K_ADD, vt, tk_int((TK_VT_FIXED + slot) * 8)));
         r = tk_call("callp", list_append(list_append(fnp, left), args));
     }
     i64 rs = tk_struct_by_ty(mt_ret_at(mi));
@@ -93,8 +94,34 @@ i64 tk_call_method(i64 left, i64 mi, i64 line, uptr fl) {
     return r;
 }
 
+// `s.m(...)` where `s` is of INTERFACE type: the class is only known at run
+// time, so the method table comes from the object's own itab (`tk_itab`,
+// ngen/lib/rt.mc) and the call is indirect. The receiver is read twice -- once
+// for the table, once as `self` -- so, as with a virtual call, it is only
+// accepted where re-evaluating it is free.
+i64 tk_iface_call(i64 left, i64 si, uptr m, i64 line, uptr fl) {
+    i64 j = tk_ifmeth_find(si, m);
+    if (j < 0) err_at2(fl, line, tk_join("teko: unknown member of ", sr_name_at(si)), m);
+    i64 k = sr_m0_at(si) + j;
+    i64 na = 0;
+    i64 args = tk_args(&na);
+    tk_line = line;
+    tk_file = fl;
+    if (na != im_np_at(k)) err_at2(fl, line, "teko: wrong number of arguments", m);
+    if (!tk_pure(left))
+        err_at2(fl, line, "teko: an interface call needs a name or a field on the left", m);
+    i64 vt = tk_call("ld64", tk_clone(left));
+    i64 mt = tk_call2("tk_itab", vt, tk_int(si));
+    i64 fnp = tk_call("ld64", tk_bin(K_ADD, mt, tk_int(j * 8)));
+    i64 r = tk_call("callp", list_append(list_append(fnp, left), args));
+    i64 rs = tk_struct_by_ty(im_ret_at(k));
+    if (rs >= 0) tk_xt_add(r, rs, 0);
+    return r;
+}
+
 // the member of a receiver whose type IS known: a field, then a method
 i64 tk_member_of(i64 left, i64 si, uptr m, i64 line, uptr fl) {
+    if (tk_is_iface(si)) return tk_iface_call(left, si, m, line, fl);
     i64 fi = tk_field_find(si, m);
     if (fi >= 0) return tk_field_use(left, fi, line, fl);
     i64 mi = tk_method_find(si, m);
@@ -104,12 +131,18 @@ i64 tk_member_of(i64 left, i64 si, uptr m, i64 line, uptr fl) {
 }
 
 // the member of a receiver whose type the module does NOT know: the name has to
-// belong to exactly one type
+// belong to exactly one type. An interface answers ahead of a class, because
+// its dispatch is the one that stays correct for every conforming class -- the
+// itab is walked at run time, so no vtable slot is guessed.
 i64 tk_member_by_name(i64 left, uptr m, i64 line, uptr fl) {
     i64 fi = tk_field_by_name(m);
     if (fi == 0 - 2)
         err_at2(fl, line, "teko: the type of the left side of `.` is not known here", m);
     if (fi >= 0) return tk_field_use(left, fi, line, fl);
+    i64 si = tk_ifmeth_by_name(m);
+    if (si == 0 - 2)
+        err_at2(fl, line, "teko: the type of the left side of `.` is not known here", m);
+    if (si >= 0) return tk_iface_call(left, si, m, line, fl);
     i64 mi = tk_method_by_name(m);
     if (mi == 0 - 2)
         err_at2(fl, line, "teko: the type of the left side of `.` is not known here", m);

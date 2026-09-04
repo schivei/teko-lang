@@ -27,10 +27,16 @@
 // `rt_alloc(n)` from `ngen/lib/rt.mc`, which hands out `n` zeroed bytes, so a
 // field nobody assigned reads as 0 and a reference field reads as null.
 
-#define TK_MAXSTRUCT 32               // structs and classes declared in one source
+#define TK_MAXSTRUCT 32               // structs, classes and interfaces declared in one source
 #define TK_MAXFIELD  256              // fields, summed across all of them
 #define TK_MAXLOCAL  256              // locals of struct/class type seen so far
 #define TK_MAXXT     256              // expressions whose type this module knows
+
+// what a row of the type table declares: the three share the table because a
+// value of any of them is one 8-byte reference, and `.` has to tell them apart
+#define TK_KSTRUCT 0
+#define TK_KCLASS  1
+#define TK_KIFACE  2
 
 uptr sr_name[TK_MAXSTRUCT];
 i64  sr_ty[TK_MAXSTRUCT];             // the id type_new returned for the name
@@ -38,9 +44,13 @@ i64  sr_first[TK_MAXSTRUCT];          // slice [first, first+count) of the field
 i64  sr_count[TK_MAXSTRUCT];
 i64  sr_size[TK_MAXSTRUCT];
 i64  sr_base[TK_MAXSTRUCT];           // the base class, or -1
-i64  sr_vt[TK_MAXSTRUCT];             // 1 when word 0 of the object is the vtable
+i64  sr_form[TK_MAXSTRUCT];           // TK_KSTRUCT, TK_KCLASS or TK_KIFACE
 i64  sr_v0[TK_MAXSTRUCT];             // slice [v0, v0+nv) of the virtual-slot table
 i64  sr_nv[TK_MAXSTRUCT];
+i64  sr_m0[TK_MAXSTRUCT];             // an interface's slice [m0, m0+mn) of the signature table
+i64  sr_mn[TK_MAXSTRUCT];
+i64  sr_i0[TK_MAXSTRUCT];             // a class's slice [i0, i0+ni) of the implemented-interface list
+i64  sr_ni[TK_MAXSTRUCT];
 i64  tk_nstruct = 0;
 
 uptr fd_name[TK_MAXFIELD];
@@ -68,9 +78,13 @@ i64  sr_first_at(i64 i) { return ld64(sr_first + i * 8); }
 i64  sr_count_at(i64 i) { return ld64(sr_count + i * 8); }
 i64  sr_size_at(i64 i)  { return ld64(sr_size + i * 8); }
 i64  sr_base_at(i64 i)  { return ld64(sr_base + i * 8); }
-i64  sr_vt_at(i64 i)    { return ld64(sr_vt + i * 8); }
+i64  sr_kind_at(i64 i)  { return ld64(sr_form + i * 8); }
 i64  sr_v0_at(i64 i)    { return ld64(sr_v0 + i * 8); }
 i64  sr_nv_at(i64 i)    { return ld64(sr_nv + i * 8); }
+i64  sr_m0_at(i64 i)    { return ld64(sr_m0 + i * 8); }
+i64  sr_mn_at(i64 i)    { return ld64(sr_mn + i * 8); }
+i64  sr_i0_at(i64 i)    { return ld64(sr_i0 + i * 8); }
+i64  sr_ni_at(i64 i)    { return ld64(sr_ni + i * 8); }
 uptr fd_name_at(i64 i)  { return ld64(fd_name + i * 8); }
 i64  fd_off_at(i64 i)   { return ld64(fd_off + i * 8); }
 i64  fd_ty_at(i64 i)    { return ld64(fd_ty + i * 8); }
@@ -86,9 +100,16 @@ void set_sr_first_at(i64 i, i64 v)  { st64(sr_first + i * 8, v); }
 void set_sr_count_at(i64 i, i64 v)  { st64(sr_count + i * 8, v); }
 void set_sr_size_at(i64 i, i64 v)   { st64(sr_size + i * 8, v); }
 void set_sr_base_at(i64 i, i64 v)   { st64(sr_base + i * 8, v); }
-void set_sr_vt_at(i64 i, i64 v)     { st64(sr_vt + i * 8, v); }
+void set_sr_kind_at(i64 i, i64 v)   { st64(sr_form + i * 8, v); }
 void set_sr_v0_at(i64 i, i64 v)     { st64(sr_v0 + i * 8, v); }
 void set_sr_nv_at(i64 i, i64 v)     { st64(sr_nv + i * 8, v); }
+void set_sr_m0_at(i64 i, i64 v)     { st64(sr_m0 + i * 8, v); }
+void set_sr_mn_at(i64 i, i64 v)     { st64(sr_mn + i * 8, v); }
+void set_sr_i0_at(i64 i, i64 v)     { st64(sr_i0 + i * 8, v); }
+void set_sr_ni_at(i64 i, i64 v)     { st64(sr_ni + i * 8, v); }
+
+i64 tk_is_class(i64 si) { return sr_kind_at(si) == TK_KCLASS; }
+i64 tk_is_iface(i64 si) { return sr_kind_at(si) == TK_KIFACE; }
 void set_fd_name_at(i64 i, uptr v)  { st64(fd_name + i * 8, v); }
 void set_fd_off_at(i64 i, i64 v)    { st64(fd_off + i * 8, v); }
 void set_fd_ty_at(i64 i, i64 v)     { st64(fd_ty + i * 8, v); }
@@ -396,17 +417,21 @@ void tk_field_add(i64 si, uptr name, i64 off, i64 ty) {
 
 // the row is appended BEFORE the body is read, so a field or a method body may
 // name the type being declared
-i64 tk_type_add(uptr name, i64 ty, i64 base, i64 vt) {
-    if (tk_nstruct == TK_MAXSTRUCT) err_at(tk_file, tk_line, "teko: too many struct and class declarations");
+i64 tk_type_add(uptr name, i64 ty, i64 base, i64 kind) {
+    if (tk_nstruct == TK_MAXSTRUCT) err_at(tk_file, tk_line, "teko: too many type declarations");
     set_sr_name_at(tk_nstruct, name);
     set_sr_ty_at(tk_nstruct, ty);
     set_sr_first_at(tk_nstruct, tk_nfield);
     set_sr_count_at(tk_nstruct, 0);
     set_sr_size_at(tk_nstruct, 0);
     set_sr_base_at(tk_nstruct, base);
-    set_sr_vt_at(tk_nstruct, vt);
+    set_sr_kind_at(tk_nstruct, kind);
     set_sr_v0_at(tk_nstruct, 0);
     set_sr_nv_at(tk_nstruct, 0);
+    set_sr_m0_at(tk_nstruct, 0);
+    set_sr_mn_at(tk_nstruct, 0);
+    set_sr_i0_at(tk_nstruct, 0);
+    set_sr_ni_at(tk_nstruct, 0);
     tk_nstruct = tk_nstruct + 1;
     return tk_nstruct - 1;
 }
@@ -502,7 +527,7 @@ void tk_struct() {
     p_next();                                    // the `struct` word
     uptr name = tk_newname("struct");
     i64 ty = type_new(name, 8, 8, TK_INT);       // a field of its own type parses
-    i64 si = tk_type_add(name, ty, 0 - 1, 0);    // no base, no vtable: offset 0
+    i64 si = tk_type_add(name, ty, 0 - 1, TK_KSTRUCT);   // no base, no vtable: offset 0
     p_expect(K_LBRACE, "expected { in the struct body");
     i64 off = 0;
     loop {
