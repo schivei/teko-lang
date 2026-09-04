@@ -201,5 +201,10 @@ i64 tk_dot(i64 left) {
     uptr m = p_ident();                          // the member name, on the right
     i64 si = tk_struct_of_expr(left);
     if (si >= 0) return tk_member_of(left, si, m, line, fl);
+    i64 ty = tk_xt_ty(left);                      // a scalar this module already typed:
+    if (ty >= 0) {                                // a field load, not a struct/class/interface
+        tk_reject_scalar_member(fl, line, ty, m);
+        return 0;
+    }
     return tk_defer_member(left, m, line, fl);
 }
