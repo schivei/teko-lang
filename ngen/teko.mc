@@ -42,6 +42,11 @@
 //   Name<Circle, 4> x = new Name<Circle, 4>;                  p_push_source + p_subst_*
 //   T items[N]  /  x.items[i]                                 an inline array field
 //
+// and C7c makes `params` one of them -- a declaration generic in its COUNT,
+// instantiated per call site so the bound is a constant there too:
+//   i64 total(params xs) { ... xs_len ... xs[i] ... }          teko_params.mc
+//   total(1, 2)  ->  total__2(<two words>)                     one body per count
+//
 // Everything else in docs/design/port-teko-mc.md §3 (types/classes,
 // generics, operator overload, error-union, `service`/DI, concurrency, the
 // rest of the stdlib) is a later entrega and is not stubbed here: it does
@@ -88,19 +93,22 @@ void user_init() {
     on_stmt(&tk_on_stmt);
 
     // FIRST among the passes, and a later one must not slip in front: the
-    // `params` pass is what turns `total(a, b, c)` into the uniform
-    // `total(ptr, n)` and `i64 total(params xs)` into `i64 total(uptr, i64)`.
+    // `params` pass INSTANTIATES `i64 total(params xs)` once per argument count
+    // -- `total(a, b, c)` becomes `total__3(ptr)`, with the count a constant
+    // inside the body -- and the declaration that was generic leaves the unit.
     // Whatever comes next -- the overload mangling of C4 above all -- then sees
-    // ordinary parameters and ordinary arguments, and never has to know what a
-    // `params` list is. Running after it would mean mangling a signature the
-    // `params` pass is about to rewrite.
+    // ordinary functions with ordinary parameters, and never has to know what a
+    // `params` list is. Running after it would mean mangling a declaration the
+    // `params` pass is about to take away.
     pass(&tk_params_pass);
     pass(&tk_typeof_pass);
 
     // LAST, and behind both of the above: the overload mangling reads ordinary
-    // parameter lists (the `params` pass has already turned a list into `uptr
-    // xs, i64 xs_len`) and ordinary calls (the oracle's pass has already
-    // rebuilt every deferred `.`), and it renames declarations, which is the
-    // one rewrite the two before it would not survive.
+    // parameter lists (a `params` list is gone by now, replaced by its
+    // instances, whose `__k` suffix is a number and cannot collide with the
+    // type-named suffix an overload takes) and ordinary calls (the oracle's
+    // pass has already rebuilt every deferred `.`), and it renames
+    // declarations, which is the one rewrite the two before it would not
+    // survive.
     pass(&tk_over_pass);
 }

@@ -1,8 +1,8 @@
 // teko_params.mc -- `params`, the C# multi-parameter, taught as a type word and
-// one AST pass.
+// one AST pass, and INSTANTIATED PER CALL SITE over the constant generics of C8:
 //
 //   i64 total(params xs) { ... xs_len ... xs[i] ... }
-//   total(1, 2, 3)
+//   total(1, 2, 3)      ->  total__3(<a block of three words>)
 //
 // The spelling is the mc core's own (D213: type first, no `fn`, no `func`).
 // C#'s `params i64[] xs` is not reachable and is not attempted: the core has no
@@ -10,40 +10,95 @@
 // registered as a primitive of its own (`type_new`, teko_type.mc) and the
 // element type is the register-wide word every teko scalar already is.
 //
-// One `pass()` does everything, because a pass is the only place where the
-// whole unit exists at once -- a call site above the declaration it targets
-// would see nothing from a parser hook (`decl_find` answers -1 for what has not
-// been parsed yet, hooks.md § "Asking about a declaration the core already
-// parsed"). It rewrites three things:
+// THE DECLARATION IS A GENERIC IN `N`, and a call site with `k` arguments is
+// what instantiates it (the dono's 2026-09-04 ruling: constant generics are
+// what let a variadic be bounded at COMPILE time). The body is replayed once
+// per distinct `k`, memoized by it, so inside `total__3` the count is the
+// literal 3 -- `xs_len` is not a parameter, it is that constant -- and
+// `xs[9]` is an error the compiler reports instead of a guard the program pays
+// for. Only a NON-literal index keeps the run-time check (`tk_va_at`).
 //
-//   i64 total(params xs)  ->  i64 total(uptr xs, i64 xs_len)
-//   xs[i]                 ->  tk_va_at(xs, xs_len, i)
-//   total(a, b, c)        ->  total(tk_va_put(tk_va_put(tk_va_put(
-//                                 tk_va_new(3), 0, a), 1, b), 2, c), 3)
+//   i64 total(params xs)  ->  i64 total__3(uptr xs)          one per distinct k
+//   xs_len                ->  3
+//   xs[2]                 ->  ld64(xs + 16)                  decided here
+//   xs[i]                 ->  tk_va_at(xs, 3, i)             guarded there
+//   total(a, b, c)        ->  total__3(tk_va_put(tk_va_put(tk_va_put(
+//                                 tk_va_new(3), 0, a), 1, b), 2, c))
 //
 // so nothing with the `params` type ever reaches the lowering, and the taught
-// surface costs the core nothing: the callee reads an ordinary pointer and an
-// ordinary count.
+// surface costs the core nothing: the callee reads an ordinary pointer.
+//
+// WHY THE BODY IS COPIED AND NOT RE-PARSED. C8 records a generic's text with
+// `p_skip_balanced` and replays it with `p_push_source`, which is reachable
+// because `class Box<T, const N: i64>` starts with a WORD a module may own
+// (`syntax`). A function does not: it starts with its return TYPE, `parse_top`
+// consults `syntax_find` on that first token only (mc src/parse.mc:2076-2082),
+// and `word_add` refuses every core keyword (`mc/src/hooks.mc:231-237`) --
+// measured, `syntax("i64", &f)` dies with `mc: cannot redefine core keyword:
+// i64`. Recording the TEXT of a top-level function therefore needs a core hook
+// the mc does not have yet (the plan's C6). It is not needed for what a
+// `params` list instantiates over: its only generic parameter is the constant
+// `N`, there is no TYPE to substitute, so the copy is of the parsed body and
+// `p_subst_int` becomes an `N_INT` written into the copy. Same instance, same
+// constant, one lex and one parse fewer.
+//
+// A copy is only faithful if it carries what is keyed by NODE: the deferred
+// `.` of teko_typeof.mc (a placeholder whose receiver hangs off the pend table,
+// not off the tree) and the type rows of teko_struct.mc. tk_va_clone carries
+// both, and the template's own rows are marked done when it leaves the unit --
+// a `params` function whose body reads `s.area()` on a class-typed parameter
+// compiles exactly as it did before it was instantiated.
 //
 // THE LIST IS ALLOCATED AT THE CALL SITE, on the arena (`tk_va_new` ->
 // `rt_alloc`, ngen/lib/rt.mc -- the very path `new` takes), and the pass writes
 // one word per index into it. The mc's pointers are opaque `uptr` and the only
 // way to take an address is `&name` over a direct name (docs/core-language.md
-// § Operators, and § "&arr[i]" in the C-differences list: `&` does not accept
-// an indexing expression), so a caller-frame list would need a local array
-// declared per site and inserted as a STATEMENT before the expression that
-// carries the call -- which a pass over expressions cannot place in general (a
-// call sits inside a condition, an argument, a return). The arena is what a
-// site can allocate from inside the expression it already is.
+// § Operators), so a caller-frame list would need a local array declared per
+// site and inserted as a STATEMENT before the expression that carries the call
+// -- which a pass over expressions cannot place in general (a call sits inside
+// a condition, an argument, a return). The arena is what a site can allocate
+// from inside the expression it already is.
 //
 // Nothing is shared between two sites, so nothing has to be refused for
 // reentrancy: a variadic call nested inside another one, and one inside the
 // body of a variadic function, both compile and each gets its own block.
 //
 // The teto is the ABI's: MAXPARAMS = 12 (mc/src/arena.mc:58, 1..8 in registers
-// and 9..12 on the stack). A variadic list costs two of them, so a declaration
-// carries at most 10 fixed parameters, and one call site passes at most 12
-// arguments counting the fixed ones.
+// and 9..12 on the stack). A declaration carries at most 10 fixed parameters
+// and one call site passes at most 12 arguments counting the fixed ones -- the
+// instance now spends one register instead of two, and the ceiling is kept
+// where the source can see it rather than moved to where the lowering ends up.
+
+#define TK_MAXVA   16                 // functions declared with a `params` list
+#define TK_MAXVAI  64                 // instances of them, over the whole unit
+
+uptr va_name[TK_MAXVA];               // the name the source declared
+i64  va_node[TK_MAXVA];               // the N_FUNC whose body is the template
+i64  va_fixed[TK_MAXVA];              // parameters that come before the list
+i64  tk_nva = 0;
+
+uptr vi_name[TK_MAXVAI];              // the instances already generated
+i64  tk_nvai = 0;
+
+// the instance being specialised: its list parameter, the count that parameter
+// stands for, and the frame every refusal inside it is reported under. 0 in
+// tk_va_xs means the walk is outside any instance, where a `[` has no list to
+// index and `xs_len` is an ordinary name.
+uptr tk_va_xs = 0;
+uptr tk_va_lenname = 0;
+i64  tk_va_n = 0;
+uptr tk_va_frame = 0;
+
+// ---- table accessors (no raw ld64/st64 outside this section) ----
+uptr va_name_at(i64 i)  { return ld64(va_name + i * 8); }
+i64  va_node_at(i64 i)  { return ld64(va_node + i * 8); }
+i64  va_fixed_at(i64 i) { return ld64(va_fixed + i * 8); }
+uptr vi_name_at(i64 i)  { return ld64(vi_name + i * 8); }
+
+void set_va_name_at(i64 i, uptr v)  { st64(va_name + i * 8, v); }
+void set_va_node_at(i64 i, i64 v)   { st64(va_node + i * 8, v); }
+void set_va_fixed_at(i64 i, i64 v)  { st64(va_fixed + i * 8, v); }
+void set_vi_name_at(i64 i, uptr v)  { st64(vi_name + i * 8, v); }
 
 // xs[i] -- the `[` the core's Pratt grammar does not have. `[` is punctuation
 // the lexer already knows, and `ops_init()` does not touch it, so unlike an
@@ -80,19 +135,6 @@ i64 tk_va_pos(i64 d) {
     return -1;
 }
 
-// 1 when `name` is the name of some `params` parameter in the unit. The
-// declarations have not been rewritten yet when this is asked, so the type on
-// the N_PARAM is still the answer.
-i64 tk_va_is_list(uptr name) {
-    i64 n = 1;
-    loop {
-        if (n >= nnodes) break;
-        if (nd_kind(n) == N_PARAM && nd_type(n) == tk_ty_params && str_eq(nd_name(n), name)) return 1;
-        n = n + 1;
-    }
-    return 0;
-}
-
 // the count the compiler names after the list: `xs` -> `xs_len`
 uptr tk_va_len_name(uptr name) {
     return p_cat(name, "_len", 0, 4);
@@ -102,6 +144,8 @@ uptr tk_va_len_name(uptr name) {
 void tk_va_check_decl(i64 d) {
     i64 k = tk_va_pos(d);
     if (k < 0) return;
+    if (nd_kind(d) == N_EXTERN)
+        err_at2(nd_file(d), nd_line(d), "teko: an `extern` symbol takes no `params` list", nd_name(d));
     if (k != decl_nparams(d) - 1)
         err_at2(nd_file(d), nd_line(d), "teko: `params` must be the last parameter, and there is only one", nd_name(d));
     if (k + 2 > MAXPARAMS)
@@ -116,19 +160,250 @@ void tk_va_check_stray(i64 n) {
     err_at(nd_file(n), nd_line(n), "teko: `params` declares a parameter list, nothing else");
 }
 
-// xs[i] -> tk_va_at(xs, xs_len, i), in place, keeping the sibling link
+// ---- the declarations that are templates ----
+i64 tk_va_find(uptr name) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nva) break;
+        if (str_eq(va_name_at(i), name)) return i;
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+// the `params` parameter of `d`, as a node, or 0
+i64 tk_va_param(i64 d) {
+    i64 p = nd_a(d);
+    loop {
+        if (p == 0) break;
+        if (nd_type(p) == tk_ty_params) return p;
+        p = nd_next(p);
+    }
+    return 0;
+}
+
+void tk_va_add(i64 d) {
+    if (tk_nva == TK_MAXVA)
+        err_at2(nd_file(d), nd_line(d), "teko: too many `params` declarations in one unit", nd_name(d));
+    set_va_name_at(tk_nva, nd_name(d));
+    set_va_node_at(tk_nva, d);
+    set_va_fixed_at(tk_nva, tk_va_pos(d));
+    tk_nva = tk_nva + 1;
+}
+
+// A template is the DEFINITION: a prototype declares the same list and travels
+// out of the unit with it, and a second definition of the name -- with a
+// `params` list or without one -- is the overload the instance names could not
+// tell apart, since `total(5)` would be claimed by the instantiation before any
+// signature was compared.
+void tk_va_collect(i64 root) {
+    i64 n = root;
+    loop {
+        if (n == 0) break;
+        if (decl_valid(n) && tk_va_pos(n) >= 0 && nd_kind(n) == N_FUNC) {
+            if (tk_va_find(nd_name(n)) >= 0)
+                err_at2(nd_file(n), nd_line(n), "teko: a `params` list cannot be overloaded", nd_name(n));
+            tk_va_add(n);
+        }
+        n = nd_next(n);
+    }
+}
+
+// A declaration that shares a template's name has to BE that template's own --
+// its prototype -- or the name carries two signatures the instantiation would
+// decide between before any of them was compared. And a list declared with no
+// definition anywhere has no body to instantiate: there is nothing the call
+// site could copy.
+void tk_va_check_unique(i64 root) {
+    i64 n = root;
+    loop {
+        if (n == 0) break;
+        if (decl_valid(n)) {
+            i64 t = tk_va_find(nd_name(n));
+            if (t >= 0 && tk_va_pos(n) < 0)
+                err_at2(nd_file(n), nd_line(n), "teko: a `params` list cannot be overloaded", nd_name(n));
+            if (t < 0 && tk_va_pos(n) >= 0)
+                err_at2(nd_file(n), nd_line(n), "teko: a `params` list is instantiated per call site and needs a body", nd_name(n));
+        }
+        n = nd_next(n);
+    }
+}
+
+// 1 when `d` leaves the unit: the template itself, or a prototype of it. What
+// is emitted in its place is one instance per distinct argument count.
+i64 tk_va_is_template(i64 d) {
+    if (!decl_valid(d)) return 0;
+    if (tk_va_pos(d) < 0) return 0;
+    return tk_va_find(nd_name(d)) >= 0;
+}
+
+// ---- copying a body ----
+// The pend row of a deferred `.` (teko_typeof.mc) hangs its receiver and its
+// arguments OFF the tree -- the placeholder node has no children -- so a copy
+// that only walked children would hand the instance a placeholder nothing
+// resolves, and the core would refuse `call to unknown function:
+// tk_unresolved_member`. The type rows of teko_struct.mc are keyed by node in
+// the same way. Both are carried here, per copied node.
+i64 tk_va_clone(i64 n);
+
+i64 tk_va_clone_list(i64 n) {
+    if (n == 0) return 0;
+    i64 c = tk_va_clone(n);
+    set_nd_next(c, tk_va_clone_list(nd_next(n)));
+    return c;
+}
+
+void tk_va_carry(i64 n, i64 c) {
+    i64 x = tk_xt_at(n);
+    if (x >= 0) tk_xt_put(c, xt_str_at(x), xt_ty_at(x), xt_pure_at(x));
+    i64 pi = tk_pend_at(n);
+    if (pi < 0) return;
+    tk_pend_add(c, tk_va_clone(pd_recv_at(pi)), pd_name_at(pi), tk_va_clone_list(pd_arg_at(pi)),
+                pd_na_at(pi), pd_form_at(pi), pd_line_at(pi), pd_file_at(pi));
+}
+
+i64 tk_va_clone(i64 n) {
+    if (n == 0) return 0;
+    i64 c = node_new(nd_kind(n), nd_line(n), nd_file(n));
+    node_assign(c, n);
+    set_nd_next(c, 0);
+    set_nd_a(c, tk_va_clone_list(nd_a(n)));
+    set_nd_b(c, tk_va_clone_list(nd_b(n)));
+    set_nd_c(c, tk_va_clone_list(nd_c(n)));
+    set_nd_d(c, tk_va_clone_list(nd_d(n)));
+    tk_va_carry(n, c);
+    return c;
+}
+
+// A template CONTRIBUTES NO NODES to the unit -- the same thing C8's recorded
+// text does by never being parsed, which is what a function declaration cannot
+// do here (see the head of this file). What the core already parsed is put back
+// to N_NONE, one node at a time, and the two tables that survive a tree stop
+// answering for it: a deferred `.` inside the template is marked done (the
+// copies carry the real work, and tk_pend_check would otherwise report a
+// receiver nobody ever asked about) and a pass that sweeps the node ARRAY
+// rather than the tree -- teko_over.mc's tk_ov_check_left is one -- no longer
+// finds a call in a body that is not in the program.
+void tk_va_drop(i64 n);
+
+void tk_va_drop_list(i64 n) {
+    loop {
+        if (n == 0) break;
+        tk_va_drop(n);
+        n = nd_next(n);
+    }
+}
+
+void tk_va_drop(i64 n) {
+    if (n == 0) return;
+    tk_va_drop_list(nd_a(n));
+    tk_va_drop_list(nd_b(n));
+    tk_va_drop_list(nd_c(n));
+    tk_va_drop_list(nd_d(n));
+    i64 pi = tk_pend_at(n);
+    set_nd_kind(n, N_NONE);
+    if (pi < 0) return;
+    set_pd_done_at(pi, 1);
+    tk_va_drop(pd_recv_at(pi));
+    tk_va_drop_list(pd_arg_at(pi));
+}
+
+// ---- instantiating ----
+i64 tk_vi_find(uptr mang) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nvai) break;
+        if (str_eq(vi_name_at(i), mang)) return i;
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+void tk_vi_add(uptr mang, uptr fl, i64 line) {
+    if (tk_nvai == TK_MAXVAI) err_at2(fl, line, "teko: too many `params` instances", mang);
+    set_vi_name_at(tk_nvai, mang);
+    tk_nvai = tk_nvai + 1;
+}
+
+void tk_va_walk(i64 n);
+
+// `total` with three arguments is `total__3`, generated once. The suffix is a
+// NUMBER, so it cannot collide with the type-named suffix an overload carries
+// (`pick__i64`, teko_over.mc) -- no type is spelled `3` -- and a program that
+// writes the instance's name itself is told so rather than losing its function.
+uptr tk_va_inst(i64 t, i64 v, uptr fl, i64 line) {
+    uptr mang = tk_join3(va_name_at(t), "__", tk_num(v));
+    if (tk_vi_find(mang) >= 0) return mang;
+    if (decl_find(mang) >= 0)
+        err_at2(fl, line, "teko: the name a `params` instance takes is already declared", mang);
+    tk_vi_add(mang, fl, line);
+    uptr s_xs = tk_va_xs;
+    uptr s_len = tk_va_lenname;
+    i64 s_n = tk_va_n;
+    uptr s_frame = tk_va_frame;
+    i64 s_line = tk_line;
+    uptr s_file = tk_file;
+    i64 c = tk_va_clone(va_node_at(t));
+    set_nd_name(c, mang);
+    i64 p = tk_va_param(c);
+    set_nd_type(p, TY_UPTR);
+    tk_va_xs = nd_name(p);
+    tk_va_lenname = tk_va_len_name(tk_va_xs);
+    tk_va_n = v;
+    tk_va_frame = tk_gen_frame(mang, fl, line);
+    tk_va_walk(nd_b(c));
+    tk_va_xs = s_xs;
+    tk_va_lenname = s_len;
+    tk_va_n = s_n;
+    tk_va_frame = s_frame;
+    tk_line = s_line;
+    tk_file = s_file;
+    top_add(c);
+    return mang;
+}
+
+// ---- the three rewrites, inside the instance ----
+// `xs_len` is the constant the instantiation fixed, written in as a literal:
+// the count stops being an argument, so a call spends one register instead of
+// two and a loop over the list has a bound the codegen can see.
+void tk_va_lower_len(i64 n) {
+    if (tk_va_xs == 0) return;
+    if (!str_eq(nd_name(n), tk_va_lenname)) return;
+    tk_line = nd_line(n);
+    tk_file = nd_file(n);
+    i64 keep = nd_next(n);
+    node_assign(n, tk_int(tk_va_n));
+    set_nd_next(n, keep);
+}
+
+uptr tk_va_msg(i64 k, uptr what, i64 n) {
+    return tk_join3(tk_join3("teko: index ", tk_num(k), what),
+                    "a `params` list of ", tk_num(n));
+}
+
+// A LITERAL index is decided HERE, against the constant this instance was made
+// with -- the whole point of instantiating per call site. Anything else keeps
+// the run-time guard, so no index ever reads a word the list does not have.
+i64 tk_va_elem(i64 base, i64 idx, i64 line) {
+    if (nd_kind(idx) != N_INT)
+        return tk_call("tk_va_at", list_append(list_append(base, tk_int(tk_va_n)), idx));
+    i64 k = nd_val(idx);
+    if (k < 0)          err_at(tk_va_frame, line, tk_va_msg(k, " is before the start of ", tk_va_n));
+    if (k >= tk_va_n)   err_at(tk_va_frame, line, tk_va_msg(k, " is past the end of ", tk_va_n));
+    return tk_call("ld64", tk_bin(K_ADD, base, tk_int(k * 8)));
+}
+
 void tk_va_lower_index(i64 n) {
     i64 base = nd_a(n);
     if (nd_kind(base) != N_IDENT)
         err_at(nd_file(n), nd_line(n), "teko: `[` indexes a `params` list only");
-    if (!tk_va_is_list(nd_name(base)))
+    if (tk_va_xs == 0 || !str_eq(nd_name(base), tk_va_xs))
         err_at2(nd_file(n), nd_line(n), "teko: `[` indexes a `params` list only", nd_name(base));
-    tk_line = nd_line(n);
+    i64 line = nd_line(n);
+    tk_line = line;
     tk_file = nd_file(n);
     i64 keep = nd_next(n);
-    i64 args = list_append(base, tk_id(tk_va_len_name(nd_name(base))));
-    i64 c = tk_call("tk_va_at", list_append(args, nd_b(n)));
-    node_assign(n, c);
+    node_assign(n, tk_va_elem(base, nd_b(n), line));
     set_nd_next(n, keep);
 }
 
@@ -152,12 +427,14 @@ i64 tk_va_pack(i64 tail, i64 v) {
     return pack;
 }
 
-// total(a, b, c) -> total(<packed block>, 3). The fixed arguments stay where
-// they are; the tail is cut off the list and becomes the block's contents.
+// total(a, b, c) -> total__3(<packed block>). The fixed arguments stay where
+// they are; the tail is cut off the list and becomes the block's contents, and
+// the instance the count names is generated if this is the first site to ask
+// for it.
 void tk_va_lower_call(i64 n) {
-    i64 d = decl_find(nd_name(n));
-    i64 k = tk_va_pos(d);
-    if (k < 0) return;
+    i64 t = tk_va_find(nd_name(n));
+    if (t < 0) return;
+    i64 k = va_fixed_at(t);
     i64 args = nd_a(n);
     i64 prev = 0;
     i64 tail = args;
@@ -170,41 +447,110 @@ void tk_va_lower_call(i64 n) {
         i = i + 1;
     }
     i64 v = 0;
-    i64 t = tail;
+    i64 x = tail;
     loop {
-        if (t == 0) break;
+        if (x == 0) break;
         v = v + 1;
-        t = nd_next(t);
+        x = nd_next(x);
     }
     if (k + v > MAXPARAMS)
         err_at2(nd_file(n), nd_line(n), "teko: too many arguments for a `params` list (twelve, the fixed ones included)", nd_name(n));
+    uptr mang = tk_va_inst(t, v, nd_file(n), nd_line(n));
     if (prev) set_nd_next(prev, 0);
     if (!prev) args = 0;
     tk_line = nd_line(n);
     tk_file = nd_file(n);
-    args = list_append(args, tk_va_pack(tail, v));
-    set_nd_a(n, list_append(args, tk_int(v)));
+    set_nd_name(n, mang);
+    set_nd_a(n, list_append(args, tk_va_pack(tail, v)));
 }
 
-// i64 total(params xs) -> i64 total(uptr xs, i64 xs_len)
-void tk_va_lower_decl(i64 d) {
-    if (tk_va_pos(d) < 0) return;
-    i64 p = nd_a(d);
+// a `params` function has no single symbol to point at: what the linker sees is
+// one instance per argument count, and which of them `&total` would mean is a
+// question the source did not ask
+void tk_va_check_addr(i64 n) {
+    if (tk_va_find(nd_name(n)) < 0) return;
+    err_at2(nd_file(n), nd_line(n),
+            "teko: a `params` function exists once per call site and has no address", nd_name(n));
+}
+
+// ---- the walk ----
+// Children first, then the node: an argument that is itself a variadic call is
+// rewritten before the call that carries it packs it, and the index expression
+// of `xs[f(1, 2)]` is rewritten before the index is decided.
+void tk_va_visit(i64 n) {
+    i64 k = nd_kind(n);
+    if (k == N_IDENT) { tk_va_lower_len(n); return; }
+    if (k == N_INDEX) { tk_va_lower_index(n); return; }
+    if (k == N_CALL)  { tk_va_lower_call(n); return; }
+    if (k == N_ADDR)  { tk_va_check_addr(n); return; }
+}
+
+void tk_va_walk(i64 n) {
     loop {
-        if (nd_type(p) == tk_ty_params) break;
-        p = nd_next(p);
+        if (n == 0) break;
+        tk_va_walk(nd_a(n));
+        tk_va_walk(nd_b(n));
+        tk_va_walk(nd_c(n));
+        tk_va_walk(nd_d(n));
+        tk_va_visit(n);
+        n = nd_next(n);
     }
-    set_nd_type(p, TY_UPTR);
-    set_nd_next(p, param_new(TY_I64, tk_va_len_name(nd_name(p))));
 }
 
-// The pass, in four sweeps over the node array: the checks read the tree as the
-// source wrote it, then the three rewrites run outward-in -- indexes, call
-// sites, declarations -- because both of the first two ask a declaration what
-// its parameters are, and the third is what takes that answer away. `nnodes` is
-// snapshotted, so the nodes a rewrite creates are not swept again; a nested
-// variadic call is an ORIGINAL node and is rewritten in place, whichever of the
-// two the sweep reaches first.
+// every declaration the source wrote, template bodies excepted -- those are
+// walked once per instance, with the constant bound. An instance the walk
+// itself appended is past `last` and has already been specialised.
+void tk_va_walk_unit(i64 root, i64 last) {
+    i64 f = root;
+    loop {
+        if (f == 0) break;
+        if (f < last && !tk_va_is_template(f)) {
+            tk_va_walk(nd_a(f));
+            tk_va_walk(nd_b(f));
+        }
+        f = nd_next(f);
+    }
+}
+
+// ---- the templates leave the unit ----
+// the declaration's own node keeps its `next`, so the chain the core still
+// holds in unit_head reaches everything after it -- what it loses is being a
+// declaration at all, which is what takes it out of decl_find
+void tk_va_unlink_one(i64 d) {
+    tk_va_drop_list(nd_a(d));
+    tk_va_drop_list(nd_b(d));
+    set_nd_kind(d, N_NONE);
+}
+
+i64 tk_va_unlink(i64 root) {
+    i64 head = root;
+    loop {
+        if (head == 0) break;
+        if (!tk_va_is_template(head)) break;
+        tk_va_unlink_one(head);
+        head = nd_next(head);
+    }
+    i64 p = head;
+    loop {
+        if (p == 0) break;
+        i64 q = nd_next(p);
+        if (q == 0) break;
+        if (tk_va_is_template(q)) {
+            tk_va_unlink_one(q);
+            set_nd_next(p, nd_next(q));
+        } else {
+            p = q;
+        }
+    }
+    return head;
+}
+
+// The pass. The checks read the tree as the source wrote it; then the templates
+// are collected, every call site that names one is rewritten -- generating the
+// instance it asks for, and walking that instance in turn -- and what is left
+// of the templates leaves the unit. A program with no `params` in it returns
+// from the collection with nothing to do and the tree exactly as it was, which
+// is what the no-op proof of a taught construct means.
 i64 tk_params_pass(i64 root) {
     i64 last = nnodes;
     i64 n = 1;
@@ -214,23 +560,9 @@ i64 tk_params_pass(i64 root) {
         tk_va_check_decl(n);
         n = n + 1;
     }
-    n = 1;
-    loop {
-        if (n >= last) break;
-        if (nd_kind(n) == N_INDEX) tk_va_lower_index(n);
-        n = n + 1;
-    }
-    n = 1;
-    loop {
-        if (n >= last) break;
-        if (nd_kind(n) == N_CALL) tk_va_lower_call(n);
-        n = n + 1;
-    }
-    n = 1;
-    loop {
-        if (n >= last) break;
-        if (decl_valid(n)) tk_va_lower_decl(n);
-        n = n + 1;
-    }
-    return root;
+    tk_va_collect(root);
+    tk_va_check_unique(root);
+    if (tk_nva == 0) return root;
+    tk_va_walk_unit(root, last);
+    return tk_va_unlink(root);
 }
