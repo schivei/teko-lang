@@ -94,6 +94,39 @@ a exigir **só** o check `mc build ngen && run` (antes: "CI gate" e "Test suite 
 `pr.yml`, que nunca mais fechariam). `fix/retirement` não tem proteção; o ruleset
 `others` só barra force-push fora de `main`/`fix/**`/`theory/**`/`f1/**`/`cargo/**`.
 
+### As CINCO pernas nativas (dono 2026-09-04)
+
+`ngen.yml` é uma **matriz de 5 pernas**, cada uma no runner do próprio SO **e**
+arquitetura — nada é cross-compilado e deixado sem rodar. Cada perna baixa a
+release do `mc` daquele par, confere o `.sha256`, **assere `mc --host`** contra o
+par da perna, constrói o compilador ensinado e **executa** `hello` + as 16
+fixtures (`// expect-exit: N` como oráculo).
+
+| runner | `[target]` os/arch | asset da release | `[linker]` |
+|---|---|---|---|
+| `ubuntu-latest` | `linux`/`x86_64` | `linux-x86_64` | `cc` |
+| `ubuntu-24.04-arm` | `linux`/`aarch64` | `linux-arm64` | `cc` |
+| `macos-latest` | `macos`/`aarch64` | `macos-arm64` | **nenhum** (backend `macho-exe`) |
+| `windows-latest` | `windows`/`x86_64` | `windows-x86_64` | `lld-link` |
+| `windows-11-arm` | `windows`/`aarch64` | `windows-arm64` | `lld-link` |
+
+O nome do asset usa `arm64`, o `[target]` usa `aarch64` — os dois nomes convivem
+na matriz. O check dos legs é `ngen (<os>/<arch>)`; o **agregador** mantém o nome
+exato que o ruleset exige, `mc build ngen && run`, e falha se qualquer perna falhar
+(nada a trocar no ruleset).
+
+O config de cada perna é **derivado do `ngen/mc.toml`** (nunca editado): remove-se o
+`[linker]`, troca-se `[target] os`/`arch` e o `out` ganha `.exe` no Windows; o resto
+(`[project]`/`[compiler]`/`[include]`/`[limits]`) não pode divergir entre pernas.
+
+**Windows não tem C runtime nem backend de executável direto**, então a perna monta
+antes o sysroot que o link precisa, tudo com o próprio `mc` + LLVM da imagem:
+`winstart.obj` (`#include <sys_windows_start>`) e `mcrt.obj`
+(`#include <sys_windows_host>`) compilados com `--backend=coff-obj-{arm64,x86_64}`, e
+`kernel32.lib` gerado por `llvm-dlltool` a partir da lista de 15 exports (a mesma de
+`schivei/mc` `scripts/sysroot-windows.sh`). A linha de link é a do próprio `mc`
+(`src/mc.windows-*.toml`): `-entry:mc_start -nodefaultlib -stack:8388608`.
+
 ## 4. Loop local — o `mc` vem da RELEASE, não de submodule
 
 A sandbox remota **não consegue rodar o `mc`** (rede para o GitHub bloqueada, 403);
@@ -267,6 +300,19 @@ ao mc; rota é `pass()`).
 11. **Campos vindos de trait entram DEPOIS dos campos próprios da classe**,
     independentemente de onde o `use` aparece no corpo (`ngen/teko_class.mc:439`).
     Duas classes que usam o mesmo trait têm offsets independentes e corretos.
+
+12. **`extern` de libc POSIX não linka no Windows** (achado ao abrir as 5 pernas).
+    O Windows não tem C runtime nenhum: o link é `-nodefaultlib` + kernel32, e o que
+    resolve os nomes POSIX é a camada de sistema do `mc` (`mcrt.obj`, quinze nomes:
+    `open`/`read`/`write`/`close`/`creat`/`exit`/`_exit`/`mmap`/`chmod`/`mkdir`/
+    `unlink`/`posix_spawnp`/`waitpid`/…). `surface_overload_free.tk` declarava
+    `extern i64 getpid()` e dava `undefined symbol: getpid` nas duas pernas Windows —
+    trocado por `chmod` (existe nas cinco), perguntado sobre um path inexistente e
+    comparado contra resultado POSITIVO, porque POSIX responde -1 e o shim do Windows
+    responde 0. **Fixture nova só declara `extern` que esteja nessa lista.** Um
+    `extern` declarado e NÃO chamado não custa nada: o `mc` só emite símbolo
+    indefinido para o que é referenciado (é por isso que os `<sys>` de `lib/rt.mc`
+    — `munmap`, `_NSGetEnviron`, `posix_spawnp` — não quebram o link).
 
 ## 6. Comunicação — coordenador remoto + sessão local
 

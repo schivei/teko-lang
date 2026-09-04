@@ -13,18 +13,22 @@
 // recursive site is an ordinary site.
 //
 // What is NOT touched is half the point. `plain` has one signature and keeps
-// the symbol `_plain`; `getpid` is an `extern` and owns `_getpid`, which is the
+// the symbol `_plain`; `chmod` is an `extern` and owns `_chmod`, which is the
 // C ABI and not ours to move; and `steps` is declared by a PROTOTYPE above its
 // definition, so both ends of it get the same new symbol and the core still
-// pairs them. `getpid` is compared against 0 and not against a range: no
-// process has pid 0, and a C `int` return says nothing about the upper half of
-// the register it comes back in.
+// pairs them. `chmod` is the extern because it is the one this fixture can call
+// on all five CI legs: libSystem and glibc have it, and on Windows -- where
+// there is no libc at all -- it is in the system layer the link already carries
+// (`mc` lib/sys_windows_host.mc). It is asked about a path that does not exist,
+// so it changes nothing, and it is compared against a POSITIVE result rather
+// than a fixed number: POSIX answers -1 for the missing path and the Windows
+// shim answers 0, because NTFS has no mode bits to set.
 //
 // expect-exit: 42
 
 #include "../lib/rt.mc"
 
-extern i64 getpid();
+extern i64 chmod(uptr path, i64 mode);
 
 struct Vec {
     i64 x;
@@ -84,7 +88,7 @@ i64 main() {
     if (steps(v) != 2) return 8;                  // ...and its other signature
 
     if (plain(4) != 4) return 9;                  // one signature: symbol untouched
-    if (getpid() == 0) return 10;                 // an extern: never renamed
+    if (chmod("no-such-file.teko", 0) > 0) return 10;   // an extern: never renamed
 
     return pick(9) + pick(v) + pick(3, 4) + tally() + plain(8);   // 10+10+12+2+8
 }
