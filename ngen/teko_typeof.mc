@@ -260,6 +260,17 @@ void tk_pend_add(i64 n, i64 recv, uptr m, i64 arg, i64 na, i64 form, i64 line, u
 // FORM (a call, a store, a load) without knowing the type, which is the half of
 // the work that has to happen while the parser is here. The placeholder node
 // keeps the expression's place in its parent until the pass fills it.
+//
+// It is a call to a symbol NOTHING declares, and deliberately so. A literal
+// would COMPILE: a `.` this pass never got to rewrite -- because the pass was
+// not registered, or because one that runs later put the node there -- would be
+// a silent `0` in the middle of an expression, and the program would run and
+// answer wrong (measured, with the pass unregistered: types_class.tk built and
+// exited 12 instead of 42). A name nothing declares cannot end that way: the
+// core's own resolver refuses the call where it is written (`call to unknown
+// function`, mc/src/gen_resolve.mc res_call), and a declared-but-undefined one
+// would stop at the link. It costs nothing when the rewrite does happen -- the
+// node is overwritten in place, so the name never reaches codegen.
 i64 tk_defer_member(i64 left, uptr m, i64 line, uptr fl) {
     i64 form = TK_PLOAD;
     i64 arg = 0;
@@ -273,7 +284,7 @@ i64 tk_defer_member(i64 left, uptr m, i64 line, uptr fl) {
     }
     tk_line = line;
     tk_file = fl;
-    i64 n = tk_int(0);
+    i64 n = tk_call("tk_unresolved_member", 0);
     tk_pend_add(n, left, m, arg, na, form, line, fl);
     return n;
 }
