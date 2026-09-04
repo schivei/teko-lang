@@ -269,8 +269,12 @@ void tk_ops_teko_left(i64 n, i64 si, i64 sb, i64 op, i64 line, uptr fl) {
 void tk_ops_binary(i64 n) {
     tk_ops_operand(nd_a(n));
     tk_ops_operand(nd_b(n));
-    i64 sa = tk_ty_struct_of(nd_a(n));
-    i64 sb = tk_ty_struct_of(nd_b(n));
+    i64 lty = tk_ty_of(nd_a(n));
+    i64 sa = 0 - 1;
+    if (lty >= 0) sa = tk_struct_by_ty(lty);
+    i64 rty = tk_ty_of(nd_b(n));
+    i64 sb = 0 - 1;
+    if (rty >= 0) sb = tk_struct_by_ty(rty);
     if (sa < 0 && sb < 0) return;
     i64 op = nd_op(n);
     i64 line = nd_line(n);
