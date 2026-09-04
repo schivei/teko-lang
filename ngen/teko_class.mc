@@ -559,10 +559,12 @@ i64 tk_member(i64 ci, uptr name, i64 off, i64 ti) {
         err_at(tk_file, tk_line, "teko: method with too many parameters (`self` counts, and so does the vtable pointer of a virtual call)");
     uptr fn = tk_method_symbol(ci, name, m, sig);
     tk_method_add(m, ci, sig, fn, np, nreq, d0, fty, tk_slot_take(ci, kind, m, sig, fn));
+    i64 mark = tk_nlocal;                        // `self` belongs to this body alone
     tk_local_add("self", ci);                    // `self.field` inside the body
     i64 line = p_line();
     uptr fl = p_file();
     i64 f = parse_function(fty, fn, params);
+    tk_nlocal = mark;
     set_nd_line(f, line);                        // the declaration starts at the {
     set_nd_file(f, fl);
     top_add(f);

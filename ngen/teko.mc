@@ -34,6 +34,7 @@
 //   new Name                                                  syntax_expr (M21)
 //   p.field, p.field = e, p.method(...)                       syntax_infix (M21)
 //   the N_VAR of a local of struct/class/interface type       on_stmt     (M21.5)
+//   { ... } -- every block, so the locals table has a scope   syntax_stmt (M21.5)
 //
 // Everything else in docs/design/port-teko-mc.md §3 (types/classes,
 // generics, operator overload, error-union, `service`/DI, concurrency, the
@@ -64,6 +65,7 @@ void user_init() {
     syntax("import",    &tk_stop_import);
     syntax("using",     &tk_stop_using);
 
+    syntax_stmt("{",     &tk_block);
     syntax_stmt("var",   &tk_stop_var);
     syntax_stmt("const", &tk_stop_const);
     syntax_stmt("match", &tk_stop_match);
