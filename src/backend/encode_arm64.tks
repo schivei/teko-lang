@@ -518,22 +518,24 @@ fn scan_inst_saved(abi: AbiDescriptor, acc0: Saved, inst: @MInst()): Saved {
 
 fn scan_block_saved(abi: AbiDescriptor, acc0: Saved, b: MBlock): Saved {
     var acc = acc0
-    var i: u64 = 0
+    var it = b.insts.iter()
     loop {
-        if i >= b.insts.len { break }
-        acc = scan_inst_saved(abi, acc, b.insts[i])
-        i++
+        match it.next() {
+            MInstNode as n => { acc = scan_inst_saved(abi, acc, n.op) }
+            null => break
+        }
     }
     acc
 }
 
 fn collect_callee_saved(abi: AbiDescriptor, f: MFunc): Saved {
     var acc = Saved { gpr = []; fpr = [] }
-    var i: u64 = 0
+    var it = f.blocks.iter()
     loop {
-        if i >= f.blocks.len { break }
-        acc = scan_block_saved(abi, acc, f.blocks[i])
-        i++
+        match it.next() {
+            MBlock as b => { acc = scan_block_saved(abi, acc, b) }
+            null => break
+        }
     }
     acc
 }
@@ -565,41 +567,45 @@ fn inst_is_ret(inst: @MInst()): bool {
 }
 
 fn block_any_call(b: MBlock): bool {
-    var i: u64 = 0
+    var it = b.insts.iter()
     loop {
-        if i >= b.insts.len { break }
-        if inst_is_call(b.insts[i]) { return true }
-        i++
+        match it.next() {
+            MInstNode as n => { if inst_is_call(n.op) { return true } }
+            null => break
+        }
     }
     false
 }
 
 fn block_any_ret(b: MBlock): bool {
-    var i: u64 = 0
+    var it = b.insts.iter()
     loop {
-        if i >= b.insts.len { break }
-        if inst_is_ret(b.insts[i]) { return true }
-        i++
+        match it.next() {
+            MInstNode as n => { if inst_is_ret(n.op) { return true } }
+            null => break
+        }
     }
     false
 }
 
 fn func_any_call(f: MFunc): bool {
-    var i: u64 = 0
+    var it = f.blocks.iter()
     loop {
-        if i >= f.blocks.len { break }
-        if block_any_call(f.blocks[i]) { return true }
-        i++
+        match it.next() {
+            MBlock as b => { if block_any_call(b) { return true } }
+            null => break
+        }
     }
     false
 }
 
 fn func_any_ret(f: MFunc): bool {
-    var i: u64 = 0
+    var it = f.blocks.iter()
     loop {
-        if i >= f.blocks.len { break }
-        if block_any_ret(f.blocks[i]) { return true }
-        i++
+        match it.next() {
+            MBlock as b => { if block_any_ret(b) { return true } }
+            null => break
+        }
     }
     false
 }
@@ -624,24 +630,30 @@ fn out_arg_slots_of_inst(i: @MInst()): u32 {
 
 fn max_out_arg_slots_of_block(b: MBlock): u32 {
     var max: u32 = 0
-    var i: u64 = 0
+    var it = b.insts.iter()
     loop {
-        if i >= b.insts.len { break }
-        var slots = out_arg_slots_of_inst(b.insts[i])
-        if slots > max { max = slots }
-        i++
+        match it.next() {
+            MInstNode as n => {
+                var slots = out_arg_slots_of_inst(n.op)
+                if slots > max { max = slots }
+            }
+            null => break
+        }
     }
     max
 }
 
 fn max_out_arg_slots(f: MFunc): u32 {
     var max: u32 = 0
-    var i: u64 = 0
+    var it = f.blocks.iter()
     loop {
-        if i >= f.blocks.len { break }
-        var b_max = max_out_arg_slots_of_block(f.blocks[i])
-        if b_max > max { max = b_max }
-        i++
+        match it.next() {
+            MBlock as b => {
+                var b_max = max_out_arg_slots_of_block(b)
+                if b_max > max { max = b_max }
+            }
+            null => break
+        }
     }
     max
 }
@@ -1104,12 +1116,14 @@ fn encode_one(layout: FrameLayout, words0: []EncWord, inst: @MInst()): []EncWord
 
 fn encode_block_words(layout: FrameLayout, words0: []EncWord, blk: MBlock): []EncWord | error {
     var words = words0
-    var i: u64 = 0
+    var it = blk.insts.iter()
     loop {
-        if i >= blk.insts.len { break }
-        var next = match encode_one(layout, words, blk.insts[i]) { []EncWord as w => w; error as e => return e }
-        words = next
-        i++
+        match it.next() {
+            MInstNode as n => {
+                words = match encode_one(layout, words, n.op) { []EncWord as w => w; error as e => return e }
+            }
+            null => break
+        }
     }
     words
 }
@@ -1148,16 +1162,19 @@ pub fn encode_func(abi: AbiDescriptor, f: MFunc): EncodedFunc | error {
     var layout = compute_frame_layout(abi, f)
     var pro_words = match emit_prologue(layout) { []u32 as w => w; error as e => return e }
     var words: []EncWord = wrap_plain_words([], pro_words)
-    var offsets: [f.blocks.len]BlockOffset = []
+    var offsets: [f.blocks.len()]BlockOffset = []
     var bi: u64 = 0
+    var it = f.blocks.iter()
     loop {
-        if bi >= f.blocks.len { break }
-        var blk = f.blocks[bi]
-        var off = words.len to u32
-        offsets[bi] = BlockOffset { id = blk.id; word = off }
-        var next = match encode_block_words(layout, words, blk) { []EncWord as w => w; error as e => return e }
-        words = next
-        bi++
+        match it.next() {
+            MBlock as blk => {
+                var off = words.len to u32
+                offsets[bi] = BlockOffset { id = blk.id; word = off }
+                words = match encode_block_words(layout, words, blk) { []EncWord as w => w; error as e => return e }
+                bi++
+            }
+            null => break
+        }
     }
     finalize_func(f.symbol, words, offsets)
 }
@@ -1229,14 +1246,16 @@ pub fn fold_encoded_func(acc: ModuleText, ef: EncodedFunc): ModuleText {
     ModuleText { text = text; relocs = relocs; syms = syms; text_off = text_off }
 }
 
-fn encode_functions(abi: AbiDescriptor, funcs: []MFunc): ModuleText | error {
+fn encode_functions(abi: AbiDescriptor, funcs: teko::collections::Chunked<MFunc>): ModuleText | error {
     var acc = empty_module_text()
-    var i: u64 = 0
+    var it = funcs.iter()
     loop {
-        if i >= funcs.len { break }
-        var next = match fold_func_into_text(abi, acc, funcs[i]) { ModuleText as x => x; error as e => return e }
-        acc = next
-        i++
+        match it.next() {
+            MFunc as f => {
+                acc = match fold_func_into_text(abi, acc, f) { ModuleText as x => x; error as e => return e }
+            }
+            null => break
+        }
     }
     acc
 }
