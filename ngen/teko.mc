@@ -49,6 +49,7 @@
 #include "teko_class.mc"
 #include "teko_stmt.mc"
 #include "teko_expr.mc"
+#include "teko_params.mc"
 
 void user_init() {
     tk_types_init();
@@ -71,6 +72,8 @@ void user_init() {
 
     syntax_expr("new", &tk_new);
     syntax_infix(".", 12, &tk_dot);
+    syntax_infix("[", 12, &tk_bracket);
 
     on_stmt(&tk_on_stmt);
+    pass(&tk_params_pass);
 }

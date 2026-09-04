@@ -13,6 +13,17 @@
 // opaque, single pointer type mc already names `uptr` -- the ISA distinction
 // teko-classic drew between them does not exist on this core, so both words
 // resolve to one representation.
+//
+// `params` is the one word here that is NOT an alias: it is a `type_new`, a
+// primitive of its own, because the whole point is that a parameter declared
+// with it is DISTINGUISHABLE from a `uptr` one after the parse
+// (`decl_param_type` preserves the id `type_new` returned). Nothing ever
+// reaches codegen with that type -- teko_params.mc's pass rewrites every one
+// of them into the `uptr xs, i64 xs_len` pair before the tree is lowered --
+// so its width/align/kind are only what the core needs to carry the id
+// through the parameter list: one pointer, `TK_INT`.
+i64 tk_ty_params = 0;
+
 void tk_types_init() {
     type_alias("bool",  TY_U8);
     type_alias("char",  TY_U32);
@@ -21,4 +32,5 @@ void tk_types_init() {
     type_alias("usize", TY_U64);
     type_alias("ptr",   TY_UPTR);
     type_alias("str",   TY_UPTR);
+    tk_ty_params = type_new("params", 8, 8, TK_INT);
 }
