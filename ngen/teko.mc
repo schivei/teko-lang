@@ -76,6 +76,14 @@ void user_init() {
     syntax_infix("[", 12, &tk_bracket);
 
     on_stmt(&tk_on_stmt);
+
+    // FIRST among the passes, and a later one must not slip in front: the
+    // `params` pass is what turns `total(a, b, c)` into the uniform
+    // `total(ptr, n)` and `i64 total(params xs)` into `i64 total(uptr, i64)`.
+    // Whatever comes next -- the overload mangling of C4 above all -- then sees
+    // ordinary parameters and ordinary arguments, and never has to know what a
+    // `params` list is. Running after it would mean mangling a signature the
+    // `params` pass is about to rewrite.
     pass(&tk_params_pass);
     pass(&tk_typeof_pass);
 }

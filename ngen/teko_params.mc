@@ -14,22 +14,31 @@
 // whole unit exists at once -- a call site above the declaration it targets
 // would see nothing from a parser hook (`decl_find` answers -1 for what has not
 // been parsed yet, hooks.md § "Asking about a declaration the core already
-// parsed"). It rewrites three things and refuses four:
+// parsed"). It rewrites three things:
 //
-//   i64 total(params xs)    ->  i64 total(uptr xs, i64 xs_len)
-//   xs[i]                   ->  tk_va_at(xs, i)
-//   total(a, b, c)          ->  total(tk_va3(a, b, c), 3)
+//   i64 total(params xs)  ->  i64 total(uptr xs, i64 xs_len)
+//   xs[i]                 ->  tk_va_at(xs, xs_len, i)
+//   total(a, b, c)        ->  total(tk_va_put(tk_va_put(tk_va_put(
+//                                 tk_va_new(3), 0, a), 1, b), 2, c), 3)
 //
 // so nothing with the `params` type ever reaches the lowering, and the taught
 // surface costs the core nothing: the callee reads an ordinary pointer and an
 // ordinary count.
 //
-// THE DECLARED RESTRICTION OF THIS FIRST SLICE: the argument buffer
-// (`tk_va_buf`, ngen/lib/rt.mc) is STATIC, so it does NOT reenter. A variadic
-// call nested inside another one, or inside the body of a variadic function,
-// would overwrite the list its caller is still reading -- and is REFUSED here,
-// with its own message, rather than miscompiled. Reentrancy is not invented
-// around it; a frame-allocated list is what a later entrega buys.
+// THE LIST IS ALLOCATED AT THE CALL SITE, on the arena (`tk_va_new` ->
+// `rt_alloc`, ngen/lib/rt.mc -- the very path `new` takes), and the pass writes
+// one word per index into it. The mc's pointers are opaque `uptr` and the only
+// way to take an address is `&name` over a direct name (docs/core-language.md
+// § Operators, and § "&arr[i]" in the C-differences list: `&` does not accept
+// an indexing expression), so a caller-frame list would need a local array
+// declared per site and inserted as a STATEMENT before the expression that
+// carries the call -- which a pass over expressions cannot place in general (a
+// call sits inside a condition, an argument, a return). The arena is what a
+// site can allocate from inside the expression it already is.
+//
+// Nothing is shared between two sites, so nothing has to be refused for
+// reentrancy: a variadic call nested inside another one, and one inside the
+// body of a variadic function, both compile and each gets its own block.
 //
 // The teto is the ABI's: MAXPARAMS = 12 (mc/src/arena.mc:58, 1..8 in registers
 // and 9..12 on the stack). A variadic list costs two of them, so a declaration
@@ -82,27 +91,9 @@ i64 tk_va_is_list(uptr name) {
     return 0;
 }
 
-// 1 when `n` is a call to a function that declares a `params` list
-i64 tk_va_is_call(i64 n) {
-    if (nd_kind(n) != N_CALL) return 0;
-    return tk_va_pos(decl_find(nd_name(n))) >= 0;
-}
-
-// 1 when the subtree at `n`, siblings included, contains a variadic call
-i64 tk_va_in_subtree(i64 n) {
-    if (n == 0) return 0;
-    if (tk_va_is_call(n)) return 1;
-    if (tk_va_in_subtree(nd_a(n))) return 1;
-    if (tk_va_in_subtree(nd_b(n))) return 1;
-    if (tk_va_in_subtree(nd_c(n))) return 1;
-    if (tk_va_in_subtree(nd_d(n))) return 1;
-    return tk_va_in_subtree(nd_next(n));
-}
-
-// tk_va3, tk_va12: the packer of that arity, in ngen/lib/rt.mc
-uptr tk_va_fn(i64 v) {
-    if (v < 10) return p_cat("tk_va", "0123456789", v, 1);
-    return p_cat(p_cat("tk_va", "1", 0, 1), "0123456789", v - 10, 1);
+// the count the compiler names after the list: `xs` -> `xs_len`
+uptr tk_va_len_name(uptr name) {
+    return p_cat(name, "_len", 0, 4);
 }
 
 // `params` may be declared once, last, and with room left for the count
@@ -113,16 +104,6 @@ void tk_va_check_decl(i64 d) {
         err_at2(nd_file(d), nd_line(d), "teko: `params` must be the last parameter, and there is only one", nd_name(d));
     if (k + 2 > MAXPARAMS)
         err_at2(nd_file(d), nd_line(d), "teko: too many parameters before `params` (the list costs two of the twelve)", nd_name(d));
-    if (tk_va_in_subtree(nd_b(d)))
-        err_at2(nd_file(d), nd_line(d), "teko: a variadic call may not appear inside the body of a variadic function", nd_name(d));
-}
-
-// the static buffer is written before the call and read during it: an argument
-// that is itself a variadic call would overwrite the list being built
-void tk_va_check_args(i64 n) {
-    if (!tk_va_is_call(n)) return;
-    if (tk_va_in_subtree(nd_a(n)))
-        err_at2(nd_file(n), nd_line(n), "teko: a variadic call may not appear inside another variadic call", nd_name(n));
 }
 
 // `params` names a parameter form, not a type: a local, a global, a field or a
@@ -133,7 +114,7 @@ void tk_va_check_stray(i64 n) {
     err_at(nd_file(n), nd_line(n), "teko: `params` declares a parameter list, nothing else");
 }
 
-// xs[i] -> tk_va_at(xs, i), in place, keeping the sibling link
+// xs[i] -> tk_va_at(xs, xs_len, i), in place, keeping the sibling link
 void tk_va_lower_index(i64 n) {
     i64 base = nd_a(n);
     if (nd_kind(base) != N_IDENT)
@@ -143,14 +124,34 @@ void tk_va_lower_index(i64 n) {
     tk_line = nd_line(n);
     tk_file = nd_file(n);
     i64 keep = nd_next(n);
-    i64 c = tk_call2("tk_va_at", base, nd_b(n));
+    i64 args = list_append(base, tk_id(tk_va_len_name(nd_name(base))));
+    i64 c = tk_call("tk_va_at", list_append(args, nd_b(n)));
     node_assign(n, c);
     set_nd_next(n, keep);
 }
 
-// total(a, b, c) -> total(tk_va3(a, b, c), 3). The fixed arguments stay where
-// they are; the tail is cut off the list and becomes the packer's own argument
-// list, so nothing is copied and no node is rebuilt.
+// the tail of a call's argument list, packed one word per index into a block
+// the site allocates: tk_va_new(v), then a tk_va_put per argument, each handing
+// the block to the next. Every argument is cut off the sibling list before it
+// becomes an argument of its own put -- a node lives in ONE list.
+i64 tk_va_pack(i64 tail, i64 v) {
+    if (v == 0) return tk_int(0);
+    i64 pack = tk_call("tk_va_new", tk_int(v));
+    i64 t = tail;
+    i64 i = 0;
+    loop {
+        if (t == 0) break;
+        i64 nxt = nd_next(t);
+        set_nd_next(t, 0);
+        pack = tk_call("tk_va_put", list_append(list_append(pack, tk_int(i)), t));
+        i = i + 1;
+        t = nxt;
+    }
+    return pack;
+}
+
+// total(a, b, c) -> total(<packed block>, 3). The fixed arguments stay where
+// they are; the tail is cut off the list and becomes the block's contents.
 void tk_va_lower_call(i64 n) {
     i64 d = decl_find(nd_name(n));
     i64 k = tk_va_pos(d);
@@ -179,9 +180,7 @@ void tk_va_lower_call(i64 n) {
     if (!prev) args = 0;
     tk_line = nd_line(n);
     tk_file = nd_file(n);
-    i64 pack = tk_int(0);                        // an empty list: len is 0, the pointer is never read
-    if (v > 0) pack = tk_call(tk_va_fn(v), tail);
-    args = list_append(args, pack);
+    args = list_append(args, tk_va_pack(tail, v));
     set_nd_a(n, list_append(args, tk_int(v)));
 }
 
@@ -194,14 +193,16 @@ void tk_va_lower_decl(i64 d) {
         p = nd_next(p);
     }
     set_nd_type(p, TY_UPTR);
-    set_nd_next(p, param_new(TY_I64, p_cat(nd_name(p), "_len", 0, 4)));
+    set_nd_next(p, param_new(TY_I64, tk_va_len_name(nd_name(p))));
 }
 
 // The pass, in four sweeps over the node array: the checks read the tree as the
 // source wrote it, then the three rewrites run outward-in -- indexes, call
 // sites, declarations -- because both of the first two ask a declaration what
 // its parameters are, and the third is what takes that answer away. `nnodes` is
-// snapshotted, so the nodes a rewrite creates are not swept again.
+// snapshotted, so the nodes a rewrite creates are not swept again; a nested
+// variadic call is an ORIGINAL node and is rewritten in place, whichever of the
+// two the sweep reaches first.
 i64 tk_params_pass(i64 root) {
     i64 last = nnodes;
     i64 n = 1;
@@ -209,7 +210,6 @@ i64 tk_params_pass(i64 root) {
         if (n >= last) break;
         tk_va_check_stray(n);
         tk_va_check_decl(n);
-        tk_va_check_args(n);
         n = n + 1;
     }
     n = 1;
