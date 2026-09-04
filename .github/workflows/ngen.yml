@@ -100,3 +100,39 @@ jobs:
             exit 1
           fi
           echo "ngen/build/teko-hello exited 42, as expected"
+
+      - name: run the primitives fixtures (entrega 2)
+        # `mc.toml`'s `[project]` carries exactly one entry (tests/hello.tk,
+        # above); entrega 2's fixtures (docs/design/port-teko-mc.md §3) are
+        # each their own file under ngen/tests/primitives_*.tk, so this step
+        # iterates them directly with the compiler `mc build ngen` already
+        # produced (ngen/build/mc-teko) instead of adding one [project] per
+        # fixture. Each fixture's own `// expect-exit: N` header comment is
+        # the oracle, the same convention `mc`'s own tests/*.mc use.
+        run: |
+          set -u
+          status=0
+          for src in ngen/tests/primitives_*.tk; do
+            name=$(basename "$src" .tk)
+            want=$(grep -m1 '// expect-exit:' "$src" | sed 's/.*expect-exit: *//')
+            if [ -z "$want" ]; then
+              echo "::error::$src has no // expect-exit: N header" >&2
+              status=1
+              continue
+            fi
+            out="ngen/build/$name"
+            if ! ngen/build/mc-teko --exe "$src" -o "$out"; then
+              echo "::error::$src failed to compile" >&2
+              status=1
+              continue
+            fi
+            "$out"
+            rc=$?
+            if [ "$rc" -ne "$want" ]; then
+              echo "::error::$src exited $rc, expected $want" >&2
+              status=1
+              continue
+            fi
+            echo "$src exited $rc, as expected"
+          done
+          exit $status
