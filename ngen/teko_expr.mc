@@ -55,6 +55,19 @@ i64 tk_args(uptr pn) {
     return head;
 }
 
+// the arguments a call left out, taken from the callee's own defaults. Each
+// site gets a CLONE: a node lives in exactly one sibling list, so handing the
+// same default to two calls would rewire it out of the first.
+i64 tk_fill_defaults(i64 args, i64 na, i64 np, i64 nreq, i64 d0) {
+    i64 k = na;
+    loop {
+        if (k >= np) break;
+        args = list_append(args, tk_clone(df_node_at(d0 + k - nreq)));
+        k = k + 1;
+    }
+    return args;
+}
+
 // `p.f` / `p.f = e`: the load or the store of the field's own width
 i64 tk_field_use(i64 left, i64 fi, i64 line, uptr fl) {
     i64 fty = fd_ty_at(fi);
@@ -79,7 +92,9 @@ i64 tk_call_method(i64 left, i64 mi, i64 line, uptr fl) {
     i64 args = tk_args(&na);
     tk_line = line;
     tk_file = fl;
-    if (na != mt_np_at(mi)) err_at2(fl, line, "teko: wrong number of arguments", mt_name_at(mi));
+    if (na < mt_nreq_at(mi) || na > mt_np_at(mi))
+        err_at2(fl, line, "teko: wrong number of arguments", mt_name_at(mi));
+    args = tk_fill_defaults(args, na, mt_np_at(mi), mt_nreq_at(mi), mt_d0_at(mi));
     i64 slot = mt_slot_at(mi);
     i64 r = 0;
     if (slot < 0) {
@@ -109,7 +124,9 @@ i64 tk_iface_call(i64 left, i64 si, uptr m, i64 line, uptr fl) {
     i64 args = tk_args(&na);
     tk_line = line;
     tk_file = fl;
-    if (na != im_np_at(k)) err_at2(fl, line, "teko: wrong number of arguments", m);
+    if (na < im_nreq_at(k) || na > im_np_at(k))
+        err_at2(fl, line, "teko: wrong number of arguments", m);
+    args = tk_fill_defaults(args, na, im_np_at(k), im_nreq_at(k), im_d0_at(k));
     if (!tk_pure(left))
         err_at2(fl, line, "teko: an interface call needs a name or a field on the left", m);
     i64 vt = tk_call("ld64", tk_clone(left));

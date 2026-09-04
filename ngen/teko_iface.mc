@@ -36,6 +36,8 @@
 
 uptr im_name[TK_MAXIFMETH];           // the signatures of every interface, in declaration order
 i64  im_np[TK_MAXIFMETH];             // parameters, not counting `self`
+i64  im_nreq[TK_MAXIFMETH];           // of those, the ones with no default: the smallest call
+i64  im_d0[TK_MAXIFMETH];             // where its defaults start in the default table
 i64  im_ret[TK_MAXIFMETH];
 i64  tk_nifmeth = 0;
 
@@ -48,12 +50,16 @@ i64  tk_nconf = 0;
 // ---- table accessors (no raw ld64/st64 outside this section) ----
 uptr im_name_at(i64 i) { return ld64(im_name + i * 8); }
 i64  im_np_at(i64 i)   { return ld64(im_np + i * 8); }
+i64  im_nreq_at(i64 i) { return ld64(im_nreq + i * 8); }
+i64  im_d0_at(i64 i)   { return ld64(im_d0 + i * 8); }
 i64  im_ret_at(i64 i)  { return ld64(im_ret + i * 8); }
 i64  ci_if_at(i64 i)   { return ld64(ci_if + i * 8); }
 i64  conf_if_at(i64 i) { return ld64(conf_if + i * 8); }
 
 void set_im_name_at(i64 i, uptr v) { st64(im_name + i * 8, v); }
 void set_im_np_at(i64 i, i64 v)    { st64(im_np + i * 8, v); }
+void set_im_nreq_at(i64 i, i64 v)  { st64(im_nreq + i * 8, v); }
+void set_im_d0_at(i64 i, i64 v)    { st64(im_d0 + i * 8, v); }
 void set_im_ret_at(i64 i, i64 v)   { st64(im_ret + i * 8, v); }
 void set_ci_if_at(i64 i, i64 v)    { st64(ci_if + i * 8, v); }
 void set_conf_if_at(i64 i, i64 v)  { st64(conf_if + i * 8, v); }
@@ -92,10 +98,12 @@ i64 tk_ifmeth_by_name(uptr name) {
     return found;
 }
 
-void tk_ifmeth_add(uptr name, i64 np, i64 ret) {
+void tk_ifmeth_add(uptr name, i64 np, i64 nreq, i64 d0, i64 ret) {
     if (tk_nifmeth == TK_MAXIFMETH) err_at(tk_file, tk_line, "teko: too many interface methods");
     set_im_name_at(tk_nifmeth, name);
     set_im_np_at(tk_nifmeth, np);
+    set_im_nreq_at(tk_nifmeth, nreq);
+    set_im_d0_at(tk_nifmeth, d0);
     set_im_ret_at(tk_nifmeth, ret);
     tk_nifmeth = tk_nifmeth + 1;
 }
@@ -159,9 +167,11 @@ void tk_iface_member(i64 si) {
     if (p_id() != K_LPAR) err_at2(tk_file, tk_line, "teko: an interface declares methods, not fields", m);
     if (tk_ifmeth_find(si, m) >= 0) err_at2(tk_file, tk_line, "teko: duplicate interface method", m);
     i64 np = 0;
-    tk_params(&np, 1);                           // the list itself is the class's business
+    i64 nreq = 0;
+    i64 d0 = tk_ndflt;
+    tk_params(&np, &nreq, 1);                    // the list itself is the class's business
     p_expect(K_SEMI, "expected ; after the interface method");
-    tk_ifmeth_add(m, np, rty);
+    tk_ifmeth_add(m, np, nreq, d0, rty);
     set_sr_mn_at(si, tk_nifmeth - sr_m0_at(si));
 }
 

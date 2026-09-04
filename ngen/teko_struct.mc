@@ -26,6 +26,11 @@
 // The runtime belongs to the PROGRAM, not to this file: `Name_new` calls
 // `rt_alloc(n)` from `ngen/lib/rt.mc`, which hands out `n` zeroed bytes, so a
 // field nobody assigned reads as 0 and a reference field reads as null.
+//
+// A struct body is read by the very machine a class body is read by
+// (`tk_member`, teko_class.mc), so a struct declares METHODS -- with `self`,
+// with default arguments and with overloads -- under one difference: no vtable,
+// hence no `virtual`/`override` and no trait, both refused by name.
 
 #define TK_MAXSTRUCT 32               // structs, classes and interfaces declared in one source
 #define TK_MAXFIELD  256              // fields, summed across all of them
@@ -528,18 +533,15 @@ void tk_struct() {
     uptr name = tk_newname("struct");
     i64 ty = type_new(name, 8, 8, TK_INT);       // a field of its own type parses
     i64 si = tk_type_add(name, ty, 0 - 1, TK_KSTRUCT);   // no base, no vtable: offset 0
+    tk_use_reset();
     p_expect(K_LBRACE, "expected { in the struct body");
     i64 off = 0;
     loop {
         if (p_id() == K_RBRACE) break;
         if (p_id() == T_EOF) err_at(head_file, head_line, "unterminated struct");
-        tk_line = p_line();                      // errors and nodes for this field
+        tk_line = p_line();                      // errors and nodes for this member
         tk_file = p_file();
-        if (tk_kw("use")) err_at(tk_file, tk_line, "teko: only a class uses a trait");
-        i64 fty = p_type();
-        uptr m = p_ident();
-        p_expect(K_SEMI, "expected ; after the struct field");
-        off = tk_field_place(si, name, m, fty, off);
+        off = tk_member(si, name, off, 0 - 1);   // fields and methods, the class's own machine
     }
     p_next();                                    // }
     p_accept(K_SEMI);                            // a C programmer's trailing ;
