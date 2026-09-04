@@ -1,0 +1,102 @@
+name: ngen (mc) CI
+
+# Builds and tests `ngen/` -- the teko-over-mc port (docs/design/port-teko-mc.md,
+# DECISION_LOG.md D211/D212/D213) -- with the mc toolchain (github.com/schivei/mc),
+# always fetching its LATEST release. `src/` is frozen (D211/D212): the escada
+# gen0->gen3 this repository's other workflows run is irrelevant to `ngen/` and
+# is deliberately NOT run here.
+#
+# pr.yml (this repository's main gate) triggers on `pull_request` with NO
+# `paths:` filter, on purpose (its own header explains why: a GitHub Actions
+# required check that stops reporting goes pending forever, not red, so a
+# trigger-level `paths-ignore` is avoided there in favour of an internal
+# paths-filter job). A PR touching only `ngen/**` therefore still runs pr.yml's
+# full escada today; teaching it to skip that escada for an `ngen/`-only diff
+# means reworking its internal `dorny/paths-filter` job, which is out of this
+# entrega's scope -- left as-is, flagged for the integrator.
+
+on:
+  push:
+    paths: ['ngen/**', '.github/workflows/ngen.yml']
+  pull_request:
+    branches: ['**']
+    paths: ['ngen/**', '.github/workflows/ngen.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ngen-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: mc build ngen && run
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: resolve latest mc release
+        id: mc_release
+        run: |
+          set -eu
+          resp="$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            "https://api.github.com/repos/schivei/mc/releases/latest")" || {
+            echo "::error::could not reach the schivei/mc releases API" >&2
+            exit 1
+          }
+          tag="$(printf '%s' "$resp" | jq -r '.tag_name // empty')"
+          if [ -z "$tag" ]; then
+            echo "::error::schivei/mc has no releases (or the API response has no tag_name)" >&2
+            printf '%s\n' "$resp" >&2
+            exit 1
+          fi
+          ver="${tag#v}"
+          echo "tag=$tag"     >>"$GITHUB_OUTPUT"
+          echo "version=$ver" >>"$GITHUB_OUTPUT"
+          echo "resolved schivei/mc $tag"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: download and verify the mc toolchain
+        env:
+          MC_TAG: ${{ steps.mc_release.outputs.tag }}
+          MC_VERSION: ${{ steps.mc_release.outputs.version }}
+        run: |
+          set -eu
+          toolchain="${RUNNER_TEMP}/mc-toolchain"
+          mkdir -p "$toolchain"
+          cd "$toolchain"
+          asset="mc-${MC_VERSION}-linux-x86_64.tar.gz"
+          base="https://github.com/schivei/mc/releases/download/${MC_TAG}"
+          for f in "$asset" "$asset.sha256"; do
+            if ! curl -fsSL -o "$f" "$base/$f"; then
+              echo "::error::missing release asset: $base/$f" >&2
+              exit 1
+            fi
+          done
+          sha256sum -c "$asset.sha256"
+          tar xzf "$asset"
+          dir="mc-${MC_VERSION}-linux-x86_64"
+          chmod 755 "$dir/mc"
+          "$dir/mc" --version || true
+          echo "$toolchain/$dir" >>"$GITHUB_PATH"
+
+      - name: mc build ngen
+        run: mc build ngen
+
+      - name: run tests/hello.tk, expect exit 42
+        run: |
+          set +e
+          ngen/build/teko-hello
+          rc=$?
+          set -e
+          if [ "$rc" -ne 42 ]; then
+            echo "::error::ngen/build/teko-hello exited $rc, expected 42" >&2
+            exit 1
+          fi
+          echo "ngen/build/teko-hello exited 42, as expected"
