@@ -23,6 +23,13 @@
 //   char isize usize byte ptr str                            type_alias  (M12)
 //   f32 f64 (+ ldf64/ldf32/stf64/stf32/sqrt_f64/fabs/fmin/fmax) <float> (M24)
 //
+// What entrega 3 (tipos, D214) adds, one construct per commit -- this commit is
+// `struct`, the one that needs no vtable:
+//   struct Name { type field; ... }                          syntax      (M12)
+//   new Name                                                  syntax_expr (M21)
+//   p.field, p.field = e                                      syntax_infix (M21)
+//   the N_VAR of a struct-typed local                         on_stmt     (M21.5)
+//
 // Everything else in docs/design/port-teko-mc.md §3 (types/classes,
 // generics, operator overload, error-union, `service`/DI, concurrency, the
 // rest of the stdlib) is a later entrega and is not stubbed here: it does
@@ -31,6 +38,7 @@
 
 #include "teko_type.mc"
 #include "teko_float.mc"
+#include "teko_struct.mc"
 #include "teko_class.mc"
 #include "teko_stmt.mc"
 #include "teko_expr.mc"
@@ -51,5 +59,10 @@ void user_init() {
     syntax_stmt("match", &tk_stop_match);
     syntax_stmt("when",  &tk_stop_when);
 
-    syntax_expr("new", &tk_stop_new);
+    syntax("struct", &tk_struct);
+
+    syntax_expr("new", &tk_new);
+    syntax_infix(".", 12, &tk_dot);
+
+    on_stmt(&tk_on_stmt);
 }
