@@ -330,3 +330,24 @@ com assinatura que não casa → erro claro. Esquerdo do core + direito teko →
 **Adjacente (diagnóstico, não miscompila):** `operator` dentro de `interface` é recusado
 por `teko_iface.mc` com "an interface declares methods, not fields: operator" — mensagem
 confusa; dizer que operador em interface não é ensinado. Mini-ajuste em `teko_iface.mc`.
+
+## 13. C7c pronto (aguarda verificação) — instância por cópia de AST (2026-09-04)
+
+**Medido: record TEXTUAL de função de topo é inalcançável no mc 0.10.0** — `parse_top`
+(`mc/src/parse.mc:2076-2082`) consulta `syntax_find` só no 1º token, que numa função é o
+tipo de retorno, e `word_add` recusa keyword do core (`cannot redefine core keyword:
+i64`). Confirma o bloqueio do C6. **Saída adotada (`feat/ngen-params-generic` @
+`5104808a`):** como o único parâmetro genérico do `params` é a constante `N` — não há
+tipo a substituir — a instância é **cópia da AST** com `N_INT` no lugar de `xs_len`
+(`tk_va_inst`), memoizada por `k`, mangling `total__k`, moldura de erro `tk_gen_frame`
+do C8. Sufixo numérico não colide com o `nome__Tipo` do C4. O template sai da unidade
+(`tk_va_drop` → `N_NONE`) porque o `tk_ov_check_left` do C4 varre o array de nós.
+`xs[lit]` fora de `[0, N)` → erro de compilação com prefixo de instância; não-literal
+mantém `tk_va_at`. 17/17; no-op nas 16.
+
+**Adjacentes:** (1) `teko_over.mc:177-192` `tk_ov_va_shape` ficou **obsoleta** — a lista
+nunca mais lowera para `(uptr, i64)`; duas `g(uptr, i64)` escritas à mão num programa sem
+`params` levam a mensagem errada ("a params list is (uptr, i64)…"). Apagar o guard.
+(2) `params` em **método** é recusado (`wrong number of arguments`) — pré-existente;
+`tk_method_pick` não sabe o que é lista. (3) O teto de 12 virou **política**: a instância
+gasta um registrador a menos; se o dono quiser o teto real do ABI, são dois números.
