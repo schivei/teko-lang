@@ -103,13 +103,14 @@ Record/replay: `p_skip_balanced`/`p_push_source`/`p_subst_name`/`p_subst_int`/`p
 | Construto teko | Camada/hook mc | Precedente | Notas |
 |---|---|---|---|
 | primitivos `u8/u16/u32/u64/i64/uptr/void` | **core do mc** (7 words nativas) | `mc/docs/core-language.md` §Types | idênticos; `i64`=inteiro de trabalho |
-| `str` | `type_alias("str", TY_UPTR)` + módulo `str` como fns | `lang.mc:39`, `oop.mc` (api) | `str` do teko É `{ptr,len}` de bytes → view/`slice_view` = `ld64`/offset, sem cópia (preserva D197) |
+| `str` | `type_alias("str", TY_UPTR)` + módulo `str` como fns | `lang.mc:39`, `oop.mc` (api) | **LANDADO (entrega 2) como NUL-terminated `uptr`** (`ngen/teko_type.mc:23`, `lib/rt.mc` `tk_str_len`/`tk_str_slice` — view por ponteiro, sem cópia, D197). A forma `{ptr,len}` do teko-clássico NÃO foi herdada (D215); o código vence esta tabela. |
 | `char=u32`, `'x'`/`b'x'` (D198 D2) | `type_alias("char", TY_U32)` + `#token` p/ literal byte | `type_alias` (M12) | D205 (char fat vs `byte`) morre — no mc `char` é `u32` escalar, 1 word |
 | `bool` | `type_alias("bool", TY_U8)` | `lang.mc:40` | comparações já dão 0/1 |
 | `isize`/`usize` (D131) | `type_alias` sobre `i64`/`u64` | `type_alias` | 64-bit hoje; coerção implícita já é a regra |
 | `ptr`/`uptr` + `wrap`/`unwrap` (D131) | `uptr` core + fns de reinterpret | core `uptr` opaco; `ld*/st*` | `wrap`/`unwrap` = reinterpret zero-custo → `ld64`/`st64` no offset; sem intrínseco mágico |
 | `type`/struct/subtipo (campos+métodos, D196) | `syntax("class"/"struct", &f)` → `top_add` de decls achatadas | `lang_class.mc` (`lg_class`) | layout: vtable@0, campos base-first (`lang/README.md §Layout`) |
 | `interface` (+ `error` interface D199) | `syntax("interface", &f)` + itab | `lang.mc:50` `lg_interface`; `Printable` | dispatch `rt_itab(ld64(obj),ID)`+`callp` |
+| `trait` (D216 — modelo do PHP) | `syntax("trait", &f)`: corpo gravado por `p_skip_balanced`, re-parseado por classe via `p_push_source`; `use A, B;` lido no corpo do tipo, sem registro global | sem precedente no mc — desenho próprio, `ngen/teko_trait.mc` | flattening em compile-time pela mesma máquina de membros; NÃO é tipo (sem `type_new`); precedência classe > trait > base; conflito/ciclo = erro claro |
 | genéricos `<T, const N: i64>` + `where` | record/replay: `p_skip_balanced`+`p_subst_name`/`p_subst_int`; `syntax_expr` na instanciação | `lang_type.mc`; `Box<Circle,4>` | `>>` fecha com `p_resplit_punct(1)`; constraint re-parseada na instância |
 | constraint `&` (interseção) + form/lifetime (D199) | mesma máquina `where` do lx, estendida no MÓDULO | `lang_type.mc` (`where`) | `|`-disjunção MORREU no teko (D199) → nada a portar; só `&`/asserção |
 | operador overload = método do tipo (D-2026-08-28) | `syntax_infix(op, prec, &f)` — resolve pelo método do tipo estático | `lang_expr.mc` `lg_dot`/`lg_index` (`.`,`[`) | operador-com-opcode fica core; sem-opcode = chamada de método genérica |
