@@ -102,15 +102,29 @@ jobs:
           echo "ngen/build/teko-hello exited 42, as expected"
 
       - name: run the primitives fixtures (entrega 2)
-        # `mc.toml`'s `[project]` carries exactly one entry (tests/hello.tk,
-        # above); entrega 2's fixtures (docs/design/port-teko-mc.md §3) are
-        # each their own file under ngen/tests/primitives_*.tk, so this step
-        # iterates them directly with the compiler `mc build ngen` already
-        # produced (ngen/build/mc-teko) instead of adding one [project] per
-        # fixture. Each fixture's own `// expect-exit: N` header comment is
-        # the oracle, the same convention `mc`'s own tests/*.mc use.
+        # `mc --exe` always emits a Mach-O (`schivei/mc` src/main.mc:227
+        # hardcodes `bname = "macho-exe"`, ignoring host and [target]), so
+        # compiling a fixture with `mc-teko --exe` on this Linux runner
+        # produced an unrunnable binary (ENOEXEC, exit 126). The only path
+        # that honours `[target] os="linux"`/`[linker] cmd="cc"` is the one
+        # `mc build ngen` itself already used for tests/hello.tk (docs/build.md
+        # `mc build DIR --config FILE`): a `[project]` naming the fixture. Each
+        # fixture gets its own config, generated here from `ngen/mc.toml` by
+        # swapping only `[project].entry`/`out` -- so it can never drift from
+        # `ngen/mc.toml`'s own `[target]`/`[linker]` -- and is fed to the
+        # already-built `ngen/build/mc-teko` with `--entry-only`
+        # (docs/build.md § [compiler]), which reuses that taught compiler
+        # instead of re-teaching it once per fixture. Each fixture's own
+        # `// expect-exit: N` header comment is the oracle, the same
+        # convention `mc`'s own tests/*.mc use.
+        #
+        # The runner's default shell already runs with `-e` (bash -e {0}), so
+        # a bare `set -u` here let the FIRST fixture that failed `exit 1` the
+        # whole step immediately -- the loop's own `status=1; continue`
+        # accumulation never got to run past it. `set +e` below is what lets
+        # every fixture in the loop actually run and be reported.
         run: |
-          set -u
+          set +e -u
           status=0
           for src in ngen/tests/primitives_*.tk; do
             name=$(basename "$src" .tk)
@@ -120,13 +134,18 @@ jobs:
               status=1
               continue
             fi
-            out="ngen/build/$name"
-            if ! ngen/build/mc-teko --exe "$src" -o "$out"; then
+            cfg="ngen/mc.$name.toml"
+            sed -e "s#^entry = .*#entry = \"tests/$name.tk\"#" \
+                -e "s#^out   = .*#out   = \"build/$name\"#" \
+                ngen/mc.toml >"$cfg"
+            if ! ngen/build/mc-teko build ngen --config "$cfg" --entry-only; then
               echo "::error::$src failed to compile" >&2
               status=1
+              rm -f "$cfg"
               continue
             fi
-            "$out"
+            rm -f "$cfg"
+            "ngen/build/$name"
             rc=$?
             if [ "$rc" -ne "$want" ]; then
               echo "::error::$src exited $rc, expected $want" >&2
