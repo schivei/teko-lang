@@ -1157,6 +1157,16 @@ Verificador reproduziu o crash instrumentando com ASan+UBSan (as flags do CI pro
 - **CONSERTO (dispatch):** `cg_emit_self_addr` tem que PARAR de escapar o endereço de um temp cujo escopo é o próprio statement-expression — hoist do `_rcvN` pra um escopo que sobrevive à chamada externa inteira, OU passar receptor tipo-valor por valor (Region/Arena são structs de 8B, métodos leem self). Root-cause, não workaround; conserta a CLASSE (todo receptor não-endereçável), não só o sítio arena.
 - **LEI DE PROCESSO (endurece D163/D164):** o fixpoint no sandbox NÃO pega UB que só crasha sob certos toolchains — **o gate de verificador de compiler-core passa a incluir um build ASan+UBSan** (`-fsanitize=address,undefined -fno-omit-frame-pointer -g`) do gen0 compilando o tip, além do fixpoint. Barato, pega stack-use-after-scope/UAF/OOB que o build seco esconde. (A ser gravado na CLAUDE.md.)
 
+### D217 · DONO: NADA DE `Variant` na versão teko-mc (dono 2026-09-04) 🔧 SUPERFÍCIE
+Ruling curto e duro para o port `ngen/`: **não se ensina `Variant`** — nenhuma união
+dinâmica / valor etiquetado em runtime / tipo "qualquer". A superfície teko-mc é
+**estaticamente tipada**: todo receptor, argumento e operando tem tipo conhecido pelo
+oráculo (`teko_typeof.mc`) ou é erro claro de compilação — é o que a entrega 4 inteira
+(escopo, sobrecarga, operadores, genéricos com constantes) assume. Onde o teko-clássico
+usaria Variant, o teko-mc usa `interface` (despacho por itab), `class` (vtable) ou
+genéricos com constantes (record/replay, inline). Construto que "pedir" Variant é fork:
+parar e perguntar ao dono, não emular.
+
 ### D216 · DONO: `trait` do `ngen/` funciona IGUAL AO DO PHP — flattening em compile-time, não é tipo (dono 2026-09-04) 🔧 SUPERFÍCIE
 Fecha o único fork aberto da entrega 3 (o `trait` não tinha precedente no mc nem mapeamento na §3 de `port-teko-mc.md`). **A forma é a do PHP**, com tudo que ela implica:
 - **Flattening em tempo de compilação:** `use A;` dentro do corpo da classe COPIA campos e métodos do trait para dentro dela, pela mesma máquina de layout (offset/alinhamento) do `class`. Não há vtable própria, itab, nem despacho dinâmico envolvido.

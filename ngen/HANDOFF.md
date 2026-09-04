@@ -28,6 +28,9 @@ D213, D214** do `DECISION_LOG.md`. Leia-as — são leis, não sugestões.
 - **D197 — não regrida memória ao surfacear:** o que era view/reinterpret
   (zero-cópia) continua view. Surfacear um bypass-de-memória como fn-que-copia
   é regressão.
+- **NADA DE `Variant` nesta versão teko-mc (dono 2026-09-04, D217).** Não se ensina
+  união dinâmica/valor etiquetado em runtime; tipos são estáticos e conhecidos pelo
+  oráculo. Se um construto "pedir" Variant, é fork — parar e perguntar.
 - **Forward-only, sem PR.** Dreno para `fix/retirement` por cherry-pick.
 - **Base-lock antes de trabalhar:** parta de `origin/fix/retirement`, confirme
   que o HEAD é de 2026-09+ e que `src/parser/ast.tks:92` diz
@@ -142,7 +145,7 @@ sobre saída do compilador ensinado. Compile sempre por `mc build DIR --config F
 Plano executável em `docs/design/plano-ngen-entrega4.md` (leia §1 descobertas medidas,
 §6 correção de rota do escopo, §7-§8 C7b/C8/C7c e a fila revista).
 
-**Landados em `fix/retirement`** (16 fixtures verdes, cada crumb com verificação
+**Landados em `fix/retirement`** (17 fixtures verdes, cada crumb com verificação
 independente e revalidação pós-cherry-pick):
 - **C0** glob do CI aceita `surface_*.tk`; erratas do handoff.
 - **C1** default de parâmetro em MÉTODO (`i64 scale(self, i64 k = 2)`), inclusive em
@@ -178,13 +181,19 @@ independente e revalidação pós-cherry-pick):
   é **erro de compilação** na instância (índice não-literal recebe guard de runtime
   `tk_ix`, emitido uma vez e só no programa que indexa).
 
-**Em voo:** **C3b** (oráculo tipa `N_BINARY`/`N_UNARY` pela regra do core `res_binary`
-e membro escalar; placeholder deferido vira símbolo inexistente → falha no link se
-nenhum pass o resolver).
+- **C3b** oráculo tipa `N_BINARY`/`N_UNARY` espelhando `res_binary` do core (usa o
+  próprio `cmp_cond`) e membro escalar (`xt_ty`); o `.` deferido vira chamada a
+  `tk_unresolved_member` — sem o pass, o `res_call` do core recusa `call to unknown
+  function` com `arquivo:linha` (antes: `INT 0` e binário errado em silêncio).
 
-**Fila (plano §9):** C3b → **C5** operadores por `pass()` e **C7c** `params`
-genérico em `N` (índice literal bloqueado em compile-time, sobre o C8) → **C6** quando
-o mc der o hook de declaração de função (pedido feito à sessão do mc, sai como `0.10.N`).
+**Em voo:** **C3c** (`.` sobre receptor ESCALAR hoje compila e dá SIGSEGV — recusar com
+`<tipo> has no members`), **C5** operadores por `pass()` (`operator+` contextual em
+`tk_member`; despacho sobre `N_BINARY` — **nunca** `syntax_infix`, que morre em
+silêncio), **C7c** `params` genérico em `N` (instância por sítio; `xs[lit]` fora do
+range é erro de compilação).
+
+**Fila:** C3c ∥ C5 ∥ C7c → **C6** quando o mc der o hook de declaração de função
+(pedido feito à sessão do mc, sai como `0.10.N`).
 
 **Dívida do C8:** `p.items[i]` sobre um receptor que o parser NÃO tipa (um parâmetro,
 que só o oráculo do `pass()` resolve) não chega ao `[` de array — cai no `[` do `params`
