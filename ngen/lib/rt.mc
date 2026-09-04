@@ -94,3 +94,34 @@ f64 tk_f64_from_bits(u64 bits) {
     st64(tk_f64_bits_scratch, bits);
     return ldf64(tk_f64_bits_scratch);
 }
+
+// the argument list of a `params` call (teko_params.mc). `total(a, b, c)` is
+// rewritten into `total(tk_va3(a, b, c), 3)`: the packer writes the arguments
+// into this buffer and hands back its address, and the callee reads them with
+// tk_va_at. Twelve slots because MAXPARAMS is twelve -- a call cannot carry a
+// thirteenth argument to pack.
+//
+// STATIC, so it does NOT reenter: the compiler refuses a variadic call nested
+// in another one, and one inside the body of a variadic function, which is
+// exactly the pair of shapes that would overwrite a list still being read. Each
+// packer delegates to the one below it, so the twelve are a single chain and
+// the offset of a slot is written in exactly one place.
+u8 tk_va_buf[96];
+
+uptr tk_va1(i64 a0) { st64(tk_va_buf, a0); return tk_va_buf; }
+uptr tk_va2(i64 a0, i64 a1) { tk_va1(a0); st64(tk_va_buf + 8, a1); return tk_va_buf; }
+uptr tk_va3(i64 a0, i64 a1, i64 a2) { tk_va2(a0, a1); st64(tk_va_buf + 16, a2); return tk_va_buf; }
+uptr tk_va4(i64 a0, i64 a1, i64 a2, i64 a3) { tk_va3(a0, a1, a2); st64(tk_va_buf + 24, a3); return tk_va_buf; }
+uptr tk_va5(i64 a0, i64 a1, i64 a2, i64 a3, i64 a4) { tk_va4(a0, a1, a2, a3); st64(tk_va_buf + 32, a4); return tk_va_buf; }
+uptr tk_va6(i64 a0, i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) { tk_va5(a0, a1, a2, a3, a4); st64(tk_va_buf + 40, a5); return tk_va_buf; }
+uptr tk_va7(i64 a0, i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6) { tk_va6(a0, a1, a2, a3, a4, a5); st64(tk_va_buf + 48, a6); return tk_va_buf; }
+uptr tk_va8(i64 a0, i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6, i64 a7) { tk_va7(a0, a1, a2, a3, a4, a5, a6); st64(tk_va_buf + 56, a7); return tk_va_buf; }
+uptr tk_va9(i64 a0, i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6, i64 a7, i64 a8) { tk_va8(a0, a1, a2, a3, a4, a5, a6, a7); st64(tk_va_buf + 64, a8); return tk_va_buf; }
+uptr tk_va10(i64 a0, i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6, i64 a7, i64 a8, i64 a9) { tk_va9(a0, a1, a2, a3, a4, a5, a6, a7, a8); st64(tk_va_buf + 72, a9); return tk_va_buf; }
+uptr tk_va11(i64 a0, i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6, i64 a7, i64 a8, i64 a9, i64 a10) { tk_va10(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9); st64(tk_va_buf + 80, a10); return tk_va_buf; }
+uptr tk_va12(i64 a0, i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6, i64 a7, i64 a8, i64 a9, i64 a10, i64 a11) { tk_va11(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10); st64(tk_va_buf + 88, a11); return tk_va_buf; }
+
+// xs[i] of a `params` list: the i-th word of the packed buffer
+i64 tk_va_at(uptr xs, i64 i) {
+    return ld64(xs + i * 8);
+}
