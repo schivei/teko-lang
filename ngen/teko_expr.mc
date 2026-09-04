@@ -28,12 +28,14 @@ i64 tk_new() {
     uptr fl = p_file();
     p_next();                                    // the `new` word
     uptr name = p_name();                        // a type word is reserved: not T_IDENT
+    i64 gi = tk_gen_find(name);                  // `new Box<Circle, 4>`
+    p_next();
+    if (gi >= 0) name = sr_name_at(tk_gen_struct(gi));
     i64 si = tk_struct_find(name);
     if (si < 0 && tk_trait_find(name) >= 0)
         err_at2(fl, line, "teko: a trait is not a type; `new` needs a struct or a class", name);
     if (si < 0) err_at2(fl, line, "teko: unknown struct or class after `new`", name);
     if (tk_is_iface(si)) err_at2(fl, line, "teko: an interface has no object to allocate", name);
-    p_next();
     if (p_accept(K_LPAR)) p_expect(K_RPAR, "expected ) after the type name");
     tk_line = line;
     tk_file = fl;
@@ -75,6 +77,7 @@ i64 tk_fill_defaults(i64 args, i64 na, i64 np, i64 nreq, i64 d0) {
 i64 tk_field_use(i64 left, i64 fi, i64 line, uptr fl) {
     i64 fty = fd_ty_at(fi);
     i64 addr = tk_bin(K_ADD, left, tk_int(fd_off_at(fi)));
+    if (fd_nel_at(fi) > 0) return tk_array_of(addr, fi, line, fl);
     if (p_accept(K_ASSIGN)) {
         i64 v = parse_expr(0);
         tk_line = line;

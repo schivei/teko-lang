@@ -53,6 +53,8 @@
 // but never builds and never lowers, so an index this pass does not rewrite is
 // impossible to miss.
 i64 tk_bracket(i64 left) {
+    i64 x = tk_ax_find(left);                    // an ARRAY FIELD, whose length is known
+    if (x >= 0) return tk_array_index(left, x);  // here: teko_struct.mc lowers it now
     i64 line = p_line();
     uptr fl = p_file();
     i64 idx = parse_expr(0);

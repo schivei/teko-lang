@@ -36,6 +36,12 @@
 //   the N_VAR of a local of struct/class/interface type       on_stmt     (M21.5)
 //   { ... } -- every block, so the locals table has a scope   syntax_stmt (M21.5)
 //
+// What entrega 4's C8 adds -- generics with constants, by record and replay
+// (teko_generic.mc), which is what makes a bound a compile-time constant:
+//   class/struct Name<T, const N: i64> { ... }                p_skip_balanced
+//   Name<Circle, 4> x = new Name<Circle, 4>;                  p_push_source + p_subst_*
+//   T items[N]  /  x.items[i]                                 an inline array field
+//
 // Everything else in docs/design/port-teko-mc.md §3 (types/classes,
 // generics, operator overload, error-union, `service`/DI, concurrency, the
 // rest of the stdlib) is a later entrega and is not stubbed here: it does
@@ -47,6 +53,7 @@
 #include "teko_struct.mc"
 #include "teko_iface.mc"
 #include "teko_trait.mc"
+#include "teko_generic.mc"
 #include "teko_class.mc"
 #include "teko_typeof.mc"
 #include "teko_stmt.mc"

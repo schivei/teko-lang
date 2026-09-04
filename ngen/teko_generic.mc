@@ -1,0 +1,387 @@
+// teko_generic.mc -- generics with constants, by RECORD and REPLAY (entrega 4,
+// crumb C8; D215's C-like spelling, the mc's own):
+//
+//   class Box<T, const N: i64> {      nothing is declared here: the parameter
+//       T items[N];                   list is read and the rest of the
+//       i64 count;                    declaration is RECORDED, byte for byte
+//       i64 cap(self) { return N; }
+//   }
+//
+//   Box<Circle, 4> b = new Box<Circle, 4>;    -> class Box__Circle__4 { ... }
+//
+// The mechanism is the core's, and this file adds no machinery to it
+// (mc/docs/guide/30-teaching.md § record and replay): `p_skip_balanced` records
+// the body without parsing it, `p_subst_name`/`p_subst_int` bind the parameters
+// to the arguments of ONE instantiation, `p_push_source` parses the result under
+// a name that says where it came from, and `p_resplit_punct` takes the `>>` of
+// `Holder<Box<Circle, 2>>` apart -- the one longest-match decision a parser can
+// undo.
+//
+// Two consequences, and they are the reason the dono asked for this shape:
+//
+//   1. The body is INLINE in every instance -- it is re-parsed per instance, so
+//      `T` is a real type and `N` is a real integer literal, with no run-time
+//      indirection to stand in for either.
+//   2. The CONSTANT decides at compile time. `items[3]` inside `Box<Circle, 2>`
+//      is `teko: index 3 is past the end of items[2]` at the line that wrote it
+//      (teko_struct.mc's tk_ax_index) -- no analysis, no run-time guard, because
+//      by then the bound is a literal.
+//
+// An instance is keyed by (name, arguments) and generated ONCE: the mangled name
+// `Box__Circle__4` follows the same suffix convention overloading already uses,
+// and the instance is registered by the very `type_new` a plain `class` goes
+// through -- so `.`, `new`, the vtable and interfaces cost nothing extra.
+//
+// Where an instance is BORN: at its first use as a declared type (a local, a
+// field, a parameter, a return type) or after `new`. The generic's own name is
+// registered with `syntax_stmt`, which is what lets `Box<Circle, 4> b = ...;`
+// be read at all -- `Box` alone is not a type, so the core's own declaration
+// grammar would stop at it (`examples/lang` reaches the same position the same
+// way, through its `lg_declstmt`).
+
+#define TK_MAXGEN   16                // generic declarations in one source
+#define TK_MAXGP    4                 // parameters of one generic
+#define TK_MAXGARG  64                // parameters, summed across all of them
+#define TK_MAXINST  32                // instances generated in one source
+
+uptr gn_name[TK_MAXGEN];
+i64  gn_kind[TK_MAXGEN];              // TK_KSTRUCT or TK_KCLASS
+uptr gn_text[TK_MAXGEN];              // the recorded declaration, `>` to `}`
+i64  gn_len[TK_MAXGEN];
+i64  gn_p0[TK_MAXGEN];                // slice [p0, p0+np) of the parameter table
+i64  gn_np[TK_MAXGEN];
+i64  tk_ngen = 0;
+
+uptr gp_name[TK_MAXGARG];
+i64  gp_const[TK_MAXGARG];            // 1 for `const N: i64`, 0 for a type parameter
+i64  tk_ngp = 0;
+
+uptr in_name[TK_MAXINST];             // the mangled names already generated
+i64  tk_ninst = 0;
+
+i64 tk_gen_declstmt();
+uptr tk_gen_targs(i64 gi);
+
+// ---- table accessors (no raw ld64/st64 outside this section) ----
+uptr gn_name_at(i64 i)  { return ld64(gn_name + i * 8); }
+i64  gn_kind_at(i64 i)  { return ld64(gn_kind + i * 8); }
+uptr gn_text_at(i64 i)  { return ld64(gn_text + i * 8); }
+i64  gn_len_at(i64 i)   { return ld64(gn_len + i * 8); }
+i64  gn_p0_at(i64 i)    { return ld64(gn_p0 + i * 8); }
+i64  gn_np_at(i64 i)    { return ld64(gn_np + i * 8); }
+uptr gp_name_at(i64 i)  { return ld64(gp_name + i * 8); }
+i64  gp_const_at(i64 i) { return ld64(gp_const + i * 8); }
+uptr in_name_at(i64 i)  { return ld64(in_name + i * 8); }
+
+void set_gn_name_at(i64 i, uptr v)  { st64(gn_name + i * 8, v); }
+void set_gn_kind_at(i64 i, i64 v)   { st64(gn_kind + i * 8, v); }
+void set_gn_text_at(i64 i, uptr v)  { st64(gn_text + i * 8, v); }
+void set_gn_len_at(i64 i, i64 v)    { st64(gn_len + i * 8, v); }
+void set_gn_p0_at(i64 i, i64 v)     { st64(gn_p0 + i * 8, v); }
+void set_gn_np_at(i64 i, i64 v)     { st64(gn_np + i * 8, v); }
+void set_gp_name_at(i64 i, uptr v)  { st64(gp_name + i * 8, v); }
+void set_gp_const_at(i64 i, i64 v)  { st64(gp_const + i * 8, v); }
+void set_in_name_at(i64 i, uptr v)  { st64(in_name + i * 8, v); }
+
+i64 tk_gen_find(uptr name) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_ngen) break;
+        if (str_eq(gn_name_at(i), name)) return i;
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+i64 tk_inst_find(uptr mang) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_ninst) break;
+        if (str_eq(in_name_at(i), mang)) return i;
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+void tk_inst_add(uptr mang) {
+    if (tk_ninst == TK_MAXINST) err_at2(tk_file, tk_line, "teko: too many generic instances", mang);
+    set_in_name_at(tk_ninst, mang);
+    tk_ninst = tk_ninst + 1;
+}
+
+// the lexeme of the current token, whatever its class: `const` is a word this
+// port reserved (teko_stmt.mc's honest-stop), so tk_kw's T_IDENT test would
+// never see it inside a generic parameter list
+i64 tk_word_is(uptr w) { return str_eq(p_name(), w); }
+
+// `>` closing a list, where the lexer may have built `>>` by longest match --
+// the one decision p_resplit_punct exists to undo (`Holder<Box<Circle, 2>>`)
+void tk_gen_gt(uptr msg) {
+    if (p_id() == K_SHR) p_resplit_punct(1);
+    if (p_id() != K_GT) err_at(p_file(), p_line(), msg);
+}
+
+// ---- recording a declaration ----
+
+// `<T, const N: i64>`: the names the replay substitutes, and which of them
+// carries an integer instead of a type
+void tk_gen_params(i64 gi) {
+    p_expect(K_LT, "expected < in the generic parameter list");
+    i64 n = 0;
+    loop {
+        if (n == TK_MAXGP) err_at(tk_file, tk_line, "teko: too many generic parameters");
+        if (tk_ngp == TK_MAXGARG) err_at(tk_file, tk_line, "teko: too many generic parameters");
+        i64 c = 0;
+        if (tk_word_is("const")) { p_next(); c = 1; }
+        set_gp_name_at(tk_ngp, p_ident());
+        set_gp_const_at(tk_ngp, c);
+        tk_ngp = tk_ngp + 1;
+        n = n + 1;
+        if (c) {
+            p_expect(K_COLON, "expected : after a const generic parameter");
+            if (p_type() != TY_I64)
+                err_at(p_file(), p_line(), "teko: a const generic parameter is an `i64`");
+        }
+        if (!p_accept(K_COMMA)) break;
+    }
+    set_gn_np_at(gi, n);
+    tk_gen_gt("expected > to close the generic parameter list");
+    p_next();                                    // the `>`
+}
+
+// from the `>` to the body's `{`: the `: Base, Iface` list travels inside the
+// recorded text, so the instance goes through the same tk_class that read it
+void tk_gen_to_body(uptr name) {
+    loop {
+        if (p_id() == K_LBRACE) break;
+        if (p_id() == T_EOF) err_at2(tk_file, tk_line, "teko: unterminated generic", name);
+        p_next();
+    }
+}
+
+// `class Name<...> ...` / `struct Name<...> ...`: the parameter list is parsed,
+// everything after it is RECORDED, and no declaration is produced. The name
+// becomes a statement word, which is the position `Box<Circle, 4> b;` arrives in.
+void tk_gen_record(uptr name, i64 kind) {
+    if (tk_ngen == TK_MAXGEN) err_at2(tk_file, tk_line, "teko: too many generic declarations", name);
+    if (tk_gen_find(name) >= 0) err_at2(tk_file, tk_line, "teko: duplicate generic", name);
+    if (tk_struct_find(name) >= 0) err_at2(tk_file, tk_line, "teko: the name is already a type", name);
+    i64 gi = tk_ngen;
+    set_gn_name_at(gi, name);
+    set_gn_kind_at(gi, kind);
+    set_gn_p0_at(gi, tk_ngp);
+    tk_gen_params(gi);
+    uptr start = p_start();                      // the `:` or the `{`
+    tk_gen_to_body(name);
+    i64 blen = 0;
+    uptr body = p_skip_balanced(K_LBRACE, K_RBRACE, &blen);
+    set_gn_text_at(gi, start);
+    set_gn_len_at(gi, body + blen - start);
+    tk_ngen = tk_ngen + 1;
+    p_accept(K_SEMI);                            // a C programmer's trailing ;
+    syntax_stmt(name, &tk_gen_declstmt);
+}
+
+// ---- instantiating ----
+
+// `Box` and the argument lexemes in source order: the generation order is a
+// function of first use and of nothing else
+uptr tk_gen_mangle(uptr base, uptr args, i64 n) {
+    uptr s = base;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        s = tk_join3(s, "__", ld64(args + i * 8));
+        i = i + 1;
+    }
+    return s;
+}
+
+// "Box__Circle__4 instantiated from prog.tk:27" -- what err_at prints for every
+// error inside the instance, so a bad body is reported where it was ASKED for
+uptr tk_gen_frame(uptr mang, uptr fl, i64 line) {
+    return tk_join3(mang, " instantiated from ", tk_join3(fl, ":", tk_num(line)));
+}
+
+// `class Box__Circle__4 ` + the recorded declaration + `;`. The trailing `;` is
+// the instance's own: without it the p_accept(K_SEMI) that closes a type body
+// would reach past the end of the pushed source and eat the caller's.
+uptr tk_gen_text(i64 gi, uptr mang, uptr plen) {
+    uptr head = tk_join3("struct ", mang, " ");
+    if (gn_kind_at(gi) == TK_KCLASS) head = tk_join3("class ", mang, " ");
+    i64 hl = cstrlen(head);
+    i64 bl = gn_len_at(gi);
+    uptr d = xalloc(hl + bl + 2);
+    mem_copy(d, head, hl);
+    mem_copy(d + hl, gn_text_at(gi), bl);
+    st8(d + hl + bl, ';');
+    st8(d + hl + bl + 1, 0);
+    st64(plen, hl + bl + 1);
+    return d;
+}
+
+// the substitutions of ONE instantiation: a type parameter becomes a name the
+// token table resolves (so `T` may become `i64` or `Box__Circle__2`), and a
+// const parameter becomes a `T_INT` that folds like any literal
+void tk_gen_bind(i64 gi, uptr args, uptr vals, i64 n) {
+    p_subst_reset();
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 p = gn_p0_at(gi) + i;
+        if (gp_const_at(p)) p_subst_int(gp_name_at(p), ld64(vals + i * 8));
+        else                p_subst_name(gp_name_at(p), ld64(args + i * 8));
+        i = i + 1;
+    }
+}
+
+// pushes the instance as a second source and drives the declarations it produces
+// into the unit. The caller sits on the closing `>`, which the p_next() below
+// spends -- the lookahead contract of p_push_source.
+//
+// The scratch a type declaration keeps while it is being read is SAVED across
+// the push: an instantiation may sit inside another type's body (a field of
+// generic type, a local in a method), and the nested tk_class would otherwise
+// reset the outer one's queued traits and its conformance list.
+void tk_gen_replay(i64 gi, uptr mang, uptr args, uptr vals, i64 n, uptr fl, i64 line) {
+    i64 s_line = tk_line;
+    uptr s_file = tk_file;
+    i64 s_own = tk_own_methods;
+    i64 s_nconf = tk_nconf;
+    i64 s_ntu = tk_ntu;
+    i64 s_nud = tk_nud;
+    i64 s_tu[TK_MAXUSE];
+    i64 s_ud[TK_MAXUSE];
+    i64 i = 0;
+    loop {
+        if (i >= TK_MAXUSE) break;
+        st64(s_tu + i * 8, tu_tr_at(i));
+        st64(s_ud + i * 8, ud_tr_at(i));
+        i = i + 1;
+    }
+    tk_inst_add(mang);
+    i64 len = 0;
+    uptr text = tk_gen_text(gi, mang, &len);
+    tk_gen_bind(gi, args, vals, n);
+    i64 d0 = p_depth();
+    p_push_source(tk_gen_frame(mang, fl, line), text, len);
+    p_next();                                    // spends the `>` the caller sat on
+    loop {
+        if (p_depth() == d0) break;
+        top_add(parse_top());
+    }
+    tk_line = s_line;
+    tk_file = s_file;
+    tk_own_methods = s_own;
+    tk_nconf = s_nconf;
+    tk_ntu = s_ntu;
+    tk_nud = s_nud;
+    i = 0;
+    loop {
+        if (i >= TK_MAXUSE) break;
+        set_tu_tr_at(i, ld64(s_tu + i * 8));
+        set_ud_tr_at(i, ld64(s_ud + i * 8));
+        i = i + 1;
+    }
+}
+
+// one type argument, returned as the LEXEME that is both substituted and
+// mangled. A generic argument instantiates FIRST, so `Box__Circle__2` is a type
+// word by the time `Holder` binds `T` to it.
+uptr tk_gen_read_targ() {
+    uptr nm = p_name();
+    i64 g = tk_gen_find(nm);
+    if (g >= 0) {
+        p_next();
+        return tk_gen_targs(g);
+    }
+    if (p_id() == T_IDENT)
+        err_at2(p_file(), p_line(), "teko: unknown type as a generic argument", nm);
+    return type_name(p_type());
+}
+
+uptr tk_gen_arity(i64 gi) {
+    return tk_join3(tk_join3("teko: `", gn_name_at(gi), "` takes "),
+                    tk_num(gn_np_at(gi)), " generic arguments");
+}
+
+// `< a, b >` for generic `gi`. On return the parser is PAST the `>`: a memoized
+// instance spends it here, a new one spends it in the replay's push.
+uptr tk_gen_targs(i64 gi) {
+    i64 line = p_line();
+    uptr fl = p_file();
+    uptr args[TK_MAXGP];
+    i64  vals[TK_MAXGP];
+    i64 n = gn_np_at(gi);
+    p_expect(K_LT, "expected < after a generic type name");
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        if (i > 0) {
+            if (!p_accept(K_COMMA)) err_at(p_file(), p_line(), tk_gen_arity(gi));
+        }
+        st64(vals + i * 8, 0);
+        if (gp_const_at(gn_p0_at(gi) + i)) {
+            if (p_id() != T_INT)
+                err_at(p_file(), p_line(), "teko: a const generic argument is an integer literal");
+            st64(vals + i * 8, p_val());
+            st64(args + i * 8, tk_num(p_val()));
+            p_next();
+        } else {
+            st64(args + i * 8, tk_gen_read_targ());
+        }
+        i = i + 1;
+    }
+    if (p_id() == K_COMMA) err_at(p_file(), p_line(), tk_gen_arity(gi));
+    tk_gen_gt(tk_gen_arity(gi));
+    uptr mang = tk_gen_mangle(gn_name_at(gi), args, n);
+    if (tk_inst_find(mang) >= 0) {
+        p_next();                                // memoized: nothing to generate
+        return mang;
+    }
+    tk_gen_replay(gi, mang, args, vals, n, fl, line);
+    return mang;
+}
+
+// the type table row of `Name<args>`, instantiating it on first use
+i64 tk_gen_struct(i64 gi) {
+    i64 line = p_line();
+    uptr fl = p_file();
+    uptr mang = tk_gen_targs(gi);
+    i64 si = tk_struct_find(mang);
+    if (si < 0) err_at2(fl, line, "teko: the generic produced no type", mang);
+    return si;
+}
+
+// a type word, or a generic instantiated where it is first named: the field
+// type, the return type and the parameter type of a member all read one
+i64 tk_gen_ty() {
+    i64 gi = tk_gen_find(p_name());
+    if (gi < 0) return p_type();
+    p_next();
+    return sr_ty_at(tk_gen_struct(gi));
+}
+
+// `Box<Circle, 4> b;` / `Box<Circle, 4> b = e;` -- the core's own declaration,
+// rebuilt around an instantiation, because `Box` is not a type word and its
+// arguments are not part of the core's declaration grammar. The N_VAR that
+// comes out is the one tk_on_stmt reads back, so the local is typed exactly as
+// a plainly declared one is.
+i64 tk_gen_declstmt() {
+    i64 line = p_line();
+    uptr fl = p_file();
+    uptr nm = p_name();
+    i64 gi = tk_gen_find(nm);
+    if (gi < 0) err_at2(fl, line, "teko: not a generic type", nm);
+    p_next();
+    i64 ty = sr_ty_at(tk_gen_struct(gi));
+    uptr vn = p_ident();
+    if (p_id() == K_LBRACK)
+        err_at2(fl, line, "teko: an array of a generic instance is not taught yet", vn);
+    i64 init = 0;
+    if (p_accept(K_ASSIGN)) init = parse_expr(0);
+    p_expect(K_SEMI, "expected ; after declaration");
+    tk_line = line;
+    tk_file = fl;
+    return tk_var(ty, vn, init);
+}

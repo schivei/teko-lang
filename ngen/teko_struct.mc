@@ -36,6 +36,13 @@
 #define TK_MAXFIELD  256              // fields, summed across all of them
 #define TK_MAXLOCAL  256              // locals of struct/class type seen so far
 #define TK_MAXXT     256              // expressions whose type this module knows
+#define TK_MAXAX     128              // array-field addresses this module handed out
+
+// teko_generic.mc is included after this file, because a generic body is
+// re-parsed by the very machine below; these two are what the declaration of a
+// type has to ask it before there is a type at all
+i64 tk_gen_find(uptr name);
+void tk_gen_record(uptr name, i64 kind);
 
 // what a row of the type table declares: the three share the table because a
 // value of any of them is one 8-byte reference, and `.` has to tell them apart
@@ -61,7 +68,14 @@ i64  tk_nstruct = 0;
 uptr fd_name[TK_MAXFIELD];
 i64  fd_off[TK_MAXFIELD];
 i64  fd_ty[TK_MAXFIELD];
+i64  fd_nel[TK_MAXFIELD];             // elements of an INLINE array field, 0 for a scalar
 i64  tk_nfield = 0;
+
+i64  ax_node[TK_MAXAX];               // the address node of an array field, and its shape
+i64  ax_ty[TK_MAXAX];
+i64  ax_nel[TK_MAXAX];
+uptr ax_name[TK_MAXAX];
+i64  tk_nax = 0;
 
 uptr lv_name[TK_MAXLOCAL];            // a local the CORE declared, seen via on_stmt
 i64  lv_str[TK_MAXLOCAL];
@@ -93,6 +107,11 @@ i64  sr_ni_at(i64 i)    { return ld64(sr_ni + i * 8); }
 uptr fd_name_at(i64 i)  { return ld64(fd_name + i * 8); }
 i64  fd_off_at(i64 i)   { return ld64(fd_off + i * 8); }
 i64  fd_ty_at(i64 i)    { return ld64(fd_ty + i * 8); }
+i64  fd_nel_at(i64 i)   { return ld64(fd_nel + i * 8); }
+i64  ax_node_at(i64 i)  { return ld64(ax_node + i * 8); }
+i64  ax_ty_at(i64 i)    { return ld64(ax_ty + i * 8); }
+i64  ax_nel_at(i64 i)   { return ld64(ax_nel + i * 8); }
+uptr ax_name_at(i64 i)  { return ld64(ax_name + i * 8); }
 uptr lv_name_at(i64 i)  { return ld64(lv_name + i * 8); }
 i64  lv_str_at(i64 i)   { return ld64(lv_str + i * 8); }
 i64  xt_node_at(i64 i)  { return ld64(xt_node + i * 8); }
@@ -118,6 +137,11 @@ i64 tk_is_iface(i64 si) { return sr_kind_at(si) == TK_KIFACE; }
 void set_fd_name_at(i64 i, uptr v)  { st64(fd_name + i * 8, v); }
 void set_fd_off_at(i64 i, i64 v)    { st64(fd_off + i * 8, v); }
 void set_fd_ty_at(i64 i, i64 v)     { st64(fd_ty + i * 8, v); }
+void set_fd_nel_at(i64 i, i64 v)    { st64(fd_nel + i * 8, v); }
+void set_ax_node_at(i64 i, i64 v)   { st64(ax_node + i * 8, v); }
+void set_ax_ty_at(i64 i, i64 v)     { st64(ax_ty + i * 8, v); }
+void set_ax_nel_at(i64 i, i64 v)    { st64(ax_nel + i * 8, v); }
+void set_ax_name_at(i64 i, uptr v)  { st64(ax_name + i * 8, v); }
 void set_lv_name_at(i64 i, uptr v)  { st64(lv_name + i * 8, v); }
 void set_lv_str_at(i64 i, i64 v)    { st64(lv_str + i * 8, v); }
 void set_xt_node_at(i64 i, i64 v)   { st64(xt_node + i * 8, v); }
@@ -155,6 +179,24 @@ uptr tk_join(uptr a, uptr b) {
 }
 
 uptr tk_join3(uptr a, uptr b, uptr c) { return tk_join(tk_join(a, b), c); }
+
+// an integer as the decimal text a name and a message are built from: the
+// const argument of a generic travels as a LEXEME, so `Box__Circle__4` and the
+// substitution that produced it come from one and the same spelling
+uptr tk_num(i64 v) {
+    u8 tmp[24];
+    i64 neg = 0;
+    if (v < 0) { neg = 1; v = 0 - v; }
+    i64 i = 24;
+    loop {
+        i = i - 1;
+        st8(tmp + i, '0' + v % 10);
+        v = v / 10;
+        if (v == 0) break;
+    }
+    if (neg) { i = i - 1; st8(tmp + i, '-'); }
+    return xstrdup(tmp + i, 24 - i);
+}
 
 // Point         ->  point_new       (the generated constructor)
 uptr tk_ctor_name(uptr name) { return tk_join(tk_case(name, 0), "_new"); }
@@ -239,6 +281,21 @@ i64 tk_func(i64 ty, uptr name, i64 params, i64 body) {
     set_nd_a(f, params);
     set_nd_b(f, body);
     return f;
+}
+
+i64 tk_str(uptr s) {
+    i64 n = tk_nd(N_STR);
+    set_nd_name(n, s);
+    set_nd_val(n, cstrlen(s));
+    set_nd_type(n, TY_UPTR);
+    return n;
+}
+
+i64 tk_if(i64 cond, i64 then) {
+    i64 n = tk_nd(N_IF);
+    set_nd_a(n, cond);
+    set_nd_b(n, then);
+    return n;
 }
 
 // a global with no initializer: it goes to __bss, already zeroed
@@ -413,11 +470,12 @@ void tk_xt_add(i64 n, i64 si, i64 pure) {
 
 // appends the field and extends the owner's slice, so a method parsed further
 // down the same body already sees the fields declared above it
-void tk_field_add(i64 si, uptr name, i64 off, i64 ty) {
+void tk_field_add(i64 si, uptr name, i64 off, i64 ty, i64 nel) {
     if (tk_nfield == TK_MAXFIELD) err_at(tk_file, tk_line, "teko: too many fields");
     set_fd_name_at(tk_nfield, name);
     set_fd_off_at(tk_nfield, off);
     set_fd_ty_at(tk_nfield, ty);
+    set_fd_nel_at(tk_nfield, nel);
     tk_nfield = tk_nfield + 1;
     set_sr_count_at(si, tk_nfield - sr_first_at(si));
 }
@@ -498,6 +556,8 @@ i64 tk_ctor(uptr name, i64 ty, i64 size, i64 install) {
 // keyword rather than as T_IDENT -- without this guard the error would come out
 // as an unexplained "name expected".
 uptr tk_newname(uptr what) {
+    if (tk_gen_find(p_name()) >= 0)
+        err_at2(p_file(), p_line(), "teko: the name is already a generic", p_name());
     if (p_id() == T_IDENT) return p_ident();
     if (alias_find(p_id()) >= 0)
         err_at2(p_file(), p_line(), "teko: the name is already a type", p_name());
@@ -505,17 +565,130 @@ uptr tk_newname(uptr what) {
     return 0;
 }
 
+// `[4]` after a field name: an INLINE array of that many elements, whose size
+// the instantiation of a generic fixes (`T items[N]`, N substituted by
+// p_subst_int). 0 when the field is a scalar.
+i64 tk_field_dim() {
+    if (!p_accept(K_LBRACK)) return 0;
+    if (p_id() != T_INT)
+        err_at(p_file(), p_line(), "teko: an array field size is an integer literal");
+    i64 n = p_val();
+    if (n < 1) err_at(p_file(), p_line(), "teko: an array field size is positive");
+    p_next();
+    p_expect(K_RBRACK, "expected ] after the array field size");
+    return n;
+}
+
 // places `m`, of type `fty`, at or after `off` and returns the next offset:
 // the natural alignment of the field's own width, the `#define` of the offset,
-// and the row in the field table
-i64 tk_field_place(i64 si, uptr tname, uptr m, i64 fty, i64 off) {
+// and the row in the field table. `nel` elements when the field is an array,
+// laid out inline, so the object grows with the constant the generic was
+// instantiated with.
+i64 tk_field_place(i64 si, uptr tname, uptr m, i64 fty, i64 nel, i64 off) {
     if (fty == TY_VOID) err_at2(tk_file, tk_line, "teko: field of type void", m);
     if (tk_field_find(si, m) >= 0) err_at2(tk_file, tk_line, "teko: duplicate field", m);
     i64 w = type_width(fty);
     off = (off + w - 1) & ~(w - 1);
     def_add(tk_cname(tname, m), off, tk_line, tk_file);
-    tk_field_add(si, m, off, fty);
+    tk_field_add(si, m, off, fty, nel);
+    if (nel > 0) return off + w * nel;
     return off + w;
+}
+
+// ---- an array field, and the `[` that is the only way to reach one ----
+void tk_ax_add(i64 n, i64 ty, i64 nel, uptr name) {
+    if (tk_nax == TK_MAXAX) err_at(tk_file, tk_line, "teko: too many array-field accesses");
+    set_ax_node_at(tk_nax, n);
+    set_ax_ty_at(tk_nax, ty);
+    set_ax_nel_at(tk_nax, nel);
+    set_ax_name_at(tk_nax, name);
+    tk_nax = tk_nax + 1;
+}
+
+i64 tk_ax_find(i64 n) {
+    i64 i = tk_nax - 1;
+    loop {
+        if (i < 0) break;
+        if (ax_node_at(i) == n) return i;
+        i = i - 1;
+    }
+    return 0 - 1;
+}
+
+// `p.items` is the ADDRESS of the array, tagged with the element type and the
+// length so that `[` can bound-check it. The array itself is not a value: there
+// is nothing for `p.items` alone, or for `p.items = e`, to be.
+i64 tk_array_of(i64 addr, i64 fi, i64 line, uptr fl) {
+    if (p_id() == K_ASSIGN)
+        err_at2(fl, line, "teko: an array field is assigned one element at a time", fd_name_at(fi));
+    if (p_id() != K_LBRACK)
+        err_at2(fl, line, "teko: an array field is read one element at a time", fd_name_at(fi));
+    tk_ax_add(addr, fd_ty_at(fi), fd_nel_at(fi), fd_name_at(fi));
+    return addr;
+}
+
+uptr tk_ax_msg(i64 k, uptr what, uptr name, i64 nel) {
+    return tk_join3(tk_join3("teko: index ", tk_num(k), what),
+                    name, tk_join3("[", tk_num(nel), "]"));
+}
+
+// i64 tk_ix(i64 i, i64 n) { if (i < 0) rt_panic(...); if (i >= n) rt_panic(...);
+// return i; } -- emitted ONCE, into the program, and only when a program really
+// indexes an array field with something other than a literal. A program that
+// does not is left with exactly the tree it had, which is what the no-op proof
+// of a taught construct means.
+i64 tk_ix_emitted = 0;
+
+void tk_ix_emit() {
+    if (tk_ix_emitted) return;
+    tk_ix_emitted = 1;
+    i64 low = tk_if(tk_bin(K_LT, tk_id("i"), tk_int(0)),
+                    tk_stmt(tk_call("rt_panic", tk_str("index below zero into an array field"))));
+    i64 high = tk_if(tk_bin(K_GE, tk_id("i"), tk_id("n")),
+                     tk_stmt(tk_call("rt_panic", tk_str("index past the end of an array field"))));
+    i64 body = tk_blk(list_append(list_append(low, high), tk_ret(tk_id("i"))));
+    i64 params = list_append(param_new(TY_I64, "i"), param_new(TY_I64, "n"));
+    top_add(tk_func(TY_I64, "tk_ix", params, body));
+}
+
+// A LITERAL index is decided here, against the constant the instantiation
+// fixed -- which is the whole point of a generic taking a `const N`. Anything
+// else is checked at run time by tk_ix, so no index ever reads past the object
+// in silence.
+i64 tk_ax_index(i64 idx, i64 nel, uptr name, i64 line, uptr fl) {
+    if (nd_kind(idx) != N_INT) {
+        tk_ix_emit();
+        return tk_call2("tk_ix", idx, tk_int(nel));
+    }
+    i64 k = nd_val(idx);
+    if (k < 0) err_at(fl, line, tk_ax_msg(k, " is before the start of ", name, nel));
+    if (k >= nel) err_at(fl, line, tk_ax_msg(k, " is past the end of ", name, nel));
+    return idx;
+}
+
+// `p.items[i]` and `p.items[i] = e`: the load or the store of the element's own
+// width. `=` is read here for the same reason tk_field_use reads it -- it is not
+// in the core's infix table, so the Pratt loop has already stopped.
+i64 tk_array_index(i64 addr, i64 x) {
+    i64 line = p_line();
+    uptr fl = p_file();
+    i64 ety = ax_ty_at(x);
+    i64 idx = parse_expr(0);
+    p_expect(K_RBRACK, "expected ] after the index");
+    tk_line = line;
+    tk_file = fl;
+    i64 k = tk_ax_index(idx, ax_nel_at(x), ax_name_at(x), line, fl);
+    i64 at = tk_bin(K_ADD, addr, tk_bin(K_MUL, k, tk_int(type_width(ety))));
+    if (p_accept(K_ASSIGN)) {
+        i64 v = parse_expr(0);
+        tk_line = line;
+        tk_file = fl;
+        return tk_call2(tk_stn(ety), at, v);
+    }
+    i64 r = tk_call(tk_ldn(ety), at);
+    i64 es = tk_struct_by_ty(ety);
+    if (es >= 0) tk_xt_add(r, es, 1);
+    return r;
 }
 
 // the whole object is aligned to 8, and exists even with no field at all
@@ -533,6 +706,10 @@ void tk_struct() {
     uptr head_file = tk_file;
     p_next();                                    // the `struct` word
     uptr name = tk_newname("struct");
+    if (p_id() == K_LT) {                        // struct Name<T, const N: i64>
+        tk_gen_record(name, TK_KSTRUCT);         // recorded, not declared
+        return;
+    }
     i64 ty = type_new(name, 8, 8, TK_INT);       // a field of its own type parses
     i64 si = tk_type_add(name, ty, 0 - 1, TK_KSTRUCT);   // no base, no vtable: offset 0
     tk_use_reset();
