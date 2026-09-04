@@ -97,3 +97,36 @@ montar cada `N_PARAM`, com o parser no token seguinte, podendo consumir o
 `= expr` e devolver o `N_PARAM`. Estimativa do architect: ~10 linhas no core, na
 mesma forma dos hooks existentes. Alternativa mais estreita: o core aceitar
 `= <constante>` e publicá-la por `decl_param_default(d, i)`.
+
+## 6. Erratas e correção de rota (2026-09-04, depois de C1-C3)
+
+**Errata do §2:** o corpo de `struct` **não** era parseado por `tk_member` — só
+lia campos; `struct` não tinha método. O C1 puxou a correção para dentro do crumb
+(lei do não-deferir): `struct` passa pela mesma máquina de membros do `class`, e
+`virtual`/`override`/`use` num `struct` são recusados por nome.
+
+**Dois defeitos silenciosos da entrega 3, expostos pelo C3** (medidos; código
+errado, não mensagem ruim):
+1. **Shadowing:** `i64 report(Shape s) { if (1) { Ledger s = new Ledger; }
+   return s.area(); }` chama `ledger_area` sobre um `Shape` — a tabela `tk_local`
+   (`ngen/teko_struct.mc:392`) é global e sem escopo, o `s` do bloco interno vaza.
+2. **Resolução por nome único:** `a.extra()` com `a: A`, quando só `B` declara
+   `extra`, compila e chama `b_extra(a)`. O correto é erro de compilação.
+
+**Correção de rota — pelo mecanismo do mc, não por tabela própria.** O `ngen`
+reinventou (mal) o que a doc e o `lx` já ensinam: rastreio de escopo é
+`syntax_stmt("{")` (o módulo é dono de todo bloco — `mc/docs/reference/hooks.md:288-289`,
+`examples/lang/lang_stmt.mc` `lg_block`), `p_blockdepth()` para a profundidade e
+`on_jump` (M31) para as arestas de saída. Logo:
+- a tabela de locais ganha **escopo por bloco** por essa via — empilha na entrada
+  do `{`, desempilha na saída — e o shadowing resolve **no parse**, primeira
+  linha de defesa; **não** se "defere todo `.` ao `pass()`" como paliativo;
+- com o tipo do receptor conhecido, a busca de membro é **restrita àquele tipo**
+  (e à cadeia de base/traits/interfaces dele) — nome que o tipo não declara é
+  erro; o por-nome-único só sobrevive para receptor genuinamente sem tipo, e só
+  até o oráculo (C3) responder;
+- o oráculo do C3 fica para o que o parse **não alcança** (parâmetro de função de
+  topo), como desenhado.
+Esta correção entra como **crumb próprio, antes de C4/C5** — eles constroem em cima
+da mesma resolução. Prova: os dois programas acima (o 1º sai 1; o 2º é rejeitado)
+mais as fixtures existentes intactas e a prova de no-op do C3 preservada.
