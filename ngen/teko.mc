@@ -1,8 +1,9 @@
 // teko.mc -- teko taught to `mc` from outside `src/`, in `ngen/` (not
-// `mc/examples/`, per the dono's 2026-09-04 ruling): the first entrega, a
-// vertical slice proving the pipeline end to end. Not compiled as a program:
-// `mc build` links this INSIDE a compiler (`#include <mc/core>` plus this
-// file, docs/build.md § [compiler]) that then compiles a `.tk` source.
+// `mc/examples/`, per the dono's 2026-09-04 ruling): entrega 2 teaches the
+// primitives on top of entrega 1's vertical slice. Not compiled as a
+// program: `mc build` links this INSIDE a compiler (`#include <mc/core>`
+// plus this file, docs/build.md § [compiler]) that then compiles a `.tk`
+// source.
 //
 // D213 (dono 2026-09-04): reuse the mc core's own syntax; teach only the
 // DELTA. `examples/lang` does not reimplement expressions/statements/types
@@ -11,24 +12,32 @@
 // the whole Pratt grammar) IS the teko-over-mc spelling here; nothing in
 // this file re-teaches it.
 //
-// What this entrega actually adds:
+// What entrega 1 added:
 //   bool                                                    type_alias  (M12)
 //   class interface namespace import using type              syntax      (M12, honest-stop)
 //   var const match when                                     syntax_stmt (M12, honest-stop)
 //   new                                                       syntax_expr (M21, honest-stop)
 //
-// Everything else in docs/design/port-teko-mc.md §3 (generics, operator
-// overload, error-union, `service`/DI, concurrency, the stdlib) is a later
-// entrega and is not stubbed here: it does not yet have a reserved word to
-// stop on, so it simply is not part of the language this compiler accepts.
+// What entrega 2 (this one) adds -- docs/design/port-teko-mc.md §3, all
+// `type_alias`/library wiring, no new syntax:
+//   char isize usize byte ptr str                            type_alias  (M12)
+//   f32 f64 (+ ldf64/ldf32/stf64/stf32/sqrt_f64/fabs/fmin/fmax) <float> (M24)
+//
+// Everything else in docs/design/port-teko-mc.md §3 (types/classes,
+// generics, operator overload, error-union, `service`/DI, concurrency, the
+// rest of the stdlib) is a later entrega and is not stubbed here: it does
+// not yet have a reserved word to stop on, so it simply is not part of the
+// language this compiler accepts.
 
 #include "teko_type.mc"
+#include "teko_float.mc"
 #include "teko_class.mc"
 #include "teko_stmt.mc"
 #include "teko_expr.mc"
 
 void user_init() {
     tk_types_init();
+    tk_float_init();
 
     syntax("class",     &tk_stop_class);
     syntax("type",      &tk_stop_type);
