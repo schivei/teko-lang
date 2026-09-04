@@ -385,7 +385,7 @@ i64 tk_params(uptr pnp, uptr pnreq, i64 extra) {
     i64 np = 0;
     loop {
         if (!p_accept(K_COMMA)) break;
-        i64 ty = p_type();
+        i64 ty = tk_gen_ty();
         if (ty == TY_VOID) err_at(p_file(), p_line(), "teko: parameter of type void");
         head = list_append(head, param_new(ty, p_ident()));
         np = np + 1;
@@ -532,15 +532,16 @@ i64 tk_member(i64 ci, uptr name, i64 off, i64 ti) {
     else if (tk_kw("override")) { kind = 2; p_next(); }
     if (kind && !tk_is_class(ci))
         err_at(tk_file, tk_line, "teko: a struct has no vtable; `virtual`/`override` needs a class");
-    i64 fty = p_type();
+    i64 fty = tk_gen_ty();
     uptr m = p_ident();
     if (p_id() != K_LPAR) {
         if (kind) err_at2(tk_file, tk_line, "teko: virtual/override on a field", m);
+        i64 nel = tk_field_dim();                // `T items[N]`: 0 when it is a scalar
         p_expect(K_SEMI, "expected ; after the field");
         if (ti >= 0 && tk_field_find(ci, m) >= 0)
             err_at2(tk_file, tk_line,
                     tk_join3("teko: field of trait `", tr_name_at(ti), "` collides with a field of the class"), m);
-        return tk_field_place(ci, name, m, fty, off);
+        return tk_field_place(ci, name, m, fty, nel, off);
     }
     if (str_eq(m, "new")) err_at2(tk_file, tk_line, "teko: method name reserved by the class", m);
     i64 extra = 0;
@@ -613,6 +614,10 @@ void tk_class() {
     uptr head_file = tk_file;
     p_next();                                    // the `class` word
     uptr name = tk_newname("class");
+    if (p_id() == K_LT) {                        // class Name<T, const N: i64>
+        tk_gen_record(name, TK_KCLASS);          // recorded, not declared
+        return;
+    }
     i64 base = 0 - 1;
     tk_nconf = 0;
     if (p_accept(K_COLON)) base = tk_class_conf();
