@@ -13,10 +13,13 @@
 // reads the `=` itself and the core sees a plain expression statement
 // (mc/lib/user_syntax_demo.mc's `p ~> len = 3`, the same mechanism).
 //
-// The receiver's type comes from tk_struct_of_expr when the module knows it,
-// and from the member's own name when it does not -- a parameter's type is the
-// one thing the core never reports to a module, so `s.area()` on a `Shape s`
-// parameter resolves by name, and says so plainly when two types share it.
+// The receiver's type comes from tk_struct_of_expr, whose answer is exact: a
+// node this module built, or a local whose N_VAR the on_stmt hook saw, under
+// the block scope teko_stmt.mc's `{` handler maintains. When it has no answer --
+// a parameter, the one thing the core never reports to a module mid-body -- the
+// access is DEFERRED to teko_typeof.mc's pass rather than resolved by the
+// member's name: a name that only ANOTHER type declares is not this receiver's
+// member, and calling it would be a call to a foreign type's method.
 
 // new Name  /  new Name()  -- the allocation is the generated constructor's, so
 // nothing here knows the type's size; `new` only names it.
@@ -84,16 +87,30 @@ i64 tk_field_use(i64 left, i64 fi, i64 line, uptr fl) {
     return r;
 }
 
-// what a resolution that did not land on one method says. -2 and -3 are both
-// "more than one answer", and they are different questions: -2 is two unrelated
-// TYPES declaring the name, -3 is two SIGNATURES of one type taking that many
-// arguments -- which only the argument types could tell apart.
-void tk_call_refuse(i64 mi, uptr m, i64 line, uptr fl) {
+// what a pick INSIDE a known type says when it did not land on one signature.
+// The receiver's type is not in question here -- the type is known and declares
+// the name -- so -2 means what tk_method_pick/tk_ifmeth_pick define it to mean:
+// no signature of that name takes this many arguments. -3 is two that do, which
+// only the argument types could tell apart.
+void tk_pick_refuse(i64 mi, uptr m, i64 line, uptr fl) {
+    if (mi == 0 - 3)
+        err_at2(fl, line, "teko: ambiguous overload; two signatures take this many arguments", m);
+    if (mi == 0 - 2)
+        err_at(fl, line, tk_join("teko: wrong number of arguments for ", m));
+    err_at2(fl, line, "teko: unknown member", m);
+}
+
+// the same question asked of the NAME alone, where the codes mean something
+// else: tk_method_by_name answers -2 when two unrelated classes declare it (the
+// receiver's type is what would decide, and nothing knows it), -3 when one class
+// has two signatures taking this many arguments, and -1 when the name exists but
+// no signature takes them.
+void tk_loose_refuse(i64 mi, uptr m, i64 line, uptr fl) {
     if (mi == 0 - 3)
         err_at2(fl, line, "teko: ambiguous overload; two signatures take this many arguments", m);
     if (mi == 0 - 2)
         err_at2(fl, line, "teko: the type of the left side of `.` is not known here", m);
-    err_at2(fl, line, "teko: wrong number of arguments", m);
+    err_at(fl, line, tk_join("teko: wrong number of arguments for ", m));
 }
 
 // `p.m(...)` once the method is known: a plain one is a direct call to the
@@ -126,18 +143,7 @@ i64 tk_call_method(i64 left, i64 si, uptr m, i64 line, uptr fl) {
     i64 na = 0;
     i64 args = tk_args(&na);
     i64 mi = tk_method_pick(si, m, na);
-    if (mi < 0) tk_call_refuse(mi, m, line, fl);
-    return tk_emit_call(left, mi, args, na, line, fl);
-}
-
-// `x.m(...)` where the module does not know x's class: the name has to belong to
-// exactly one type, and, among that type's signatures, the argument count has to
-// pick exactly one
-i64 tk_call_loose(i64 left, uptr m, i64 line, uptr fl) {
-    i64 na = 0;
-    i64 args = tk_args(&na);
-    i64 mi = tk_method_by_name(m, na);
-    if (mi < 0) tk_call_refuse(mi, m, line, fl);
+    if (mi < 0) tk_pick_refuse(mi, m, line, fl);
     return tk_emit_call(left, mi, args, na, line, fl);
 }
 
@@ -152,7 +158,7 @@ i64 tk_iface_call(i64 left, i64 si, uptr m, i64 line, uptr fl) {
     i64 na = 0;
     i64 args = tk_args(&na);
     i64 j = tk_ifmeth_pick(si, m, na);
-    if (j < 0) tk_call_refuse(j, m, line, fl);
+    if (j < 0) tk_pick_refuse(j, m, line, fl);
     i64 k = sr_m0_at(si) + j;
     tk_line = line;
     tk_file = fl;
@@ -178,24 +184,16 @@ i64 tk_member_of(i64 left, i64 si, uptr m, i64 line, uptr fl) {
     return 0;
 }
 
-// the member of a receiver whose type the module does NOT know: the name has to
-// belong to exactly one type. An interface answers ahead of a class, because
-// its dispatch is the one that stays correct for every conforming class -- the
-// itab is walked at run time, so no vtable slot is guessed.
-i64 tk_member_by_name(i64 left, uptr m, i64 line, uptr fl) {
-    i64 fi = tk_field_by_name(m);
-    if (fi == 0 - 2)
-        err_at2(fl, line, "teko: the type of the left side of `.` is not known here", m);
-    if (fi >= 0) return tk_field_use(left, fi, line, fl);
-    i64 si = tk_ifmeth_by_name(m);
-    if (si == 0 - 2)
-        err_at2(fl, line, "teko: the type of the left side of `.` is not known here", m);
-    if (si >= 0) return tk_iface_call(left, si, m, line, fl);
-    if (tk_method_has_name(m)) return tk_call_loose(left, m, line, fl);
-    err_at2(fl, line, "teko: unknown member", m);
-    return 0;
-}
-
+// A receiver the parser can type is resolved AGAINST THAT TYPE, and only that
+// type: its own members, its bases', its traits' (flattened into it) and its
+// interfaces'. A name the type does not declare is an error, not a search of the
+// other types that happen to declare it.
+//
+// A receiver the parser cannot type is not guessed either: it is DEFERRED to
+// teko_typeof.mc's pass, where the unit exists and a parameter's declared type
+// can be read. Resolving a member by its name alone survives only there, and
+// only after the oracle has answered that it does not know the type -- a global,
+// or an expression whose type nothing reports.
 i64 tk_dot(i64 left) {
     i64 line = p_line();
     uptr fl = p_file();
@@ -204,6 +202,5 @@ i64 tk_dot(i64 left) {
     uptr m = p_ident();                          // the member name, on the right
     i64 si = tk_struct_of_expr(left);
     if (si >= 0) return tk_member_of(left, si, m, line, fl);
-    if (tk_member_ambiguous(m)) return tk_defer_member(left, m, line, fl);
-    return tk_member_by_name(left, m, line, fl);
+    return tk_defer_member(left, m, line, fl);
 }

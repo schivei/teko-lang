@@ -205,10 +205,14 @@ record/replay.
 6. **O core reporta o tipo de PARÂMETRO — mas só depois de a declaração
    fechar.** As cinco `decl_*` do M31 respondem a assinatura já parseada, e
    `decl_param_type` devolve o id de `type_new` sem colapsar em `TY_*` (medido).
-   Dentro do corpo que está sendo parseado não há resposta — daí o `.` resolver
-   por NOME quando o tipo estático do receptor é desconhecido; dois tipos
-   não-relacionados com mesmo nome → erro de compilação limpo (não leitura
-   silenciosa em offset errado). Verificado com programa hostil.
+   Dentro do corpo que está sendo parseado não há resposta — daí o `.` sobre
+   receptor de tipo desconhecido ser **DEFERIDO** ao `pass()` (`teko_typeof.mc`),
+   onde a unidade inteira existe e o tipo declarado do parâmetro se lê. Resolver
+   pelo NOME do membro **não** é aceitável nesse caso: o nome que só OUTRO tipo
+   declara não é membro deste receptor (foi o defeito 2 da entrega 3, corrigido
+   na entrega 4). O por-nome só sobra como último recurso DENTRO do pass, depois
+   de o oráculo dizer que não sabe o tipo — um global, ou expressão que ninguém
+   tipa.
 7. **Ordem de declaração:** método só chama métodos ACIMA dele (mesma limitação
    do `examples/lang`); consertar exige record/replay. Planejado pra release
    seguinte do mc.
