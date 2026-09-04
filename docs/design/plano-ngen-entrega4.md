@@ -211,3 +211,28 @@ mantém o guard de runtime (`rt_panic`). O pacote continua alocado por sítio na
 **Ordem revista da fila:** escopo pela via do mc (§6, corretude) → **C8** ∥ **C4**
 (arquivos próprios: `teko_over.mc`) → **C7c** e **C5** (ambos tocam `teko_class.mc`
 depois do C8) → C6 quando o mc der o hook.
+
+## 9. C4 em verificação; C3b — o oráculo precisa tipar expressão (2026-09-04)
+
+**C4 (`ecdd1a46`, em verificação):** `teko_over.mc`, pass registrado depois de
+`params` e do oráculo. Decisão que difere do C2 de propósito: **toda** sobrecarga de
+função de topo é renomeada (`pick__i64`, `pick__Vec`, `pick__i64__i64`, `tally__void`)
+— nenhuma fica com o símbolo plano, para um sítio não reescrito virar **erro de link**
+em vez de cair na primeira. Nome de assinatura única não muda. Guards: `&f` de
+sobrecarregado; colisão ABI com `params` (`(uptr, i64)` homônima); `params` não se
+sobrecarrega; `extern` e `main` não se sobrecarregam; ambiguidade recusada; o
+`function declared twice` do core não é mascarado.
+
+**Achado adjacente, medido — dívida do oráculo (C3b):** `tk_ty_of` responde por nome,
+chamada, literal e cast, mas **não por `N_BINARY`/`N_UNARY`** (`pick(n - 1)` → "the type
+of argument 1 of pick is not known here") nem por **acesso a membro escalar**
+(`pick(self.side)` em método: `tk_pend_field` só registra no `xt` resultado de tipo
+struct; escalar cai em −1). Ambos erram claro, não miscompilam — mas são formas comuns.
+**A regra não é palpite, é a do core:** `mc/src/gen_resolve.mc` `res_binary` (~:486) —
+tipo do binário = tipo do operando **esquerdo**; comparação e lógico = `i64`; `N_UNARY`
+= tipo do operando, `!` = `i64`. Espelhar isso em `tk_ty_of`, e registrar no `xt` o tipo
+escalar do campo em `tk_pend_field`. **Entra antes do C5** (operadores precisam tipar
+`a + b` com `a` composto) e depois do escopo (mesmos arquivos: `teko_typeof.mc`,
+`teko_expr.mc`). Fixture: `surface_typeof_expr.tk`.
+
+**Fila revista:** escopo → C4 → **C3b** → C8 ∥ C5 → C7c → C6.
