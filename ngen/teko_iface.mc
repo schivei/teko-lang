@@ -35,6 +35,7 @@
 #define TK_MAXCONF   8                // interfaces named in ONE class's `:` list
 
 uptr im_name[TK_MAXIFMETH];           // the signatures of every interface, in declaration order
+uptr im_sig[TK_MAXIFMETH];            // its parameter types: what a conforming class has to match
 i64  im_np[TK_MAXIFMETH];             // parameters, not counting `self`
 i64  im_nreq[TK_MAXIFMETH];           // of those, the ones with no default: the smallest call
 i64  im_d0[TK_MAXIFMETH];             // where its defaults start in the default table
@@ -49,6 +50,7 @@ i64  tk_nconf = 0;
 
 // ---- table accessors (no raw ld64/st64 outside this section) ----
 uptr im_name_at(i64 i) { return ld64(im_name + i * 8); }
+uptr im_sig_at(i64 i)  { return ld64(im_sig + i * 8); }
 i64  im_np_at(i64 i)   { return ld64(im_np + i * 8); }
 i64  im_nreq_at(i64 i) { return ld64(im_nreq + i * 8); }
 i64  im_d0_at(i64 i)   { return ld64(im_d0 + i * 8); }
@@ -57,6 +59,7 @@ i64  ci_if_at(i64 i)   { return ld64(ci_if + i * 8); }
 i64  conf_if_at(i64 i) { return ld64(conf_if + i * 8); }
 
 void set_im_name_at(i64 i, uptr v) { st64(im_name + i * 8, v); }
+void set_im_sig_at(i64 i, uptr v)  { st64(im_sig + i * 8, v); }
 void set_im_np_at(i64 i, i64 v)    { st64(im_np + i * 8, v); }
 void set_im_nreq_at(i64 i, i64 v)  { st64(im_nreq + i * 8, v); }
 void set_im_d0_at(i64 i, i64 v)    { st64(im_d0 + i * 8, v); }
@@ -73,6 +76,44 @@ i64 tk_ifmeth_find(i64 si, uptr name) {
         if (str_eq(im_name_at(sr_m0_at(si) + i), name)) return i;
         i = i + 1;
     }
+    return 0 - 1;
+}
+
+// the position of `name` at `sig` inside `si`, or -1: two signatures of one name
+// are two entries of the table, each with its own slot
+i64 tk_ifmeth_sig_find(i64 si, uptr name, uptr sig) {
+    i64 i = 0;
+    loop {
+        if (i >= sr_mn_at(si)) break;
+        if (str_eq(im_name_at(sr_m0_at(si) + i), name)) {
+            if (str_eq(im_sig_at(sr_m0_at(si) + i), sig)) return i;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+// the position of the signature of `name` that takes `na` arguments, under the
+// same rule the classes use: -1 the name is not declared, -2 it is and no
+// signature takes that many arguments, -3 two do
+i64 tk_ifmeth_pick(i64 si, uptr name, i64 na) {
+    i64 found = 0 - 1;
+    i64 named = 0;
+    i64 i = 0;
+    loop {
+        if (i >= sr_mn_at(si)) break;
+        i64 k = sr_m0_at(si) + i;
+        if (str_eq(im_name_at(k), name)) {
+            named = 1;
+            if (na >= im_nreq_at(k) && na <= im_np_at(k)) {
+                if (found >= 0) return 0 - 3;
+                found = i;
+            }
+        }
+        i = i + 1;
+    }
+    if (found >= 0) return found;
+    if (named) return 0 - 2;
     return 0 - 1;
 }
 
@@ -98,9 +139,10 @@ i64 tk_ifmeth_by_name(uptr name) {
     return found;
 }
 
-void tk_ifmeth_add(uptr name, i64 np, i64 nreq, i64 d0, i64 ret) {
+void tk_ifmeth_add(uptr name, uptr sig, i64 np, i64 nreq, i64 d0, i64 ret) {
     if (tk_nifmeth == TK_MAXIFMETH) err_at(tk_file, tk_line, "teko: too many interface methods");
     set_im_name_at(tk_nifmeth, name);
+    set_im_sig_at(tk_nifmeth, sig);
     set_im_np_at(tk_nifmeth, np);
     set_im_nreq_at(tk_nifmeth, nreq);
     set_im_d0_at(tk_nifmeth, d0);
@@ -165,13 +207,14 @@ void tk_iface_member(i64 si) {
     i64 rty = p_type();
     uptr m = p_ident();
     if (p_id() != K_LPAR) err_at2(tk_file, tk_line, "teko: an interface declares methods, not fields", m);
-    if (tk_ifmeth_find(si, m) >= 0) err_at2(tk_file, tk_line, "teko: duplicate interface method", m);
     i64 np = 0;
     i64 nreq = 0;
     i64 d0 = tk_ndflt;
-    tk_params(&np, &nreq, 1);                    // the list itself is the class's business
+    i64 params = tk_params(&np, &nreq, 1);       // the list itself is the class's business
+    uptr sig = tk_sig_of(params);
+    if (tk_ifmeth_sig_find(si, m, sig) >= 0) err_at2(tk_file, tk_line, "teko: duplicate interface method", m);
     p_expect(K_SEMI, "expected ; after the interface method");
-    tk_ifmeth_add(m, np, nreq, d0, rty);
+    tk_ifmeth_add(m, sig, np, nreq, d0, rty);
     set_sr_mn_at(si, tk_nifmeth - sr_m0_at(si));
 }
 

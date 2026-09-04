@@ -181,11 +181,12 @@ void tk_trait() {
     p_accept(K_SEMI);                            // a C programmer's trailing ;
 }
 
-// a method the class declares itself: its tokens are skipped whole, so the copy
-// that loses to the class is never even parsed
-void tk_skip_method() {
+// the body of a trait method the class declares itself: its tokens are skipped,
+// so the copy that loses to the class is never parsed. The parameter list is
+// already read by then -- it is the signature that says which member this copy
+// even is, and whether the class has it.
+void tk_skip_body() {
     i64 n = 0;
-    p_skip_balanced(K_LPAR, K_RPAR, &n);
     if (p_id() != K_LBRACE) err_at(tk_file, tk_line, "teko: expected { in the trait method body");
     p_skip_balanced(K_LBRACE, K_RBRACE, &n);
 }

@@ -84,16 +84,25 @@ i64 tk_field_use(i64 left, i64 fi, i64 line, uptr fl) {
     return r;
 }
 
-// `p.m(...)`: a plain method is a direct call to the mangled Owner_method, a
-// virtual one goes through the object's vtable. The virtual form reads the
-// receiver twice, so it is only accepted where re-evaluating it is free.
-i64 tk_call_method(i64 left, i64 mi, i64 line, uptr fl) {
-    i64 na = 0;
-    i64 args = tk_args(&na);
+// what a resolution that did not land on one method says. -2 and -3 are both
+// "more than one answer", and they are different questions: -2 is two unrelated
+// TYPES declaring the name, -3 is two SIGNATURES of one type taking that many
+// arguments -- which only the argument types could tell apart.
+void tk_call_refuse(i64 mi, uptr m, i64 line, uptr fl) {
+    if (mi == 0 - 3)
+        err_at2(fl, line, "teko: ambiguous overload; two signatures take this many arguments", m);
+    if (mi == 0 - 2)
+        err_at2(fl, line, "teko: the type of the left side of `.` is not known here", m);
+    err_at2(fl, line, "teko: wrong number of arguments", m);
+}
+
+// `p.m(...)` once the method is known: a plain one is a direct call to the
+// mangled Owner_method, a virtual one goes through the object's vtable. The
+// virtual form reads the receiver twice, so it is only accepted where
+// re-evaluating it is free.
+i64 tk_emit_call(i64 left, i64 mi, i64 args, i64 na, i64 line, uptr fl) {
     tk_line = line;
     tk_file = fl;
-    if (na < mt_nreq_at(mi) || na > mt_np_at(mi))
-        err_at2(fl, line, "teko: wrong number of arguments", mt_name_at(mi));
     args = tk_fill_defaults(args, na, mt_np_at(mi), mt_nreq_at(mi), mt_d0_at(mi));
     i64 slot = mt_slot_at(mi);
     i64 r = 0;
@@ -111,21 +120,42 @@ i64 tk_call_method(i64 left, i64 mi, i64 line, uptr fl) {
     return r;
 }
 
+// `p.m(...)` on a receiver whose class IS known: the arguments come first,
+// because how many there are is what tells one overload from the other
+i64 tk_call_method(i64 left, i64 si, uptr m, i64 line, uptr fl) {
+    i64 na = 0;
+    i64 args = tk_args(&na);
+    i64 mi = tk_method_pick(si, m, na);
+    if (mi < 0) tk_call_refuse(mi, m, line, fl);
+    return tk_emit_call(left, mi, args, na, line, fl);
+}
+
+// `x.m(...)` where the module does not know x's class: the name has to belong to
+// exactly one type, and, among that type's signatures, the argument count has to
+// pick exactly one
+i64 tk_call_loose(i64 left, uptr m, i64 line, uptr fl) {
+    i64 na = 0;
+    i64 args = tk_args(&na);
+    i64 mi = tk_method_by_name(m, na);
+    if (mi < 0) tk_call_refuse(mi, m, line, fl);
+    return tk_emit_call(left, mi, args, na, line, fl);
+}
+
 // `s.m(...)` where `s` is of INTERFACE type: the class is only known at run
 // time, so the method table comes from the object's own itab (`tk_itab`,
 // ngen/lib/rt.mc) and the call is indirect. The receiver is read twice -- once
 // for the table, once as `self` -- so, as with a virtual call, it is only
 // accepted where re-evaluating it is free.
 i64 tk_iface_call(i64 left, i64 si, uptr m, i64 line, uptr fl) {
-    i64 j = tk_ifmeth_find(si, m);
-    if (j < 0) err_at2(fl, line, tk_join("teko: unknown member of ", sr_name_at(si)), m);
-    i64 k = sr_m0_at(si) + j;
+    if (tk_ifmeth_find(si, m) < 0)
+        err_at2(fl, line, tk_join("teko: unknown member of ", sr_name_at(si)), m);
     i64 na = 0;
     i64 args = tk_args(&na);
+    i64 j = tk_ifmeth_pick(si, m, na);
+    if (j < 0) tk_call_refuse(j, m, line, fl);
+    i64 k = sr_m0_at(si) + j;
     tk_line = line;
     tk_file = fl;
-    if (na < im_nreq_at(k) || na > im_np_at(k))
-        err_at2(fl, line, "teko: wrong number of arguments", m);
     args = tk_fill_defaults(args, na, im_np_at(k), im_nreq_at(k), im_d0_at(k));
     if (!tk_pure(left))
         err_at2(fl, line, "teko: an interface call needs a name or a field on the left", m);
@@ -143,8 +173,7 @@ i64 tk_member_of(i64 left, i64 si, uptr m, i64 line, uptr fl) {
     if (tk_is_iface(si)) return tk_iface_call(left, si, m, line, fl);
     i64 fi = tk_field_find(si, m);
     if (fi >= 0) return tk_field_use(left, fi, line, fl);
-    i64 mi = tk_method_find(si, m);
-    if (mi >= 0) return tk_call_method(left, mi, line, fl);
+    if (tk_method_named_find(si, m) >= 0) return tk_call_method(left, si, m, line, fl);
     err_at2(fl, line, tk_join("teko: unknown member of ", sr_name_at(si)), m);
     return 0;
 }
@@ -162,10 +191,7 @@ i64 tk_member_by_name(i64 left, uptr m, i64 line, uptr fl) {
     if (si == 0 - 2)
         err_at2(fl, line, "teko: the type of the left side of `.` is not known here", m);
     if (si >= 0) return tk_iface_call(left, si, m, line, fl);
-    i64 mi = tk_method_by_name(m);
-    if (mi == 0 - 2)
-        err_at2(fl, line, "teko: the type of the left side of `.` is not known here", m);
-    if (mi >= 0) return tk_call_method(left, mi, line, fl);
+    if (tk_method_has_name(m)) return tk_call_loose(left, m, line, fl);
     err_at2(fl, line, "teko: unknown member", m);
     return 0;
 }
