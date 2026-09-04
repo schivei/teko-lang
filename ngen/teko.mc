@@ -51,6 +51,7 @@
 #include "teko_stmt.mc"
 #include "teko_expr.mc"
 #include "teko_params.mc"
+#include "teko_over.mc"
 
 void user_init() {
     tk_types_init();
@@ -86,4 +87,11 @@ void user_init() {
     // `params` pass is about to rewrite.
     pass(&tk_params_pass);
     pass(&tk_typeof_pass);
+
+    // LAST, and behind both of the above: the overload mangling reads ordinary
+    // parameter lists (the `params` pass has already turned a list into `uptr
+    // xs, i64 xs_len`) and ordinary calls (the oracle's pass has already
+    // rebuilt every deferred `.`), and it renames declarations, which is the
+    // one rewrite the two before it would not survive.
+    pass(&tk_over_pass);
 }
