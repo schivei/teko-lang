@@ -150,14 +150,20 @@ da superfície e do comportamento base**. O dono nomeou (2026-09-04) quatro iten
 
 **Nenhum dos quatro tem precedente no mc** — `examples/lang/README.md:243` diz
 que o `lx` não tem overloads, default arguments, properties nem static members,
-e ainda tem teto de **8 parâmetros** (contando `self` e o ponteiro da vtable).
+e tem teto de **8 parâmetros** (contando `self` e o ponteiro da vtable). Esse 8
+é do `lx`, não do core: o teto do mc é **`MAXPARAMS` = 12**
+(`mc/src/arena.mc:58`, 1..8 em registrador e 9..12 na pilha).
 
-**A DÍVIDA que os quatro compartilham:** o core do mc **não reporta a um módulo o
-tipo declarado de um parâmetro de função**. Hoje o `.` contorna resolvendo o
-membro pelo NOME quando o receptor é opaco (e aborta com erro claro se dois
-tipos não-relacionados declararem o mesmo nome) — o que basta para o
-polimorfismo, mas **não** basta para escolher entre assinaturas sobrecarregadas
-nem para despachar um operador pelo tipo dos operandos. Note ainda que
+**A DÍVIDA que os quatro compartilham:** o core do mc **só reporta o tipo
+declarado de um parâmetro DEPOIS de a declaração fechar** — as cinco `decl_*` do
+M31 (`decl_find`/`decl_ret`/`decl_nparams`/`decl_param_type`/`decl_valid`,
+`mc/docs/reference/hooks.md` § "Asking about a declaration the core already
+parsed") respondem, e `decl_param_type` preserva o id que `type_new` devolveu.
+O que não existe é a resposta DENTRO do corpo que está sendo parseado, onde a
+função ainda não entrou na unidade; por isso o `.` resolve o membro pelo NOME
+quando o receptor é opaco (e aborta com erro claro se dois tipos
+não-relacionados declararem o mesmo nome), e por isso o oráculo de tipo estático
+mora num `pass()`, onde a unidade inteira existe. Note ainda que
 `syntax_infix` é registro **único e global**: ensinar o mesmo operador duas vezes
 é erro declarado no mc (`lib/user_dupop.mc`), logo a resolução por tipo tem de
 acontecer DENTRO do handler único.
@@ -196,9 +202,12 @@ record/replay.
    declaram `x`, é error claro (`"type of the left side of '.' is not known"`).
    Auditado contra `mc docs/reference/hooks.md:350`; SEM regressão de ABI
    (8/8 = pointer).
-6. **O core NÃO reporta tipo de PARÂMETRO ao módulo.** Quando o tipo estático
-   do receptor é desconhecido (chamada cross-unit), o `.` resolve por NOME; dois
-   tipos não-relacionados com mesmo nome → erro de compilação limpo (não leitura
+6. **O core reporta o tipo de PARÂMETRO — mas só depois de a declaração
+   fechar.** As cinco `decl_*` do M31 respondem a assinatura já parseada, e
+   `decl_param_type` devolve o id de `type_new` sem colapsar em `TY_*` (medido).
+   Dentro do corpo que está sendo parseado não há resposta — daí o `.` resolver
+   por NOME quando o tipo estático do receptor é desconhecido; dois tipos
+   não-relacionados com mesmo nome → erro de compilação limpo (não leitura
    silenciosa em offset errado). Verificado com programa hostil.
 7. **Ordem de declaração:** método só chama métodos ACIMA dele (mesma limitação
    do `examples/lang`); consertar exige record/replay. Planejado pra release
