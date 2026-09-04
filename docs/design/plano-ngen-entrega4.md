@@ -307,3 +307,26 @@ miscompilação; o fecho é no `teko_typeof.mc` (C3b).
 **C7c fica pronto para escrever:** a máquina de que ele precisa — corpo instanciado
 por sítio, `N` como literal substituído, índice literal barrado contra `N` — é
 exatamente a que o C8 deixou.
+
+## 12. C5 pronto (aguarda verificação), com duas regras que o plano não previa (2026-09-04)
+
+**C5** (`feat/ngen-operators-v2` @ `c4124f26` = `299e1366` + costura com a API do C3c):
+`teko_ops.mc`, `operator<op>` contextual em `tk_member`, pass entre o oráculo e o C4.
+`N_BINARY` chega **intacto** ao pass (passes rodam antes de `fold()`), a troca in-place
+sobrevive. 18/18; no-op nas 17.
+
+**Armadilha medida, resolvida estruturalmente:** o próprio `ngen` constrói `N_BINARY`
+com valor teko à esquerda — `p.side` é `ld64(p + SIDE)`, `items[i]` é
+`ADD(ADD(obj, off), MUL(i, w))`. Sem distinguir, `operator+(self, i64)` declarado
+transformaria todo acesso a campo em chamada. O pass trata o 1º argumento de
+`ld8..st64` e a espinha esquerda desses `ADD`s como **endereço**, nunca operando.
+
+**Regra de resolução (obrigatória por `surface_typeof_expr.tk:64`, `pick(v + zero)`):**
+teko à esquerda que **não declara** o operador + valor do core à direita → o pass **não
+toca** (é a aritmética de ponteiro do core). Teko dos dois lados, ou operador declarado
+com assinatura que não casa → erro claro. Esquerdo do core + direito teko → recusa
+("a reversed operator is not taught"). Unário → honest-stop.
+
+**Adjacente (diagnóstico, não miscompila):** `operator` dentro de `interface` é recusado
+por `teko_iface.mc` com "an interface declares methods, not fields: operator" — mensagem
+confusa; dizer que operador em interface não é ensinado. Mini-ajuste em `teko_iface.mc`.
