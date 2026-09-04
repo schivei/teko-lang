@@ -240,20 +240,22 @@ pub type MInArg = struct {
 
 macro MInst() { lowering { MAlu | MAluImm | MMSub | MNeg | MMvn | MFAlu | MFNeg | MCmp | MCmpImm | MFCmp | MCSet | MMovZ | MMovK | MMovN | MFMov | MMov | MExt | MCvt | MLoad | MStore | MFSpill | MFrameAddr | MAdrp | MAddLo | MBranch | MBranchCond | MCbz | MCall | MCallIndirect | MSyscall | MAtomic | MRet | MOutArg | MInArg } }
 
+pub type MInstNode = struct { op: @MInst() }
+
 pub type MBlock = struct {
     id: u32
     params: []MReg
-    insts: []@MInst()
+    insts: teko::collections::Chunked<MInstNode>
 }
 
 pub type MFunc = struct {
     symbol: str
-    blocks: []MBlock
+    blocks: teko::collections::Chunked<MBlock>
     frame: []lir::LAlloca
 }
 
 pub type MModule = struct {
-    funcs: []MFunc
+    funcs: teko::collections::Chunked<MFunc>
     rodata: []lir::LRodata
     globals: []lir::LGlobal
     layouts: []lir::LStructLayout
@@ -402,34 +404,32 @@ pub fn in_arg(size: MMemSize, dst: MReg, index: u32): @MInst() {
 }
 
 pub fn empty_mmodule(): MModule {
-    MModule { funcs = []; rodata = []; globals = []; layouts = [] }
+    MModule { funcs = teko::collections::Chunked<MFunc>::make(); rodata = []; globals = []; layouts = [] }
 }
 
 pub fn new_mfunc(symbol: str): MFunc {
-    var entry = MBlock { id = 0; params = []; insts = [] }
-    MFunc { symbol = symbol; blocks = [entry]; frame = [] }
-}
-
-fn push_minst_block(b: MBlock, inst: @MInst()): MBlock {
-    MBlock { id = b.id; params = b.params; insts = [..b.insts, inst] }
+    var entry = MBlock { id = 0; params = []; insts = teko::collections::Chunked<MInstNode>::make() }
+    var blocks = teko::collections::Chunked<MBlock>::make()
+    blocks.push(entry)
+    MFunc { symbol = symbol; blocks = blocks; frame = [] }
 }
 
 pub fn append_minst(f: MFunc, block_id: u32, inst: @MInst()): MFunc {
-    var blocks = f.blocks
-    var i: u64 = 0
+    var it = f.blocks.iter()
     loop {
-        if i >= blocks.len { break }
-        if blocks[i].id == block_id {
-            blocks[i] = push_minst_block(blocks[i], inst)
-            break
+        match it.next() {
+            MBlock as b => {
+                if b.id == block_id { b.insts.push(MInstNode { op = inst }); break }
+            }
+            null => break
         }
-        i++
     }
-    MFunc { symbol = f.symbol; blocks = blocks; frame = f.frame }
+    f
 }
 
 pub fn append_block(f: MFunc, blk: MBlock): MFunc {
-    MFunc { symbol = f.symbol; blocks = [..f.blocks, blk]; frame = f.frame }
+    f.blocks.push(blk)
+    f
 }
 
 pub fn append_frame(f: MFunc, slot: lir::LAlloca): MFunc {
@@ -448,21 +448,23 @@ fn mreg_list_set(xs: []MReg, index: u32, reg: MReg): []MReg {
 }
 
 pub fn set_block_param(f: MFunc, block_id: u32, index: u32, reg: MReg): MFunc {
-    var blocks = f.blocks
+    var n = f.blocks.len()
     var i: u64 = 0
     loop {
-        if i >= blocks.len { break }
-        if blocks[i].id == block_id {
-            blocks[i] = MBlock { id = blocks[i].id; params = mreg_list_set(blocks[i].params, index, reg); insts = blocks[i].insts }
+        if i >= n { break }
+        var b = f.blocks.get(i)
+        if b.id == block_id {
+            f.blocks.set(i, MBlock { id = b.id; params = mreg_list_set(b.params, index, reg); insts = b.insts })
             break
         }
         i++
     }
-    MFunc { symbol = f.symbol; blocks = blocks; frame = f.frame }
+    f
 }
 
 pub fn add_mfunc(m: MModule, f: MFunc): MModule {
-    MModule { funcs = [..m.funcs, f]; rodata = m.rodata; globals = m.globals; layouts = m.layouts }
+    m.funcs.push(f)
+    m
 }
 
 fn wide_suffix(wide: bool): str {
@@ -744,22 +746,24 @@ fn print_mblock(b: MBlock): str {
     var out = teko::str::concat("  #M", teko::u64_to_str(b.id to u64))
     if b.params.len != 0 { out = teko::str::concat(out, "(", print_regs(b.params), ")") }
     out = teko::str::concat(out, ":\n")
-    var i: u64 = 0
+    var it = b.insts.iter()
     loop {
-        if i >= b.insts.len { break }
-        out = teko::str::concat(out, "    ", print_minst(b.insts[i]), "\n")
-        i++
+        match it.next() {
+            MInstNode as n => { out = teko::str::concat(out, "    ", print_minst(n.op), "\n") }
+            null => break
+        }
     }
     out
 }
 
 fn print_mfunc(f: MFunc): str {
     var out = teko::str::concat("func @", f.symbol, " {\n")
-    var i: u64 = 0
+    var it = f.blocks.iter()
     loop {
-        if i >= f.blocks.len { break }
-        out = teko::str::concat(out, print_mblock(f.blocks[i]))
-        i++
+        match it.next() {
+            MBlock as b => { out = teko::str::concat(out, print_mblock(b)) }
+            null => break
+        }
     }
     teko::str::concat(out, "}\n")
 }
@@ -767,11 +771,16 @@ fn print_mfunc(f: MFunc): str {
 pub fn minst_print(m: MModule): str {
     var out = ""
     var i: u64 = 0
+    var it = m.funcs.iter()
     loop {
-        if i >= m.funcs.len { break }
-        if i > 0 { out = teko::str::concat(out, "\n") }
-        out = teko::str::concat(out, print_mfunc(m.funcs[i]))
-        i++
+        match it.next() {
+            MFunc as f => {
+                if i > 0 { out = teko::str::concat(out, "\n") }
+                out = teko::str::concat(out, print_mfunc(f))
+                i++
+            }
+            null => break
+        }
     }
     out
 }

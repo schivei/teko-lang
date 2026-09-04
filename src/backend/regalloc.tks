@@ -27,25 +27,31 @@ fn reverse_u32(list: []u32): []u32 {
     out
 }
 
-fn block_insts_of(f: MFunc, id: u32): []@MInst() {
-    var i: u64 = 0
+fn block_insts_of(f: MFunc, id: u32): teko::collections::Chunked<MInstNode> {
+    var it = f.blocks.iter()
     loop {
-        if i >= f.blocks.len { break }
-        if f.blocks[i].id == id { return f.blocks[i].insts }
-        i++
+        match it.next() {
+            MBlock as b => {
+                if b.id == id { return b.insts }
+            }
+            null => break
+        }
     }
-    []
+    teko::collections::Chunked<MInstNode>::make()
 }
 
 fn block_successors(f: MFunc, id: u32): []u32 {
     var insts = block_insts_of(f, id)
     var out: []u32 = []
-    var i: u64 = 0
+    var it = insts.iter()
     loop {
-        if i >= insts.len { break }
-        var t = terminator_target(insts[i])
-        if t.has { out = add_unique_u32(out, t.target) }
-        i++
+        match it.next() {
+            MInstNode as n => {
+                var t = terminator_target(n.op)
+                if t.has { out = add_unique_u32(out, t.target) }
+            }
+            null => break
+        }
     }
     out
 }
@@ -69,36 +75,38 @@ fn rpo_visit(f: MFunc, id: u32, st: RpoState): RpoState {
 }
 
 fn append_unvisited(f: MFunc, order: []u32): []u32 {
-    var out: [order.len + f.blocks.len]u32 = []
+    var out: [order.len + f.blocks.len()]u32 = []
     var count: u64 = 0
     loop {
         if count >= order.len { break }
         out[count] = order[count]
         count++
     }
-    var i: u64 = 0
+    var it = f.blocks.iter()
     loop {
-        if i >= f.blocks.len { break }
-        var bid = f.blocks[i].id
-        if !u32_in(out[0..count], bid) {
-            out[count] = bid
-            count++
+        match it.next() {
+            MBlock as b => {
+                if !u32_in(out[0..count], b.id) {
+                    out[count] = b.id
+                    count++
+                }
+            }
+            null => break
         }
-        i++
     }
     out[0..count]
 }
 
 fn rpo_block_order(f: MFunc): []u32 {
-    if f.blocks.len == 0 { return [] }
-    var entry = f.blocks[0].id
+    if f.blocks.is_empty() { return [] }
+    var entry = f.blocks.first().id
     var st = rpo_visit(f, entry, RpoState { visited = []; post = [] })
     append_unvisited(f, reverse_u32(st.post))
 }
 
 fn reachable_blocks(f: MFunc): []u32 {
-    if f.blocks.len == 0 { return [] }
-    var entry = f.blocks[0].id
+    if f.blocks.is_empty() { return [] }
+    var entry = f.blocks.first().id
     rpo_visit(f, entry, RpoState { visited = []; post = [] }).visited
 }
 
@@ -117,7 +125,7 @@ fn number_insts_total(f: MFunc, order: []u32): u64 {
     var bi: u64 = 0
     loop {
         if bi >= order.len { break }
-        total = total + block_insts_of(f, order[bi]).len
+        total = total + block_insts_of(f, order[bi]).len()
         bi++
     }
     total
@@ -131,14 +139,16 @@ fn number_insts(f: MFunc, order: []u32): []NumberedInst {
     loop {
         if bi >= order.len { break }
         var bid = order[bi]
-        var insts = block_insts_of(f, bid)
-        var ii: u64 = 0
+        var iit = block_insts_of(f, bid).iter()
         loop {
-            if ii >= insts.len { break }
-            out[k] = NumberedInst { point = p; block_id = bid; inst = insts[ii] }
-            k++
-            p = p + 1
-            ii++
+            match iit.next() {
+                MInstNode as n => {
+                    out[k] = NumberedInst { point = p; block_id = bid; inst = n.op }
+                    k++
+                    p = p + 1
+                }
+                null => break
+            }
         }
         bi++
     }
@@ -1117,30 +1127,21 @@ fn append_spill_slots(abi: AbiDescriptor, frame: []lir::LAlloca, spills: u64): [
 }
 
 fn rewrite_block(abi: AbiDescriptor, sr: ScanResult, b: MBlock, frame_base: u64): MBlock {
-    var parts: [b.insts.len][]@MInst() = []
-    var total: u64 = 0
-    var ii: u64 = 0
+    var insts = teko::collections::Chunked<MInstNode>::make()
+    var it = b.insts.iter()
     loop {
-        if ii >= b.insts.len { break }
-        var part = rewrite_inst(abi, sr, b.insts[ii], frame_base)
-        parts[ii] = part
-        total = total + part.len
-        ii++
-    }
-    var insts: [total]@MInst() = []
-    var k: u64 = 0
-    var pi: u64 = 0
-    loop {
-        if pi >= parts.len { break }
-        var part = parts[pi]
-        var pj: u64 = 0
-        loop {
-            if pj >= part.len { break }
-            insts[k] = part[pj]
-            k++
-            pj++
+        match it.next() {
+            MInstNode as n => {
+                var part = rewrite_inst(abi, sr, n.op, frame_base)
+                var pj: u64 = 0
+                loop {
+                    if pj >= part.len { break }
+                    insts.push(MInstNode { op = part[pj] })
+                    pj++
+                }
+            }
+            null => break
         }
-        pi++
     }
     MBlock { id = b.id; params = b.params; insts = insts }
 }
@@ -1148,37 +1149,43 @@ fn rewrite_block(abi: AbiDescriptor, sr: ScanResult, b: MBlock, frame_base: u64)
 fn rewrite_func(abi: AbiDescriptor, f: MFunc, sr: ScanResult): MFunc {
     var frame_base = f.frame.len
     var frame = append_spill_slots(abi, f.frame, count_spills(sr))
-    var blocks: [f.blocks.len]MBlock = []
-    var bi: u64 = 0
+    var blocks = teko::collections::Chunked<MBlock>::make()
+    var it = f.blocks.iter()
     loop {
-        if bi >= f.blocks.len { break }
-        blocks[bi] = rewrite_block(abi, sr, f.blocks[bi], frame_base)
-        bi++
+        match it.next() {
+            MBlock as b => { blocks.push(rewrite_block(abi, sr, b, frame_base)) }
+            null => break
+        }
     }
     MFunc { symbol = f.symbol; blocks = blocks; frame = frame }
 }
 
 pub fn all_physical(f: MFunc): bool {
-    var bi: u64 = 0
+    var bit = f.blocks.iter()
     loop {
-        if bi >= f.blocks.len { break }
-        var b = f.blocks[bi]
-        var ii: u64 = 0
-        loop {
-            if ii >= b.insts.len { break }
-            var ir = inst_regs(b.insts[ii])
-            if ir.has_def {
-                if !ir.def_reg.is_phys { return false }
+        match bit.next() {
+            MBlock as b => {
+                var iit = b.insts.iter()
+                loop {
+                    match iit.next() {
+                        MInstNode as n => {
+                            var ir = inst_regs(n.op)
+                            if ir.has_def {
+                                if !ir.def_reg.is_phys { return false }
+                            }
+                            var ui: u64 = 0
+                            loop {
+                                if ui >= ir.uses.len { break }
+                                if !ir.uses[ui].is_phys { return false }
+                                ui++
+                            }
+                        }
+                        null => break
+                    }
+                }
             }
-            var ui: u64 = 0
-            loop {
-                if ui >= ir.uses.len { break }
-                if !ir.uses[ui].is_phys { return false }
-                ui++
-            }
-            ii++
+            null => break
         }
-        bi++
     }
     true
 }
@@ -1196,16 +1203,16 @@ pub fn regalloc_func(abi: AbiDescriptor, f: MFunc): MFunc | error {
 }
 
 pub fn regalloc_module(abi: AbiDescriptor, m: MModule): MModule | error {
-    var funcs: [m.funcs.len]MFunc = []
-    var i: u64 = 0
+    var funcs = teko::collections::Chunked<MFunc>::make()
+    var it = m.funcs.iter()
     loop {
-        if i >= m.funcs.len { break }
-        var rf = match regalloc_func(abi, m.funcs[i]) {
-            MFunc as g => g
-            error as e => return e
+        match it.next() {
+            MFunc as f => {
+                var rf = match regalloc_func(abi, f) { MFunc as g => g; error as e => return e }
+                funcs.push(rf)
+            }
+            null => break
         }
-        funcs[i] = rf
-        i++
     }
     MModule { funcs = funcs; rodata = m.rodata; globals = m.globals; layouts = m.layouts }
 }
