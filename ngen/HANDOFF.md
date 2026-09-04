@@ -57,16 +57,29 @@ D213, D214** do `DECISION_LOG.md`. Leia-as — são leis, não sugestões.
   ponteiro, zero-cópia — D197**) e `tk_f64_bits`/`tk_f64_from_bits` (o
   reinterpret concreto `f64↔u64`; a forma genérica `<T>` do `wrap`/`unwrap`
   precisa de generics record/replay e fica para a entrega de tipos).
-- **Entrega 3 (tipos) — PARCIAL: `struct` e `class` LANDADOS** (SHAs
-  `984f268e` e `06db615d`). Cada um define a tabela de tipos compartilhada
-  (campos de offset/size/layout em registro, vtable para class). Registrados
-  com `type_new(nome, 8, 8, TK_INT)` — identidade estática preservada para `.`
-  resolver membro. `interface` e `trait` ainda são honest-stop.
+- **Entrega 3 (tipos) — COMPLETA: `struct`, `class`, `interface` e `trait`
+  LANDADOS** (SHAs `984f268e`, `06db615d`, `a8757cef`, `2821c261`). Todos
+  passam pela mesma tabela de tipos (`ngen/teko_struct.mc`), e `struct`/`class`/
+  `interface` são registrados com `type_new(nome, 8, 8, TK_INT)` — identidade
+  estática preservada para o `.` resolver membro.
+  - `class`: palavra 0 da vtable é a itab, slots virtuais depois
+    (`TK_VT_FIXED 1`); campos base-first; `virtual`/`override` contextuais.
+  - `interface`: assinaturas + conformidade checada dentro do `Classe_vt_init`;
+    despacho por `tk_itab` (`ngen/lib/rt.mc:44`), dinâmico.
+  - `trait` (**D216 — modelo do PHP**): corpo gravado por `p_skip_balanced` e
+    re-parseado por classe via `p_push_source`; flattening pela MESMA máquina de
+    membros; precedência classe > trait > base; **não é tipo** (sem `type_new`);
+    `use` lida como identificador contextual, nunca registrada.
+  - **Polimorfismo FUNCIONA**, por interface E por classe base, inclusive sobre
+    parâmetro (verificado: `area_of(Shape s)` com a derivada devolve o
+    `override`; três níveis `A→B→C` devolvem 1/2/3). O despacho não depende do
+    tipo estático porque a vtable da derivada é extensão-PREFIXO da base — o
+    slot é o mesmo em toda a cadeia. Ver a dívida do §5 para o limite real.
 - **CI VERDE, com execução real** (Linux x86_64, ~15 s ponta-a-ponta): baixa
   `mc-0.10.0-linux-x86_64`, confere checksum, `mc build ngen` constrói o
-  compilador ensinado `build/mc-teko`, e **7 fixtures compilam, linkam e
+  compilador ensinado `build/mc-teko`, e **9 fixtures compilam, linkam e
   RODAM**: `hello.tk` + `primitives_{float,ptr,scalar,str}.tk` +
-  `types_{struct,class}.tk`, todas com exit 42.
+  `types_{struct,class,interface,trait}.tk`, todas com exit 42.
 
 ## 4. Loop local — o `mc` vem da RELEASE, não de submodule
 
@@ -124,24 +137,41 @@ sobre saída do compilador ensinado. Compile sempre por `mc build DIR --config F
 (ver armadilha 1 do §5.1).
 
 
-## 5. Próximo passo — entrega 3: TIPOS (continuação)
+## 5. Próximo passo — entrega 4: SUPERFÍCIE E COMPORTAMENTO BASE
 
-**Struct e class LANDADOS** (commits `984f268e` + `06db615d`); `interface` e
-`trait` seguem como honest-stop. A sessão remota **parou de despachar** ngen
-para a local assumir sem colisão.
+A entrega 3 (tipos) está **fechada**: `struct`, `class`, `interface` e `trait`
+ensinados, 9 fixtures verdes. Pela ordem do D214, o que vem é **crescer o ensino
+da superfície e do comportamento base**. O dono nomeou (2026-09-04) quatro itens:
 
-**Próxima fase: `interface`.**
-- Precedente: `examples/api/oop.mc` no repo do mc (~482 linhas,
-  classes+interfaces+methods sem generics pesadas — modelo limpo e certo).
-- Mapeamento e hook: `docs/design/port-teko-mc.md` §3.
-- `interface` traz **conformance automática** (`type conforms_to`) e
-  **dispatch via itab** (method indirection) — ambos já proven no mc.
+1. **parâmetros default** (`fn f(i64 x, i64 y = 10)`);
+2. **multiparâmetros à la C#** (`params`, lista variádica tipada);
+3. **sobrecarga** por assinatura (a **sobrescrita** já existe: `virtual`/`override`);
+4. **sobrecarga de operadores**.
 
-**`trait` — FORK ABERTO:** não há precedente no mc nem forma mapeada em
-port-teko-mc.md. Decisão e forma precisam de input do dono antes de iniciar.
+**Nenhum dos quatro tem precedente no mc** — `examples/lang/README.md:243` diz
+que o `lx` não tem overloads, default arguments, properties nem static members,
+e ainda tem teto de **8 parâmetros** (contando `self` e o ponteiro da vtable).
 
-**Enquanto isso:** a forma genérica `<T>` de `wrap`/`unwrap` também destrava
-(precisa de generics record/replay — vem junto dos tipos; aguarda M41/M40 do mc).
+**A DÍVIDA que os quatro compartilham:** o core do mc **não reporta a um módulo o
+tipo declarado de um parâmetro de função**. Hoje o `.` contorna resolvendo o
+membro pelo NOME quando o receptor é opaco (e aborta com erro claro se dois
+tipos não-relacionados declararem o mesmo nome) — o que basta para o
+polimorfismo, mas **não** basta para escolher entre assinaturas sobrecarregadas
+nem para despachar um operador pelo tipo dos operandos. Note ainda que
+`syntax_infix` é registro **único e global**: ensinar o mesmo operador duas vezes
+é erro declarado no mc (`lib/user_dupop.mc`), logo a resolução por tipo tem de
+acontecer DENTRO do handler único.
+
+Os dois caminhos, **pendentes de decisão do dono**: (a) **ensinar o `fn` próprio**
+no `ngen`, como o `examples/lang` faz — destrava os quatro, mas reimplementa peça
+que o core já tem (arranha o D213); (b) **pedir suporte novo ao mc** (o core
+preservar o id do `type_new` no nó do parâmetro, ou expor algo como
+`type_of_param`). A pergunta está com a sessão local que desenvolve o mc (§6).
+
+**Também em aberto, menores:** `base.m()` (chamar a implementação da base — existe
+no `examples/lang/tests/01-inherit.lx`), construtor com argumentos (hoje só
+`new Nome`), e a forma genérica `<T>` de `wrap`/`unwrap`, que precisa de generics
+record/replay.
 
 ## 5.1 Armadilhas já pagas (não repita)
 
@@ -178,6 +208,16 @@ port-teko-mc.md. Decisão e forma precisam de input do dono antes de iniciar.
 9. **Achado no repo do mc (não confirmado):** `examples/lang/lang_expr.mc:42-44`
    reutiliza nó do receptor em `ld64` vtable e na lista de args; método virtual
    de aridade ≥1 quebraria. No `ngen/` está contornado por clonagem com guarda.
+
+10. **Trait como tipo de declaração dá mensagem GENÉRICA.** `new Trait` e
+    `class C : Trait` acusam com mensagem dedicada e clara, mas `A a;` (trait
+    como tipo de variável) falha antes, no parser do core, com
+    `expected ; after expression` — sem dizer que a causa é "trait não é tipo".
+    Rejeita corretamente, mas o diagnóstico é pobre; é consequência de o trait
+    não ter `type_new` (por desenho, D216). Dívida cosmética conhecida.
+11. **Campos vindos de trait entram DEPOIS dos campos próprios da classe**,
+    independentemente de onde o `use` aparece no corpo (`ngen/teko_class.mc:439`).
+    Duas classes que usam o mesmo trait têm offsets independentes e corretos.
 
 ## 6. Comunicação — coordenador remoto + sessão local
 

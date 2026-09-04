@@ -77,10 +77,10 @@ uses THAT binary to compile `ngen/tests/hello.tk` into `ngen/build/teko-hello`.
 Nothing in `mc`'s own `src/` changes, and nothing in this repository's `src/`
 changes either. `.github/workflows/ngen.yml` then uses that same `ngen/build/
 mc-teko` directly (`--exe`, bypassing `mc.toml`'s single `[project]` entry) to
-compile and run each `ngen/tests/primitives_*.tk` fixture from entrega 2, one
+compile and run each `ngen/tests/primitives_*.tk` and `ngen/tests/types_*.tk` fixture, one
 process per fixture — see § Fixtures below.
 
-## Fixtures (entrega 2)
+## Fixtures (entregas 1-3)
 
 One `.tk` file per group of primitives, each with its own `// expect-exit: N`
 header (the same convention `mc`'s own `tests/*.mc` use) — `mc.toml`'s single
@@ -94,6 +94,10 @@ directly against the compiler `mc build ngen` already produced.
 | `tests/primitives_ptr.tk` | `ptr` (+ `uptr`, `ld64`/`st64`) | 42 |
 | `tests/primitives_str.tk` | `str` (+ `lib/rt.mc`'s `tk_str_len`/`tk_str_slice`) | 42 |
 | `tests/primitives_float.tk` | `f32`/`f64` (+ `lib/rt.mc`'s `tk_f64_bits`/`tk_f64_from_bits`) | 42 |
+| `tests/types_struct.tk` | `struct`, field layout, `new`, `.` (entrega 3) | 42 |
+| `tests/types_class.tk` | `class`, vtable, `virtual`/`override`, polymorphic dispatch | 42 |
+| `tests/types_interface.tk` | `interface`, itab, conformance checking | 42 |
+| `tests/types_trait.tk` | `trait` (PHP-style flattening), `use`, precedence | 42 |
 
 ## Why the CI is a separate workflow
 
