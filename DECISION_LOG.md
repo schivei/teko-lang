@@ -1157,6 +1157,16 @@ Verificador reproduziu o crash instrumentando com ASan+UBSan (as flags do CI pro
 - **CONSERTO (dispatch):** `cg_emit_self_addr` tem que PARAR de escapar o endereço de um temp cujo escopo é o próprio statement-expression — hoist do `_rcvN` pra um escopo que sobrevive à chamada externa inteira, OU passar receptor tipo-valor por valor (Region/Arena são structs de 8B, métodos leem self). Root-cause, não workaround; conserta a CLASSE (todo receptor não-endereçável), não só o sítio arena.
 - **LEI DE PROCESSO (endurece D163/D164):** o fixpoint no sandbox NÃO pega UB que só crasha sob certos toolchains — **o gate de verificador de compiler-core passa a incluir um build ASan+UBSan** (`-fsanitize=address,undefined -fno-omit-frame-pointer -g`) do gen0 compilando o tip, além do fixpoint. Barato, pega stack-use-after-scope/UAF/OOB que o build seco esconde. (A ser gravado na CLAUDE.md.)
 
+### D215 · DONO: rulings do port `ngen/` — superfície C-like (não herda a sintaxe teko-clássica); "ensinar" = ZERO toque no mc; mc por RELEASE; canal com a sessão local do mc (dono 2026-09-04) 🔧 PORT / método
+Dados na sessão local que assumiu o `ngen/`, no dia em que **`struct` e `class` landaram** (commits `984f268e` e `06db615d`, entrega 3 commits 1 e 2; 7 fixtures verdes — hello + 4 primitivas + `types_struct` + `types_class`, todas exit 42; check-run do CI verde; verificação independente aprovada).
+
+- **1. A superfície do `ngen` é C-like e NÃO reaproveita a sintaxe do teko que consta em `src/` e nas docs.** `struct Nome { }` / `class Nome { }` como declaração de topo, campos em **C de escola**, construção por **`new`** (o dono confirmou o `new` explicitamente). A forma clássica (`type X = struct { }` com o corpo depois do `=`, e o brace-init `Box { v = 42 }`) **não é herdada por este port**. Concretiza o D213: fidelidade sintática ao teko-clássico não é requisito, funcionalidade é.
+- **2. "Ensinar o mc" significa NÃO tocar no código do mc.** O ferramental já existe e é o mesmo que o mc usa nos próprios exemplos para `class`/`interface`: módulo `.mc` que registra handlers (`syntax`/`syntax_stmt`/`syntax_expr`/`syntax_infix`/`type_alias`/`type_new`/`on_stmt`). Todo o delta do teko vive em `ngen/`; o repo do mc é **somente leitura** para esta sessão. O dono avalia que **quase tudo que o mc tem hoje já atende** — quando não atender, pergunta-se (item 4) em vez de contornar.
+- **3. O mc entra por RELEASE, não por submodule.** Baixa-se o **executável** das releases de `schivei/mc` (checksum conferido) e instala-se no PATH. Não se usa submodule, não se roda o bootstrap do mc (chicken-and-egg), e **não se usa binário de dentro do clone do mc** — ele pode estar à frente da release que o CI consome (o workflow resolve a `latest` dinamicamente).
+- **4. Canal com a sessão local que desenvolve o mc** (`/Users/schivei/projects/mini_compiler`): ela **avisa esta sessão a cada release nova** — e aí se baixa a release, troca-se o symlink e **reconfere-se o baseline** do `ngen` antes de seguir. E quando aparecer **tensão que o ferramental atual do mc não resolva**, consulta-se essa sessão para saber por onde se resolve, ou se o caso exige suporte novo no mc. Continua valendo o canal com a sessão remota coordenadora (histórico do port e dreno das branches canônicas).
+
+**Adjacente (registro, não é ruling):** `docs/design/port-teko-mc.md:106` ainda descreve o `str` do teko como `{ptr,len}`, mas a entrega 2 landou **NUL-terminated** (`ngen/teko_type.mc:23` → `TY_UPTR`). O código vence a doc; a §3 precisa de sync.
+
 ### D214 · DONO: ordem das entregas do `ngen/` — primitivas → tipos (`class`/`struct`/`interface`/`trait`) → superfície e comportamento base; o PORT SÓ FECHA no mc 1.0.0 (dono 2026-09-04) 🔧 SEQUÊNCIA
 Com a **fatia vertical A3 VERDE** (CI provou ponta-a-ponta: `mc-0.10.0-linux-x86_64` baixado + checksum OK, compilador ensinado `build/mc-teko` construído, `tests/hello.tk` compilado POR ele, binário executado com **exit 42** — tudo em ~0,5 s), o dono ordenou o crescimento do `ngen/`:
 - **ORDEM DAS ENTREGAS:** (1) **novas primitivas**; (2) **tipos — `class`, `struct`, `interface`, `trait`**; (3) ir **crescendo o ensino da superfície e do comportamento base**. Sempre "por baixo", sempre reusando a base do mc e ensinando só o DELTA (D213).
@@ -1904,34 +1914,3 @@ Cluster I/O/panic (`rt-io-panic-migrate @ c5c0689f`, base `bfd4d7a1`) landou ver
 - **Opções de sequenciamento (pro dono rular):** (1) ACEITAR o float-up do pico durante o expurgo, reclamar tudo na RM-C9 (o ratchet passa a valer no estado FINAL pós-RM-C9, não a cada passo) — casa com a lei "arena+I/O co-dependentes"; (2) PUXAR a RM-C9 (arena por-unidade) pra FRENTE, antes do resto das migrações → cada migração vira peak-free (AST drenada por unidade), pico flat o tempo todo; (3) outra. Recomendo (1) ou (2).
 - **Sub-forks menores:** (B) **D117 shadow-validation BLOQUEADA** — projeto standalone no scratchpad não resolve `teko::sys::abi` (o prelúdio injeta teko::runtime/sys/assert mas NÃO sys::abi, e o `rtio.tks` sempre-injetado referencia `abi::WriteFile`/`os_read_raw`/`ReadFile`). Fix = adicionar `teko::sys::abi` ao prelúdio injetado (transitório, consistente com D111 "continua como está por hora"). (C) **CAST trap mantido em C** — o `tk_to_*` que detecta o cast é `static inline` FROZEN no `teko_rt.h` (D90 proíbe editar); migrar exigiria editar o header frozen OU inline da tabela de bounds em milhares de sítios → mantido em C byte-idêntico, morre no F9. Recomendo aceitar (B: fix; C: aceitar o defer até F9).
 - **AÇÃO:** branch SEGURA no origin (`rt-io-panic-migrate @ c5c0689f`), **não drenada**. Aguarda ruling do dono no fork principal antes de drenar (0133 cresce o pico; a decisão molda todo o resto da campanha).
-
----
-
-## 2026-09-04 — Entrega 3 (`ngen/`): struct e class landados; rulings do port
-
-### D215 · DONO: rulings do port `ngen/` — superfície C-like; método "ensinar o mc = hooks"; mc por release; canal com local (dono 2026-09-04) 🔧 PORT / método
-Com **struct** e **class LANDADOS** (SHAs `984f268e` + `06db615d`, commits 1 e 2 da entrega 3) e **7 fixtures verdes** (hello + 4 primitivas + struct + class, todas exit 42, CI ponta-a-ponta ~15s), o dono ratificou 4 rulings estruturais do port:
-
-**1. Superfície do `ngen` é C-like, NÃO herda sintaxe teko-clássica.**
-- **Forma:** `struct Nome { }` e `class Nome { }` de topo; campos em **C de escola** (`i64 x; u8 flag;`); construção por **`new`** (não `Box { x: 42 }`/brace-init).
-- **Reafirma D213:** não há requisito de fidelidade sintática ao teko-clássico; a intenção original era **simplificar**, reutilizando a base do mc.
-
-**2. "Ensinar" o mc = ZERO toques no código do mc.**
-- O ferramental já existe: **módulos `.mc` de hooks** (3 camadas: `#token/#infix/#rule`, `pass()`, `syntax/type_alias/on_stmt`).
-- Tudo se faz por adição de módulo `.mc` em `ngen/` — **repo do mc é somente leitura** (nem um caráter de git).
-
-**3. O mc entra por RELEASE, não por submodule.**
-- Baixa-se o executável das **releases oficiais** de `schivei/mc` (checksum conferido).
-- Instala-se no PATH (`~/.local/bin/mc`).
-- **Nada de `make bootstrap-linux`** (chicken-and-egg); nada de `git submodule`.
-
-**4. Canal operacional: coordenador remoto + sessão local do mc.**
-- **Coordenador remoto** (`fix/retirement`, drenagem ao teko): drena changes do `ngen` às duas branches canônicas (faz edições cirúrgicas em leis/memory, despacha via agentes).
-- **Sessão local (mini_compiler repo):** desenvolve o mc em paralelo; repo **somente leitura** para o `ngen`. Regras: (a) avisa quando sai release nova; (b) resolve queries de "que caminho no mc pra este construto?"; (c) não recebe pushes diretos — só diretiva via dono.
-- Quando bater **tensão que o ferramental atual não resolve** (ex.: forma de construto novo, capacidade de hook desconhecida), a sessão local **consulta o dono/desenvolve o suporte**.
-
-**Consequências imediatas:**
-- Atualizado `ngen/HANDOFF.md` §3 (estado: 7 fixtures verdes, entrega 3 PARCIAL), §4 (loop local: download release + build + test ~1s), §5 (próximo: `interface`, fork aberto em `trait`), §5.1 (armadilhas: 9 itens, novo em "registrar tipo com type_new, não type_alias").
-- Seção §6 (canal): sessão local pode ler/editar `ngen/`, coordenador drena ao teko.
-
-**Adjacente achado no código (não blocking):** `docs/design/port-teko-mc.md:106` descreve `str` do teko como `{ptr,len}`, mas entrega 2 adotou **NUL-terminated `uptr`** (feito em `ngen/teko_type.mc:23` via D215). Código vence doc nesse ponto — nota futura pra sync.

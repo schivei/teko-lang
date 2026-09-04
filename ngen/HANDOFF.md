@@ -68,43 +68,61 @@ D213, D214** do `DECISION_LOG.md`. Leia-as — são leis, não sugestões.
   RODAM**: `hello.tk` + `primitives_{float,ptr,scalar,str}.tk` +
   `types_{struct,class}.tk`, todas com exit 42.
 
-## 4. Loop local — baixar release do mc, compilar, testar
+## 4. Loop local — o `mc` vem da RELEASE, não de submodule
 
-A sandbox remota **não consegue rodar o `mc`**: a rede para o GitHub está
-bloqueada (403). **Localmente tu tens o `mc` completo** — então o loop é:
+A sandbox remota **não consegue rodar o `mc`** (rede para o GitHub bloqueada, 403);
+lá só se valida estaticamente e o CI é o gate. **Localmente roda-se o `mc` de
+verdade**, e é onde esta sessão rende mais — o ciclo fecha em ~1 s.
 
-**1. Instalação ÚNICA do `mc`:**
+**Instalação (uma vez, e a cada release nova).** Baixa-se o EXECUTÁVEL das releases
+de `schivei/mc` — **nada de submodule**, e **não se usa binário de dentro do clone do
+mc** (pode estar à frente do que o CI usa). Troque `macos-arm64` pelo seu alvo:
+
 ```sh
-# Baixar a release de schivei/mc (latest ou pinada)
-gh release download --repo schivei/mc --pattern "mc-*-linux-x86_64" -D ~/.local/bin
-# (ou do SO teu: macos, windows, etc.)
-chmod +x ~/.local/bin/mc-*
-ln -sf ~/.local/bin/mc-* ~/.local/bin/mc   # symlink para "mc" simples
-# Verificar checksum publicado na release
+gh release download v0.10.0 --repo schivei/mc \
+  --pattern 'mc-0.10.0-macos-arm64.tar.gz*'
+shasum -a 256 mc-0.10.0-macos-arm64.tar.gz   # conferir contra o .sha256 publicado
+mkdir -p ~/.local/mc && tar xzf mc-0.10.0-macos-arm64.tar.gz -C ~/.local/mc
+ln -sf ~/.local/mc/mc-0.10.0-macos-arm64/mc ~/.local/bin/mc
 ```
 
-**2. Compile-test local:**
-```sh
-# Da raiz do repo teko-lang
-mc build ngen        # compila o compilador ensinado
-ngen/build/mc-teko < ngen/tests/types_struct.tk > /tmp/out.c
-gcc -o /tmp/test /tmp/out.c
-/tmp/test; echo $?   # tem que dar 42
-```
+O CI resolve a release **`latest`** dinamicamente (`.github/workflows/ngen.yml:40`),
+não uma versão fixa — então release nova entra no gate sozinha, e o local precisa
+acompanhar (§6).
 
-**3. Derivar config de host (se macOS ou Windows):**
+**Config de host.** O `ngen/mc.toml` versionado mira `linux/x86_64`, o alvo do CI, e
+não linka neste host. Deriva-se um config em scratch — `os = "macos"`,
+`arch = "aarch64"` (`arm64` **não** é aceito; `mc --host` diz o par certo) — sem o
+bloco `[linker]`, para o alvo sair pelo backend `macho-exe` embutido:
+
 ```sh
-# Arquivo: ngen/mc.macos.toml (não se committa)
-# Copiar ngen/mc.toml, trocar [target] pra o seu:
-#   [target]
-#   os = "macos"
-#   arch = "aarch64"    # arm64 (NOT aarch64 — ambos nomes)
-# Remover bloco [linker] (nativo precisa apenas do xcode-select)
+sed -e 's#^os   = .*#os   = "macos"#' -e 's#^arch = .*#arch = "aarch64"#' ngen/mc.toml \
+  | grep -v '^\[linker\]' | grep -v '^cmd  = ' | grep -v '^args = ' > ngen/mc.macos.toml
 mc build ngen --config ngen/mc.macos.toml
+./ngen/build/teko-hello; echo $?          # 42
 ```
 
-**Ciclo:** ~1 s local (vs. 15 s no CI). Não-commitar `ngen/mc.macos.toml`,
-`ngen/build/`, ou artefatos derivados.
+**As fixtures**, no mesmo laço que o CI usa — `--entry-only` reaproveita o compilador
+ensinado em vez de reconstruí-lo por fixture:
+
+```sh
+for src in ngen/tests/*.tk; do
+  n=$(basename "$src" .tk); w=$(grep -m1 '// expect-exit:' "$src" | sed 's/.*expect-exit: *//')
+  sed -e "s#^entry = .*#entry = \"tests/$n.tk\"#" -e "s#^out   = .*#out   = \"build/$n\"#" \
+      ngen/mc.macos.toml > "ngen/mc.$n.toml"
+  ngen/build/mc-teko build ngen --config "ngen/mc.$n.toml" --entry-only && "ngen/build/$n"
+  echo "$n exit=$?  want=$w"; rm -f "ngen/mc.$n.toml"
+done
+```
+
+Hoje isso dá **7/7 em exit 42**. `ngen/mc.macos.toml`, os `ngen/mc.*.toml` transientes
+e `ngen/build/` **nunca se commitam**, e `ngen/mc.toml` fica **intacto** — alterá-lo
+quebra o CI.
+
+**O `mc` NÃO emite C.** Ele emite objeto nativo e linka; não existe passo de `gcc`
+sobre saída do compilador ensinado. Compile sempre por `mc build DIR --config FILE`
+(ver armadilha 1 do §5.1).
+
 
 ## 5. Próximo passo — entrega 3: TIPOS (continuação)
 
@@ -163,8 +181,9 @@ port-teko-mc.md. Decisão e forma precisam de input do dono antes de iniciar.
 
 ## 6. Comunicação — coordenador remoto + sessão local
 
-**Coordenador remoto** (`fix/retirement`): dono, histórico do port, drenagem
-de changes às branches canônicas — <https://claude.ai/code/session_01VX6NuV7RoBLyW6tBCrwEde>
+**Sessão remota coordenadora**: guarda o histórico completo da virada (por que o
+port existe, o que aposenta, o que já foi decidido) e drena para as duas branches
+canônicas — <https://claude.ai/code/session_01VX6NuV7RoBLyW6tBCrwEde>
 
 **Sessão local** (mini_compiler, `/Users/schivei/projects/mini_compiler`):
 desenvolve o `mc` paralelo; repo **somente leitura** para o `ngen`. Regras:
