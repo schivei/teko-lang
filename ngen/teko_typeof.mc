@@ -18,17 +18,17 @@
 //   3. the callee's declared return type, for an N_CALL, and the type the core
 //      itself put on a literal or a cast.
 //
-// It does NOT read `tk_local` (teko_struct.mc): that table is global and has no
-// scope, so a name declared in one function answers in another. A name this
-// oracle cannot decide -- two declarations of different type under one name,
-// a global, a receiver it never saw -- answers -1, and the consumer reports it.
-// Conservative, never a guess.
+// It does NOT read `tk_local` (teko_struct.mc): that table belongs to the parse,
+// and by the time the pass runs it is empty. It builds its own scope over the
+// tree, under the same rule -- a mark per block, cut back on the way out -- so a
+// name declared in an inner block answers only there. A name this oracle cannot
+// decide -- a global, a receiver it never saw -- answers -1, and only THEN does
+// the member's own name get to resolve the access (`tk_pend_by_name`).
 //
 // The consumer here is `.` on a receiver the parser could not type: teko_expr.mc
-// resolves the member by NAME when the receiver is opaque, and that is exact
-// until two unrelated types declare the same member. Where it used to stop with
-// "the type of the left side of `.` is not known here", the access is now
-// RECORDED and rebuilt in the pass, in the same shapes teko_expr.mc emits
+// DEFERS every one of them rather than guessing from the member's name, because
+// a name that only another type declares is not this receiver's member. The
+// access is RECORDED and rebuilt in the pass, in the same shapes teko_expr.mc emits
 // (field load, field store, direct call, vtable call, itab call). "The same
 // shapes" includes the two things a call resolves by: the SIGNATURE the
 // argument count picks, whose symbol carries the overload suffix, and the
@@ -59,8 +59,8 @@ i64 tk_fill_defaults(i64 args, i64 na, i64 np, i64 nreq, i64 d0);
 void tk_pick_refuse(i64 mi, uptr m, i64 line, uptr fl);
 void tk_loose_refuse(i64 mi, uptr m, i64 line, uptr fl);
 
-uptr sc_name[TK_MAXSCOPE];            // one function's names, rebuilt per N_FUNC
-i64  sc_ty[TK_MAXSCOPE];              // its declared type, or -1 when two disagree
+uptr sc_name[TK_MAXSCOPE];            // the names in scope, innermost last
+i64  sc_ty[TK_MAXSCOPE];              // the type each was declared with
 i64  tk_nscope = 0;
 
 i64  pd_node[TK_MAXPEND];             // the placeholder the pass rewrites in place
