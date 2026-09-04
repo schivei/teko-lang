@@ -354,8 +354,10 @@ i64 tk_field_by_name(uptr name) {
     return found;
 }
 
-// the newest declaration of `name` wins, so a second function reusing the name
-// for another type is not shadowed by the first one's entry
+// the table is a STACK, marked at every `{` and cut back at the matching `}`
+// (teko_stmt.mc's tk_block), so what it holds is exactly the names in scope
+// where the parser stands; the newest entry wins, which is what makes an inner
+// declaration shadow an outer one for as long as its block is open
 i64 tk_local_find(uptr name) {
     i64 i = tk_nlocal - 1;
     loop {
