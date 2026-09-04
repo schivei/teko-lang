@@ -32,20 +32,32 @@
 // One limit, the same one `mc/examples/lang` has: names resolve in declaration
 // order, so a method may call the methods declared ABOVE it in the same body.
 //
+// A parameter may carry a DEFAULT (`i64 area(self, i64 k = 2)`): the constant is
+// folded once, at the declaration, and every call that omits the argument gets a
+// clone of it. It is a property of the declaration the call site resolves
+// against, not of the vtable -- a `virtual`/`override` pair keeps one slot, and
+// each of the two declarations answers with its own default.
+//
 // What is NOT here, and stops with a message rather than a surprise: `type`,
 // `namespace`, `import` and `using` (docs/design/port-teko-mc.md §3).
 
 #define TK_MAXMETHOD 128              // methods, summed across all classes
 #define TK_MAXVSLOT  128              // virtual slots, summed across all classes
+#define TK_MAXDFLT   64               // default arguments, summed across all signatures
 #define TK_VT_FIXED  1                // vtable word 0 is the interface table; slots follow
 
 uptr mt_name[TK_MAXMETHOD];
 i64  mt_cls[TK_MAXMETHOD];
 uptr mt_fn[TK_MAXMETHOD];             // the mangled name: class_method
 i64  mt_np[TK_MAXMETHOD];             // parameters, not counting `self`
+i64  mt_nreq[TK_MAXMETHOD];           // of those, the ones with no default: the smallest call
+i64  mt_d0[TK_MAXMETHOD];             // where its defaults start in the default table
 i64  mt_ret[TK_MAXMETHOD];
 i64  mt_slot[TK_MAXMETHOD];           // its vtable slot, or -1 when not virtual
 i64  tk_nmethod = 0;
+
+i64  df_node[TK_MAXDFLT];             // the folded constant a missing argument becomes
+i64  tk_ndflt = 0;
 
 uptr vs_m[TK_MAXVSLOT];               // the method name a slot answers to
 uptr vs_fn[TK_MAXVSLOT];              // the function currently filling it
@@ -55,19 +67,25 @@ uptr mt_name_at(i64 i) { return ld64(mt_name + i * 8); }
 i64  mt_cls_at(i64 i)  { return ld64(mt_cls + i * 8); }
 uptr mt_fn_at(i64 i)   { return ld64(mt_fn + i * 8); }
 i64  mt_np_at(i64 i)   { return ld64(mt_np + i * 8); }
+i64  mt_nreq_at(i64 i) { return ld64(mt_nreq + i * 8); }
+i64  mt_d0_at(i64 i)   { return ld64(mt_d0 + i * 8); }
 i64  mt_ret_at(i64 i)  { return ld64(mt_ret + i * 8); }
 i64  mt_slot_at(i64 i) { return ld64(mt_slot + i * 8); }
 uptr vs_m_at(i64 i)    { return ld64(vs_m + i * 8); }
 uptr vs_fn_at(i64 i)   { return ld64(vs_fn + i * 8); }
+i64  df_node_at(i64 i) { return ld64(df_node + i * 8); }
 
 void set_mt_name_at(i64 i, uptr v) { st64(mt_name + i * 8, v); }
 void set_mt_cls_at(i64 i, i64 v)   { st64(mt_cls + i * 8, v); }
 void set_mt_fn_at(i64 i, uptr v)   { st64(mt_fn + i * 8, v); }
 void set_mt_np_at(i64 i, i64 v)    { st64(mt_np + i * 8, v); }
+void set_mt_nreq_at(i64 i, i64 v)  { st64(mt_nreq + i * 8, v); }
+void set_mt_d0_at(i64 i, i64 v)    { st64(mt_d0 + i * 8, v); }
 void set_mt_ret_at(i64 i, i64 v)   { st64(mt_ret + i * 8, v); }
 void set_mt_slot_at(i64 i, i64 v)  { st64(mt_slot + i * 8, v); }
 void set_vs_m_at(i64 i, uptr v)    { st64(vs_m + i * 8, v); }
 void set_vs_fn_at(i64 i, uptr v)   { st64(vs_fn + i * 8, v); }
+void set_df_node_at(i64 i, i64 v)  { st64(df_node + i * 8, v); }
 
 // the method `name` of `ci` or of one of its bases, or -1
 i64 tk_method_find(i64 ci, uptr name) {
@@ -131,12 +149,14 @@ i64 tk_method_by_name(uptr name) {
     return found;
 }
 
-i64 tk_method_add(uptr name, i64 ci, uptr fn, i64 np, i64 ret, i64 slot) {
+i64 tk_method_add(uptr name, i64 ci, uptr fn, i64 np, i64 nreq, i64 d0, i64 ret, i64 slot) {
     if (tk_nmethod == TK_MAXMETHOD) err_at(tk_file, tk_line, "teko: too many methods");
     set_mt_name_at(tk_nmethod, name);
     set_mt_cls_at(tk_nmethod, ci);
     set_mt_fn_at(tk_nmethod, fn);
     set_mt_np_at(tk_nmethod, np);
+    set_mt_nreq_at(tk_nmethod, nreq);
+    set_mt_d0_at(tk_nmethod, d0);
     set_mt_ret_at(tk_nmethod, ret);
     set_mt_slot_at(tk_nmethod, slot);
     tk_nmethod = tk_nmethod + 1;
@@ -205,11 +225,37 @@ i64 tk_slot_take(i64 ci, i64 kind, uptr m, uptr fn) {
     return 0 - 1;
 }
 
-// `(self)` or `(self, type name, ...)`: parse_params cannot be used, because
-// `self` comes with no type and that is exactly the sugar being taught. `extra`
-// is the argument slot dispatch spends besides the parameters: 1 for a virtual
-// method, whose call is `callp(slot, self, ...)`, 0 for a direct one.
-i64 tk_params(uptr pnp, i64 extra) {
+// the `= constant` a parameter may carry. The expression is folded HERE, once,
+// and every call site that omits the argument gets a CLONE of the node (a node
+// sits in one sibling list only, so a shared default would be rewired by the
+// second call that used it). `mark` is where this signature's defaults start:
+// past it there is a default, so a bare parameter after one is refused rather
+// than leaving a hole no call could fill.
+void tk_param_default(i64 mark) {
+    if (!p_accept(K_ASSIGN)) {
+        if (tk_ndflt > mark)
+            err_at(p_file(), p_line(), "teko: a parameter without a default cannot follow one with a default");
+        return;
+    }
+    i64 line = p_line();
+    uptr fl = p_file();
+    i64 e = fold(parse_expr(0));
+    if (nd_kind(e) != N_INT) err_at(fl, line, "teko: a default argument must be a constant");
+    if (tk_ndflt == TK_MAXDFLT) err_at(fl, line, "teko: too many default arguments");
+    set_df_node_at(tk_ndflt, e);
+    tk_ndflt = tk_ndflt + 1;
+}
+
+// `(self)`, `(self, type name, ...)` or `(self, type name = constant, ...)`:
+// parse_params cannot be used, because `self` comes with no type and a default
+// is not in the core's parameter grammar at all -- and both are reachable here
+// precisely because the body of a type is parsed by this module. `extra` is the
+// argument slot dispatch spends besides the parameters: 1 for a virtual method,
+// whose call is `callp(slot, self, ...)`, 0 for a direct one. The defaults go to
+// the shared table starting at the caller's own `tk_ndflt`, and `pnreq` answers
+// with the smallest number of arguments a call may pass.
+i64 tk_params(uptr pnp, uptr pnreq, i64 extra) {
+    i64 mark = tk_ndflt;
     p_expect(K_LPAR, "expected ( in the method parameter list");
     if (p_id() != T_IDENT || !str_eq(p_name(), "self"))
         err_at(p_file(), p_line(), "teko: the first parameter of a method is `self`");
@@ -222,11 +268,13 @@ i64 tk_params(uptr pnp, i64 extra) {
         if (ty == TY_VOID) err_at(p_file(), p_line(), "teko: parameter of type void");
         head = list_append(head, param_new(ty, p_ident()));
         np = np + 1;
+        tk_param_default(mark);
         if (np + 1 + extra > MAXPARAMS)
             err_at(p_file(), p_line(), "teko: method with too many parameters (`self` counts, and so does the vtable pointer of a virtual call)");
     }
     p_expect(K_RPAR, "expected ) in the method parameter list");
     st64(pnp, np);
+    st64(pnreq, np - (tk_ndflt - mark));
     return head;
 }
 
@@ -332,16 +380,21 @@ i64 tk_member_gate(i64 ci, uptr m, i64 ti, i64 kind) {
 // itself -- the one difference between the two bodies, which is what PHP's
 // flattening needs and why both run the same machine.
 i64 tk_member(i64 ci, uptr name, i64 off, i64 ti) {
-    if (tk_kw("use")) return tk_use(ci, name, off);
+    if (tk_kw("use")) {
+        if (!tk_is_class(ci)) err_at(tk_file, tk_line, "teko: only a class uses a trait");
+        return tk_use(ci, name, off);
+    }
     if (ti >= 0) tk_trait_gate();
     i64 kind = 0;
     if (tk_kw("virtual")) { kind = 1; p_next(); }
     else if (tk_kw("override")) { kind = 2; p_next(); }
+    if (kind && !tk_is_class(ci))
+        err_at(tk_file, tk_line, "teko: a struct has no vtable; `virtual`/`override` needs a class");
     i64 fty = p_type();
     uptr m = p_ident();
     if (p_id() != K_LPAR) {
         if (kind) err_at2(tk_file, tk_line, "teko: virtual/override on a field", m);
-        p_expect(K_SEMI, "expected ; after the class field");
+        p_expect(K_SEMI, "expected ; after the field");
         if (ti >= 0 && tk_field_find(ci, m) >= 0)
             err_at2(tk_file, tk_line,
                     tk_join3("teko: field of trait `", tr_name_at(ti), "` collides with a field of the class"), m);
@@ -356,9 +409,11 @@ i64 tk_member(i64 ci, uptr name, i64 off, i64 ti) {
     i64 extra = 0;
     if (kind) extra = 1;
     i64 np = 0;
-    i64 params = tk_params(&np, extra);
+    i64 nreq = 0;
+    i64 d0 = tk_ndflt;
+    i64 params = tk_params(&np, &nreq, extra);
     uptr fn = tk_fname(name, m);
-    tk_method_add(m, ci, fn, np, fty, tk_slot_take(ci, kind, m, fn));
+    tk_method_add(m, ci, fn, np, nreq, d0, fty, tk_slot_take(ci, kind, m, fn));
     tk_local_add("self", ci);                    // `self.field` inside the body
     i64 line = p_line();
     uptr fl = p_file();
