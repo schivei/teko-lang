@@ -32,6 +32,13 @@
 // One limit, the same one `mc/examples/lang` has: names resolve in declaration
 // order, so a method may call the methods declared ABOVE it in the same body.
 //
+// A name may be OVERLOADED: methods are keyed by (name, parameter types), the
+// first one of a name keeps the plain `class_method` symbol and the ones after
+// it carry their signature, and a virtual overload is a slot of its own -- so an
+// `override` fills the inherited slot of ITS signature. A call resolves by how
+// many arguments it passes; two signatures taking the same number are refused at
+// the call site, because the argument types are what would tell them apart.
+//
 // A parameter may carry a DEFAULT (`i64 area(self, i64 k = 2)`): the constant is
 // folded once, at the declaration, and every call that omits the argument gets a
 // clone of it. It is a property of the declaration the call site resolves
@@ -48,7 +55,8 @@
 
 uptr mt_name[TK_MAXMETHOD];
 i64  mt_cls[TK_MAXMETHOD];
-uptr mt_fn[TK_MAXMETHOD];             // the mangled name: class_method
+uptr mt_sig[TK_MAXMETHOD];            // its parameter types, `__i64__Point`: the overload key
+uptr mt_fn[TK_MAXMETHOD];             // the mangled name: class_method, class_method__i64...
 i64  mt_np[TK_MAXMETHOD];             // parameters, not counting `self`
 i64  mt_nreq[TK_MAXMETHOD];           // of those, the ones with no default: the smallest call
 i64  mt_d0[TK_MAXMETHOD];             // where its defaults start in the default table
@@ -60,11 +68,13 @@ i64  df_node[TK_MAXDFLT];             // the folded constant a missing argument 
 i64  tk_ndflt = 0;
 
 uptr vs_m[TK_MAXVSLOT];               // the method name a slot answers to
+uptr vs_sig[TK_MAXVSLOT];             // ...at that signature: an overload is a slot of its own
 uptr vs_fn[TK_MAXVSLOT];              // the function currently filling it
 i64  tk_nvslot = 0;
 
 uptr mt_name_at(i64 i) { return ld64(mt_name + i * 8); }
 i64  mt_cls_at(i64 i)  { return ld64(mt_cls + i * 8); }
+uptr mt_sig_at(i64 i)  { return ld64(mt_sig + i * 8); }
 uptr mt_fn_at(i64 i)   { return ld64(mt_fn + i * 8); }
 i64  mt_np_at(i64 i)   { return ld64(mt_np + i * 8); }
 i64  mt_nreq_at(i64 i) { return ld64(mt_nreq + i * 8); }
@@ -72,11 +82,13 @@ i64  mt_d0_at(i64 i)   { return ld64(mt_d0 + i * 8); }
 i64  mt_ret_at(i64 i)  { return ld64(mt_ret + i * 8); }
 i64  mt_slot_at(i64 i) { return ld64(mt_slot + i * 8); }
 uptr vs_m_at(i64 i)    { return ld64(vs_m + i * 8); }
+uptr vs_sig_at(i64 i)  { return ld64(vs_sig + i * 8); }
 uptr vs_fn_at(i64 i)   { return ld64(vs_fn + i * 8); }
 i64  df_node_at(i64 i) { return ld64(df_node + i * 8); }
 
 void set_mt_name_at(i64 i, uptr v) { st64(mt_name + i * 8, v); }
 void set_mt_cls_at(i64 i, i64 v)   { st64(mt_cls + i * 8, v); }
+void set_mt_sig_at(i64 i, uptr v)  { st64(mt_sig + i * 8, v); }
 void set_mt_fn_at(i64 i, uptr v)   { st64(mt_fn + i * 8, v); }
 void set_mt_np_at(i64 i, i64 v)    { st64(mt_np + i * 8, v); }
 void set_mt_nreq_at(i64 i, i64 v)  { st64(mt_nreq + i * 8, v); }
@@ -84,11 +96,29 @@ void set_mt_d0_at(i64 i, i64 v)    { st64(mt_d0 + i * 8, v); }
 void set_mt_ret_at(i64 i, i64 v)   { st64(mt_ret + i * 8, v); }
 void set_mt_slot_at(i64 i, i64 v)  { st64(mt_slot + i * 8, v); }
 void set_vs_m_at(i64 i, uptr v)    { st64(vs_m + i * 8, v); }
+void set_vs_sig_at(i64 i, uptr v)  { st64(vs_sig + i * 8, v); }
 void set_vs_fn_at(i64 i, uptr v)   { st64(vs_fn + i * 8, v); }
 void set_df_node_at(i64 i, i64 v)  { st64(df_node + i * 8, v); }
 
-// the method `name` of `ci` or of one of its bases, or -1
-i64 tk_method_find(i64 ci, uptr name) {
+// the signature key of a parameter list: `__i64__Point` for `(self, i64 a,
+// Point p)`, and empty for a method that takes `self` alone. It is what tells
+// two overloads apart -- one name, one class, different parameter types -- and
+// the suffix that keeps their two symbols apart.
+uptr tk_sig_of(i64 params) {
+    uptr s = "";
+    i64 p = nd_next(params);                     // past `self`, which every method has
+    loop {
+        if (p == 0) break;
+        s = tk_join3(s, "__", type_name(nd_type(p)));
+        p = nd_next(p);
+    }
+    return s;
+}
+
+// the first method called `name` in `ci` or in one of its bases, whatever its
+// signature, or -1: the question "does this type have such a member at all",
+// which comes before the arguments are even read
+i64 tk_method_named_find(i64 ci, uptr name) {
     loop {
         if (ci < 0) break;
         i64 i = 0;
@@ -104,18 +134,89 @@ i64 tk_method_find(i64 ci, uptr name) {
     return 0 - 1;
 }
 
-// the method `name` declared by `ci` ITSELF, or -1: a redeclaration in the same
-// body is a duplicate, while one that collides with a base's is the business of
-// tk_slot_take (an inherited virtual needs `override`, a plain one is hidden)
-i64 tk_method_own(i64 ci, uptr name) {
+// the method `name` with signature `sig` in `ci` or in one of its bases, or -1
+i64 tk_method_sig_find(i64 ci, uptr name, uptr sig) {
+    loop {
+        if (ci < 0) break;
+        i64 i = 0;
+        loop {
+            if (i >= tk_nmethod) break;
+            if (mt_cls_at(i) == ci && str_eq(mt_name_at(i), name)) {
+                if (str_eq(mt_sig_at(i), sig)) return i;
+            }
+            i = i + 1;
+        }
+        ci = sr_base_at(ci);
+    }
+    return 0 - 1;
+}
+
+// the method `name` at signature `sig` declared by `ci` ITSELF, or -1: a
+// redeclaration of the same signature in the same body is a duplicate, one at
+// another signature is an OVERLOAD, and one that collides with a base's is the
+// business of tk_slot_take (an inherited virtual needs `override`)
+i64 tk_method_own(i64 ci, uptr name, uptr sig) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nmethod) break;
+        if (mt_cls_at(i) == ci && str_eq(mt_name_at(i), name)) {
+            if (str_eq(mt_sig_at(i), sig)) return i;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+// 1 when `ci` already registered a method under `name`, at any signature: the
+// next one to arrive is an overload, and takes the signature suffix on its
+// symbol so that the FIRST one keeps the plain `class_method`
+i64 tk_method_overloads(i64 ci, uptr name) {
     i64 i = 0;
     loop {
         if (i >= tk_nmethod) break;
         if (mt_cls_at(i) == ci) {
-            if (str_eq(mt_name_at(i), name)) return i;
+            if (str_eq(mt_name_at(i), name)) return 1;
         }
         i = i + 1;
     }
+    return 0;
+}
+
+// 1 when a call passing `na` arguments fits the method: the parameters with no
+// default are the floor, all of them the ceiling
+i64 tk_method_fits(i64 i, i64 na) {
+    if (na < mt_nreq_at(i)) return 0;
+    if (na > mt_np_at(i)) return 0;
+    return 1;
+}
+
+// the method of `ci` (or of a base) called `name` that takes `na` arguments, ONE
+// level of the chain at a time -- so a class's own declaration hides the base's
+// overloads of that name, as it does in C#. -1: nobody declares the name; -2:
+// the name is there and no signature takes that many arguments; -3: two do, and
+// only the argument types could tell them apart -- which is what a module cannot
+// ask the core about mid-body (`decl_*` answers after the declaration closes).
+i64 tk_method_pick(i64 ci, uptr name, i64 na) {
+    i64 named = 0;
+    loop {
+        if (ci < 0) break;
+        i64 found = 0 - 1;
+        i64 i = 0;
+        loop {
+            if (i >= tk_nmethod) break;
+            if (mt_cls_at(i) == ci && str_eq(mt_name_at(i), name)) {
+                named = 1;
+                if (tk_method_fits(i, na)) {
+                    if (found >= 0) return 0 - 3;
+                    found = i;
+                }
+            }
+            i = i + 1;
+        }
+        if (found >= 0) return found;
+        ci = sr_base_at(ci);
+    }
+    if (named) return 0 - 2;
     return 0 - 1;
 }
 
@@ -129,18 +230,31 @@ i64 tk_is_ancestor(i64 a, i64 b) {
     return 0;
 }
 
-// the method called `name` when the receiver's class is not known statically,
-// under the same rule tk_field_by_name uses -- except that an `override` is not
-// a second method: candidates inside ONE inheritance chain answer with the
-// BASE's declaration, whose slot is the one the whole chain shares. -1 = nobody
-// declares it, -2 = two unrelated classes do.
-i64 tk_method_by_name(uptr name) {
+// 1 when some class declares a method called `name`
+i64 tk_method_has_name(uptr name) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nmethod) break;
+        if (str_eq(mt_name_at(i), name)) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+// the method called `name` taking `na` arguments when the receiver's class is
+// not known statically, under the same rule tk_field_by_name uses -- except that
+// an `override` is not a second method: candidates inside ONE inheritance chain
+// answer with the BASE's declaration, whose slot is the one the whole chain
+// shares. -1 = no signature takes that many arguments, -2 = two unrelated
+// classes answer, -3 = two signatures of ONE class do.
+i64 tk_method_by_name(uptr name, i64 na) {
     i64 found = 0 - 1;
     i64 i = 0;
     loop {
         if (i >= tk_nmethod) break;
-        if (str_eq(mt_name_at(i), name)) {
+        if (str_eq(mt_name_at(i), name) && tk_method_fits(i, na)) {
             if (found < 0) found = i;
+            else if (mt_cls_at(i) == mt_cls_at(found)) return 0 - 3;
             else if (tk_is_ancestor(mt_cls_at(i), mt_cls_at(found))) found = i;
             else if (!tk_is_ancestor(mt_cls_at(found), mt_cls_at(i))) return 0 - 2;
         }
@@ -149,10 +263,11 @@ i64 tk_method_by_name(uptr name) {
     return found;
 }
 
-i64 tk_method_add(uptr name, i64 ci, uptr fn, i64 np, i64 nreq, i64 d0, i64 ret, i64 slot) {
+i64 tk_method_add(uptr name, i64 ci, uptr sig, uptr fn, i64 np, i64 nreq, i64 d0, i64 ret, i64 slot) {
     if (tk_nmethod == TK_MAXMETHOD) err_at(tk_file, tk_line, "teko: too many methods");
     set_mt_name_at(tk_nmethod, name);
     set_mt_cls_at(tk_nmethod, ci);
+    set_mt_sig_at(tk_nmethod, sig);
     set_mt_fn_at(tk_nmethod, fn);
     set_mt_np_at(tk_nmethod, np);
     set_mt_nreq_at(tk_nmethod, nreq);
@@ -184,6 +299,7 @@ void tk_slots_inherit(i64 ci, i64 base) {
         if (i >= n) break;
         if (tk_nvslot == TK_MAXVSLOT) err_at(tk_file, tk_line, "teko: too many virtual slots");
         set_vs_m_at(tk_nvslot, vs_m_at(sr_v0_at(base) + i));
+        set_vs_sig_at(tk_nvslot, vs_sig_at(sr_v0_at(base) + i));
         set_vs_fn_at(tk_nvslot, vs_fn_at(sr_v0_at(base) + i));
         tk_nvslot = tk_nvslot + 1;
         i = i + 1;
@@ -191,12 +307,16 @@ void tk_slots_inherit(i64 ci, i64 base) {
     set_sr_nv_at(ci, n);
 }
 
-// the slot of the class's own slice that answers to `name`, or -1
-i64 tk_slot_find(i64 ci, uptr name) {
+// the slot of the class's own slice that answers to `name` at `sig`, or -1: an
+// overload is a slot of its own, so a derived class that adds `area(self, i64)`
+// beside the inherited `area(self)` extends the table instead of colliding with it
+i64 tk_slot_find(i64 ci, uptr name, uptr sig) {
     i64 i = 0;
     loop {
         if (i >= sr_nv_at(ci)) break;
-        if (str_eq(vs_m_at(sr_v0_at(ci) + i), name)) return i;
+        if (str_eq(vs_m_at(sr_v0_at(ci) + i), name)) {
+            if (str_eq(vs_sig_at(sr_v0_at(ci) + i), sig)) return i;
+        }
         i = i + 1;
     }
     return 0 - 1;
@@ -205,8 +325,8 @@ i64 tk_slot_find(i64 ci, uptr name) {
 // `override` fills an inherited slot, `virtual` takes a new one, and a plain
 // method that collides with an inherited slot is refused rather than silently
 // hiding it. Returns the method's slot, or -1 when it is not virtual.
-i64 tk_slot_take(i64 ci, i64 kind, uptr m, uptr fn) {
-    i64 slot = tk_slot_find(ci, m);
+i64 tk_slot_take(i64 ci, i64 kind, uptr m, uptr sig, uptr fn) {
+    i64 slot = tk_slot_find(ci, m, sig);
     if (kind == 2) {
         if (slot < 0) err_at2(tk_file, tk_line, "teko: override of a method the base does not declare", m);
         set_vs_fn_at(sr_v0_at(ci) + slot, fn);
@@ -216,6 +336,7 @@ i64 tk_slot_take(i64 ci, i64 kind, uptr m, uptr fn) {
         if (slot >= 0) err_at2(tk_file, tk_line, "teko: virtual redeclares an inherited slot; use override", m);
         if (tk_nvslot == TK_MAXVSLOT) err_at(tk_file, tk_line, "teko: too many virtual slots");
         set_vs_m_at(tk_nvslot, m);
+        set_vs_sig_at(tk_nvslot, sig);
         set_vs_fn_at(tk_nvslot, fn);
         tk_nvslot = tk_nvslot + 1;
         set_sr_nv_at(ci, sr_nv_at(ci) + 1);
@@ -291,20 +412,27 @@ i64 tk_vt_slots(i64 ci, uptr vt) {
     return stmts;
 }
 
-// the function of `ci` answering the interface method `k` -- this is where
-// "interface method not implemented" comes from, and the two signature checks
-// with it: a class conforms only if every method is there, at the interface's
-// own arity and return type
+// the function of `ci` answering the interface method `k`: the class's method of
+// the same NAME and the same PARAMETER TYPES, so a class that overloads the name
+// still publishes the one the interface asked for. This is where "interface
+// method not implemented" comes from, and the three signature checks with it.
 uptr tk_conform(i64 ci, i64 k, uptr iname) {
     uptr m = im_name_at(k);
-    i64 mi = tk_method_find(ci, m);
+    i64 mi = tk_method_sig_find(ci, m, im_sig_at(k));
+    if (mi >= 0) {
+        if (mt_ret_at(mi) != im_ret_at(k))
+            err_at2(tk_file, tk_line, "teko: method with a return type different from the interface", m);
+        return mt_fn_at(mi);
+    }
+    mi = tk_method_named_find(ci, m);            // the name is there: say what differs
     if (mi < 0)
         err_at2(tk_file, tk_line, tk_join3("teko: method of `", iname, "` not implemented"), m);
     if (mt_np_at(mi) != im_np_at(k))
         err_at2(tk_file, tk_line, "teko: method with an arity different from the interface", m);
     if (mt_ret_at(mi) != im_ret_at(k))
         err_at2(tk_file, tk_line, "teko: method with a return type different from the interface", m);
-    return mt_fn_at(mi);
+    err_at2(tk_file, tk_line, "teko: method with parameter types different from the interface", m);
+    return 0;
 }
 
 // u8 class_iface_mt[n * 8], and the stores that fill it: the class's own
@@ -361,17 +489,31 @@ i64 tk_vt_init(i64 ci, uptr cls, uptr vt) {
 
 // a member the class DECLARES loses to nothing; one COPIED from a trait loses
 // to the class's own (PHP's precedence, teko_trait.mc), and two traits bringing
-// the same name is a conflict rather than a last-one-wins
-i64 tk_member_gate(i64 ci, uptr m, i64 ti, i64 kind) {
-    i64 own = tk_method_own(ci, m);
+// the same name is a conflict rather than a last-one-wins. Every one of the
+// three questions is asked of the SIGNATURE, not of the name alone: a trait
+// method overloading a name the class also declares is a member of its own.
+i64 tk_member_gate(i64 ci, uptr m, uptr sig, i64 ti, i64 kind) {
+    i64 own = tk_method_own(ci, m, sig);
     if (ti < 0) {
         if (own >= 0) err_at2(tk_file, tk_line, "teko: duplicate method", m);
         return kind;
     }
-    if (own >= 0 && own < tk_own_methods) return 0 - 1;   // the class declares it: not copied
+    if (own >= 0 && own < tk_own_methods) return 0 - 1;        // the class declares it: not copied
     if (own >= 0) err_at2(tk_file, tk_line, "teko: two traits bring the same member", m);
-    if (kind == 0 && tk_slot_find(ci, m) >= 0) return 2;  // the trait wins over the base
+    if (kind == 0 && tk_slot_find(ci, m, sig) >= 0) return 2;  // the trait wins over the base
     return kind;
+}
+
+// the symbol of a method: the FIRST one of a name in the class keeps the plain
+// `class_method`, and every overload after it carries its signature, so the two
+// reach the linker as two functions and the programs that never overload emit
+// exactly the symbols they emitted before. The one that takes `self` alone has
+// an EMPTY signature, and would collide with the plain symbol when it is not the
+// first to arrive -- `void` names it, being the one type a parameter cannot have.
+uptr tk_method_symbol(i64 ci, uptr name, uptr m, uptr sig) {
+    if (!tk_method_overloads(ci, m)) return tk_fname(name, m);
+    if (cstrlen(sig) == 0) return tk_join(tk_fname(name, m), "__void");
+    return tk_join(tk_fname(name, m), sig);
 }
 
 // one member of a body: a `use` of a trait, a field, or a method whose body the
@@ -401,19 +543,22 @@ i64 tk_member(i64 ci, uptr name, i64 off, i64 ti) {
         return tk_field_place(ci, name, m, fty, off);
     }
     if (str_eq(m, "new")) err_at2(tk_file, tk_line, "teko: method name reserved by the class", m);
-    kind = tk_member_gate(ci, m, ti, kind);
-    if (kind < 0) {
-        tk_skip_method();                        // the class's own wins: not even parsed
-        return off;
-    }
     i64 extra = 0;
     if (kind) extra = 1;
     i64 np = 0;
     i64 nreq = 0;
     i64 d0 = tk_ndflt;
-    i64 params = tk_params(&np, &nreq, extra);
-    uptr fn = tk_fname(name, m);
-    tk_method_add(m, ci, fn, np, nreq, d0, fty, tk_slot_take(ci, kind, m, fn));
+    i64 params = tk_params(&np, &nreq, extra);   // the signature decides every gate below
+    uptr sig = tk_sig_of(params);
+    kind = tk_member_gate(ci, m, sig, ti, kind);
+    if (kind < 0) {
+        tk_skip_body();                          // the class's own wins: its body is not parsed
+        return off;
+    }
+    if (kind && np + 2 > MAXPARAMS)              // a trait method promoted to a slot pays the vtable word
+        err_at(tk_file, tk_line, "teko: method with too many parameters (`self` counts, and so does the vtable pointer of a virtual call)");
+    uptr fn = tk_method_symbol(ci, name, m, sig);
+    tk_method_add(m, ci, sig, fn, np, nreq, d0, fty, tk_slot_take(ci, kind, m, sig, fn));
     tk_local_add("self", ci);                    // `self.field` inside the body
     i64 line = p_line();
     uptr fl = p_file();

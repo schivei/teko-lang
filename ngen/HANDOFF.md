@@ -128,7 +128,7 @@ for src in ngen/tests/*.tk; do
 done
 ```
 
-Hoje isso dá **7/7 em exit 42**. `ngen/mc.macos.toml`, os `ngen/mc.*.toml` transientes
+Hoje isso dá **11/11 em exit 42**. `ngen/mc.macos.toml`, os `ngen/mc.*.toml` transientes
 e `ngen/build/` **nunca se commitam**, e `ngen/mc.toml` fica **intacto** — alterá-lo
 quebra o CI.
 
