@@ -40,16 +40,28 @@ D213, D214** do `DECISION_LOG.md`. Leia-as — são leis, não sugestões.
 
 - **Branches:** `fix/retirement` (base canônica) e
   `claude/conversation-recovery-memory-cu1x6d` — mantidas **tree-idênticas**.
-- **Entrega 1 (fatia vertical) — VERDE.** `ngen/` com `mc.toml`, `teko.mc`
+  Trabalhe a partir de **`fix/retirement`**.
+- **Entrega 1 (fatia vertical) — LANDADA.** `ngen/` com `mc.toml`, `teko.mc`
   (registro `user_init`), `teko_{type,class,stmt,expr}.mc`, `lib/rt.mc`,
   `tests/hello.tk`, e o CI `.github/workflows/ngen.yml`.
-  Ensinado até aqui: **`bool`** (`type_alias` → `TY_U8`) e honest-stops para
+  Ensinado: **`bool`** (`type_alias` → `TY_U8`) + honest-stops para
   `class`/`type`/`interface`/`namespace`/`import`/`using`, `var`/`const`/
-  `match`/`when`, `new`. Todo o resto vem do core do mc.
-- **Prova de CI (primeiro verde):** baixa `mc-0.10.0-linux-x86_64`, confere o
-  checksum, `mc build ngen` constrói o compilador ensinado `build/mc-teko`,
-  compila `tests/hello.tk` **com ele**, e o binário sai com **exit 42**.
-  Pipeline inteiro em **~11 s**.
+  `match`/`when`, `new`.
+- **Entrega 2 (primitivas) — LANDADA.** Ensinado por `type_alias` (identidade
+  pura): **`char`** (`u32`), **`byte`** (`u8`), **`isize`/`usize`**,
+  **`ptr`** (colapsa em `uptr`, o único ponteiro opaco do core), **`str`**
+  (`uptr`). **`f32`/`f64`**: a lib `<float>` do mc (M24) **já registra essas
+  mesmas palavras** — foi só **conectar** (`ngen/teko_float.mc`), não
+  reimplementar. `lib/rt.mc` ganhou as fns ordinárias (não-hook):
+  `tk_str_len`/`tk_str_slice` (**view por ponteiro, zero-cópia — D197**) e
+  `tk_f64_bits`/`tk_f64_from_bits` (o reinterpret concreto `f64↔u64`; a forma
+  genérica `<T>` do `wrap`/`unwrap` precisa de generics record/replay e fica
+  para a entrega de tipos).
+- **CI VERDE, com execução real** (Linux x86_64, ~15 s ponta-a-ponta): baixa
+  `mc-0.10.0-linux-x86_64`, confere checksum, `mc build ngen` constrói o
+  compilador ensinado `build/mc-teko`, e **5 fixtures compilam, linkam e
+  RODAM**: `hello.tk` + `primitives_{float,ptr,scalar,str}.tk`, todas com
+  exit 42.
 
 ## 4. O que a sessão local pode fazer que a remota NÃO pode
 
@@ -70,17 +82,37 @@ Comando e opções: `docs/build.md` do repo do mc (seção `[compiler]`).
 Isso remove o round-trip de push, e é onde a sessão local rende mais —
 sobretudo nos construtos que pedem muita iteração (classes/interfaces).
 
-## 5. EM VOO agora (não duplicar)
+## 5. Próximo passo — entrega 3: TIPOS
 
-- **Entrega 2 — primitivas**, por um agente remoto, na branch
-  `feat/ngen-primitivas`: `str` (view sem cópia, D197), `char` (`u32`),
-  `isize`/`usize`, `byte`, `ptr`/`uptr` + `wrap`/`unwrap`, e `f32`/`f64` via a
-  biblioteca `<float>` do mc (M24).
-- **Próxima (entrega 3) — tipos:** `class`, `struct`, `interface`, `trait`.
-  Precedente a copiar: `examples/lang/lang_class.mc` e `lang_type.mc` do mc.
+**Nada em voo.** As entregas 1 e 2 estão drenadas para as duas branches e o CI
+está verde; a sessão remota **parou de despachar** trabalho de `ngen/` para a
+sessão local assumir sem colisão.
 
-Antes de começar, **confira se a entrega 2 já foi drenada** para
-`fix/retirement` (`git log --oneline -- ngen/`), para não colidir.
+**Entrega 3 (D214) — `class`, `struct`, `interface`, `trait`.**
+- Precedente a copiar: `examples/lang/lang_class.mc` e `lang_type.mc` no repo
+  do mc (classes single-inherit, `virtual`/`override`, interfaces, itab,
+  layout vtable@0 + campos base-first — ver `examples/lang/README.md §Layout`).
+- Hoje esses construtos estão como **honest-stop** em `ngen/teko_class.mc`;
+  é substituir a parada pelo handler real, um construto por commit.
+- Mapeamento e hook de cada um: `docs/design/port-teko-mc.md` §3.
+- Enquanto isso, a forma genérica `<T>` de `wrap`/`unwrap` também destrava
+  (precisa de generics record/replay, que vem junto dos tipos).
+
+## 5.1 Armadilhas já pagas (não repita)
+
+1. **`mc --exe` emite Mach-O SEMPRE.** `schivei/mc` `src/main.mc:227` faz
+   `--exe → bname = "macho-exe"`, ignorando host e `[target]`. Num runner/host
+   Linux isso gera `Exec format error` (ENOEXEC, exit 126). **Compile sempre
+   pelo caminho `mc build DIR --config FILE`**, que honra `[target] os/arch` e
+   `[linker]` do toml. O CI já faz assim (gera um toml por fixture a partir do
+   `ngen/mc.toml`, trocando só `[project].entry`/`out`).
+2. **O runner injeta `bash -e`.** Um passo de CI que pretende acumular falhas
+   (`status=1; continue`) precisa de **`set +e`** no topo, senão aborta na
+   primeira e esconde o estado das demais.
+3. **Confira o CI da branch de feature ANTES de drenar.** Drenar primeiro e
+   olhar depois já deixou as duas branches canônicas vermelhas uma vez.
+4. **`ld` avisa `missing .note.GNU-stack`** em todo `.o` emitido pelo mc → o
+   binário sai com stack executável. É item do lado do mc, não do `ngen/`.
 
 ## 6. Consultar a sessão remota
 
