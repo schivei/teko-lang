@@ -535,6 +535,7 @@ void tk_struct() {
         if (p_id() == T_EOF) err_at(head_file, head_line, "unterminated struct");
         tk_line = p_line();                      // errors and nodes for this field
         tk_file = p_file();
+        if (tk_kw("use")) err_at(tk_file, tk_line, "teko: only a class uses a trait");
         i64 fty = p_type();
         uptr m = p_ident();
         p_expect(K_SEMI, "expected ; after the struct field");

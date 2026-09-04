@@ -311,9 +311,29 @@ i64 tk_vt_init(i64 ci, uptr cls, uptr vt) {
     return tk_func(TY_VOID, tk_join(vt, "_init"), 0, tk_blk(stmts));
 }
 
-// one member of the body: a field, or a method whose body the CORE parses
-// (parse_function), with the parameter list already built here
-i64 tk_class_member(i64 ci, uptr name, i64 off) {
+// a member the class DECLARES loses to nothing; one COPIED from a trait loses
+// to the class's own (PHP's precedence, teko_trait.mc), and two traits bringing
+// the same name is a conflict rather than a last-one-wins
+i64 tk_member_gate(i64 ci, uptr m, i64 ti, i64 kind) {
+    i64 own = tk_method_own(ci, m);
+    if (ti < 0) {
+        if (own >= 0) err_at2(tk_file, tk_line, "teko: duplicate method", m);
+        return kind;
+    }
+    if (own >= 0 && own < tk_own_methods) return 0 - 1;   // the class declares it: not copied
+    if (own >= 0) err_at2(tk_file, tk_line, "teko: two traits bring the same member", m);
+    if (kind == 0 && tk_slot_find(ci, m) >= 0) return 2;  // the trait wins over the base
+    return kind;
+}
+
+// one member of a body: a `use` of a trait, a field, or a method whose body the
+// CORE parses (parse_function) with the parameter list already built here. `ti`
+// is the trait the member is being COPIED from, or -1 when the class declares it
+// itself -- the one difference between the two bodies, which is what PHP's
+// flattening needs and why both run the same machine.
+i64 tk_member(i64 ci, uptr name, i64 off, i64 ti) {
+    if (tk_kw("use")) return tk_use(ci, name, off);
+    if (ti >= 0) tk_trait_gate();
     i64 kind = 0;
     if (tk_kw("virtual")) { kind = 1; p_next(); }
     else if (tk_kw("override")) { kind = 2; p_next(); }
@@ -322,15 +342,22 @@ i64 tk_class_member(i64 ci, uptr name, i64 off) {
     if (p_id() != K_LPAR) {
         if (kind) err_at2(tk_file, tk_line, "teko: virtual/override on a field", m);
         p_expect(K_SEMI, "expected ; after the class field");
+        if (ti >= 0 && tk_field_find(ci, m) >= 0)
+            err_at2(tk_file, tk_line,
+                    tk_join3("teko: field of trait `", tr_name_at(ti), "` collides with a field of the class"), m);
         return tk_field_place(ci, name, m, fty, off);
     }
     if (str_eq(m, "new")) err_at2(tk_file, tk_line, "teko: method name reserved by the class", m);
+    kind = tk_member_gate(ci, m, ti, kind);
+    if (kind < 0) {
+        tk_skip_method();                        // the class's own wins: not even parsed
+        return off;
+    }
     i64 extra = 0;
     if (kind) extra = 1;
     i64 np = 0;
     i64 params = tk_params(&np, extra);
     uptr fn = tk_fname(name, m);
-    if (tk_method_own(ci, m) >= 0) err_at2(tk_file, tk_line, "teko: duplicate method", m);
     tk_method_add(m, ci, fn, np, fty, tk_slot_take(ci, kind, m, fn));
     tk_local_add("self", ci);                    // `self.field` inside the body
     i64 line = p_line();
@@ -350,6 +377,8 @@ i64 tk_conf_name(i64 base) {
     uptr fl = p_file();
     p_next();
     i64 si = tk_struct_find(nm);
+    if (si < 0 && tk_trait_find(nm) >= 0)
+        err_at2(fl, line, "teko: a trait is not a base class nor an interface; use `use`", nm);
     if (si < 0) err_at2(fl, line, "teko: unknown base class or interface", nm);
     if (tk_is_iface(si)) {
         tk_conf_add(si, line, fl, nm);
@@ -397,15 +426,18 @@ void tk_class() {
     }
     i64 off = 8;                                 // word 0 is the vtable
     if (base >= 0) off = sr_size_at(base);       // the base's fields keep their offsets
+    tk_use_reset();
     p_expect(K_LBRACE, "expected { in the class body");
     loop {
         if (p_id() == K_RBRACE) break;
         if (p_id() == T_EOF) err_at(head_file, head_line, "unterminated class");
         tk_line = p_line();                      // errors and nodes for this member
         tk_file = p_file();
-        off = tk_class_member(ci, name, off);
+        off = tk_member(ci, name, off, 0 - 1);
     }
-    p_next();                                    // }
+    tk_own_methods = tk_nmethod;                 // what a trait's copy has to lose to
+    if (tk_ntu > 0) off = tk_flatten(ci, name, 0, off);   // the push spends the `}`
+    else            p_next();                    // }
     p_accept(K_SEMI);
     tk_line = head_line;                         // back to the class's own level
     tk_file = head_file;

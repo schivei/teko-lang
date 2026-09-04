@@ -26,6 +26,8 @@ i64 tk_new() {
     p_next();                                    // the `new` word
     uptr name = p_name();                        // a type word is reserved: not T_IDENT
     i64 si = tk_struct_find(name);
+    if (si < 0 && tk_trait_find(name) >= 0)
+        err_at2(fl, line, "teko: a trait is not a type; `new` needs a struct or a class", name);
     if (si < 0) err_at2(fl, line, "teko: unknown struct or class after `new`", name);
     if (tk_is_iface(si)) err_at2(fl, line, "teko: an interface has no object to allocate", name);
     p_next();
