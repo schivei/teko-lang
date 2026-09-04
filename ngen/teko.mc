@@ -23,12 +23,14 @@
 //   char isize usize byte ptr str                            type_alias  (M12)
 //   f32 f64 (+ ldf64/ldf32/stf64/stf32/sqrt_f64/fabs/fmin/fmax) <float> (M24)
 //
-// What entrega 3 (tipos, D214) adds, one construct per commit -- this commit is
-// `struct`, the one that needs no vtable:
+// What entrega 3 (tipos, D214) adds, one construct per commit -- `struct` (no
+// vtable, fields from offset 0) and `class` (vtable at word 0, base-first
+// fields, `virtual`/`override`):
 //   struct Name { type field; ... }                          syntax      (M12)
+//   class Name [: Base] { fields, methods, virtual/override } syntax      (M12)
 //   new Name                                                  syntax_expr (M21)
-//   p.field, p.field = e                                      syntax_infix (M21)
-//   the N_VAR of a struct-typed local                         on_stmt     (M21.5)
+//   p.field, p.field = e, p.method(...)                       syntax_infix (M21)
+//   the N_VAR of a local of struct/class type                 on_stmt     (M21.5)
 //
 // Everything else in docs/design/port-teko-mc.md §3 (types/classes,
 // generics, operator overload, error-union, `service`/DI, concurrency, the
@@ -47,7 +49,7 @@ void user_init() {
     tk_types_init();
     tk_float_init();
 
-    syntax("class",     &tk_stop_class);
+    syntax("class",     &tk_class);
     syntax("type",      &tk_stop_type);
     syntax("interface", &tk_stop_interface);
     syntax("namespace", &tk_stop_namespace);
