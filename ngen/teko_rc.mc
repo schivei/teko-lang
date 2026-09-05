@@ -62,6 +62,7 @@ i64 tk_rc_floor = 0;                  // where the body's own locals start: past
 i64 tk_rc_ret = 0 - 1;                // the declared return type of the function being walked
 i64 tk_nparked = 0;                   // temporaries parked so far: a change detector
 i64 tk_rc_swept = 0;                  // 1 when the statement swept its own temporaries
+i64 tk_rc_root = 0;                   // the unit, for the return type of a callee
 
 i64 rc_lp_at(i64 i)          { return ld64(rc_lp + i * 8); }
 void set_rc_lp_at(i64 i, i64 v) { st64(rc_lp + i * 8, v); }
@@ -75,8 +76,31 @@ void tk_rc_at(i64 n) {
     tk_file = nd_file(n);
 }
 
+// 1 when the function `name` answers with a counted reference. The answer comes
+// from the TREE and not from `decl_find`, which is keyed by name alone: two
+// overloads of one name are still two declarations spelled the same here (the
+// mangling pass runs behind this one), and a name whose declarations disagree
+// answers "borrowed" -- an increment too many is a leak, one too few is a
+// use-after-free, and only one of the two is worth risking on an ambiguity.
+i64 tk_rc_call_owned(uptr name) {
+    i64 seen = 0;
+    i64 ans = 0;
+    i64 f = tk_rc_root;
+    loop {
+        if (f == 0) break;
+        if (nd_kind(f) == N_FUNC && str_eq(nd_name(f), name)) {
+            i64 c = tk_is_counted(nd_type(f));
+            if (seen && c != ans) return 0;
+            ans = c;
+            seen = 1;
+        }
+        f = nd_next(f);
+    }
+    return ans;
+}
+
 // 1 when the value already carries a reference of its own: `new C(...)`, or a
-// call to anything declared to return a class or an interface -- every such
+// call to anything declared to answer with a class or an interface -- every such
 // function hands out a reference of the caller's own, which is the protocol the
 // return lowering below keeps. A name, a field load and an element load are
 // BORROWED: the object belongs to whoever the load read it from.
@@ -88,9 +112,7 @@ i64 tk_rc_own(i64 e) {
         return tk_is_counted(xt_ty_at(x));
     }
     if (nd_kind(e) != N_CALL) return 0;
-    i64 d = decl_find(nd_name(e));
-    if (d < 0) return 0;
-    return tk_is_counted(decl_ret(d));
+    return tk_rc_call_owned(nd_name(e));
 }
 
 // where `name` sits in the scope stack, or -1: below the floor it is a
@@ -454,6 +476,7 @@ i64 tk_rc_needed() {
 
 i64 tk_rc_pass(i64 root) {
     if (!tk_rc_needed()) return root;
+    tk_rc_root = root;
     i64 f = root;
     loop {
         if (f == 0) break;
