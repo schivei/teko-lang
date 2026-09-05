@@ -719,7 +719,68 @@ nome; ordem final: local/parâmetro → membro do tipo corrente → namespace co
 declaração plana de topo → `using`s (`tk_ns_call_cls`, lido de `teko_class.mc`'s `tk_method_of_fn`/
 `tk_method_named_find`, os dois já usados por `teko_this.mc` para o mesmo passe posterior).
 
-**Fila:** `const` → `switch` (D222) → closures/`ref`/`out` (D221, architect-first) →
+**Entrega 5 — CONST LANDADO** (D218, plano §36; 29 fixtures): `const` como açúcar sobre o `#define`
+do mc, `ngen/teko_const.mc` (novo).
+- **Mecanismo:** NEM `do_directive()` NEM `p_push_source`/laço-de-topo — o handler `syntax("const",
+  &tk_const_top)` chama `fold(parse_expr(0))` (o mesmo que `#define` chama) e `def_add(nome, valor,
+  linha, arquivo)` DIRETO, o mesmo par que o `enum` demo do próprio mc usa (`mc docs/reference/
+  hooks.md` § `syntax()`). Zero indireção: nenhum texto é montado/empurrado.
+- **Topo:** `const i64 N = 10;` — fora de namespace o nome do `#define` É o nome curto, então o
+  `parse_primary` do NÚCLEO já resolve toda referência bare (inclusive como tamanho de array —
+  `parse_dim` chama `fold(parse_expr(0))` também — e em expressão comum) sem código nenhum daqui.
+  Dentro de `namespace geo { }` o nome é qualificado ANTES do `#define` (`tk_ns_qualified_name`,
+  NÃO `tk_ns_qualify` — esta última reservaria a palavra curta como TIPO, errado para uma
+  constante): `geo.N` resolve no PARSE (`tk_ns_qualified_call`, o mesmo segmento de `geo.area(x)`,
+  agora também respondendo por const) e `N` bare de dentro de `geo` (ou via `using`) resolve num
+  PASSE novo (`tk_ns_rewrite_ident`, estendendo `tk_ns_walk_calls_in` para `N_IDENT` — uma chamada
+  é resolvida por RENOME porque o núcleo procura o símbolo em tempo de lowering, mas um const não
+  tem essa procura: o nó é SUBSTITUÍDO por um `N_INT`, o mesmo que `parse_primary` teria construído).
+- **Genérico:** `Box<T, const N: i64>` instanciado com o NOME de um const (`Box<Circle, N>`) —
+  `tk_gen_targs` lia só `T_INT` cru; ganhou um ramo que aceita `T_IDENT`, procura bare e depois
+  qualificado pelo namespace corrente na tabela de `teko_const.mc`, e lê o valor já dobrado (sem
+  reparsear).
+- **Membro:** `public const i64 MAX = 4;` — `const` entra em `tk_member_mods` como mais um modificador
+  contextual (`static const` é recusado: "already static"); `tk_member_const` (teko_const.mc) lê
+  tipo+nome+valor e registra `Tipo__MAX` (dois underscores, distinto do `Tipo_campo` de um static
+  field). `Nome.MAX` de fora entra em `tk_static_member` (checado ANTES de field/método, já que um
+  const não ocupa slot nenhum); `MAX`/`STEP` bare de dentro entram em `tk_this_ident`'s fallback
+  (`tk_this_const`, mesma prioridade que um field), visibilidade pelo `tk_check_member` de sempre.
+  Não há RC nem layout — `const` nunca ocupa slot; herda pela cadeia de base como um field.
+- **Local recusado, de propósito:** `teko_stmt.mc`'s `tk_stop_const` (a posição de ESTATUTO, dentro
+  de corpo de função) segue reservada, mensagem própria — `#define` é uma tabela única do programa,
+  sem escopo de local.
+- **Achado (não previsto pelo crumb, registrado):** a redefinição de um `const` de topo NÃO cai no
+  `duplicate #define` de `def_add` — `p_ident()` do núcleo já recusa ANTES, com `name already
+  defined by #define` (o guard embutido em toda leitura de nome de declaração, `check_def()`).
+  Mensagem diferente da esperada, mas 100% do núcleo, igualmente clara.
+- **Fixture** `surface_const.tk` (29/29 em exit 42): const de topo em expressão, como tamanho de
+  ARRAY GLOBAL (`i64 arr[SIZE];` — um array LOCAL com `[i]=v;` não é suportado por este compilador,
+  achado adjacente, não é regressão do `const`: `[` em posição de expressão é `teko_params.mc`'s
+  `tk_bracket`, que só resolve um campo-array ou uma lista `params`; um `N_INDEX` sobre array
+  comum nunca é lowered — dívida pré-existente, registrada abaixo), como argumento `const N` de
+  genérico (`Box<i64, SIZE>`), const em `namespace geo` bare e qualificado, const membro `public`
+  acessado `Nome.X` de fora e bare dentro, `private const` bare dentro. AST das **28 fixtures
+  anteriores** (as 27 do glob + `hello.tk`) **byte-idêntica** contra o compilador da base
+  `8adf0f93`. `mc limits ngen` `ok`. Probes fora de `tests/`: `static const` ("already static; drop
+  static"); local const (a mensagem acima); `private const` de fora ("Foo.SECRET is private");
+  atribuição a um const de topo (`N = 5;` → o núcleo recusa com `left side of assignment must be a
+  name`, porque `N` já virou `N_INT` no parse — nunca chega a ser um `N_IDENT` atribuível);
+  redefinição (achado acima); valor não-constante (`const i64 N = g();` → "teko: const requires a
+  constant expression", mensagem própria).
+- **Dívida nova:** um array LOCAL comum (`i64 arr[N];` dentro de função, fora de struct/`params`) não
+  suporta `arr[i] = v;` — o `[` cai em `teko_params.mc`'s `tk_bracket`, que só sabe lowerar um campo
+  de array (`this.items[i]`) ou uma lista `params`; sobre qualquer outro array o `N_INDEX` que ele
+  constrói nunca é resolvido (nem lido nem escrito), e uma ATRIBUIÇÃO a ele já é recusada no parse
+  (`left side of assignment must be a name`, o núcleo exige `N_IDENT`). Pré-existente ao `const`
+  (achado ao testar o array de tamanho fixo); registrado, não fechado aqui.
+- **Dívidas herdadas dos verificadores N3b/N3c (ainda não constavam, registradas agora):** `&campo`
+  bare dentro de um método não resolve (só `&funcao` livre passa por `tk_ns_rewrite_call`/`N_ADDR`);
+  um membro `private` da BASE bloqueia com erro de visibilidade em vez de cair no fallback `using`
+  quando um `using` traria um candidato de mesmo nome de outro namespace — o gate de acesso roda
+  ANTES da decisão "achou member, tenta using", então a mensagem é "is private" em vez de resolver
+  pelo `using`. Nenhum dos dois é tocado por este crumb.
+
+**Fila:** `switch` (D222) → closures/`ref`/`out` (D221, architect-first) →
 compilador teko de `<mc/core_min>` (plano §26). **Fora:** `var`, `type`, `match`, Variant,
 método parcial, nested, `foreach` (precisa de iteráveis), herança de interface, `using G = geo;`/
 `using static`, genérico qualificado (D31.14), namespace aninhado (D31.1).

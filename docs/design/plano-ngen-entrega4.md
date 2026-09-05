@@ -1330,3 +1330,15 @@ resolve para `geo.f` (`f(5)` dá `1005 mod 256 = 237`) -- o membro de `Circle` n
 da própria classe.
 
 **Fila:** inalterada -- `const`, `switch` (D222), closures/`ref`/`out` (D221).
+
+## 36. `const` landado -- açúcar sobre o `#define` do mc (2026-09-05)
+
+D218: "o mc usa `#define`; construir `const` como açúcar". `ngen/teko_const.mc` (novo): topo
+(bare ou `geo__N` namespaced, resolvido bare por um passe novo que estende `tk_ns_walk_calls_in`
+a `N_IDENT` -- uma const não tem lookup em tempo de lowering como uma chamada tem, então o nó é
+SUBSTITUÍDO por `N_INT`, não renomeado); membro (`Tipo__MAX`, checado antes de field/método em
+`tk_static_member`, e no fallback de `tk_this_ident` para o bare); `Box<T, const N: i64>`
+instanciado pelo NOME de um const (`tk_gen_targs` ganhou o ramo `T_IDENT`). Local recusado, de
+propósito (`#define` é tabela única do programa). 29 fixtures, AST das 28 anteriores
+byte-idêntica. HANDOFF.md §5 "CONST LANDADO" tem o detalhe completo, inclusive as dívidas
+achadas (array local sem `[i]=v;`, redefinição cai num guard diferente do esperado).

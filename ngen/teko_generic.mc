@@ -442,7 +442,10 @@ uptr tk_gen_arity(i64 gi) {
 }
 
 // `< a, b >` for generic `gi`. On return the parser is PAST the `>`: a memoized
-// instance spends it here, a new one spends it in the replay's push.
+// instance spends it here, a new one spends it in the replay's push. A `const`
+// bound (D218, entrega 5's own `const` crumb) also takes a declared const's
+// own bare name -- looked up bare, then qualified by the current namespace --
+// its value read straight off `teko_const.mc`'s table rather than re-parsed.
 uptr tk_gen_targs(i64 gi) {
     i64 line = p_line();
     uptr fl = p_file();
@@ -458,11 +461,23 @@ uptr tk_gen_targs(i64 gi) {
         }
         st64(vals + i * 8, 0);
         if (gp_const_at(gn_p0_at(gi) + i)) {
-            if (p_id() != T_INT)
-                err_at(p_file(), p_line(), "teko: a const generic argument is an integer literal");
-            st64(vals + i * 8, p_val());
-            st64(args + i * 8, tk_num(p_val()));
-            p_next();
+            i64 v = 0;
+            if (p_id() == T_INT) {
+                v = p_val();
+                p_next();
+            } else if (p_id() == T_IDENT) {
+                uptr cn = p_name();
+                i64 gci = tk_gconst_find(cn);
+                if (gci < 0) gci = tk_gconst_find(tk_ns_qualified_name(cn));
+                if (gci < 0)
+                    err_at(p_file(), p_line(), "teko: a const generic argument is an integer literal or a declared const");
+                v = gc_val_at(gci);
+                p_next();
+            } else {
+                err_at(p_file(), p_line(), "teko: a const generic argument is an integer literal or a declared const");
+            }
+            st64(vals + i * 8, v);
+            st64(args + i * 8, tk_num(v));
         } else {
             st64(args + i * 8, tk_gen_read_targ());
         }

@@ -582,13 +582,20 @@ i64 tk_var_after_type(i64 ty, i64 line, uptr fl) {
 // and this runs at PARSE time, long before `tk_ns_pass` mangles that
 // declaration to the same name) -- one that turns out not to exist reaches
 // the linker as a missing symbol, same as any other reference this compiler
-// never taught to guess.
+// never taught to guess. A CONST is the one exception: `geo.N` (D218,
+// entrega 5's own `const` crumb) is checked against `teko_const.mc`'s own
+// table, which is filled at the point `const` itself is read -- ahead of
+// every reference to it -- so the check is exact rather than trust-and-link.
 i64 tk_ns_qualified_call(uptr ns, i64 line, uptr fl) {
     uptr fname = p_ident();
     uptr full = tk_join3(ns, "__", fname);
     tk_line = line;
     tk_file = fl;
-    if (p_id() != K_LPAR) return tk_id(full);
+    if (p_id() != K_LPAR) {
+        i64 gci = tk_gconst_find(full);
+        if (gci >= 0) return tk_gconst_node(gci, line, fl);
+        return tk_id(full);
+    }
     i64 na = 0;
     i64 args = tk_args(&na);
     return tk_call(full, args);
@@ -800,6 +807,71 @@ i64 tk_ns_rewrite_call(i64 n, uptr ns, i64 cls, uptr fl) {
     return 1;
 }
 
+// the const-table twin of `tk_ns_call_try_prefixes`/`tk_ns_call_try_usings`
+// (D218, entrega 5's own `const` crumb): a call is resolved by RENAMING the
+// node (the core looks the final symbol up at lowering time), but a const
+// reference has no lowering-time lookup at all -- `#define` only ever
+// substitutes at the moment `parse_primary` reads the ORIGINAL token, so a
+// bare name reaching this pass is proof it is not one already. What both
+// still share is the search order (D31.6/N3c): local/parameter, then a
+// member (a field or a const, `teko_this.mc`'s own priority for one written
+// out) of the enclosing type, then the namespace and its prefixes outward,
+// then the `using`s of the file the reference is written in.
+i64 tk_ns_const_try_prefixes(uptr name, uptr ns) {
+    if (ns == 0) return 0 - 1;
+    i64 len = cstrlen(ns);
+    loop {
+        uptr pre = xstrdup(ns, len);
+        i64 gi = tk_gconst_find(tk_join3(pre, "__", name));
+        if (gi >= 0) return gi;
+        i64 cut = tk_ns_last_sep(ns, len);
+        if (cut < 0) break;
+        len = cut;
+    }
+    return 0 - 1;
+}
+
+i64 tk_ns_const_try_usings(uptr name, uptr fl, i64 line) {
+    i64 found = 0 - 1;
+    uptr found_ns = 0;
+    i64 i = 0;
+    loop {
+        if (i >= tk_nusing) break;
+        if (str_eq(ug_file_at(i), fl)) {
+            i64 gi = tk_gconst_find(tk_join3(ug_ns_at(i), "__", name));
+            if (gi >= 0) {
+                if (found >= 0 && gi != found)
+                    err_at(fl, line, tk_ns_ambig_msg(name, found_ns, ug_ns_at(i)));
+                found = gi;
+                found_ns = ug_ns_at(i);
+            }
+        }
+        i = i + 1;
+    }
+    return found;
+}
+
+// the node itself is REPLACED, not renamed: a const reference becomes the
+// same `N_INT` `parse_primary` would have folded it to, `nd_next` kept so the
+// sibling list survives it (mc docs/reference/hooks.md § pass())
+void tk_ns_ident_to_const(i64 n, i64 gi) {
+    i64 keep = nd_next(n);
+    node_assign(n, tk_gconst_node(gi, nd_line(n), nd_file(n)));
+    set_nd_next(n, keep);
+}
+
+i64 tk_ns_rewrite_ident(i64 n, uptr ns, i64 cls, uptr fl) {
+    uptr name = nd_name(n);
+    if (tk_ty_scope_find(name) >= 0) return 0;
+    if (cls >= 0 && (tk_field_find(cls, name) >= 0 || tk_mconst_find(cls, name) >= 0
+                     || tk_method_named_find(cls, name) >= 0)) return 0;
+    i64 gi = tk_ns_const_try_prefixes(name, ns);
+    if (gi < 0) gi = tk_ns_const_try_usings(name, fl, nd_line(n));
+    if (gi < 0) return 0;
+    tk_ns_ident_to_const(n, gi);
+    return 1;
+}
+
 // every node of one function's body, under the SAME block-scoped stack
 // `teko_typeof.mc` builds for its own later pass (`sc_name`/`tk_nscope`,
 // `tk_ty_scope_add`/`tk_ty_scope_var`) -- reused rather than a third table,
@@ -816,6 +888,7 @@ void tk_ns_walk_calls_in(i64 n) {
         if (n == 0) break;
         i64 k = nd_kind(n);
         if (k == N_CALL || k == N_ADDR) tk_ns_rewrite_call(n, tk_ns_call_site, tk_ns_call_cls, nd_file(n));
+        else if (k == N_IDENT) tk_ns_rewrite_ident(n, tk_ns_call_site, tk_ns_call_cls, nd_file(n));
         if (k == N_BLOCK) {
             i64 mark = tk_nscope;
             tk_ns_walk_calls_in(nd_a(n));

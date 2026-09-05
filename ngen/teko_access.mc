@@ -264,11 +264,16 @@ i64 tk_static_call(i64 si, uptr m, i64 line, uptr fl) {
     return r;
 }
 
-// the member half of `Name.member`, with the type word already read
+// the member half of `Name.member`, with the type word already read --
+// `Name.MAX` (D218, entrega 5's own `const` crumb, teko_const.mc) is checked
+// first: a const takes no slot at all, so neither the field table nor the
+// method table has a row for it to be found through
 i64 tk_static_member(i64 si, i64 line, uptr fl) {
     if (!p_accept(tk_dot_tok)) err_at2(fl, line, "teko: a type name reaches its static members", sr_name_at(si));
     tk_check_type_use(si, line, fl);
     uptr m = p_ident();
+    i64 mci = tk_mconst_find(si, m);
+    if (mci >= 0) return tk_mconst_use(mci, line, fl);
     if (p_id() == K_LPAR) return tk_static_call(si, m, line, fl);
     if (tk_prop_find(si, m) >= 0) return tk_prop_static_use(si, m, line, fl);
     i64 fi = tk_static_field_of(si, m, line, fl);
