@@ -14,11 +14,28 @@
 // `bigger` exercise a namespaced short type as a field, a method's parameter
 // and return type, and a free function's own parameter and return type.
 //
+// N1b (§31/§32 errata) adds `geo.IShape` and `geo.Loud`: a base/interface
+// list entry read as a dotted path (`mesh.Rhomb : geo.IShape`, qualified;
+// `Trapezoid : IShape` after `using geo;`, bare) and a `use` of a namespaced
+// trait, whose short name is a reserved word by the time `use` reads it
+// (`Speaker`'s `use Loud;`, bare via `using geo;`; `Echoer`'s
+// `use geo.Loud;`, qualified, needing no `using` at all).
+//
 // expect-exit: 42
 
 #include "../lib/rt.mc"
 
 namespace geo {
+    interface IShape {
+        i64 sides();
+    }
+
+    trait Loud {
+        public i64 shout() {
+            return 7;
+        }
+    }
+
     class Circle {
         public static i64 made;
         public i64 r;
@@ -36,6 +53,12 @@ namespace mesh {
 
         public i64 area() {
             return side * side;
+        }
+    }
+
+    class Rhomb : geo.IShape {
+        public i64 sides() {
+            return 4;
         }
     }
 }
@@ -57,6 +80,27 @@ namespace A.B {
 #include "parts/ns_file.tk"
 
 using geo;
+
+// `IShape` resolved bare, through `using geo;` above -- `tk_conf_name`'s own
+// search order, the same rule a plain type reference already follows
+class Trapezoid : IShape {
+    public i64 sides() {
+        return 4;
+    }
+}
+
+// `Loud`'s short name is a reserved word (its declaration went through
+// `tk_ns_qualify`'s `tk_ns_register`, same as a namespaced type's), so `use`
+// reads it with `tk_ns_read_path`, never `p_ident()` -- bare, through the
+// `using geo;` above
+class Speaker {
+    use Loud;
+}
+
+// the qualified form of the same trait, needing no `using` at all
+class Echoer {
+    use geo.Loud;
+}
 
 // a plain (non-namespaced) class using the namespaced short type as a field,
 // a method parameter and a method return type -- teko_generic.mc's `tk_gen_ty`
@@ -108,6 +152,18 @@ i64 main() {
 
     Circle big = bigger(gc, c2);                 // c2's area (25) beats gc's (9)
     if (big.r != 5) return 4;
+
+    mesh.Rhomb rh = new mesh.Rhomb();
+    if (rh.sides() != 4) return 5;               // interface, qualified base
+
+    Trapezoid tz = new Trapezoid();
+    if (tz.sides() != 4) return 6;               // interface, bare base via `using`
+
+    Speaker sp = new Speaker();
+    if (sp.shout() != 7) return 7;               // trait, bare `use` via `using`
+
+    Echoer ec = new Echoer();
+    if (ec.shout() != 7) return 8;               // trait, qualified `use`
 
     return a1 + a2 + a3 + gb.v + wd.w + mk.m;    // 9 + 4 + 25 + 2 + 1 + 1 = 42
 }

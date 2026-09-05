@@ -1110,3 +1110,10 @@ tolerância 1.00). Fixture `surface_namespace.tk` + `ngen/tests/parts/ns_file.tk
    via o laço que este módulo já possui): não há hook de "todo `parse_top` top-level" fora de um
    laço que o módulo mesmo controla, e ganhar um não é escopo do N1 (não registra `pass()`
    nenhum). Os probes usam a forma de bloco, que é pega. Fica para o `tk_ns_pass` do N2.
+7. **N1b (2026-09-05): dois furos do verificador, ambos a mesma causa.** `tk_conf_name` (a lista
+   `:`) e `tk_use` (o `use` de trait) liam o nome com um único `p_name()`/`p_ident()`, sem andar
+   pelos segmentos `.` — o primeiro nunca via `geo.IShape` inteiro, o segundo nem sequer aceitava
+   um nome namespaced (seu curto virou palavra reservada em `tk_ns_register`, e `p_ident()` exige
+   `T_IDENT`). Corrigidos lendo por `tk_ns_read_path` (D31.3) e resolvendo bare pela lista de
+   busca, qualificado por exato — `tk_conf_name` contra `tk_struct_find`, `tk_use` contra um novo
+   `tk_trait_resolve` (a mesma busca de `tk_ns_resolve`, sobre a tabela de traits).
