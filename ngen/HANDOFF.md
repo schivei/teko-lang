@@ -127,6 +127,18 @@ antes o sysroot que o link precisa, tudo com o próprio `mc` + LLVM da imagem:
 `schivei/mc` `scripts/sysroot-windows.sh`). A linha de link é a do próprio `mc`
 (`src/mc.windows-*.toml`): `-entry:mc_start -nodefaultlib -stack:8388608`.
 
+## 3.2 O mc que o CI usa hoje: 0.10.2 (2026-09-04)
+
+A sessão do mc coopera por **patch release** (`x.x.N`), sem mensagem: o CI resolve
+`latest` sozinho. **0.10.1** = M41 (core composto em cinco partes, `type_disable`/
+`intrinsic_disable`, largura declarada de `uptr`). **0.10.2** = os defeitos que o
+`ngen` achou: `--exe` resolve o host (antes: Mach-O sempre), `.note.GNU-stack` em todo
+ELF, `examples/lang` avaliava o receptor duas vezes na chamada virtual (o achado do
+crumb 2), README do `lx` com `MAXPARAMS` 12. **Segue aberto no mc:** hook de declaração
+de função (C6 — `on_param` ou geral) e `syntax_infix` sobre operador do core morrendo em
+silêncio no `ops_init()` (rota do C5 é `pass()` de qualquer forma). Ao sair release nova:
+baixar, trocar o symlink, **reconferir o baseline** (§4).
+
 ## 4. Loop local — o `mc` vem da RELEASE, não de submodule
 
 A sandbox remota **não consegue rodar o `mc`** (rede para o GitHub bloqueada, 403);
@@ -138,11 +150,11 @@ de `schivei/mc` — **nada de submodule**, e **não se usa binário de dentro do
 mc** (pode estar à frente do que o CI usa). Troque `macos-arm64` pelo seu alvo:
 
 ```sh
-gh release download v0.10.0 --repo schivei/mc \
-  --pattern 'mc-0.10.0-macos-arm64.tar.gz*'
-shasum -a 256 mc-0.10.0-macos-arm64.tar.gz   # conferir contra o .sha256 publicado
-mkdir -p ~/.local/mc && tar xzf mc-0.10.0-macos-arm64.tar.gz -C ~/.local/mc
-ln -sf ~/.local/mc/mc-0.10.0-macos-arm64/mc ~/.local/bin/mc
+tag=$(gh api repos/schivei/mc/releases/latest --jq .tag_name); ver=${tag#v}
+gh release download "$tag" --repo schivei/mc --pattern "mc-$ver-macos-arm64.tar.gz*"
+shasum -a 256 -c "mc-$ver-macos-arm64.tar.gz.sha256"
+mkdir -p ~/.local/mc && tar xzf "mc-$ver-macos-arm64.tar.gz" -C ~/.local/mc
+ln -sf ~/.local/mc/mc-$ver-macos-arm64/mc ~/.local/bin/mc
 ```
 
 O CI resolve a release **`latest`** dinamicamente (`.github/workflows/ngen.yml:40`),
