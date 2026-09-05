@@ -251,6 +251,14 @@ void tk_gen_reopen(i64 gi, uptr name, i64 kind, i64 part) {
 // `class Name<...> ...` / `struct Name<...> ...`: the parameter list is parsed,
 // everything after it is RECORDED, and no declaration is produced. The name
 // becomes a statement word, which is the position `Box<Circle, 4> b;` arrives in.
+//
+// `name` is NEVER namespace-qualified here (§31 N1, errata): `tk_gen_find`
+// and the `syntax_stmt` this function registers below both key on the bare
+// spelling, and a qualified-instantiation form (`geo.Box<T,4>`) is refused
+// with its own message (D31.14) -- reworking the lookup to the namespace
+// search order is that debt's, not this one's. A generic declared inside a
+// namespace still registers under its bare name, colliding with today's own
+// clear "duplicate generic" if another namespace reuses the same spelling.
 void tk_gen_record(uptr name, i64 kind, i64 vis, i64 proj, i64 abst, i64 part) {
     i64 gi = tk_gen_find(name);
     if (gi >= 0) {
@@ -476,7 +484,7 @@ uptr tk_gen_targs(i64 gi) {
 // an instance written as PARTS is closed as soon as the replay has read them
 // all: every part was recorded before the instantiation asked for one
 void tk_gen_close(uptr mang) {
-    i64 si = tk_struct_find(mang);
+    i64 si = tk_struct_find_exact(mang);
     if (si >= 0) tk_close_open(si);
 }
 
@@ -485,25 +493,32 @@ i64 tk_gen_struct(i64 gi) {
     i64 line = p_line();
     uptr fl = p_file();
     uptr mang = tk_gen_targs(gi);
-    i64 si = tk_struct_find(mang);
+    i64 si = tk_struct_find_exact(mang);
     if (si < 0) err_at2(fl, line, "teko: the generic produced no type", mang);
     return si;
 }
 
 // a type word, or a generic instantiated where it is first named: the field
-// type, the return type and the parameter type of a member all read one
+// type, the return type and the parameter type of a member all read one.
+// A namespaced short type name (§31 N1) is tried between the two -- it is
+// never a generic and the core's own `p_type()` does not know it either.
 i64 tk_gen_ty() {
     i64 gi = tk_gen_find(p_name());
-    if (gi < 0) return p_type();
-    p_next();
-    return sr_ty_at(tk_gen_struct(gi));
+    if (gi >= 0) { p_next(); return sr_ty_at(tk_gen_struct(gi)); }
+    i64 nsty = tk_ns_param_ty();
+    if (nsty >= 0) { p_next(); return nsty; }
+    return p_type();
 }
 
 // `Box<Circle, 4> b;` / `Box<Circle, 4> b = e;` -- the core's own declaration,
 // rebuilt around an instantiation, because `Box` is not a type word and its
 // arguments are not part of the core's declaration grammar. The N_VAR that
 // comes out is the one tk_on_stmt reads back, so the local is typed exactly as
-// a plainly declared one is.
+// a plainly declared one is. `tk_var_after_type` (teko_ns.mc) is the part
+// after the type is known -- shared with a namespace-qualified var-decl
+// (`geo.Circle c = ...;`), which reads a multi-token name the same way a
+// generic instantiation does and so cannot hand the type word itself to the
+// core's own `parse_var` (§31 N1).
 i64 tk_gen_declstmt() {
     i64 line = p_line();
     uptr fl = p_file();
@@ -511,14 +526,5 @@ i64 tk_gen_declstmt() {
     i64 gi = tk_gen_find(nm);
     if (gi < 0) err_at2(fl, line, "teko: not a generic type", nm);
     p_next();
-    i64 ty = sr_ty_at(tk_gen_struct(gi));
-    uptr vn = p_ident();
-    if (p_id() == K_LBRACK)
-        err_at2(fl, line, "teko: an array of a generic instance is not taught yet", vn);
-    i64 init = 0;
-    if (p_accept(K_ASSIGN)) init = parse_expr(0);
-    p_expect(K_SEMI, "expected ; after declaration");
-    tk_line = line;
-    tk_file = fl;
-    return tk_var(ty, vn, init);
+    return tk_var_after_type(sr_ty_at(tk_gen_struct(gi)), line, fl);
 }

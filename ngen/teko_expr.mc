@@ -41,8 +41,10 @@ uptr tk_new_pick(i64 si, uptr name, uptr pargs, i64 na, i64 line, uptr fl) {
     return tk_new_sym(name, mt_sig_at(mi));
 }
 
-// new Name  /  new Name(args)  -- the allocation is the generated allocator's,
-// so nothing here knows the type's size; `new` only names it.
+// new Name  /  new Name(args)  /  new geo.Name(args)  -- the allocation is the
+// generated allocator's, so nothing here knows the type's size; `new` only
+// names it. A qualified name (§31 N1) is walked by `tk_ns_walk`, which is a
+// no-op the instant the first segment already names a plain type.
 i64 tk_new() {
     i64 line = p_line();
     uptr fl = p_file();
@@ -51,10 +53,12 @@ i64 tk_new() {
     i64 gi = tk_gen_find(name);                  // `new Box<Circle, 4>`
     p_next();
     if (gi >= 0) name = sr_name_at(tk_gen_struct(gi));
+    else         name = tk_ns_walk(name);
     i64 si = tk_struct_find(name);
     if (si < 0 && tk_trait_find(name) >= 0)
         err_at2(fl, line, "teko: a trait is not a type; `new` needs a struct or a class", name);
     if (si < 0) err_at2(fl, line, "teko: unknown struct or class after `new`", name);
+    name = sr_name_at(si);                        // the real, qualified name: what a symbol is built from
     if (tk_is_iface(si)) err_at2(fl, line, "teko: an interface has no object to allocate", name);
     if (sr_abst_at(si)) err_at2(fl, line, "teko: an abstract class is not instantiated", name);
     tk_check_type_use(si, line, fl);

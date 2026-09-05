@@ -46,6 +46,16 @@
 i64 tk_gen_find(uptr name);
 void tk_gen_record(uptr name, i64 kind, i64 vis, i64 proj, i64 abst, i64 part);
 
+// teko_ns.mc is included after this file: the fallback below is what gives a
+// namespaced short type name its identity when the exact scan finds nothing,
+// and `tk_ns_qualify` is what `struct`'s own declaration (below) calls on its
+// name -- the identity function outside a namespace, so a plain `struct`
+// declares exactly as it always has
+i64 tk_ns_resolve(uptr curto);
+uptr tk_ns_qualify(uptr nome);
+uptr tk_ns_qualified_name(uptr nome);
+i64 tk_ns_short_known(uptr curto);
+
 // teko_access.mc is included after this file too -- it reads the tables below --
 // and these three are what a type declaration has to ask it: the modifier that
 // came before the word, whether the file it is written in belongs to the
@@ -422,7 +432,12 @@ uptr tk_stn(i64 ty) {
 }
 
 // ---- lookups, linear and in declaration order (mc docs/determinism.md rule 1) ----
-i64 tk_struct_find(uptr name) {
+// the scan alone, no namespace resolution: what a name ALREADY qualified (a
+// declaration's own exact-match check, or a candidate teko_ns.mc constructed
+// while resolving one) is tested against -- calling the fallback-carrying
+// `tk_struct_find` below on a name IT itself built would recurse without ever
+// converging (each failed candidate grows a new one to try)
+i64 tk_struct_find_exact(uptr name) {
     i64 i = 0;
     loop {
         if (i >= tk_nstruct) break;
@@ -430,6 +445,16 @@ i64 tk_struct_find(uptr name) {
         i = i + 1;
     }
     return 0 - 1;
+}
+
+// the exact scan first, always; the fallback is namespace resolution -- the
+// current namespace outward, then the file's own `using`s (teko_ns.mc's
+// `tk_ns_resolve`) -- which answers -1 with zero further work when the
+// program declares no namespace at all, so a plain type's lookup is unchanged
+i64 tk_struct_find(uptr name) {
+    i64 si = tk_struct_find_exact(name);
+    if (si >= 0) return si;
+    return tk_ns_resolve(name);
 }
 
 i64 tk_struct_by_ty(i64 ty) {
@@ -695,10 +720,26 @@ i64 tk_ctor(uptr name, i64 ty, i64 size, i64 install) {
 // the word, so a second `struct Point` (or `struct str`) arrives here as a
 // keyword rather than as T_IDENT -- without this guard the error would come out
 // as an unexplained "name expected".
+//
+// A namespaced short type word (§31 N1) is ALSO reserved this way from its
+// second declaration onward -- `geo.Circle` claims the word "Circle" for
+// EVERY namespace, so `mesh { class Circle { ... } }` would otherwise fail
+// this same way. It is accepted here, but only when the CURRENT namespace has
+// not already declared it: the qualified exact-match answers a genuine
+// `mesh.Circle` beside `geo.Circle` (two different rows) from a true
+// duplicate `geo.Circle` declared twice with no `partial` (`tk_class`'s own
+// reopen check already took the `partial` case before this is ever reached).
 uptr tk_newname(uptr what) {
     if (tk_gen_find(p_name()) >= 0)
         err_at2(p_file(), p_line(), "teko: the name is already a generic", p_name());
     if (p_id() == T_IDENT) return p_ident();
+    if (tk_ns_short_known(p_name())) {
+        uptr nm = p_name();
+        if (tk_struct_find_exact(tk_ns_qualified_name(nm)) >= 0)
+            err_at2(p_file(), p_line(), "teko: the name is already a type", nm);
+        p_next();
+        return nm;
+    }
     if (alias_find(p_id()) >= 0)
         err_at2(p_file(), p_line(), "teko: the name is already a type", p_name());
     err_at2(p_file(), p_line(), tk_join3("teko: name of ", what, " expected"), p_name());
@@ -869,6 +910,7 @@ void tk_struct() {
         tk_gen_record(name, TK_KSTRUCT, vis, proj, 0, 0);   // recorded, not declared
         return;
     }
+    name = tk_ns_qualify(name);                  // the current namespace, if any (§31 N1)
     i64 ty = tk_type_word(name);                 // a field of its own type parses
     i64 si = tk_type_add(name, ty, 0 - 1, TK_KSTRUCT, vis, proj);   // no base, no vtable: offset 0
     tk_use_reset();

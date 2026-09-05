@@ -1274,7 +1274,7 @@ void tk_class_reconf(i64 ci, i64 proj, i64 line, uptr fl) {
 // and this declaration adds members to it. The modifiers of a type either say
 // what the first part said or say nothing at all.
 i64 tk_class_reopen(uptr nm, i64 vis, i64 abst, i64 line, uptr fl) {
-    i64 si = tk_struct_find(nm);
+    i64 si = tk_struct_find_exact(nm);
     if (!tk_is_class(si)) err_at2(fl, line, "teko: only a class is partial", nm);
     if (sr_part_at(si) == TK_PWHOLE) err_at2(fl, line, "teko: the type is declared without `partial`", nm);
     if (sr_part_at(si) == TK_PDONE) err_at2(fl, line, "teko: this part comes after the type was used", nm);
@@ -1318,8 +1318,9 @@ void tk_class() {
     i64 proj = tk_take_decl_proj();
     i64 abst = tk_take_decl_abst();
     i64 part = tk_take_decl_part();
-    if (part && tk_struct_find(p_name()) >= 0) {
-        i64 si = tk_class_reopen(p_name(), vwritten, abst, head_line, head_file);
+    uptr qname = tk_ns_qualified_name(p_name());   // exact reopen check: never the `using` search
+    if (part && tk_struct_find_exact(qname) >= 0) {
+        i64 si = tk_class_reopen(qname, vwritten, abst, head_line, head_file);
         p_next();                                // the class's own name
         if (p_accept(K_COLON)) tk_class_reconf(si, proj, head_line, head_file);
         tk_class_body(si, sr_name_at(si), head_line, head_file);
@@ -1341,6 +1342,7 @@ void tk_class() {
     if (p_accept(K_COLON)) base = tk_class_conf(proj);
     tk_line = head_line;                         // closing a partial base moved it
     tk_file = head_file;
+    name = tk_ns_qualify(name);                  // the current namespace, if any (§31 N1)
     i64 ty = tk_type_word(name);
     i64 ci = tk_type_add(name, ty, base, TK_KCLASS, vis, proj);
     set_sr_abst_at(ci, abst);
@@ -1373,6 +1375,4 @@ i64 tk_partial_pass(i64 root) {
 }
 
 void tk_stop_type()      { i64 l = p_line(); uptr f = p_file(); p_next(); err_at(f, l, "teko: type not taught yet"); }
-void tk_stop_namespace() { i64 l = p_line(); uptr f = p_file(); p_next(); err_at(f, l, "teko: namespace not taught yet"); }
 void tk_stop_import()    { i64 l = p_line(); uptr f = p_file(); p_next(); err_at(f, l, "teko: import not taught yet"); }
-void tk_stop_using()     { i64 l = p_line(); uptr f = p_file(); p_next(); err_at(f, l, "teko: using not taught yet"); }

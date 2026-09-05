@@ -277,11 +277,17 @@ i64 tk_static_member(i64 si, i64 line, uptr fl) {
 }
 
 // the type word in EXPRESSION position, which the core's parse_primary has
-// nothing to do with: `Shape.made`, `Shape.tally()`
+// nothing to do with: `Shape.made`, `Shape.tally()`. A plain type's own word
+// always resolves (it is registered under this exact spelling); a namespaced
+// short name (§31 N1) may not, when neither the current namespace nor a
+// `using` of the file names it -- checked here rather than left to
+// `tk_static_member`, which assumes a real row.
 i64 tk_type_expr() {
     i64 line = p_line();
     uptr fl = p_file();
-    i64 si = tk_struct_find(p_name());
+    uptr nm = p_name();
+    i64 si = tk_struct_find(nm);
+    if (si < 0) err_at2(fl, line, "teko: unresolved name", nm);
     p_next();                                    // the type word
     return tk_static_member(si, line, fl);
 }
@@ -306,11 +312,19 @@ i64 tk_dot_follows() {
 // the type word in STATEMENT position. A declaration is the core's own
 // `parse_var`, entered with the type word still unread, so `Point p = new Point;`
 // is the very statement it always was; a static access is an ordinary
-// expression, because the type word opens one (tk_type_expr above).
+// expression, because the type word opens one (tk_type_expr above). The same
+// "may not resolve" check as `tk_type_expr` applies to a namespaced short
+// name here too, ahead of `parse_var`, which would otherwise read a garbage
+// type off a row index of -1.
 i64 tk_type_stmt() {
     i64 line = p_line();
     uptr fl = p_file();
-    if (!tk_dot_follows()) return parse_var(line, fl, sr_ty_at(tk_struct_find(p_name())));
+    if (!tk_dot_follows()) {
+        uptr nm = p_name();
+        i64 si = tk_struct_find(nm);
+        if (si < 0) err_at2(fl, line, "teko: unresolved name", nm);
+        return parse_var(line, fl, sr_ty_at(si));
+    }
     i64 e = parse_expr(0);
     p_expect(K_SEMI, "expected ; after the static member");
     tk_line = line;

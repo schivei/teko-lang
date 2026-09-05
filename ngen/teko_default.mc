@@ -69,7 +69,8 @@ i64 tk_default_param() {
         set_fpd_mark_at(tk_dflt_row, tk_ndflt);
         tk_nfdecl = tk_nfdecl + 1;
     }
-    i64 ty = type_of_token(p_id());
+    i64 ty = tk_ns_param_ty();                   // a namespaced short type name (§31 N1)
+    if (ty < 0) ty = type_of_token(p_id());
     if (ty < 0 || ty == TY_VOID) return 0;       // not ours: the core's own two diagnostics stand
     p_next();
     uptr pn = p_ident();

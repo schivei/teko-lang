@@ -181,7 +181,7 @@ void tk_trait() {
     p_next();                                    // the `trait` word
     i64 vis = tk_take_decl_vis();                // the `public`/`internal` before the word
     i64 proj = tk_take_decl_proj();
-    uptr name = tk_newname("trait");
+    uptr name = tk_ns_qualify(tk_newname("trait"));   // the current namespace, if any
     if (tk_trait_find(name) >= 0) err_at2(tk_file, tk_line, "teko: duplicate trait", name);
     if (tk_struct_find(name) >= 0) err_at2(tk_file, tk_line, "teko: the name is already a type", name);
     if (tk_ntrait == TK_MAXTRAIT) err_at(tk_file, tk_line, "teko: too many traits");

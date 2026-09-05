@@ -112,6 +112,14 @@
 //   +i  (over a core type: the identity, `+i == i`)             pass()
 //   true  false                                                 syntax_expr
 //
+// What entrega 5's N1 crumb adds -- `namespace`/`using` and qualified type
+// names (teko_ns.mc; a free function inside a namespace stays plain, N2's):
+//   namespace A.B { class Circle { ... } }                      syntax
+//   namespace A.B;                          (file-scoped, C# 10)  syntax
+//   using geo;                                                  syntax
+//   Circle c = new Circle();  (the short name, inside or with a `using`)
+//   geo.Circle c = new geo.Circle();  geo.Circle.made           the segment
+//
 // Everything else in docs/design/port-teko-mc.md §3 (types/classes,
 // generics, error-union, `service`/DI, concurrency, the
 // rest of the stdlib) is a later entrega and is not stubbed here: it does
@@ -121,6 +129,7 @@
 #include "teko_type.mc"
 #include "teko_float.mc"
 #include "teko_struct.mc"
+#include "teko_ns.mc"
 #include "teko_iface.mc"
 #include "teko_trait.mc"
 #include "teko_generic.mc"
@@ -143,6 +152,7 @@ void user_init() {
     tk_float_init();
     tk_access_init();
     tk_loop_init();
+    tk_ns_init();
 
     syntax("public",    &tk_public);
     syntax("internal",  &tk_internal);
@@ -152,9 +162,9 @@ void user_init() {
     syntax("interface", &tk_interface);
     syntax("trait",     &tk_trait);
     syntax("type",      &tk_stop_type);
-    syntax("namespace", &tk_stop_namespace);
+    syntax("namespace", &tk_namespace);
     syntax("import",    &tk_stop_import);
-    syntax("using",     &tk_stop_using);
+    syntax("using",     &tk_using);
 
     syntax_stmt("{",     &tk_block);
     syntax_stmt("var",   &tk_stop_var);
