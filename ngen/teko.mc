@@ -154,15 +154,7 @@ void user_init() {
     // gave the declaration -- and has nothing left for a mangling pass to pick.
     pass(&tk_ops_pass);
 
-    // BEHIND the oracle, because ownership is a question about a value's static
-    // TYPE and the oracle is what answers it -- a deferred `.` is a placeholder
-    // until that pass rewrites it. BEHIND the operators too, because an operator
-    // that answers with an object hands out a reference like any other call. And
-    // AHEAD of the overload mangling, because it asks `decl_find` what a callee
-    // returns, and that table answers to the name the declaration was READ with.
-    pass(&tk_rc_pass);
-
-    // LAST, and behind both of the above: the overload mangling reads ordinary
+    // BEHIND both of the above: the overload mangling reads ordinary
     // parameter lists (a `params` list is gone by now, replaced by its
     // instances, whose `__k` suffix is a number and cannot collide with the
     // type-named suffix an overload takes) and ordinary calls (the oracle's
@@ -170,4 +162,11 @@ void user_init() {
     // declarations, which is the one rewrite the two before it would not
     // survive.
     pass(&tk_over_pass);
+
+    // LAST of all. Ownership is a question about a value's static TYPE: the
+    // oracle has to have rewritten every deferred `.` first, the operators have
+    // to have become the calls they are, and the overloads have to carry their
+    // own symbols -- two `pick`s spelled the same are two declarations of one
+    // name until the mangling, and only one of them may answer with an object.
+    pass(&tk_rc_pass);
 }
