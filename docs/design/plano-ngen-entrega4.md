@@ -525,3 +525,34 @@ Baseline `fix/retirement` com **0.12.0**: 18/18 sem uma linha mudada. Do que ent
 **Fila (revista):** membros C# (em verificação) → propriedades/interface v2 → `abstract`/
 `partial class` → reclaim c/ ctor/dtor → C5b → **C6 (agora alcançável, `syntax_param`)** →
 `while`/`for` → `namespace`/`import`/`using` → `const` → `switch` → closures/`ref`/`out`.
+
+## 23. Respostas da sessão do mc (canal `mini_compiler/build/NOTICES-teko.md`, 2026-09-05)
+
+**Canal:** `send_message` mc→teko nunca é processado (esta sessão está sempre com agente em
+voo); o arquivo `build/NOTICES-teko.md` (gitignored, no repo do mc) é o canal mc→teko — **ler
+ao começar cada lote**. teko→mc por `send_message` funciona.
+- **`syntax_param`:** a guarda ("consumed tokens and returned 0") é no fim da cadeia —
+  registrar **por último** o handler que reivindica. A metade que o hook não faz: `f(1)` é
+  parseado pelo core; completar o default é `pass()` + `decl_find`/`decl_nparams`
+  (`lib/user_syntax_demo.mc` faz o ciclo). → C6.
+- **Escopo — alerta:** tabela linear com marca no parse (`lg_block`, `lang_stmt.mc:466`)
+  **OU** escopo pela árvore num `pass()` — **nunca híbrido**; foi a causa dos dois bugs
+  silenciosos. O ngen hoje tem os dois (pilha no parse + oráculo por bloco no pass), verificados
+  coerentes — **risco registrado**: qualquer divergência entre os dois é bug; candidato a
+  unificar (o pass como fonte única) quando o reclaim/RC entrar, que também é por escopo.
+- **`open`/`int` em `i64`:** hazard latente (bits altos de retorno de 32 bits). **M45** traz
+  `i32` + retorno com o tipo declarado → `extern i32` para funções C que devolvem `int`. Até lá:
+  retorno descartado (é o que `surface_overload_free.tk` faz com `chmod`).
+- **Fila do mc:** patch pós-M42 (`--interp=`/`--libc=`; **`[target].libc = gnu|musl`** e
+  `link = dynamic|static`) → trocar as pernas Linux do CI para `libc = "gnu"` quando sair;
+  M45; M43 (sandbox); **M44 (pacotes estilo Go): o ngen seria o primeiro pacote "módulo de
+  compilador"** — `[package]` com `lib`/`module`; regra: **um pacote nunca define `user_init`,
+  exporta `<nome>_init()`** (`docs/specs/M44.md` §6 + emenda). Desenhar o `ngen` para virar
+  `teko_init()` exportado.
+- **Sem 1.0.0 sem coordenação com o ngen** — regra do dono.
+- **`region crosses a file boundary`:** restrição de desenho com motivo (um `#include` dentro
+  da região gravada muda o buffer; suportar exigiria copiar bytes com o include expandido e
+  perder atribuição por arquivo). **Contorno certo = gravar a instância no arquivo declarante e
+  replayar de lá.** Se `partial class`/genérico importado virar bloqueio real, mandar o caso.
+- **`p_cp()`:** entra no lote do M45; até lá, acesso direto ao `cp` com comentário "temporário"
+  (`teko_access.mc:253`).

@@ -440,6 +440,14 @@ construtor/destrutor (D218) → C5b operadores estáticos (D218; C5 landado est�
     não têm mais `[linker]`. `ngen/mc.toml` versionado (linux/x86_64 + `[linker] cc`) segue
     intacto; o CI deriva o config por perna.
 
+## 5.2 Canal com a sessão do mc
+
+`send_message` só funciona teko→mc. A sessão do mc escreve para nós em
+**`/Users/schivei/projects/mini_compiler/build/NOTICES-teko.md`** (gitignored) — **ler ao
+começar cada lote**; respostas dela e releases estão lá. Plano §23 tem o resumo do que já
+respondeu. Regra do dono: **sem 1.0.0 do mc sem coordenação com o ngen**; e o M44 prevê o
+ngen como pacote (`teko_init()` exportado, nunca `user_init`).
+
 ## 6. Comunicação — coordenador remoto + sessão local
 
 **Sessão remota coordenadora**: guarda o histórico completo da virada (por que o
