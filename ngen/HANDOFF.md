@@ -343,13 +343,48 @@ reclaim (construtor/destrutor `public`) e o C5b (`public static … operator+`) 
   é **byte-idêntica** à da base `c9b8c596` — visibilidade é checagem, não muda a árvore —, e a
   única que diverge é `types_struct`, exatamente pelo `static` que entrou nela.
 
+**Entrega 5 — crumb "propriedades + interface v2" LANDADO** (D223, plano §20), o modelo de
+membro completo que o reclaim (construtor/destrutor) e o C5b escrevem contra:
+- **`ngen/teko_prop.mc` (novo)** — `T Nome { ... }` em `class`/`struct`/`trait`, nas três
+  formas do C#: **auto** (`{ get; set; }`, com campo de apoio `private` gerado, `Nome__backing`),
+  **`=> expressão;` / `=> statement;`** (o `set` é um STATEMENT porque `side = value` é um —
+  `=` não está na tabela infixa do core) e **bloco** (`get { } set { }`).
+- **Cada acessor é um MÉTODO comum** da tabela do `teko_class.mc` (`get_X`/`set_X`, a grafia
+  do próprio C#) — daí saem de graça: **slot de vtable POR ACESSOR** (`override` que redeclara
+  só o `get` herda o `set`), `static`, símbolos de sobrecarga, e **visibilidade por acessor**
+  (`{ get; private set; }`, nunca mais aberta que a da propriedade).
+- **`value`** é o parâmetro do `set` e nada mais (nome comum, sombreável por local); **`get`/`set`
+  são lidos SÓ dentro das chaves da propriedade** — nenhuma palavra foi confiscada, e
+  `public T get()` de `surface_generics.tk` segue método comum.
+- `p.X`, `p.X = e`, `X` nu dentro do tipo e `Tipo.X` (estática) resolvem nos **dois caminhos**
+  (`tk_member_of` no parse, `tk_pend_*` no pass).
+- **Interface v2:** método com **corpo default** (C# 8) compilado como `iface_m(uptr this)` —
+  o itab da classe que não redeclara aponta para esse símbolo; `this` no default é o receptor
+  IMPLEMENTADOR tipado como a interface, e todo membro alcançado ali despacha **pelo itab**
+  (`this.m()` e o nome nu), então a classe que redeclara é quem responde, inclusive para o
+  default que chamou. **`static abstract`** (C# 11): o tipo fornece como `static`, `Tipo.m()`
+  resolve em compile-time, e a entrada **não ocupa slot** — o slot passa a ser a posição entre
+  os membros de instância (`tk_ifslot`/`tk_ifinst`). Interface também declara **propriedade**
+  (`i64 X { get; set; }` = assinaturas). Substitui a recusa de `static` em interface do D220.
+- **Recusas próprias:** atribuir a `get`-only; `value` fora de `set`; propriedade sem acessor;
+  acessor duplicado; acessor mais visível que a propriedade; auto misturado com corpo; chamar a
+  propriedade; tipo que não fornece o `static abstract` ou o fornece como instância; `static`
+  sem `abstract`; `abstract` com corpo; acessor de interface com corpo; e o acessor faltante
+  **nomeado pela propriedade** (``o `set` de uma propriedade de `I` ``, não `set_X`).
+- **Fixtures:** `surface_property.tk` e `surface_iface_default.tk` (20/20 em exit 42); a AST
+  final das **18 anteriores é byte-idêntica** à de `5579c34b` — nenhuma usa propriedade nem
+  default de interface.
+- **Limite conhecido:** um default de interface só alcança membros declarados ACIMA dele no
+  corpo da interface (a mesma ordem-de-declaração da armadilha 7).
+
 **Entrega 5 — a seguir:** crumb 1, **reclaim** pela "arena automática" do mc (plano §14):
 free lists + reference counting por escopo (`rc_dec` na saída do bloco e nas arestas de
 `on_jump`; `return` com temporário; `rc_inc`/`rc_dec` em atribuição de local/campo
 classe; destrutor `~Nome()` no lugar do `dispose` do lx, D218); fixture
 `surface_reclaim.tk` com 1M `new` sem esgotar a arena.
 
-**Fila:** entrega 5 (comportamento base): membros C# (feito) → reclaim c/ construtor+destrutor → C5b
+**Fila:** entrega 5 (comportamento base): membros C# (feito) → propriedades + interface v2 (feito)
+→ `abstract`/`partial class` (D224) → reclaim c/ construtor+destrutor → C5b
 (operador estático, D218) → `while`/`for` (prelude do mc) → stops restantes
 (`namespace`/`import`/`using`/`const`/`match`/`when`) → stdlib mínima; **C6** quando o mc
 der o hook de declaração de função (`0.10.N`).
