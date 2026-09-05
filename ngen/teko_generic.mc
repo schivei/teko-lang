@@ -302,10 +302,16 @@ uptr tk_gen_frame(uptr mang, uptr fl, i64 line) {
 // trailing `;` is the instance's own: without it the p_accept(K_SEMI) that
 // closes a type body would reach past the end of the pushed source and eat the
 // caller's.
+// the modifiers of the instance travel in the TEXT, exactly as the `: Base`
+// list already does -- they are read by the very handler a written-out
+// declaration goes through, so the template's `public`, `abstract` and
+// `partial` are the instance's without a second road for them
 uptr tk_gen_head(i64 gi, uptr mang) {
     uptr head = tk_join3("struct ", mang, " ");
     if (gn_kind_at(gi) == TK_KCLASS) head = tk_join3("class ", mang, " ");
     if (gn_part_at(gi)) head = tk_join("partial ", head);
+    if (gn_abst_at(gi)) head = tk_join("abstract ", head);
+    if (gn_vis_at(gi) == TK_TPUBLIC) head = tk_join("public ", head);
     return head;
 }
 
@@ -382,8 +388,8 @@ void tk_gen_replay(i64 gi, uptr mang, uptr args, uptr vals, i64 n, uptr fl, i64 
     i64 len = 0;
     uptr text = tk_gen_text(gi, mang, &len);
     tk_gen_bind(gi, args, vals, n);
-    tk_set_decl(gn_vis_at(gi), gn_proj_at(gi), gn_abst_at(gi));   // the instance is the template's own
-    i64 s_frame = tk_frame_enter(gn_proj_at(gi));
+    tk_set_decl(0 - 1, 0 - 1, 0);                // the head below says what it is
+    i64 s_frame = tk_frame_enter(gn_proj_at(gi));   // ...and the instance is the template's own
     i64 d0 = p_depth();
     p_push_source(tk_gen_frame(mang, fl, line), text, len);
     p_next();                                    // spends the `>` the caller sat on
