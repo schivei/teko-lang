@@ -18,14 +18,20 @@
 // OUTER `do`/`for` rewrite (`tk_loop_rewrite_stmt`) walks this switch's own
 // loop as just another nested `N_LOOP` it discovers -- the same composition
 // `docs/design/plano-ngen-entrega4.md` §29 already relies on for nested
-// loops. `continue`, though, has no level in this core (`language.md` § 4:
-// "continue restarts the innermost loop", no `continue N`) -- a bare
-// `continue;` written directly in a case body would restart the SWITCH's own
-// one-lap loop, not the enclosing real loop the source meant, and there is
-// no core mechanism to redirect it. Refused with a clear message rather than
-// worked around with a flag (the crumb's own instruction); a `continue`
-// inside a loop the case body writes ITSELF is untouched, exactly as `break`
-// composes.
+// loops.
+//
+// `continue`/`continue N` (mc 0.14.1, level-counted the same way `break N`
+// is) get the SAME `+1` treatment, reusing `tk_loop_rewrite_stmt`'s own walk
+// (`tk_switch_rewrite_continue_stmt`, below): at case-body depth 0, a
+// `continue k` becomes `continue k + 1`, reaching past the switch's own loop
+// to the enclosing real loop the source meant. Unlike `do`/`for`'s own
+// wrapper, the switch's single lap is safe to CONTINUE directly (there is no
+// step to skip), so this pass never converts the node's kind, only its
+// level -- one opened by the case body ITSELF composes exactly as `break`
+// does, untouched. A switch with no enclosing loop at all -- the bumped
+// level has nowhere to land -- is caught here too, with a message of its
+// own rather than the core's raw "continue out of range" (which would name
+// a level the source never wrote).
 //
 // THE EXPRESSION (`x switch { 1 => a, 2 or 3 => b, _ when c => d, _ => e }`)
 // builds NO machinery of its own (D228): the handler reads the arms and
@@ -75,8 +81,8 @@ i64 tk_switch_last(i64 head) {
 
 // "control cannot fall out of a case" -- a non-empty case/default body has to
 // end in one of the four jumps C# itself requires here. A body written as a
-// block ends in whatever ITS last statement is (tk_switch_no_continue_stmt's
-// own N_BLOCK recursion, just above), not in the block node itself.
+// block ends in whatever ITS last statement is (tk_switch_rewrite_continue_
+// stmt's own N_BLOCK recursion, just above), not in the block node itself.
 void tk_switch_check_end(i64 body) {
     i64 last = tk_switch_last(body);
     i64 k = nd_kind(last);
@@ -85,32 +91,41 @@ void tk_switch_check_end(i64 body) {
     err_at(nd_file(last), nd_line(last), "teko: control cannot fall out of a case; end it with break");
 }
 
-// a `continue` sitting directly in a case body -- not inside a loop the body
-// itself opens -- has nowhere to go (the header above explains why); one
-// opened by the body composes normally and is left alone, `tk_loop_rewrite_
-// stmt`'s own shape.
-void tk_switch_no_continue_stmt(i64 n, i64 depth);
+// a `continue k` sitting directly in a case body -- not inside a loop the
+// body itself opens -- becomes `continue k + 1`, `tk_loop_rewrite_stmt`'s own
+// `break` rule (teko_loop.mc), never converted to a `break`: the switch's
+// single lap is always safe to continue directly. `saw` is set whenever this
+// happens, so the caller can tell "this switch bumped a level" from "every
+// continue stayed inside a loop the case opened itself" once the walk is
+// done. One opened by the body composes normally and is left alone.
+void tk_switch_rewrite_continue_stmt(i64 n, i64 depth, uptr saw);
 
-void tk_switch_no_continue_list(i64 n, i64 depth) {
+void tk_switch_rewrite_continue_list(i64 n, i64 depth, uptr saw) {
     loop {
         if (n == 0) break;
-        tk_switch_no_continue_stmt(n, depth);
+        tk_switch_rewrite_continue_stmt(n, depth, saw);
         n = nd_next(n);
     }
 }
 
-void tk_switch_no_continue_stmt(i64 n, i64 depth) {
+void tk_switch_rewrite_continue_stmt(i64 n, i64 depth, uptr saw) {
     if (n == 0) return;
     i64 k = nd_kind(n);
-    if (k == N_BLOCK) { tk_switch_no_continue_list(nd_a(n), depth); return; }
-    if (k == N_LOOP) { tk_switch_no_continue_stmt(nd_a(n), depth + 1); return; }
+    if (k == N_BLOCK) { tk_switch_rewrite_continue_list(nd_a(n), depth, saw); return; }
+    if (k == N_LOOP) { tk_switch_rewrite_continue_stmt(nd_a(n), depth + 1, saw); return; }
     if (k == N_IF) {
-        tk_switch_no_continue_stmt(nd_b(n), depth);
-        tk_switch_no_continue_stmt(nd_c(n), depth);
+        tk_switch_rewrite_continue_stmt(nd_b(n), depth, saw);
+        tk_switch_rewrite_continue_stmt(nd_c(n), depth, saw);
         return;
     }
-    if (k == N_CONTINUE && depth == 0)
-        err_at(nd_file(n), nd_line(n), "teko: a case cannot continue past its own switch; there is no continue N");
+    if (k == N_CONTINUE) {
+        i64 lvl = nd_val(n);
+        if (lvl == 0) lvl = 1;
+        if (lvl > depth) {
+            set_nd_val(n, lvl + 1);
+            st64(saw, 1);
+        }
+    }
 }
 
 // `switch (x) { ... }` -- one `i64 $t = x;` ahead of a sequence of `if`s, one
@@ -140,6 +155,7 @@ i64 tk_switch_stmt() {
 
     i64 pendingCond = 0;
     i64 pendingHasDefault = 0;
+    i64 sawContinue = 0;
 
     loop {
         if (p_id() == K_RBRACE) break;
@@ -188,7 +204,7 @@ i64 tk_switch_stmt() {
         }
         if (body == 0) continue;                  // empty labels fall through to the next group
 
-        tk_switch_no_continue_list(body, 0);
+        tk_switch_rewrite_continue_list(body, 0, &sawContinue);
         tk_switch_check_end(body);
 
         if (pendingHasDefault) {
@@ -209,6 +225,8 @@ i64 tk_switch_stmt() {
     p_next();                                     // }
     if (pendingCond != 0 || pendingHasDefault)
         err_at(fl, line, "teko: control cannot fall out of a case; end it with break");
+    if (sawContinue && tk_realloop_depth == 0)
+        err_at(fl, line, "teko: continue inside a switch needs an enclosing loop");
 
     i64 outerBody = list_append(0, pre);
     outerBody = list_append(outerBody, casesHead);
