@@ -67,6 +67,11 @@ D213, D214** do `DECISION_LOG.md`. Leia-as — são leis, não sugestões.
   estática preservada para o `.` resolver membro.
   - `class`: palavra 0 da vtable é a itab, slots virtuais depois
     (`TK_VT_FIXED 1`); campos base-first; `virtual`/`override` contextuais.
+  - **método NÃO declara receptor** (D219, entrega 5 crumb 0): `i64 area() { return side; }`
+    — o compilador injeta `this`; nome não-qualificado que não é local nem parâmetro é
+    membro de `this`; `this.campo` explícito; `base.m()` chama a implementação da base
+    DIRETO (sem vtable). `self` é recusado (`teko: methods take no explicit receiver;
+    use this`).
   - `interface`: assinaturas + conformidade checada dentro do `Classe_vt_init`;
     despacho por `tk_itab` (`ngen/lib/rt.mc:44`), dinâmico.
   - `trait` (**D216 — modelo do PHP**): corpo gravado por `p_skip_balanced` e
@@ -186,7 +191,7 @@ for src in ngen/tests/*.tk; do
 done
 ```
 
-Hoje isso dá **16/16 em exit 42**. `ngen/mc.macos.toml`, os `ngen/mc.*.toml` transientes
+Hoje isso dá **18/18 em exit 42**. `ngen/mc.macos.toml`, os `ngen/mc.*.toml` transientes
 e `ngen/build/` **nunca se commitam**, e `ngen/mc.toml` fica **intacto** — alterá-lo
 quebra o CI.
 
@@ -203,7 +208,7 @@ Plano executável em `docs/design/plano-ngen-entrega4.md` (leia §1 descobertas 
 **Landados em `fix/retirement`** (18 fixtures verdes, cada crumb com verificação
 independente e revalidação pós-cherry-pick):
 - **C0** glob do CI aceita `surface_*.tk`; erratas do handoff.
-- **C1** default de parâmetro em MÉTODO (`i64 scale(self, i64 k = 2)`), inclusive em
+- **C1** default de parâmetro em MÉTODO (`i64 scale(i64 k = 2)`), inclusive em
   assinatura de `interface`; só constante `fold()`-ável; nó clonado por sítio.
 - **C2** sobrecarga de MÉTODO por assinatura; slots virtuais chaveados por (nome,
   assinatura); símbolo do 1º método preservado, sobrecargas com sufixo
@@ -252,21 +257,45 @@ independente e revalidação pós-cherry-pick):
   agregador `mc build ngen && run`; sem filtro de `paths:`.
 
 - **C5** sobrecarga de OPERADORES por `pass()` sobre `N_BINARY` (`teko_ops.mc`):
-  `T operator+(self, U b)` contextual no corpo do tipo; despacho pelo tipo do operando
+  `T operator+(U b)` contextual no corpo do tipo; despacho pelo tipo do operando
   ESQUERDO; `N_BINARY` de endereço construído pelo próprio ngen (`ld64(p+OFF)`,
   `items[i]`) é reconhecido e nunca tratado como operador; teko à esquerda sem operador
   + core à direita → o pass não toca. **Nunca `syntax_infix`** (morre em silêncio).
 
 **Entrega 4 FECHADA** (menos C6, bloqueado no hook do mc).
 
-**Entrega 5 — em voo:** crumb 1, **reclaim** pela "arena automática" do mc (plano §14):
+**Entrega 5 — crumb 0 LANDADO: `this` implícito e `base`** (D219, plano §16), o SWEEP que
+vem antes do reclaim e do C5b porque os dois escreveriam código na forma velha:
+- `ngen/teko_this.mc` (novo) — o receptor que o método não declara. `tk_params`
+  (`teko_class.mc`) prepende `this` e RECUSA um parâmetro `self`; `this` é palavra
+  (`syntax_expr`) válida só dentro de corpo de tipo; `base` é CONTEXTUAL (só dentro de
+  corpo de tipo — segue nome comum em `i64 offset_total(i64 base, ...)`) e `base.m()`
+  chama o símbolo da base DIRETO, escolhido por assinatura como o C2 faz.
+- **Nome não-qualificado** vira membro de `this` **no pass** (`teko_typeof.mc`, mesma
+  caminhada do oráculo): o core entrega um `N_IDENT`/`N_ASSIGN`/`N_CALL` cru e não há
+  hook na posição de identificador; o pass é também onde parâmetros e locais são
+  legíveis, que é o que a regra do C# exige — **local/parâmetro sombreia o campo**.
+  Um campo de tipo classe também vale como RECEPTOR (`inner.v`), e uma chamada
+  não-qualificada alcança método declarado ABAIXO (o pass vê o corpo inteiro).
+- Limite conhecido: **campo array inline** só pelo receptor escrito (`this.items[i]`) —
+  o `[` é rebaixado pelo handler do `.`, que o nome nu não alcança; a recusa diz isso
+  (`teko: an array field is reached through \`this.\`: items`).
+- As **18 fixtures** foram reescritas na forma nova (`grep -rn self ngen/tests` = 0) e a
+  AST final de 16 delas é **byte-idêntica** à da forma velha depois de renomear o
+  receptor (`name=self` → `name=this`); as duas que divergem são `types_class` e
+  `types_interface`, onde o `override` passou a usar `base.area()` (a diferença é
+  exatamente a chamada direta no lugar do corpo antigo).
+
+**Entrega 5 — a seguir:** crumb 1, **reclaim** pela "arena automática" do mc (plano §14):
 free lists + reference counting por escopo (`rc_dec` na saída do bloco e nas arestas de
 `on_jump`; `return` com temporário; `rc_inc`/`rc_dec` em atribuição de local/campo
-classe; `dispose(self)`); fixture `surface_reclaim.tk` com 1M `new` sem esgotar a arena.
+classe; destrutor `~Nome()` no lugar do `dispose` do lx, D218); fixture
+`surface_reclaim.tk` com 1M `new` sem esgotar a arena.
 
-**Fila:** entrega 5 (comportamento base): reclaim → `while`/`for` (prelude do mc) → stops
-restantes (`type`/`namespace`/`import`/`using`/`var`/`const`/`match`/`when`) → stdlib
-mínima; **C6** quando o mc der o hook de declaração de função (`0.10.N`).
+**Fila:** entrega 5 (comportamento base): reclaim c/ construtor+destrutor → C5b
+(operador estático, D218) → `while`/`for` (prelude do mc) → stops restantes
+(`namespace`/`import`/`using`/`const`/`match`/`when`) → stdlib mínima; **C6** quando o mc
+der o hook de declaração de função (`0.10.N`).
 
 **Dívida do C8:** `p.items[i]` sobre um receptor que o parser NÃO tipa (um parâmetro,
 que só o oráculo do `pass()` resolve) não chega ao `[` de array — cai no `[` do `params`
