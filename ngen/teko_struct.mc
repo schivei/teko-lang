@@ -866,7 +866,10 @@ i64 tk_ax_index(i64 idx, i64 nel, uptr name, i64 line, uptr fl) {
 
 // `p.items[i]` and `p.items[i] = e`: the load or the store of the element's own
 // width. `=` is read here for the same reason tk_field_use reads it -- it is not
-// in the core's infix table, so the Pratt loop has already stopped.
+// in the core's infix table, so the Pratt loop has already stopped. A receiver
+// sunk through a `- ! ~` chain (teko_prefix.mc, `tk_bracket_no_write`) is never
+// the write target the source named: `!p.items[0] = e` refuses of its own accord
+// instead of building a store the wrapping `!` would then choke on.
 i64 tk_array_index(i64 addr, i64 x) {
     i64 line = p_line();
     uptr fl = p_file();
@@ -877,6 +880,8 @@ i64 tk_array_index(i64 addr, i64 x) {
     tk_file = fl;
     i64 k = tk_ax_index(idx, ax_nel_at(x), ax_name_at(x), line, fl);
     i64 at = tk_bin(K_ADD, addr, tk_bin(K_MUL, k, tk_int(type_width(ety))));
+    if (tk_bracket_no_write && p_id() == K_ASSIGN)
+        err_at(fl, line, "teko: the left side of = is not a place");
     if (p_accept(K_ASSIGN)) {
         i64 v = parse_expr(0);
         tk_line = line;

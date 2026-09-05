@@ -234,7 +234,17 @@ i64 tk_arr_compound(i64 base, i64 ety, i64 idx, i64 op, i64 e) {
     return tk_arr_store(ety, tk_arr_addr(base2, ety, idx2), val);
 }
 
+// whether the token(s) right after an already-parsed index spell a write:
+// `=`, `+=`/`-=`, `++`/`--` -- declared here so a receiver sunk through a
+// `- ! ~` chain (below) can consult it before either LOCAL or FIELD array
+// indexing accepts one; defined further down, where a GLOBAL array's own
+// deferred write already needed it.
+i64 tk_arr_write_follows();
+
 // ---- LOCAL `a[i]`: resolved AT ONCE, teko_struct.mc's `tk_array_index` shape ----
+// A receiver sunk through a `- ! ~` chain (teko_prefix.mc) is never the write
+// target the source named: `!b[1] = e` refuses of its own accord instead of
+// building a store the wrapping `!` would then choke on.
 i64 tk_arr_index_of(i64 base, i64 ety, i64 nel, uptr name) {
     i64 line = p_line();
     uptr fl = p_file();
@@ -243,6 +253,8 @@ i64 tk_arr_index_of(i64 base, i64 ety, i64 nel, uptr name) {
     tk_line = line;
     tk_file = fl;
     i64 idx = tk_arr_bounds(idxRaw, nel, name, line, fl);
+    if (tk_bracket_no_write && tk_arr_write_follows())
+        err_at(fl, line, "teko: the left side of = is not a place");
     if (p_accept(K_ASSIGN)) {
         i64 v = parse_expr(0);
         tk_line = line;
