@@ -379,11 +379,10 @@ membro completo que o reclaim (construtor/destrutor) e o C5b escrevem contra:
   dá `unknown member` claro). A chamada **nua** (`area()`) resolve no pass e é insensível à
   ordem — funciona em qualquer posição.
 
-**Entrega 5 — a seguir:** crumb 1, **reclaim** pela "arena automática" do mc (plano §14):
-free lists + reference counting por escopo (`rc_dec` na saída do bloco e nas arestas de
-`on_jump`; `return` com temporário; `rc_inc`/`rc_dec` em atribuição de local/campo
-classe; destrutor `~Nome()` no lugar do `dispose` do lx, D218); fixture
-`surface_reclaim.tk` com 1M `new` sem esgotar a arena.
+**Em voo:** crumb **D224** — `abstract class`/membro abstrato (obriga `override` na primeira
+concreta; `new` de abstrata é erro) e **`partial class`** (a mesma classe em mais de um
+arquivo, unida na compilação; método parcial NÃO). Fixtures `surface_abstract.tk`,
+`surface_partial.tk` (parte 2 em subpasta).
 
 **Fila:** entrega 5 (comportamento base): membros C# (feito) → propriedades + interface v2 (feito)
 → `abstract`/`partial class` (D224) → reclaim c/ construtor+destrutor → C5b
