@@ -104,8 +104,8 @@ a exigir **só** o check `mc build ngen && run` (antes: "CI gate" e "Test suite 
 `ngen.yml` é uma **matriz de 5 pernas**, cada uma no runner do próprio SO **e**
 arquitetura — nada é cross-compilado e deixado sem rodar. Cada perna baixa a
 release do `mc` daquele par, confere o `.sha256`, **assere `mc --host`** contra o
-par da perna, constrói o compilador ensinado e **executa** `hello` + as 16
-fixtures (`// expect-exit: N` como oráculo).
+par da perna, constrói o compilador ensinado e **executa** `hello` + as 17
+fixtures do glob (`// expect-exit: N` como oráculo) — 18 programas no total.
 
 | runner | `[target]` os/arch | asset da release | `[linker]` |
 |---|---|---|---|
