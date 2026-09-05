@@ -480,9 +480,10 @@ Dois crumbs, logo após "membros C#":
 - **`abstract`:** entra no crumb de membros/propriedades ou logo após: `abstract class`
   (não instanciável), `abstract` método (sem corpo, slot de vtable, obriga `override` na
   primeira concreta), `abstract` só em classe `abstract`. Fixture `surface_abstract.tk`.
-- **`partial` (a decidir pelo dono):** custo a levantar — o tipo só fecha (layout, vtable,
+- **`partial class` (ratificado; método parcial NÃO — `partial` em método é erro claro):** custo a levantar — o tipo só fecha (layout, vtable,
   record de genérico) quando todas as partes foram lidas; como o mc parseia em uma passada e
   o `.` resolve no parse, parte declarada depois do 1º uso exige fechar o tipo no **pass**
   (o oráculo já resolve `.` deferido — é o mesmo mecanismo) ou exigir que as partes venham
-  antes do uso. Método parcial sem implementação: a chamada é removida (C#). Precedente do
+  antes do uso. Sem método parcial. Fixture `surface_partial.tk`: a mesma classe em dois arquivos
+  (`#include` do segundo), campos e métodos de ambas as partes, `new` depois das partes. Precedente do
   mc para "reabrir": `namespace` mergeando por prefixo (`examples/lang/README.md:265`).

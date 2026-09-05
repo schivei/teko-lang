@@ -1163,13 +1163,15 @@ Verificador reproduziu o crash instrumentando com ASan+UBSan (as flags do CI pro
   obriga `override` na primeira derivada concreta (conformidade checada como a de interface);
   método abstrato ocupa slot de vtable como um `virtual` sem corpo; `abstract` em membro exige
   classe `abstract`. Substitui o honest-stop de `abstract` do trait (D216) para classes.
-- **`partial` (dono: "estou pensando", NÃO é ruling ainda):** classe parcial = a mesma classe
+- **`partial` (RATIFICADO no mesmo dia): classes parciais SIM; métodos parciais NÃO.** Classe
+  parcial = a mesma classe declarada em mais de um arquivo/lugar, unida na compilação; o tipo
+  fecha no **pass** (mesmo mecanismo do `.` deferido). Texto original da avaliação:** classe parcial = a mesma classe
   declarada em mais de um arquivo/lugar, unida na compilação (o mc já une `namespace` por
   prefixo — precedente de "reabrir"); método parcial = declaração sem corpo cuja implementação
   é opcional (C#: `partial void m();`, sem implementação a chamada some). Registrar a forma e o
   custo (o record/replay de genéricos e o layout de campos precisam de todas as partes antes de
   fechar o tipo — as partes têm de ser vistas antes do 1º uso, ou o tipo fecha tarde, no pass).
-  Decisão do dono pendente; não se implementa até ratificar.
+  Decisão: **`partial class` entra na fila (depois de `abstract`); `partial` em método é erro claro.**
 
 ### D223 · DONO: propriedades (`get`/`set`), corpo default em `interface` e assinatura estática em `interface` — como em C# (dono 2026-09-04) 🔧 SUPERFÍCIE
 - **Propriedades como C#:** `public i64 Side { get; set; }` (auto-propriedade: campo de apoio
