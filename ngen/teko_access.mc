@@ -366,6 +366,12 @@ void tk_reject_class_only(i64 abst, i64 part, i64 line, uptr fl) {
     if (part) err_at2(fl, line, "teko: only a class is partial", p_name());
 }
 
+// K1 (D221): `delegate` is declared in teko_deleg.mc, included after this
+// file (it needs teko_typeof.mc's scope walk) -- forward-declared so
+// `public`/`internal` may still open it, the same way `tk_ns_resolve` is
+// forward-declared in teko_struct.mc for the reverse ordering need
+void tk_delegate();
+
 // the modifiers of one top-level declaration, entered ON the first of them
 void tk_decl_head(i64 vis, i64 abst, i64 part) {
     i64 line = p_line();
@@ -386,7 +392,8 @@ void tk_decl_head(i64 vis, i64 abst, i64 part) {
     if (tk_word("struct"))    { tk_struct();    return; }
     if (tk_word("interface")) { tk_interface(); return; }
     if (tk_word("trait"))     { tk_trait();     return; }
-    err_at2(fl, line, "teko: the modifier opens a class, a struct, an interface or a trait", p_name());
+    if (tk_word("delegate"))  { tk_delegate();  return; }
+    err_at2(fl, line, "teko: the modifier opens a class, a struct, an interface, a trait or a delegate", p_name());
 }
 
 void tk_public()   { tk_decl_head(TK_TPUBLIC, 0, 0); }
