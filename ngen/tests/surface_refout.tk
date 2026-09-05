@@ -17,6 +17,16 @@
 //      the caller's own `Cell`, `rt_live()`/the destructor prove the old one
 //      is released exactly once, through `rt_store`'s own old-value
 //      `rc_dec` -- the one exception `teko_rc.mc`'s `tk_rc_assign` grew.
+//   5. `outcheck` -- K2b bug 1: `Box x;` (no initializer) starts released, so
+//      the FIRST `mkbox(out x)` finds nothing to `rc_dec`, and the SECOND
+//      releases exactly the Box the first one made; a THIRD call over an
+//      already-initialized local proves the same for that shape too.
+//   6. `chaincheck` -- K2b bug 2: a scalar `ref` repassed through three
+//      levels (`a` -> `b` -> `c`), each adding 1 to the caller's own local.
+//   7. `outrelaycheck` -- the same repass over an `out` parameter.
+//   8. `rcheck_relay` -- a `ref Cell` repassed one level down and reassigned
+//      at the bottom: the caller sees the new `Cell`, `rt_live()` proves the
+//      original was released.
 //
 // expect-exit: 42
 
@@ -129,6 +139,95 @@ i64 rcheck() {
     return 0;
 }
 
+i64 box_dtors = 0;
+
+class Box {
+    public i64 v;
+
+    public Box(i64 x) {
+        v = x;
+    }
+
+    ~Box() {
+        box_dtors = box_dtors + 1;
+    }
+}
+
+void mkbox(out Box b) {
+    b = new Box(1);
+}
+
+i64 outcheck() {
+    Box x;
+    mkbox(out x);
+    if (x.v != 1) return 1;
+    if (box_dtors != 0) return 2;                 // `x` started released; nothing to free yet
+    mkbox(out x);
+    if (box_dtors != 1) return 3;                 // the first Box, released on the second call
+    if (rt_live() != 1) return 4;
+
+    Box y = new Box(2);
+    mkbox(out y);
+    if (box_dtors != 2) return 5;                 // the Box(2) the initializer made
+    if (rt_live() != 2) return 6;
+
+    x = null;
+    y = null;
+    if (box_dtors != 4) return 7;
+    if (rt_live() != 0) return 8;
+    return 0;
+}
+
+void lvl_c(ref i64 x) {
+    x = x + 1;
+}
+
+void lvl_b(ref i64 x) {
+    lvl_c(ref x);
+    x = x + 1;
+}
+
+void lvl_a(ref i64 x) {
+    lvl_b(ref x);
+}
+
+i64 chaincheck() {
+    i64 v = 1000;
+    lvl_a(ref v);
+    if (v != 1002) return 1;
+    return 0;
+}
+
+void setter_out(out i64 y) {
+    y = 55;
+}
+
+void relay_out(out i64 y) {
+    setter_out(out y);
+}
+
+i64 outrelaycheck() {
+    i64 w = 0;
+    relay_out(out w);
+    if (w != 55) return 1;
+    return 0;
+}
+
+void replace_deep(ref Cell c, i64 nv) {
+    replace(ref c, nv);
+}
+
+i64 rcheck_relay() {
+    Cell c = new Cell(10);
+    replace_deep(ref c, 20);
+    if (c.v != 20) return 1;
+    if (cell_dtors != 3) return 2;                // the Cell(10) `replace` released one level down
+    c = null;
+    if (cell_dtors != 4) return 3;
+    if (rt_live() != 0) return 4;
+    return 0;
+}
+
 i64 main() {
     i64 bad = scheck();
     if (bad != 0) return 10 + bad;
@@ -145,6 +244,20 @@ i64 main() {
     if (bad != 0) return 40 + bad;
     if (rt_live() != 0) return 45;
     if (cell_dtors != 2) return 50 + cell_dtors;
+
+    bad = outcheck();
+    if (bad != 0) return 60 + bad;
+    if (rt_live() != 0) return 69;
+
+    bad = chaincheck();
+    if (bad != 0) return 70 + bad;
+
+    bad = outrelaycheck();
+    if (bad != 0) return 80 + bad;
+
+    bad = rcheck_relay();
+    if (bad != 0) return 90 + bad;
+    if (rt_live() != 0) return 99;
 
     return 42;
 }
