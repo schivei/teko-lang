@@ -1157,6 +1157,17 @@ Verificador reproduziu o crash instrumentando com ASan+UBSan (as flags do CI pro
 - **CONSERTO (dispatch):** `cg_emit_self_addr` tem que PARAR de escapar o endereço de um temp cujo escopo é o próprio statement-expression — hoist do `_rcvN` pra um escopo que sobrevive à chamada externa inteira, OU passar receptor tipo-valor por valor (Region/Arena são structs de 8B, métodos leem self). Root-cause, não workaround; conserta a CLASSE (todo receptor não-endereçável), não só o sítio arena.
 - **LEI DE PROCESSO (endurece D163/D164):** o fixpoint no sandbox NÃO pega UB que só crasha sob certos toolchains — **o gate de verificador de compiler-core passa a incluir um build ASan+UBSan** (`-fsanitize=address,undefined -fno-omit-frame-pointer -g`) do gen0 compilando o tip, além do fixpoint. Barato, pega stack-use-after-scope/UAF/OOB que o build seco esconde. (A ser gravado na CLAUDE.md.)
 
+### D222 · DONO: `switch` nas DUAS vertentes do C# (statement e expression); `break N` atravessa o `switch`; `match` eliminado; `when` = guarda de `case` (dono 2026-09-04) 🔧 SUPERFÍCIE
+- **`switch` statement** (`switch (x) { case 1: … break; case 2: … break; default: … }`) e
+  **`switch` expression** (`x switch { 1 => a, 2 => b, _ => c }`, C# 8) — as duas vertentes.
+- **`break N` tem de funcionar em `switch`:** o `switch` conta como um nível — `break` sai do
+  `switch` (C#), `break 2` sai do `switch` e do laço de fora. Rota provável (architect confirma):
+  o `switch` statement rebaixa para um **`loop` de uma volta** com `if`/`else` e `break` ao fim de
+  cada braço — o `break N` por profundidade do core atravessa sem nada novo.
+- **`match`: eliminado** — a switch expression cobre. **`when`: mantido** como **guarda de
+  `case`** (`case n when n > 0:` / `n when n > 0 => …`), açúcar sobre `if`.
+- Supersede a dúvida do D218 sobre `match`/`when`.
+
 ### D221 · DONO: manter `loop` e as estruturas nativas do mc; closures = função inline/aninhada + açúcar sobre `&fn`/`callp` (dono 2026-09-04) 🔧 SUPERFÍCIE
 - **Manter `loop`, `break N`, `continue`, `if` e o resto das estruturas nativas do mc.** `while`/`for`
   (prelude) são ADIÇÕES, não substituições.

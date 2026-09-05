@@ -434,3 +434,13 @@ tempo de vida do capturado por referência (escopo/RC), e recusas claras (captur
 que não é local; `use` sem função). Precedentes: `mc/docs/core-language.md`
 (`&x` de função), `examples/desktop` (callbacks GTK bidirecionais), `examples/conc`
 (`spawn` com `&fn`). Entra na fila depois de `const`.
+
+## 19. D222 — `switch` (statement + expression), `break N` atravessa, `when` = guarda (2026-09-04, noite)
+
+Crumb **`switch`** (`syntax_stmt("switch")` + `syntax_infix`/postfix para a forma expressão —
+o `x switch { … }` tem `switch` à direita do operando; ver como o core deixa registrar uma
+palavra em posição infixa sem ser operador do core): statement rebaixado a `loop` de uma
+volta com `if`/`else` encadeados e `break` ao fim de cada braço (assim `break`/`break N`
+do core atravessam como em C#); `default`; `case` com constante ou `when` guarda; expressão
+com `=>` e `_`, tipada pelo oráculo (todos os braços do mesmo tipo, senão erro).
+`match` sai da fila. Entra depois de `const`, antes das closures.
