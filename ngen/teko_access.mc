@@ -225,6 +225,10 @@ i64 tk_static_field_of(i64 si, uptr m, i64 line, uptr fl) {
     return fi;
 }
 
+// teko_deleg.mc is included after this file: D221 decision 21's second
+// escape, checked where a static field of delegate type is written
+i64 tk_lam_escapes(i64 e);
+
 // `Name.field` / `Name.field = e` -- the global the static field lives in, read
 // or written at the field's own width
 i64 tk_static_use(i64 fi, i64 line, uptr fl) {
@@ -237,6 +241,8 @@ i64 tk_static_use(i64 fi, i64 line, uptr fl) {
         i64 v = parse_expr(0);
         tk_line = line;
         tk_file = fl;
+        if (tk_lam_escapes(v))
+            err_at(fl, line, "teko: a lambda that captures by reference cannot leave its scope");
         return tk_os_mark(tk_call2(tk_stn(fty), addr, v), fty);
     }
     i64 r = tk_call(tk_ldn(fty), addr);

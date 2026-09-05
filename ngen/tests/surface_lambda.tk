@@ -1,0 +1,182 @@
+// surface_lambda.tk -- lambda, local named function, `use (a, &b)` (K4, D221
+// §41): the explicit form `new Op((T a, T b) => body)`, over the same
+// object K1's plain-function wrap already builds.
+//
+// What each helper proves, in order:
+//
+//   1. `nocap_check` -- a lambda with no capture at all.
+//   2. `byval_check` -- `use (k)` freezes a COPY at construction: mutating
+//      the declarer's `k` afterward does not change what the closure reads.
+//   3. `byref_check` -- `use (&acc)` derefs the declarer's OWN slot, and a
+//      second call sees what the first one left there.
+//   4. `two_lambdas_check` -- two closures of the SAME delegate type, each
+//      with its own capture, do not step on one another.
+//   5. `local_named_check` -- `Op twice = new Op(...)`, D221 decision 22's
+//      own reading of a "local named function".
+//   6. `method_check` -- a lambda stored in a field and called through
+//      `this.cb(x)`, and one passed as a METHOD argument and called there.
+//   7. `counted_check` -- `use (b)` of a class reference: the closure holds
+//      its own count, `rt_live()` stays at 1 after the declarer's own `b`
+//      is dropped, and drops to 0 only once the closure itself is released.
+//   8. `geo.use_lambda()` -- the same machinery inside a `namespace`.
+//   9. `block_check` -- a lambda with a BLOCK body, `=> { ...; return e; }`.
+//  10. `free_arg_check` -- `new Op(...)` as the argument of a FREE function.
+//
+// expect-exit: 42
+
+#include "../lib/rt.mc"
+
+delegate i64 Op(i64 a);
+
+i64 apply(Op f, i64 x) {
+    return f(x);
+}
+
+class Holder {
+    public Op cb;
+
+    public i64 run(i64 x) {
+        return this.cb(x);
+    }
+
+    public i64 relay(Op f, i64 x) {
+        return f(x);
+    }
+}
+
+i64 boxes_released = 0;
+
+class Box {
+    public i64 v;
+
+    public Box(i64 x) {
+        v = x;
+    }
+
+    ~Box() {
+        boxes_released = boxes_released + 1;
+    }
+}
+
+delegate i64 BoxOp();
+
+namespace geo {
+    i64 use_lambda() {
+        i64 k = 3;
+        Op f = new Op((i64 x) use (k) => x * k);
+        return f(5);
+    }
+}
+
+i64 nocap_check() {
+    Op f = new Op((i64 x) => x * 2);
+    if (f(21) != 42) return 1;
+    return 0;
+}
+
+i64 byval_check() {
+    i64 k = 3;
+    Op f = new Op((i64 x) use (k) => x * k);
+    k = 999;
+    if (f(5) != 15) return 1;
+    return 0;
+}
+
+i64 byref_check() {
+    i64 acc = 0;
+    Op f = new Op((i64 x) use (&acc) => { acc = acc + x; return acc; });
+    if (f(3) != 3) return 1;
+    if (f(4) != 7) return 2;
+    if (acc != 7) return 3;
+    return 0;
+}
+
+i64 two_lambdas_check() {
+    i64 k1 = 2;
+    i64 k2 = 10;
+    Op f1 = new Op((i64 x) use (k1) => x * k1);
+    Op f2 = new Op((i64 x) use (k2) => x * k2);
+    if (f1(5) != 10) return 1;
+    if (f2(5) != 50) return 2;
+    return 0;
+}
+
+i64 local_named_check() {
+    Op twice = new Op((i64 x) => x * 2);
+    if (twice(21) != 42) return 1;
+    return 0;
+}
+
+i64 method_check() {
+    Holder h = new Holder;
+    h.cb = new Op((i64 x) => x + 1);
+    if (h.run(41) != 42) return 1;
+    if (h.relay(new Op((i64 x) => x - 1), 43) != 42) return 2;
+    return 0;
+}
+
+i64 counted_check() {
+    Box b = new Box(9);
+    BoxOp f = new BoxOp(() use (b) => b.v);
+    if (f() != 9) return 1;
+    b = null;
+    if (rt_live() != 2) return 2;                  // the closure keeps the Box alive
+    f = null;
+    if (boxes_released != 1) return 3;
+    if (rt_live() != 0) return 4;
+    return 0;
+}
+
+i64 block_check() {
+    Op f = new Op((i64 x) => { i64 y = x * 2; return y + 1; });
+    if (f(10) != 21) return 1;
+    return 0;
+}
+
+i64 free_arg_check() {
+    if (apply(new Op((i64 x) => x - 1), 43) != 42) return 1;
+    return 0;
+}
+
+i64 main() {
+    i64 bad = nocap_check();
+    if (bad != 0) return 10 + bad;
+    if (rt_live() != 0) return 20;
+
+    bad = byval_check();
+    if (bad != 0) return 30 + bad;
+    if (rt_live() != 0) return 40;
+
+    bad = byref_check();
+    if (bad != 0) return 50 + bad;
+    if (rt_live() != 0) return 60;
+
+    bad = two_lambdas_check();
+    if (bad != 0) return 70 + bad;
+    if (rt_live() != 0) return 80;
+
+    bad = local_named_check();
+    if (bad != 0) return 90 + bad;
+    if (rt_live() != 0) return 100;
+
+    bad = method_check();
+    if (bad != 0) return 110 + bad;
+    if (rt_live() != 0) return 120;
+
+    bad = counted_check();
+    if (bad != 0) return 130 + bad;
+    if (rt_live() != 0) return 140;
+
+    if (geo.use_lambda() != 15) return 150;
+    if (rt_live() != 0) return 160;
+
+    bad = block_check();
+    if (bad != 0) return 170 + bad;
+    if (rt_live() != 0) return 180;
+
+    bad = free_arg_check();
+    if (bad != 0) return 190 + bad;
+    if (rt_live() != 0) return 200;
+
+    return 42;
+}
