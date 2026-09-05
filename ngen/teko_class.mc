@@ -421,14 +421,18 @@ i64 tk_member_kind(i64 kind) {
 
 // the modifiers of one member, in any order, as C# writes them: at most one of
 // `public`/`private`/`protected`, at most one of `virtual`/`override`/
-// `abstract`, and `static` at most once. `pvis` answers with the visibility
-// (`private` when the member names none), `pstat` with 1 for a member that
-// takes no receiver, and the result is the vtable kind teko_class already
+// `abstract`, `static` at most once, and `const` at most once (D218, entrega
+// 5's own `const` crumb: a member `const` takes none of the other three --
+// `teko_const.mc`'s `tk_member`'s own dispatch checks that). `pvis` answers
+// with the visibility (`private` when the member names none), `pstat` with 1
+// for a member that takes no receiver, `pconst` with 1 for one that is a
+// folded constant, and the result is the vtable kind teko_class already
 // speaks: 0 plain, 1 virtual, 2 override, 3 abstract.
-i64 tk_member_mods(uptr pvis, uptr pstat) {
+i64 tk_member_mods(uptr pvis, uptr pstat, uptr pconst) {
     i64 vis = 0 - 1;
     i64 stat = 0;
     i64 kind = 0;
+    i64 isconst = 0;
     loop {
         i64 v = 0 - 1;
         if (tk_word("public"))         v = TK_VPUBLIC;
@@ -440,6 +444,9 @@ i64 tk_member_mods(uptr pvis, uptr pstat) {
         } else if (tk_word("static")) {
             if (stat) err_at(p_file(), p_line(), "teko: the member is already static");
             stat = 1;
+        } else if (tk_word("const")) {
+            if (isconst) err_at(p_file(), p_line(), "teko: the member is already const");
+            isconst = 1;
         } else if (tk_word("partial")) {
             err_at(p_file(), p_line(), "teko: a partial method is not taught; only a partial class");
         } else if (tk_word("virtual") || tk_word("override") || tk_word("abstract")) {
@@ -450,6 +457,7 @@ i64 tk_member_mods(uptr pvis, uptr pstat) {
     if (vis < 0) vis = TK_VPRIVATE;              // C#'s default for a member
     st64(pvis, vis);
     st64(pstat, stat);
+    st64(pconst, isconst);
     return kind;
 }
 
@@ -945,9 +953,15 @@ i64 tk_member(i64 ci, uptr name, i64 off, i64 ti) {
     if (p_id() == K_TILDE) return tk_member_dtor(ci, name, off, ti);
     i64 vis = 0;
     i64 stat = 0;
-    i64 kind = tk_member_mods(&vis, &stat);
+    i64 isconst = 0;
+    i64 kind = tk_member_mods(&vis, &stat, &isconst);
     if (p_id() == K_TILDE)
         err_at2(p_file(), p_line(), "teko: a destructor takes no modifier", name);
+    if (isconst) {
+        if (stat) err_at(tk_file, tk_line, "teko: const is already static; drop static");
+        if (kind) err_at(tk_file, tk_line, "teko: const has no vtable slot; it is not virtual");
+        return tk_member_const(ci, off, vis, ti);
+    }
     tk_reject_nested();                          // `public class B { }` reaches here too
     if (ti >= 0 && kind == 3)
         err_at(tk_file, tk_line, "teko: `abstract` in a trait not taught yet");

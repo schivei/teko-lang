@@ -1,9 +1,11 @@
 // teko_stmt.mc -- statement-position words teko adds beyond the core's own
 // `if`/`loop`/`break`/`continue`/`return`/typed-local grammar (all inherited
-// unchanged, D213). `var`/`const` (BindKind, DECISION_LOG's "so existe VAR e
-// CONST") and `match`/`when` are still future entregas (docs/design/
-// port-teko-mc.md §3): each word is reserved and stops with a clear message
-// instead of falling through to the core's "not a statement".
+// unchanged, D213). `var` and `match`/`when` are still future entregas
+// (docs/design/port-teko-mc.md §3): each word is reserved and stops with a
+// clear message instead of falling through to the core's "not a statement".
+// `const` at this position -- inside a function body -- stops the same way,
+// on purpose, even though the top-level and member forms are taught
+// (teko_const.mc): the mc's `#define` is program-wide, with no local scope.
 //
 // And the BLOCK, which is not a word teko adds but a position teko has to own:
 // `K_LBRACE` is not a core keyword, so `syntax_stmt("{")` makes this module the
@@ -14,7 +16,21 @@
 // it, so `if (1) { Ledger s = ...; }` no longer decides what the OUTER `s` is.
 
 i64 tk_stop_var()   { i64 l = p_line(); uptr f = p_file(); p_next(); err_at(f, l, "teko: var not taught yet");   return 0; }
-i64 tk_stop_const() { i64 l = p_line(); uptr f = p_file(); p_next(); err_at(f, l, "teko: const not taught yet"); return 0; }
+
+// `const` at the STATEMENT position -- inside a function body -- is the one
+// spelling teko_const.mc's own `#define` sugar does not reach: the core's
+// `#define` is a single program-wide table, with no notion of a local's own
+// scope, so a "local const" would either leak out of the function or shadow
+// itself on a second call. `const` at the top level and as a class/struct
+// member are taught (`teko_const.mc`); this is the deliberate stop between
+// them.
+i64 tk_stop_const() {
+    i64 l = p_line();
+    uptr f = p_file();
+    p_next();
+    err_at(f, l, "teko: a local const is not taught; declare it at the top or as a member");
+    return 0;
+}
 i64 tk_stop_match()  { i64 l = p_line(); uptr f = p_file(); p_next(); err_at(f, l, "teko: match not taught yet"); return 0; }
 i64 tk_stop_when()   { i64 l = p_line(); uptr f = p_file(); p_next(); err_at(f, l, "teko: when not taught yet");  return 0; }
 

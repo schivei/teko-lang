@@ -134,6 +134,15 @@
 //   Circle c = new Circle();  parts.geo.twice(x)  &twice           the
 //                              bare/qualified forms `using` already gives
 //
+// What entrega 5's `const` crumb adds -- a folded constant, sugar over the
+// core's own `#define` (D218, teko_const.mc):
+//   const i64 N = 10;                  top level, or `geo__N` in a namespace  syntax
+//   N  /  geo.N  (qualified)  /  N  (bare, from inside geo or a `using`)
+//   var x[N];                          array size: the core's own `#define` folding
+//   Box<Circle, N>                     a generic's own `const` bound (teko_generic.mc)
+//   public const i64 MAX = 4;          a class/struct member, no slot
+//   Nome.MAX  /  MAX (bare, inside)    the same two forms a static member takes
+//
 // Everything else in docs/design/port-teko-mc.md §3 (types/classes,
 // generics, error-union, `service`/DI, concurrency, the
 // rest of the stdlib) is a later entrega and is not stubbed here: it does
@@ -143,6 +152,7 @@
 #include "teko_type.mc"
 #include "teko_float.mc"
 #include "teko_struct.mc"
+#include "teko_const.mc"
 #include "teko_ns.mc"
 #include "teko_iface.mc"
 #include "teko_trait.mc"
@@ -179,6 +189,7 @@ void user_init() {
     syntax("namespace", &tk_namespace);
     syntax("import",    &tk_import);
     syntax("using",     &tk_using);
+    syntax("const",     &tk_const_top);
 
     syntax_stmt("{",     &tk_block);
     syntax_stmt("var",   &tk_stop_var);

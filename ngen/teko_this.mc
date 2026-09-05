@@ -219,6 +219,15 @@ i64 tk_this_field(uptr name) {
     return tk_field_find(tk_pass_class, name);
 }
 
+// the same question for a member CONST (D218, entrega 5's own `const`
+// crumb): a local or a parameter still answers first, and one is never
+// found by a static method any differently than by an instance one -- it
+// takes no receiver at all
+i64 tk_this_const(uptr name) {
+    if (tk_ty_scope_find(name) >= 0) return 0 - 1;
+    return tk_mconst_find(tk_pass_class, name);
+}
+
 // where the field lives: a STATIC one is a global of its own, and the object the
 // method runs on has nothing to do with it -- which is also why a method that
 // takes no receiver may still read it
@@ -279,6 +288,12 @@ void tk_this_prop_write(i64 n) {
 void tk_this_ident(i64 n) {
     i64 fi = tk_this_field(nd_name(n));
     if (fi < 0) {
+        i64 mci = tk_this_const(nd_name(n));
+        if (mci >= 0) {
+            tk_this_at(n);
+            tk_node_replace(n, tk_mconst_use(mci, tk_line, tk_file));
+            return;
+        }
         tk_this_prop_read(n);
         return;
     }
