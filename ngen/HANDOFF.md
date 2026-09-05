@@ -389,9 +389,30 @@ o acessor); **`partial class`** fecha no primeiro uso ou no fim da unidade (part
 é erro); tabelas por posse (`fd_cls`/`vs_cls`/`ci_cls`) — tipo declarado entre partes não
 corrompe o layout; base só numa parte antes de membros; interfaces em união; método parcial não.
 
-**Em voo:** **reclaim** pela "arena automática" do mc com **construtor/destrutor** (D218, plano
-§14/§15): free lists + RC por escopo no parse (`tk_block`, `on_jump`); `Nome(params)` por
-`new Nome(args)`, `~Nome()` no release; fixture `surface_reclaim.tk` com 1M `new`.
+**Entrega 5 — RECLAIM LANDADO** (D218, plano §14/§15; 23 fixtures): a arena fixa de 4 MiB ganhou
+**free list por classe de tamanho** e o **refcount por escopo**, e o `ngen` devolve memória — 1M
+`new` num laço não esgota mais nada.
+- **Layout:** cabeçalho de **16 B** (vtable@+0, contagem@+8 — o `+8` NÃO estava reservado, os
+  campos começavam em 8) e vtable com `&Nome_release` na palavra 0 e a itab na palavra 1
+  (`TK_VT_FIXED 2`, o layout do `lx`). É o release na palavra 0 que deixa `rc_dec` liberar um
+  objeto cuja classe ele não conhece. As quatro fixtures que afirmam offset foram corrigidas
+  (`SHAPE_SIDE` 8→16 etc.); `types_struct.tk` não muda (struct não tem cabeçalho).
+- **`Nome(params) { }`** é construtor, sobrecarregável por assinatura, com **`: base(args)`** como
+  no C# (e a exigência do C#: base que só declara construtor com argumento tem de ser nomeada).
+  `new Nome(args)` escolhe pela contagem de argumentos; `new Nome` sem construtor que case segue
+  entregando o objeto zerado — é por isso que as 22 fixtures anteriores não mudaram de forma.
+  **`~Nome() { }`** é destrutor (sem modificador, sem parâmetro, um por classe), chamado pelo
+  release **antes** dos campos, derivada antes da base.
+- **`ngen/teko_rc.mc` (novo)** — o passe que injeta o RC. **Vai no PASSE, não no parse** (ver o §5.2
+  abaixo: é a decisão que o crumb mandava reportar). Saída de bloco em ordem reversa, `break N`/
+  `continue`/`return`, `x = e`, `p.f = e`, `Tipo.f = e`, `x[i] = e` e o `set` de propriedade,
+  `rt_drop` para a referência que ninguém pegou, e **temporários** (`rt_park`/`rt_mark`/`rt_sweep`)
+  para o valor possuído que cai em posição sem dono — argumento, receptor de `.`, operando.
+- **Sem RC nesta fatia (dívida declarada em `lib/rt.mc`):** `struct` (não tem vtable, logo não tem
+  release nem contagem) e o pacote de `params` (nasce e morre dentro de uma expressão, não há nome
+  para segurá-lo). `rt_live()` conta os dois, então um programa que os mistura com classes vê um
+  piso acima de zero em vez de uma resposta errada. Campo `static` de tipo classe guarda a
+  referência corretamente, mas nunca é liberado (vive o programa inteiro).
 
 **Fila:** reclaim c/ construtor+destrutor (em voo) → **C5b** operadores `public static` como
 C# (o C5 landado está errado) → **C6** default em função de topo (`syntax_param`, mc ≥ 0.10.3)
@@ -399,16 +420,45 @@ C# (o C5 landado está errado) → **C6** default em função de topo (`syntax_p
 `#define`) → `switch` nas duas vertentes + `when` guarda (D222) → closures `use (a, &b)` +
 ponteiro de função/`ref`/`out` como primitivas (D221, architect-first) → compilador teko de
 `<mc/core_min>` (plano §26). **Fora:** `var`, `type`, `match`, Variant, método parcial, nested.
+**Fila:** entrega 5 (comportamento base): membros C# (feito) → propriedades + interface v2 (feito)
+→ `abstract`/`partial class` (D224, feito) → reclaim c/ construtor+destrutor (feito) → C5b
+(operador estático, D218) → `while`/`for` (prelude do mc) → stops restantes
+(`namespace`/`import`/`using`/`const`/`match`/`when`) → stdlib mínima; **C6** quando o mc
+der o hook de declaração de função (`0.10.N`).
 
 **Dívida do C8:** `p.items[i]` sobre um receptor que o parser NÃO tipa (um parâmetro,
 que só o oráculo do `pass()` resolve) não chega ao `[` de array — cai no `[` do `params`
 e é recusado com `teko: \`[\` indexes a \`params\` list only`. Recusa clara, nunca
 miscompilação; fechar isso é trabalho no `teko_typeof.mc` (C3b, em voo em paralelo).
 
-**Dívidas conhecidas:** arena bump sem reclaim (`new` e `params` em loop quente
-esgotam 4 MiB ruidosamente — entrega de comportamento base); default em função de topo
-bloqueado (C6); `syntax_infix` sobre operador do core morre em silêncio (bug reportado
-ao mc; rota é `pass()`).
+**Dívidas conhecidas:** default em função de topo bloqueado (C6); `syntax_infix` sobre
+operador do core morre em silêncio (bug reportado ao mc; rota é `pass()`); `struct`,
+pacote de `params` e campo `static` de classe sem reclaim (acima). A dívida da arena
+bump sem reclaim está **fechada** (D218).
+
+### Por que o RC ficou no PASSE e não no parse (achado do crumb do reclaim)
+
+O crumb mandava injetar o RC no parse, como o `lx` (`lang_stmt.mc` `lg_decs_from`), e
+**parar e reportar** se o `on_jump` não desse a contabilidade ou se parse e pass
+divergissem. As duas coisas apareceram, e são de fundo:
+
+1. **`on_jump` dá profundidade de BLOCO, não de laço.** O `lx` conta laços porque é dono
+   de `while`/`for` e empilha uma marca em cada um (`lg_lp`). Aqui `loop` é palavra do
+   CORE e `word_add` recusa sequestrar keyword do core (`mc/src/hooks.mc:237-241`), então
+   não existe `syntax_stmt("loop")` para empilhar marca — `break N` não teria como saber
+   quantos escopos atravessa. Na árvore o nó `N_LOOP` está lá e a conta sai de graça.
+2. **A POSSE não é decidível no parse.** Se `e` já carrega uma referência própria é uma
+   pergunta sobre o TIPO ESTÁTICO de `e`, e no `ngen` o `.` sobre receptor que o parser
+   não tipa é **deferido por desenho** (`teko_expr.mc` `tk_defer_member`): no parse o nó é
+   um placeholder sem tipo nenhum. Chutar ali é vazamento silencioso (um incremento a
+   mais) ou use-after-free silencioso (um a menos) — exatamente o que o crumb proíbe. O
+   `lx` não tem esse buraco porque tipa todo receptor no parse (o `self` dele é parâmetro
+   explícito).
+
+Logo **escopo e posse têm UM dono só, o passe** — que é o que a própria sessão do mc
+sugeriu no alerta do §23 do plano ("candidato a unificar, o pass como fonte única, quando
+o reclaim/RC entrar"). A pilha de locais do parse fica intacta e segue fazendo o que
+sempre fez, resolver `.`. **Nada ficou híbrido.**
 
 ## 5.1 Armadilhas já pagas (não repita)
 

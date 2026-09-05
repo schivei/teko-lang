@@ -76,6 +76,14 @@
 //                                 closes at its first use or at the end of the
 //                                 unit -- a part written after that is refused
 //
+// What entrega 5's reclaim crumb adds (D218) -- the arena gives memory back, and
+// C#'s two members that say when:
+//   the object grows a reference count (word 1) and the vtable a release (word 0)
+//   public Name(params) { } / : base(args)                    a constructor
+//   ~Name() { }                                               a destructor
+//   new Name(args)                                            picks by signature
+//   the reference counting itself, injected over every body   pass (teko_rc.mc)
+//
 // Everything else in docs/design/port-teko-mc.md §3 (types/classes,
 // generics, error-union, `service`/DI, concurrency, the
 // rest of the stdlib) is a later entrega and is not stubbed here: it does
