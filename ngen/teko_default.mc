@@ -156,6 +156,21 @@ i64 tk_default_d0_of_name(uptr name) {
     return fpd_mark_at(i);
 }
 
+// moves row `velho`'s own key to `novo` -- a namespace mangling a-rename
+// (entrega 5, crumb N2), which is the ONE other place besides
+// `set_nd_name` a free function's parse-time name pointer has to move to.
+// `novo` MUST be the exact pointer the caller also hands `set_nd_name`:
+// `tk_default_row_of_name`'s own pointer compare (above) is what
+// `teko_over.mc`'s fourth round reads later, and it would miss the row
+// under any other copy of the same text. A name this table never saw a
+// parameter for (`tk_default_row` answers -1) is not this function's
+// business -- there is no default to carry across the rename.
+void tk_default_rename(uptr velho, uptr novo) {
+    i64 i = tk_default_row(velho);
+    if (i < 0) return;
+    set_fpd_name_at(i, novo);
+}
+
 // the node whose name is the EXACT pointer `owner` -- the call-site half of
 // the same identity match `tk_default_row_of_node` makes from the other
 // side. Walking `root` here, rather than trusting `decl_find` (which only

@@ -1110,6 +1110,8 @@ tolerância 1.00). Fixture `surface_namespace.tk` + `ngen/tests/parts/ns_file.tk
    via o laço que este módulo já possui): não há hook de "todo `parse_top` top-level" fora de um
    laço que o módulo mesmo controla, e ganhar um não é escopo do N1 (não registra `pass()`
    nenhum). Os probes usam a forma de bloco, que é pega. Fica para o `tk_ns_pass` do N2.
+   **FECHADO pelo N2 (§33):** `tk_ns_scan_decls` varre `root` inteiro no `tk_ns_pass` e aplica o
+   mesmo `tk_ns_reject_topkind` a todo nó cujo arquivo declarou um namespace file-scoped.
 7. **N1b (2026-09-05): dois furos do verificador, ambos a mesma causa.** `tk_conf_name` (a lista
    `:`) e `tk_use` (o `use` de trait) liam o nome com um único `p_name()`/`p_ident()`, sem andar
    pelos segmentos `.` — o primeiro nunca via `geo.IShape` inteiro, o segundo nem sequer aceitava
@@ -1117,3 +1119,58 @@ tolerância 1.00). Fixture `surface_namespace.tk` + `ngen/tests/parts/ns_file.tk
    `T_IDENT`). Corrigidos lendo por `tk_ns_read_path` (D31.3) e resolvendo bare pela lista de
    busca, qualificado por exato — `tk_conf_name` contra `tk_struct_find`, `tk_use` contra um novo
    `tk_trait_resolve` (a mesma busca de `tk_ns_resolve`, sobre a tabela de traits).
+
+## 33. N2 landado — funções livres em namespace (2026-09-05, errata)
+
+`feat/ngen-namespace-fn`, `teko_ns.mc` (`tk_ns_pass`, registrado logo depois de `tk_partial_pass`
+e antes de `tk_params_pass`), `teko_default.mc` (`tk_default_rename`), `teko_class.mc` (o furo do
+destrutor). 27/27 em exit esperado; `--dump-ast` das 26 fixtures anteriores **byte-idêntico**
+(prova de no-op do pass quando não há função livre em namespace); `mc limits ngen` `ok`.
+
+**Duas varreduras, uma tabela de site.** Sweep 1 (`tk_ns_scan_decls`) manglа toda declaração de
+função livre/protótipo dentro de um namespace, bloco OU file-scoped, ANTES de qualquer sítio ser
+lido; sweep 2 (`tk_ns_scan_calls`) resolve os sítios não-qualificados. O namespace de um BLOCO é
+anotado no parse (`tk_ns_decl_note`, chamado no laço de `tk_namespace` sobre o nó que `parse_top`
+devolveu, por identidade do nó — não por `nd_file`+linha, que a redação original do crumb sugeria,
+mas o nó já é a chave exata que o resto do módulo usa) numa tabela nova (`nsb_node`/`nsb_ns`); o de
+um FILE-SCOPED sai de graça de `tk_ns_file_get(nd_file(n))`. O de um SÍTIO (sweep 2) não precisa de
+tabela nenhuma: por sweep 1 já ter rodado, o nome de toda função top-level namespaced já é o cheio
+(`geo__area`), e `tk_ns_of_name` (novo, usado pelas DUAS pontas) extrai `geo` de volta por prefixo
+— o `.` mais específico, não o primeiro que bater, para `namespace A` e `namespace A.B` coexistirem.
+
+**`geo.area(x)` (qualificado) NÃO passa pelo pass.** `tk_ns_seg_expr`/`tk_ns_seg_stmt` do N1 só
+resolviam tipo (`tk_struct_find_exact(acc)` bem-sucedido); estendidos com `tk_ns_qualified_call`:
+quando `acc` é um namespace conhecido mas não um tipo, o token corrente (que `tk_ns_walk` já
+deixou sentado exatamente sobre o nome da função, o `.` já consumido) é lido como identificador e
+o `N_CALL` é montado com o nome cheio DIRETO, sem `decl_find` — a declaração pode vir mais abaixo
+no arquivo, e mangling delas só acontece no pass; um `geo.nome` que não é tipo nem função vira
+`unresolved qualified name`, nunca miscompila em silêncio.
+
+**Achados que exigiram correção (mesma classe do §32):**
+
+1. **Global sintetizado de uma classe namespaced apanhado pela recusa file-scoped.** A varredura
+   unificada de sweep 1 passa por TODO nó de topo, incluindo o `_vt` global que `tk_class_close`
+   emite bem depois do parse — e esse nó também é do arquivo namespaced. A guarda usa o MESMO
+   `tk_ns_of_name`: só recusa um `N_GLOBAL` que ainda NÃO carrega prefixo de namespace (um global
+   sintetizado já sai com o nome cheio, `tk_ns_qualify` correndo antes na declaração do tipo).
+2. **A guarda de colisão de (c) não vale para `decl_find` em função.** Duas declarações de uma
+   função namespaced com assinaturas diferentes (C4) aterrissam no MESMO nome cheio de propósito —
+   é o que o `tk_over_pass` espera achar. `tk_ns_rename_decl` só recusa colisão contra a tabela de
+   TIPOS (`tk_struct_find_exact`); `decl_find` fica de fora.
+3. **O construtor JÁ estava correto** (`tk_gen_ty` → `tk_ns_param_ty` resolve o nome curto pela
+   lista de busca antes de comparar com `sr_ty_at(ci)`, tipo contra tipo, não palavra contra
+   palavra) — só o DESTRUTOR comparava `tk_word(name)` contra o nome QUALIFICADO
+   (`teko_class.mc`, `tk_member_dtor`). Corrigido com `tk_ns_short_of` (novo, o inverso de
+   `tk_ns_of_name`). A MESMA classe de bug estava latente no diagnóstico `void Name(...)` (C#'s own
+   mistake) logo abaixo, também corrigida — um probe (`p7_void_ctor`, fora de `ngen/tests/`)
+   confirma a mensagem certa em vez de aceitar `void Base(...)` como um método comum.
+
+**Fixture** `surface_namespace_fn.tk` (`expect-exit: 42`): chamada qualificada (`geo.area`) e
+sobrecarga C4 sobre função namespaced, chamada bare de DENTRO do namespace (`grow` chamando
+`area`) e de FORA via `using geo;`, default C6 bare e qualificado, uma função namespaced chamando
+uma PLANA bare (fica achatada, D31.10), e `Base`/`Derived` com construtor E destrutor pelo nome
+curto mais `: base(v)`. **Probes de recusa** (fora de `ngen/tests/`): `main`/`extern`/global dentro
+de namespace FILE-SCOPED; dois `using` com a mesma função ambígua (`teko: ambiguous name f (a,
+b)`); chamada sem namespace nem `using` (erro do core, `call to unknown function`); chamada bare a
+uma função do runtime (`rt_live`) de dentro de um namespace, achatada e ligada normalmente;
+`void Name(...)` dentro de namespace.
