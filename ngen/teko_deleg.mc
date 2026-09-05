@@ -250,6 +250,11 @@ i64 tk_new_deleg(i64 si, i64 line, uptr fl) {
 // rewrite (`tk_deleg_call`) and a field call (teko_expr.mc's `tk_field_use`).
 // `obj` is read TWICE -- once for the code pointer, once as the call's own
 // object argument -- so it has to be pure; a name and a field load both are.
+// The return type is NOT registered here: the node this builds may still be
+// copied into another node's position by the caller (`node_assign`), and the
+// xt table is keyed by node POSITION (teko_struct.mc), so the entry has to
+// land on whatever identity actually ends up in the tree -- the caller's job,
+// same split `tk_pend_do` (teko_typeof.mc) keeps between building and typing.
 i64 tk_deleg_build(i64 si, i64 obj, i64 args, i64 na, i64 line, uptr fl) {
     tk_line = line;
     tk_file = fl;
@@ -258,10 +263,8 @@ i64 tk_deleg_build(i64 si, i64 obj, i64 args, i64 na, i64 line, uptr fl) {
     i64 code = tk_call("tk_deleg_code", tk_clone(obj));
     i64 call = tk_call("callp", list_append(list_append(code, obj), args));
     i64 ret = dg_ret_at(si);
-    i64 r = call;
-    if (ret != TY_VOID && type_width(ret) < 8) r = tk_cast(ret, call);
-    tk_xt_put(r, tk_struct_by_ty(ret), ret, 0);
-    return r;
+    if (ret != TY_VOID && type_width(ret) < 8) return tk_cast(ret, call);
+    return call;
 }
 
 // how many arguments an already-parsed sibling list holds
@@ -287,6 +290,12 @@ i64 tk_deleg_call(i64 n, i64 di) {
     i64 keep = nd_next(n);
     node_assign(n, r);
     set_nd_next(n, keep);
+    // the node that ends up in the TREE is `n`, not `r` -- the count the
+    // reclaim pass (teko_rc.mc) reads is by node POSITION, so the entry has
+    // to be under `n`'s identity or a counted return (`Cell c = f(7);`)
+    // reads as "borrowed" and picks up an rc_inc it never sheds
+    i64 ret = dg_ret_at(di);
+    tk_xt_put(n, tk_struct_by_ty(ret), ret, 0);
     return n;
 }
 

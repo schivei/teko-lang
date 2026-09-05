@@ -107,12 +107,17 @@ i64 tk_fill_defaults(i64 args, i64 na, i64 np, i64 nreq, i64 d0) {
 
 // `h.cb(2, 3)`: a field of delegate type, called where it is read (K1, D221
 // §41) -- the load feeds both `tk_deleg_code` and the call's own object
-// argument, `tk_deleg_build`'s own contract
+// argument, `tk_deleg_build`'s own contract. The node this hands back is
+// fresh (no `node_assign` copies over it), so the return type is registered
+// on it directly.
 i64 tk_field_deleg_call(i64 addr, i64 fty, i64 di, i64 line, uptr fl) {
     i64 obj = tk_call(tk_ldn(fty), addr);
     i64 na = 0;
     i64 args = tk_args(&na);
-    return tk_deleg_build(di, obj, args, na, line, fl);
+    i64 r = tk_deleg_build(di, obj, args, na, line, fl);
+    i64 ret = dg_ret_at(di);
+    tk_xt_put(r, tk_struct_by_ty(ret), ret, 0);
+    return r;
 }
 
 // `p.f` / `p.f = e` / `p.f(args)` on a field of delegate type: the load or
