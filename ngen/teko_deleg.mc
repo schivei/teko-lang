@@ -300,6 +300,10 @@ i64 tk_deleg_call(i64 n, i64 di) {
 }
 
 i64 tk_deleg_cur_ns = 0;              // the namespace of the function this pass walks
+i64 tk_deleg_cur_ret = 0 - 1;          // the declared return type of the function this pass walks
+i64 tk_deleg_root = 0;                 // the unit, for the same decl-count guard C6 already uses
+
+i64 tk_default_decl_count(i64 root, uptr name);   // teko_default.mc, included after this file
 
 // `gadd`, named bare inside `namespace geo { ... }`, is not this pass's own
 // call/const rewrite (teko_ns.mc's `tk_ns_pass` ran first and only touches an
@@ -314,29 +318,113 @@ uptr tk_deleg_resolve_fn(uptr fname, i64 line, uptr fl) {
     return nd_name(d);
 }
 
-// `Op f = add;`: a local/field initializer that names a FUNCTION (not a local
-// or parameter -- one of those shadows the function and is left as an
-// ordinary value copy) is coerced into the same wrap `new Op(add)` builds
+// the static type a slot of delegate type would read `e` as, peeking through
+// a CALL THROUGH a delegate-typed local before this pass's own walk gets to
+// rewrite it (the same `dg_ret_at` lookup `tk_deleg_call` makes once it does)
+// -- everything else is the general oracle's own answer (a local/param, a
+// field already resolved, a call to a plain function, or an already-wrapped
+// `new Op(...)`, xt-typed since the parser built it)
+i64 tk_deleg_expr_ty(i64 e) {
+    if (nd_kind(e) == N_CALL) {
+        i64 di = tk_deleg_row(tk_ty_scope_find(nd_name(e)));
+        if (di >= 0) return dg_ret_at(di);
+    }
+    return tk_ty_of(e);
+}
+
+// `teko: Op takes a function, another Op, or null`
+uptr tk_deleg_mismatch_msg(i64 si) {
+    uptr nm = sr_name_at(si);
+    return tk_join(tk_join3("teko: ", nm, " takes a function, another "), tk_join(nm, ", or null"));
+}
+
+// the one validator every slot of delegate type `si` shares -- a var
+// initializer, an assignment, a call argument, a `return`. Only four shapes
+// read a delegate object correctly: `null`, a call already typed `si` (a
+// local/param/field, or a plain function's return), a compatible function
+// name (wrapped here, the same thunk a var declaration gets), or a value a
+// nested delegate call already answers with row `si`. Anything else -- a
+// literal, arithmetic, a mismatched type -- is a silent wrong-width copy
+// that segfaults the first time the slot is called
+i64 tk_deleg_coerce(i64 si, i64 e, i64 line, uptr fl) {
+    if (e == 0) return e;
+    if (nd_kind(e) == N_INT && nd_val(e) == 0) return e;             // `null`
+    if (nd_kind(e) == N_IDENT && tk_ty_scope_find(nd_name(e)) < 0)
+        return tk_deleg_wrap(si, tk_deleg_resolve_fn(nd_name(e), line, fl), line, fl);
+    if (tk_deleg_expr_ty(e) == sr_ty_at(si)) return e;
+    err_at(fl, line, tk_deleg_mismatch_msg(si));
+    return e;
+}
+
+// `Op f = add;` / `Op f = new Op(mul);` / `Op maybe = null;` -- a local or
+// field initializer of delegate type `si`
 void tk_deleg_var(i64 n) {
     if (nd_val(n) != 0) return;                   // `Op tbl[4]`: references
     i64 si = tk_deleg_row(nd_type(n));
     if (si < 0) return;
-    i64 e = nd_a(n);
-    if (e == 0 || nd_kind(e) != N_IDENT) return;
-    if (tk_ty_scope_find(nd_name(e)) >= 0) return;
-    uptr fname = tk_deleg_resolve_fn(nd_name(e), nd_line(n), nd_file(n));
-    set_nd_a(n, tk_deleg_wrap(si, fname, nd_line(n), nd_file(n)));
+    set_nd_a(n, tk_deleg_coerce(si, nd_a(n), nd_line(n), nd_file(n)));
+}
+
+// `f = add;` on a local/parameter of delegate type -- the assignment form of
+// the initializer above. A qualified target (`h.cb = e;`) is a different
+// node shape entirely (teko_expr.mc's field store), untouched here.
+void tk_deleg_assign(i64 n) {
+    i64 si = tk_deleg_row(tk_ty_scope_find(nd_name(n)));
+    if (si < 0) return;
+    set_nd_a(n, tk_deleg_coerce(si, nd_a(n), nd_line(n), nd_file(n)));
+}
+
+// `return add;` / `return f(x);` from a function declared to answer a
+// delegate type
+void tk_deleg_return(i64 n) {
+    if (tk_deleg_cur_ret < 0) return;
+    i64 si = tk_deleg_row(tk_deleg_cur_ret);
+    if (si < 0) return;
+    set_nd_a(n, tk_deleg_coerce(si, nd_a(n), nd_line(n), nd_file(n)));
+}
+
+// every argument of a call to a function declared ONCE in the unit (an
+// overloaded name is `teko_over.mc`'s call to make, later, and is left
+// alone here -- the same guard `tk_default_pass`'s own arg-filling uses):
+// each parameter of delegate type gets the one validator above, the argument
+// list spliced in place when a bare function name needs its wrap
+void tk_deleg_check_call_args(i64 n) {
+    uptr name = nd_name(n);
+    if (tk_default_decl_count(tk_deleg_root, name) != 1) return;
+    i64 d = decl_find(name);
+    if (d < 0) return;
+    i64 np = decl_nparams(d);
+    i64 i = 0;
+    i64 prev = 0;
+    i64 a = nd_a(n);
+    loop {
+        if (i >= np || a == 0) break;
+        i64 nxt = nd_next(a);
+        i64 psi = tk_deleg_row(decl_param_type(d, i));
+        if (psi >= 0) {
+            i64 fixed = tk_deleg_coerce(psi, a, nd_line(a), nd_file(a));
+            if (fixed != a) {
+                set_nd_next(fixed, nxt);
+                if (prev == 0) set_nd_a(n, fixed);
+                else set_nd_next(prev, fixed);
+                a = fixed;
+            }
+        }
+        prev = a;
+        a = nxt;
+        i = i + 1;
+    }
 }
 
 void tk_deleg_visit(i64 n) {
     i64 k = nd_kind(n);
-    if (k == N_VAR) { tk_deleg_var(n); return; }
+    if (k == N_VAR)    { tk_deleg_var(n);    return; }
+    if (k == N_ASSIGN) { tk_deleg_assign(n); return; }
+    if (k == N_RETURN) { tk_deleg_return(n); return; }
     if (k != N_CALL) return;
-    i64 ty = tk_ty_scope_find(nd_name(n));
-    if (ty < 0) return;
-    i64 di = tk_deleg_row(ty);
-    if (di < 0) return;
-    tk_deleg_call(n, di);
+    i64 di = tk_deleg_row(tk_ty_scope_find(nd_name(n)));
+    if (di >= 0) { tk_deleg_call(n, di); return; }
+    tk_deleg_check_call_args(n);
 }
 
 // the same shape teko_typeof.mc's own `tk_ty_walk_list` walks a function's
@@ -378,12 +466,14 @@ i64 tk_any_deleg() {
 
 i64 tk_deleg_pass(i64 root) {
     if (!tk_any_deleg()) return root;
+    tk_deleg_root = root;
     i64 f = root;
     loop {
         if (f == 0) break;
         if (nd_kind(f) == N_FUNC) {
             tk_nscope = 0;
             tk_deleg_cur_ns = tk_ns_of_name(nd_name(f));
+            tk_deleg_cur_ret = nd_type(f);
             tk_ty_scope_params(nd_a(f));
             tk_deleg_walk(nd_b(f));
             tk_nscope = 0;
@@ -391,5 +481,6 @@ i64 tk_deleg_pass(i64 root) {
         f = nd_next(f);
     }
     tk_deleg_cur_ns = 0;
+    tk_deleg_cur_ret = 0 - 1;
     return root;
 }
