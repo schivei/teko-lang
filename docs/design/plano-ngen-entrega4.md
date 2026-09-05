@@ -1987,3 +1987,64 @@ Gate: 35/35; `--dump-ast` das 34 fixtures não tocadas **byte-idêntico** contra
 Probes (fora de `tests/`): os dois bugs revertidos isoladamente e re-testados (bug 1a crasha por
 SIGBUS ao desreferenciar o lixo do slot; bug 1b perde o `dtors` da 2ª chamada; bug 2 falha em
 compilar com `the \`out\` parameter y is never assigned` quando o rewrite/mark-seen é removido).
+
+## 45. K3 landado — `T[]` de heap, o bloqueio do §41(e) caiu no mc 0.14.2 (2026-09-05)
+
+O `syntax_type` pedido no §41(e) chegou (mc 0.14.2): um `T[]` é um objeto por elemento distinto
+(`tk_ha_row`), do MESMO shape de um delegate (vtable de duas palavras, contagem, dados) -- `rc_dec`
+libera um array sem saber nada sobre ele, pela mesma máquina que já libera classe/interface/
+delegate (`tk_is_counted` estendido, zero linha nova em `teko_rc.mc`). `xs[i]` é um endereço
+guardado em runtime (`tk_arr_at`, `lib/rt.mc`), não um bound compile-time como o array-FIELD/
+local-fixo; `.Length` é `ld64(xs+16)`, só-leitura.
+
+**Desvio 1, medido: `T[]` PARÂMETRO resolve no PARSE, não pelo `gd_*`/`decl_param_type` que o
+§41(b) previa.** Esse caminho (i) corrompe `p_decl_name()` da PRÓPRIA declaração sendo lida se o
+gerador (`tk_ha_ensure_gen`, que `top_add`) disparasse no meio do parâmetro -- `top_add` zera
+`cur_decl`, e `teko_default.mc`'s teste de "nova declaração" leria 0 pro parâmetro seguinte,
+iniciando uma linha nova por engano; (ii) deixaria `N_INDEX`/o placeholder de escrita invisíveis a
+qualquer passe ANTES do oráculo, pendurados fora da árvore como o `pd_recv` de um `.` deferido é.
+A saída medida: `teko_struct.mc`'s `tk_hp_*`, uma tabela PEQUENA resetada uma vez por declaração
+(`tk_hp_reset`, no "nova declaração" de `teko_default.mc` e no topo de `tk_params`) e preenchida
+no MESMO instante em que o parâmetro é lido -- `xs[i]`/`xs.Length` sobre ele resolvem no PARSE,
+sem oráculo, sem placeholder, sem passe extra, a mesma cedo-demais-pro-core, tarde-o-bastante-pro-
+módulo janela que `av_*`/`lv_*` já usam pra local/campo. Provado pelo caso que quebraria a
+alternativa: `cs[i].area()` sobre um parâmetro `Circle[] cs` -- se `cs[i]` ficasse `N_INDEX` cru
+até o oráculo, `.area()` deferiria sobre um receptor sem tipo e resolveria por NOME
+(`tk_pend_by_name`), que "funciona" com uma classe só declarando `area` e mascara a ambiguidade
+com duas (medido: adicionar uma segunda classe com `area` MUDAVA a resposta sob a alternativa).
+
+**Desvio 2, medido: `T[][]` não é refusado no `ty` que chega em `tk_ha_type`, e sim no token
+seguinte.** `take_type` (mc) despacha `syntax_type` UMA vez por posição de tipo -- um `ty` que já
+é um `T[]` nunca chega aqui de novo (a palavra reservada `"i64[]"` é um lexema que o lexer não
+forma, então nenhuma fonte a nomeia). A checagem certa lê o SEGUNDO `[` logo após consumir o
+primeiro `[]`, antes de devolver `tk_ha_row(ty)`.
+
+**Achado que exigiu correção (medido, não previsto pelo §41(b)):** `teko_default.mc`'s
+`tk_default_param` e `teko_ref.mc`'s `tk_ref_param` liam o tipo de um parâmetro por
+`type_of_token(p_id())` + `p_next()` manual -- o `syntax_type` só dispara dentro de `take_type`,
+que só o `p_type()` público chama. Sem trocar os dois por `p_type()`, `i64[] x` como parâmetro de
+função LIVRE (ou o apontado de `ref`/`out`) lia `i64` e deixava o `[` sobrando pro `p_ident()`
+seguinte recusar com uma mensagem confusa. `teko_class.mc`'s `tk_params` já caía em `p_type()` de
+graça, por `tk_gen_ty` (teko_generic.mc) -- membro (campo/parâmetro/retorno) funcionou sem tocar.
+
+**Mangling:** a palavra reservada de um `T[]` carrega `[`/`]` (de propósito, pra nunca colidir com
+o que a fonte escreve) -- inaceitável dentro de um SÍMBOLO gerado. `tk_ty_mangle_name` (o que
+`teko_ref.mc`'s `tk_ty_sfx` agora chama em vez de `type_name` direto) devolve `"arr_i64"` só pra
+essa forma; o TIPO em si (`--dump-ast`, `type_new`) segue com os colchetes.
+
+Fixtures: `surface_array_heap.tk` (`expect-exit: 42`) -- `n` de runtime, `xs[i]`/escrita/`+=`/`-=`/
+`++`, `.Length` como bound de `while` E `for`, `u8`/`i32` provando largura e sinal, `T[]` como
+parâmetro de função livre E de método e como campo (`this.items`), `Circle[]` com `rt_live()`
+provando o piso duas vezes, `Op[]` chamado por índice com uma função nua coagida no slot (a mesma
+`tk_deleg_coerce` que um `Op` local/campo já usa). `surface_panic_index.tk` (`expect-exit: 70`).
+
+Gate: 37/37; `--dump-ast` das 35 anteriores -- as 3 sem `rt.mc` byte-idênticas, as 32 com `rt.mc`
+com diff puramente ADITIVO (só a nova `tk_arr_at`, `grep '^<'` vazio); `mc limits ngen` `ok`,
+`intrin` 8/16 (zero crescimento), `passes` 13 (zero pass nova). Probes: `new i64[-1]` (exit 70);
+`xs.Length = 3`; `xs[i]` sobre `uptr` cru; `i64[][]`; `new i64[]` sem tamanho; `ref i64[] x`
+(recusa limpa -- `tk_hp_add` só registra a forma PLANA, nunca `ref`/`out`, cujo valor é o
+ENDEREÇO do slot do caller, não o objeto).
+
+Dívidas: `T[]` como GLOBAL -- o TIPO é aceito em toda posição, mas leitura/escrita/`.Length` sobre
+a GLOBAL não resolvem; `ref`/`out T[]`; `params T[]` (já era dívida); `T[][]`/multidimensional;
+`p.items[i]` sem `this.` explícito (herdada do D219); array de heap como elemento de outro.
