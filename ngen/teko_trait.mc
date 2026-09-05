@@ -47,6 +47,8 @@
 uptr tr_name[TK_MAXTRAIT];
 uptr tr_text[TK_MAXTRAIT];            // the recorded body, braces included
 i64  tr_len[TK_MAXTRAIT];
+i64  tr_vis[TK_MAXTRAIT];             // TK_TPUBLIC or TK_TINTERNAL, as for a type
+i64  tr_proj[TK_MAXTRAIT];            // 1 when the project itself declared it
 i64  tk_ntrait = 0;
 
 i64  tu_tr[TK_MAXUSE];                // queued by `use`, not yet flattened
@@ -64,6 +66,8 @@ i64  tk_own_methods = 0;              // methods the class declared in its OWN b
 uptr tr_name_at(i64 i) { return ld64(tr_name + i * 8); }
 uptr tr_text_at(i64 i) { return ld64(tr_text + i * 8); }
 i64  tr_len_at(i64 i)  { return ld64(tr_len + i * 8); }
+i64  tr_vis_at(i64 i)  { return ld64(tr_vis + i * 8); }
+i64  tr_proj_at(i64 i) { return ld64(tr_proj + i * 8); }
 i64  tu_tr_at(i64 i)   { return ld64(tu_tr + i * 8); }
 i64  ud_tr_at(i64 i)   { return ld64(ud_tr + i * 8); }
 i64  fl_tr_at(i64 i)   { return ld64(fl_tr + i * 8); }
@@ -71,6 +75,8 @@ i64  fl_tr_at(i64 i)   { return ld64(fl_tr + i * 8); }
 void set_tr_name_at(i64 i, uptr v) { st64(tr_name + i * 8, v); }
 void set_tr_text_at(i64 i, uptr v) { st64(tr_text + i * 8, v); }
 void set_tr_len_at(i64 i, i64 v)   { st64(tr_len + i * 8, v); }
+void set_tr_vis_at(i64 i, i64 v)   { st64(tr_vis + i * 8, v); }
+void set_tr_proj_at(i64 i, i64 v)  { st64(tr_proj + i * 8, v); }
 void set_tu_tr_at(i64 i, i64 v)    { st64(tu_tr + i * 8, v); }
 void set_ud_tr_at(i64 i, i64 v)    { st64(ud_tr + i * 8, v); }
 void set_fl_tr_at(i64 i, i64 v)    { st64(fl_tr + i * 8, v); }
@@ -167,6 +173,8 @@ void tk_trait() {
     tk_line = p_line();
     tk_file = p_file();
     p_next();                                    // the `trait` word
+    i64 vis = tk_take_decl_vis();                // the `public`/`internal` before the word
+    i64 proj = tk_take_decl_proj();
     uptr name = tk_newname("trait");
     if (tk_trait_find(name) >= 0) err_at2(tk_file, tk_line, "teko: duplicate trait", name);
     if (tk_struct_find(name) >= 0) err_at2(tk_file, tk_line, "teko: the name is already a type", name);
@@ -177,6 +185,8 @@ void tk_trait() {
     set_tr_name_at(tk_ntrait, name);
     set_tr_text_at(tk_ntrait, text);
     set_tr_len_at(tk_ntrait, len);
+    set_tr_vis_at(tk_ntrait, vis);
+    set_tr_proj_at(tk_ntrait, proj);
     tk_ntrait = tk_ntrait + 1;
     p_accept(K_SEMI);                            // a C programmer's trailing ;
 }
@@ -192,13 +202,10 @@ void tk_skip_body() {
 }
 
 // what a trait may not declare yet, said by name rather than left to fail
-// somewhere further in
+// somewhere further in. Visibility and `static` ARE read: a copied member takes
+// them into the class exactly as a member the class wrote itself.
 void tk_trait_gate() {
-    if (tk_kw("abstract"))  err_at(tk_file, tk_line, "teko: `abstract` in a trait not taught yet");
-    if (tk_kw("static"))    err_at(tk_file, tk_line, "teko: a static member not taught yet");
-    if (tk_kw("public"))    err_at(tk_file, tk_line, "teko: member visibility not taught yet");
-    if (tk_kw("private"))   err_at(tk_file, tk_line, "teko: member visibility not taught yet");
-    if (tk_kw("protected")) err_at(tk_file, tk_line, "teko: member visibility not taught yet");
+    if (tk_kw("abstract")) err_at(tk_file, tk_line, "teko: `abstract` in a trait not taught yet");
 }
 
 // one recorded body, `{` to `}`, with every member of it placed on the class
@@ -254,6 +261,8 @@ i64 tk_use(i64 ci, uptr cls, i64 off) {
         uptr nm = p_ident();
         i64 ti = tk_trait_find(nm);
         if (ti < 0) err_at2(fl, line, "teko: unknown trait", nm);
+        if (tr_vis_at(ti) == TK_TINTERNAL && tr_proj_at(ti) != sr_proj_at(ci))
+            err_at(fl, line, tk_join3("teko: ", nm, " is internal to another project"));
         if (tk_flat_has(ti)) err_at2(fl, line, "teko: trait cycle", nm);
         if (tk_used_has(ti)) err_at2(fl, line, "teko: the class already uses this trait", nm);
         tk_used_add(ti);

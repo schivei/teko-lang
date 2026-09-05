@@ -43,8 +43,14 @@ i64 tk_args(uptr pn);
 i64 tk_fill_defaults(i64 args, i64 na, i64 np, i64 nreq, i64 d0);
 void tk_pick_refuse(i64 mi, uptr m, i64 line, uptr fl);
 
+// teko_access.mc reads the state below and answers the one question every
+// member reached from here has to pass
+void tk_check_member(i64 owner, i64 vis, uptr m, i64 line, uptr fl);
+
 i64 tk_body_class = 0 - 1;            // the type whose body is being PARSED, or -1
+i64 tk_body_static = 0;               // ...and 1 when that member takes no receiver
 i64 tk_pass_class = 0 - 1;            // the type whose method the PASS is walking, or -1
+i64 tk_pass_static = 0;               // ...and 1 when that method takes no receiver
 
 // the one spelling of the receiver, in the source and in the tree alike
 uptr tk_this_name() { return "this"; }
@@ -74,13 +80,18 @@ void tk_node_replace(i64 n, i64 r) {
 // the body of a type is entered and left by teko_class.mc's tk_member; the
 // previous value is restored rather than cleared, because instantiating a
 // generic re-parses a class body in the middle of another one
-i64 tk_this_enter_body(i64 ci) {
+i64 tk_this_enter_body(i64 ci, i64 stat, uptr pkeepstat) {
     i64 keep = tk_body_class;
+    st64(pkeepstat, tk_body_static);
     tk_body_class = ci;
+    tk_body_static = stat;
     return keep;
 }
 
-void tk_this_leave_body(i64 keep) { tk_body_class = keep; }
+void tk_this_leave_body(i64 keep, i64 keepstat) {
+    tk_body_class = keep;
+    tk_body_static = keepstat;
+}
 
 // the old form, refused where it was written: a method takes no receiver of its
 // own, so `self` is neither a type nor a parameter name here
@@ -97,6 +108,7 @@ i64 tk_this() {
     uptr fl = p_file();
     p_next();                                    // the `this` word
     if (tk_body_class < 0) err_at(fl, line, "teko: `this` is only valid inside the body of a type");
+    if (tk_body_static) err_at(fl, line, "teko: `this` is not there in a static member");
     tk_line = line;
     tk_file = fl;
     return tk_this_recv();
@@ -123,6 +135,7 @@ void tk_base_refuse(i64 mi, uptr m, i64 line, uptr fl) {
 // symbol of the declaration the base made, never a vtable slot, so an
 // `override` calling it is not a call to itself.
 i64 tk_base_call(i64 line, uptr fl) {
+    if (tk_body_static) err_at(fl, line, "teko: `base` is not there in a static member");
     i64 bc = sr_base_at(tk_body_class);
     if (bc < 0)
         err_at2(fl, line, "teko: `base` in a type with no base class", sr_name_at(tk_body_class));
@@ -132,6 +145,9 @@ i64 tk_base_call(i64 line, uptr fl) {
     i64 args = tk_args(&na);
     i64 mi = tk_method_pick(bc, m, na);
     if (mi < 0) tk_base_refuse(mi, m, line, fl);
+    if (mt_static_at(mi))
+        err_at2(fl, line, "teko: the base's method is static; reach it through its type", m);
+    tk_check_member(mt_cls_at(mi), mt_vis_at(mi), m, line, fl);
     tk_line = line;
     tk_file = fl;
     args = tk_fill_defaults(args, na, mt_np_at(mi), mt_nreq_at(mi), mt_d0_at(mi));
@@ -157,10 +173,16 @@ i64 tk_method_of_fn(uptr fn) {
 void tk_this_enter_fn(uptr fn) {
     i64 mi = tk_method_of_fn(fn);
     tk_pass_class = 0 - 1;
-    if (mi >= 0) tk_pass_class = mt_cls_at(mi);
+    tk_pass_static = 0;
+    if (mi < 0) return;
+    tk_pass_class = mt_cls_at(mi);
+    tk_pass_static = mt_static_at(mi);
 }
 
-void tk_this_leave_fn() { tk_pass_class = 0 - 1; }
+void tk_this_leave_fn() {
+    tk_pass_class = 0 - 1;
+    tk_pass_static = 0;
+}
 
 // nodes this file builds report the position of the name they replace
 void tk_this_at(i64 n) {
@@ -188,14 +210,31 @@ i64 tk_this_field(uptr name) {
     return tk_field_find(tk_pass_class, name);
 }
 
+// where the field lives: a STATIC one is a global of its own, and the object the
+// method runs on has nothing to do with it -- which is also why a method that
+// takes no receiver may still read it
+i64 tk_this_field_addr(i64 fi) {
+    if (fd_sym_at(fi)) return tk_id(fd_sym_at(fi));
+    if (tk_pass_static)
+        err_at2(tk_file, tk_line, "teko: an instance member is not reachable from a static method", fd_name_at(fi));
+    return tk_this_addr(fi);
+}
+
+// an unqualified member passes the same gate a written-out one passes: a private
+// member of a BASE is not the derived class's to read
+void tk_this_check(i64 fi) {
+    tk_this_reject_array(fi);
+    tk_check_member(tk_field_owner(fi), fd_vis_at(fi), fd_name_at(fi), tk_line, tk_file);
+}
+
 // `side`  ->  ldW(this + OFF), the very node `this.side` produces
 void tk_this_ident(i64 n) {
     i64 fi = tk_this_field(nd_name(n));
     if (fi < 0) return;
     tk_this_at(n);
-    tk_this_reject_array(fi);
+    tk_this_check(fi);
     i64 fty = fd_ty_at(fi);
-    tk_node_replace(n, tk_call(tk_ldn(fty), tk_this_addr(fi)));
+    tk_node_replace(n, tk_call(tk_ldn(fty), tk_this_field_addr(fi)));
     tk_xt_put(n, tk_struct_by_ty(fty), fty, 1);
 }
 
@@ -205,8 +244,8 @@ void tk_this_assign(i64 n) {
     i64 fi = tk_this_field(nd_name(n));
     if (fi < 0) return;
     tk_this_at(n);
-    tk_this_reject_array(fi);
-    i64 st = tk_call2(tk_stn(fd_ty_at(fi)), tk_this_addr(fi), nd_a(n));
+    tk_this_check(fi);
+    i64 st = tk_call2(tk_stn(fd_ty_at(fi)), tk_this_field_addr(fi), nd_a(n));
     tk_node_replace(n, tk_stmt(st));
 }
 
@@ -214,6 +253,9 @@ void tk_this_assign(i64 n) {
 // when the declaration is virtual -- the shapes teko_expr.mc emits for a
 // receiver it could type, with `this` in the receiver's place
 i64 tk_this_emit(i64 mi, i64 args) {
+    if (mt_static_at(mi)) return tk_call(mt_fn_at(mi), args);
+    if (tk_pass_static)
+        err_at2(tk_file, tk_line, "teko: an instance member is not reachable from a static method", mt_name_at(mi));
     i64 slot = mt_slot_at(mi);
     if (slot < 0) return tk_call(mt_fn_at(mi), list_append(tk_this_recv(), args));
     i64 vt = tk_call("ld64", tk_this_recv());
@@ -231,6 +273,7 @@ void tk_this_call(i64 n) {
     i64 na = tk_arg_count(nd_a(n));
     i64 mi = tk_method_pick(tk_pass_class, m, na);
     if (mi < 0) tk_pick_refuse(mi, m, tk_line, tk_file);
+    tk_check_member(mt_cls_at(mi), mt_vis_at(mi), m, tk_line, tk_file);
     i64 args = tk_fill_defaults(nd_a(n), na, mt_np_at(mi), mt_nreq_at(mi), mt_d0_at(mi));
     tk_node_replace(n, tk_this_emit(mi, args));
     tk_xt_put(n, tk_struct_by_ty(mt_ret_at(mi)), mt_ret_at(mi), 0);

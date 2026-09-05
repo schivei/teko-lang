@@ -19,8 +19,15 @@
 //       }
 //   }
 //
-// `virtual` and `override` are CONTEXTUAL: this module does not reserve them
-// (lang's `lg_kw`), so they stay usable as ordinary names everywhere else. A
+// A member may carry C#'s modifiers, in any order and before the type
+// (`public static i64 f()`, D220): `public`/`private`/`protected` say who may
+// reach it (teko_access.mc holds the checks), and `static` says it takes no
+// receiver at all. `private` is what a member with no modifier is.
+//
+// `virtual`, `override`, `private`, `protected` and `static` are CONTEXTUAL:
+// this module does not reserve them (lang's `lg_kw`), so they stay usable as
+// ordinary names everywhere else. `public` is the one exception, because it also
+// opens a top-level declaration and so is a word of the language. A
 // plain method is called directly, a virtual one through
 // `callp(ld64(ld64(obj) + (1 + slot) * 8), obj, ...)` -- teko_expr.mc, which is
 // also where `p.field` and `p.method(...)` are resolved.
@@ -62,8 +69,17 @@ void tk_op_decl_check(i64 np, i64 nreq, i64 fty);
 // explicit one, and the body a `this`/`base` inside it belongs to
 uptr tk_this_name();
 void tk_reject_self(uptr name);
-i64 tk_this_enter_body(i64 ci);
-void tk_this_leave_body(i64 keep);
+i64 tk_this_enter_body(i64 ci, i64 stat, uptr pkeepstat);
+void tk_this_leave_body(i64 keep, i64 keepstat);
+
+// teko_access.mc is included after this file as well; a class asks it for the
+// modifier the declaration carried, for the origin of the file it is written in,
+// for the word registration of the name, and for the one check a declaration
+// makes -- naming a base class or an interface is reaching for a type
+i64 tk_take_decl_vis();
+i64 tk_take_decl_proj();
+i64 tk_type_word(uptr name);
+void tk_check_type_use_from(i64 si, i64 proj, i64 line, uptr fl);
 
 #define TK_MAXMETHOD 128              // methods, summed across all classes
 #define TK_MAXVSLOT  128              // virtual slots, summed across all classes
@@ -79,6 +95,8 @@ i64  mt_nreq[TK_MAXMETHOD];           // of those, the ones with no default: the
 i64  mt_d0[TK_MAXMETHOD];             // where its defaults start in the default table
 i64  mt_ret[TK_MAXMETHOD];
 i64  mt_slot[TK_MAXMETHOD];           // its vtable slot, or -1 when not virtual
+i64  mt_vis[TK_MAXMETHOD];            // TK_VPRIVATE, TK_VPROTECTED or TK_VPUBLIC
+i64  mt_static[TK_MAXMETHOD];         // 1 when it takes no receiver
 i64  tk_nmethod = 0;
 
 i64  df_node[TK_MAXDFLT];             // the folded constant a missing argument becomes
@@ -98,6 +116,8 @@ i64  mt_nreq_at(i64 i) { return ld64(mt_nreq + i * 8); }
 i64  mt_d0_at(i64 i)   { return ld64(mt_d0 + i * 8); }
 i64  mt_ret_at(i64 i)  { return ld64(mt_ret + i * 8); }
 i64  mt_slot_at(i64 i) { return ld64(mt_slot + i * 8); }
+i64  mt_vis_at(i64 i)  { return ld64(mt_vis + i * 8); }
+i64  mt_static_at(i64 i) { return ld64(mt_static + i * 8); }
 uptr vs_m_at(i64 i)    { return ld64(vs_m + i * 8); }
 uptr vs_sig_at(i64 i)  { return ld64(vs_sig + i * 8); }
 uptr vs_fn_at(i64 i)   { return ld64(vs_fn + i * 8); }
@@ -112,6 +132,8 @@ void set_mt_nreq_at(i64 i, i64 v)  { st64(mt_nreq + i * 8, v); }
 void set_mt_d0_at(i64 i, i64 v)    { st64(mt_d0 + i * 8, v); }
 void set_mt_ret_at(i64 i, i64 v)   { st64(mt_ret + i * 8, v); }
 void set_mt_slot_at(i64 i, i64 v)  { st64(mt_slot + i * 8, v); }
+void set_mt_vis_at(i64 i, i64 v)   { st64(mt_vis + i * 8, v); }
+void set_mt_static_at(i64 i, i64 v) { st64(mt_static + i * 8, v); }
 void set_vs_m_at(i64 i, uptr v)    { st64(vs_m + i * 8, v); }
 void set_vs_sig_at(i64 i, uptr v)  { st64(vs_sig + i * 8, v); }
 void set_vs_fn_at(i64 i, uptr v)   { st64(vs_fn + i * 8, v); }
@@ -121,9 +143,10 @@ void set_df_node_at(i64 i, i64 v)  { st64(df_node + i * 8, v); }
 // and empty for a method that takes no parameter at all. It is what tells two
 // overloads apart -- one name, one class, different parameter types -- and the
 // suffix that keeps their two symbols apart.
-uptr tk_sig_of(i64 params) {
+uptr tk_sig_of(i64 params, i64 recv) {
     uptr s = "";
-    i64 p = nd_next(params);                     // past the receiver, which every method has
+    i64 p = params;
+    if (recv) p = nd_next(params);               // past the receiver a static one does not take
     loop {
         if (p == 0) break;
         s = tk_join3(s, "__", type_name(nd_type(p)));
@@ -302,6 +325,49 @@ i64 tk_kw(uptr w) {
     return str_eq(p_name(), w);
 }
 
+// the same question asked of a word that may ALSO be reserved: `public` opens a
+// top-level declaration, so it reaches a member as a keyword and not as an
+// identifier, while `private`/`protected`/`static` stay ordinary names outside
+// the body of a type. A literal is never a word, whatever it spells.
+i64 tk_word(uptr w) {
+    if (p_id() != T_IDENT && p_id() < K_U8) return 0;
+    return str_eq(p_name(), w);
+}
+
+// the modifiers of one member, in any order, as C# writes them: at most one of
+// `public`/`private`/`protected`, at most one of `virtual`/`override`, and
+// `static` at most once. `pvis` answers with the visibility (`private` when the
+// member names none), `pstat` with 1 for a member that takes no receiver, and
+// the result is the vtable kind teko_class already speaks: 0 plain, 1 virtual,
+// 2 override.
+i64 tk_member_mods(uptr pvis, uptr pstat) {
+    i64 vis = 0 - 1;
+    i64 stat = 0;
+    i64 kind = 0;
+    loop {
+        i64 v = 0 - 1;
+        if (tk_word("public"))         v = TK_VPUBLIC;
+        else if (tk_word("private"))   v = TK_VPRIVATE;
+        else if (tk_word("protected")) v = TK_VPROTECTED;
+        if (v >= 0) {
+            if (vis >= 0) err_at(p_file(), p_line(), "teko: the member already has a visibility");
+            vis = v;
+        } else if (tk_word("static")) {
+            if (stat) err_at(p_file(), p_line(), "teko: the member is already static");
+            stat = 1;
+        } else if (tk_word("virtual") || tk_word("override")) {
+            if (kind) err_at(p_file(), p_line(), "teko: the member is already virtual or override");
+            kind = 1;
+            if (tk_word("override")) kind = 2;
+        } else break;
+        p_next();
+    }
+    if (vis < 0) vis = TK_VPRIVATE;              // C#'s default for a member
+    st64(pvis, vis);
+    st64(pstat, stat);
+    return kind;
+}
+
 // the base's slots, copied so the derived class's table is a PREFIX of its
 // base's: a slot number means the same thing in both, which is what makes a
 // virtual call correct through a base-typed name
@@ -393,10 +459,11 @@ void tk_param_default(i64 mark) {
 // method, whose call is `callp(slot, this, ...)`, 0 for a direct one. The
 // defaults go to the shared table starting at the caller's own `tk_ndflt`, and
 // `pnreq` answers with the smallest number of arguments a call may pass.
-i64 tk_params(uptr pnp, uptr pnreq, i64 extra) {
+i64 tk_params(uptr pnp, uptr pnreq, i64 extra, i64 recv) {
     i64 mark = tk_ndflt;
     p_expect(K_LPAR, "expected ( in the method parameter list");
-    i64 head = param_new(TY_UPTR, tk_this_name());
+    i64 head = 0;
+    if (recv) head = param_new(TY_UPTR, tk_this_name());
     i64 np = 0;
     loop {
         if (p_id() == K_RPAR) break;
@@ -408,7 +475,7 @@ i64 tk_params(uptr pnp, uptr pnreq, i64 extra) {
         head = list_append(head, param_new(ty, pn));
         np = np + 1;
         tk_param_default(mark);
-        if (np + 1 + extra > MAXPARAMS)
+        if (np + recv + extra > MAXPARAMS)
             err_at(p_file(), p_line(), "teko: method with too many parameters (the receiver counts, and so does the vtable pointer of a virtual call)");
         if (!p_accept(K_COMMA)) break;
     }
@@ -441,6 +508,10 @@ uptr tk_conform(i64 ci, i64 k, uptr iname) {
     if (mi >= 0) {
         if (mt_ret_at(mi) != im_ret_at(k))
             err_at2(tk_file, tk_line, "teko: method with a return type different from the interface", m);
+        if (mt_vis_at(mi) != TK_VPUBLIC)
+            err_at2(tk_file, tk_line, "teko: the method of an interface is implemented by a public one", m);
+        if (mt_static_at(mi))
+            err_at2(tk_file, tk_line, "teko: a static method implements no interface", m);
         return mt_fn_at(mi);
     }
     mi = tk_method_named_find(ci, m);            // the name is there: say what differs
@@ -535,44 +606,85 @@ uptr tk_method_symbol(i64 ci, uptr name, uptr m, uptr sig) {
     return tk_join(tk_fname(name, m), sig);
 }
 
+// the field half of a member declaration: `T name;`, `T name[N];`, and the
+// STATIC form, which is a global of its own rather than a slot in the object
+i64 tk_member_field(i64 ci, uptr name, uptr m, i64 fty, i64 off, i64 ti, i64 vis, i64 stat) {
+    i64 nel = tk_field_dim();                    // `T items[N]`: 0 when it is a scalar
+    p_expect(K_SEMI, "expected ; after the field");
+    if (ti >= 0 && tk_field_find(ci, m) >= 0)
+        err_at2(tk_file, tk_line,
+                tk_join3("teko: field of trait `", tr_name_at(ti), "` collides with a field of the class"), m);
+    if (!stat) return tk_field_place(ci, name, m, fty, nel, off, vis);
+    if (tk_method_named_find(ci, m) >= 0)
+        err_at2(tk_file, tk_line, "teko: a static field and a method cannot share a name", m);
+    tk_static_field(ci, name, m, fty, nel, vis);
+    return off;
+}
+
+// the body of one method, parsed by the CORE with the parameter list built here
+void tk_member_body(i64 ci, i64 fty, uptr fn, i64 params, i64 stat) {
+    i64 mark = tk_nlocal;                        // the receiver belongs to this body alone
+    if (!stat) tk_local_add(tk_this_name(), ci); // `this.field` inside the body
+    i64 keepstat = 0;
+    i64 keep = tk_this_enter_body(ci, stat, &keepstat);
+    i64 line = p_line();
+    uptr fl = p_file();
+    i64 f = parse_function(fty, fn, params);
+    tk_this_leave_body(keep, keepstat);
+    tk_nlocal = mark;
+    set_nd_line(f, line);                        // the declaration starts at the {
+    set_nd_file(f, fl);
+    top_add(f);
+}
+
+// a type inside a type: the pair `internal` and nested types is exclusive, and
+// D220 keeps `internal`, so the word is refused where it stands rather than
+// failing further in as "type expected"
+void tk_reject_nested() {
+    if (!tk_word("class") && !tk_word("struct") && !tk_word("interface") && !tk_word("trait")) return;
+    err_at2(p_file(), p_line(), "teko: a type is declared at top level; there is no type inside a type", p_name());
+}
+
 // one member of a body: a `use` of a trait, a field, or a method whose body the
 // CORE parses (parse_function) with the parameter list already built here. `ti`
 // is the trait the member is being COPIED from, or -1 when the class declares it
 // itself -- the one difference between the two bodies, which is what PHP's
-// flattening needs and why both run the same machine.
+// flattening needs and why both run the same machine. The modifiers come first,
+// in any order (D220), and a copied member carries the ones the trait wrote.
 i64 tk_member(i64 ci, uptr name, i64 off, i64 ti) {
     if (tk_kw("use")) {
         if (!tk_is_class(ci)) err_at(tk_file, tk_line, "teko: only a class uses a trait");
         return tk_use(ci, name, off);
     }
     if (ti >= 0) tk_trait_gate();
-    i64 kind = 0;
-    if (tk_kw("virtual")) { kind = 1; p_next(); }
-    else if (tk_kw("override")) { kind = 2; p_next(); }
+    i64 vis = 0;
+    i64 stat = 0;
+    i64 kind = tk_member_mods(&vis, &stat);
+    tk_reject_nested();                          // `public class B { }` reaches here too
     if (kind && !tk_is_class(ci))
         err_at(tk_file, tk_line, "teko: a struct has no vtable; `virtual`/`override` needs a class");
+    if (kind && stat)
+        err_at(tk_file, tk_line, "teko: a static member has no vtable slot; it is not virtual");
     i64 fty = tk_gen_ty();
     i64 isop = 0;
     uptr m = tk_op_name(&isop);                  // `operator+` names the method `op_add`
     if (p_id() != K_LPAR) {
         if (isop) err_at(tk_file, tk_line, "teko: an operator is a method; it takes a parameter list");
         if (kind) err_at2(tk_file, tk_line, "teko: virtual/override on a field", m);
-        i64 nel = tk_field_dim();                // `T items[N]`: 0 when it is a scalar
-        p_expect(K_SEMI, "expected ; after the field");
-        if (ti >= 0 && tk_field_find(ci, m) >= 0)
-            err_at2(tk_file, tk_line,
-                    tk_join3("teko: field of trait `", tr_name_at(ti), "` collides with a field of the class"), m);
-        return tk_field_place(ci, name, m, fty, nel, off);
+        return tk_member_field(ci, name, m, fty, off, ti, vis, stat);
     }
     if (str_eq(m, "new")) err_at2(tk_file, tk_line, "teko: method name reserved by the class", m);
+    i64 clash = tk_field_find(ci, m);
+    if (clash >= 0 && fd_sym_at(clash))
+        err_at2(tk_file, tk_line, "teko: a static field and a method cannot share a name", m);
     i64 extra = 0;
     if (kind) extra = 1;
     i64 np = 0;
     i64 nreq = 0;
     i64 d0 = tk_ndflt;
-    i64 params = tk_params(&np, &nreq, extra);   // the signature decides every gate below
+    i64 params = tk_params(&np, &nreq, extra, !stat);   // the signature decides every gate below
     if (isop) tk_op_decl_check(np, nreq, fty);
-    uptr sig = tk_sig_of(params);
+    uptr sig = tk_sig_of(params, !stat);
     kind = tk_member_gate(ci, m, sig, ti, kind);
     if (kind < 0) {
         tk_skip_body();                          // the class's own wins: its body is not parsed
@@ -581,24 +693,18 @@ i64 tk_member(i64 ci, uptr name, i64 off, i64 ti) {
     if (kind && np + 2 > MAXPARAMS)              // a trait method promoted to a slot pays the vtable word
         err_at(tk_file, tk_line, "teko: method with too many parameters (the receiver counts, and so does the vtable pointer of a virtual call)");
     uptr fn = tk_method_symbol(ci, name, m, sig);
-    tk_method_add(m, ci, sig, fn, np, nreq, d0, fty, tk_slot_take(ci, kind, m, sig, fn));
-    i64 mark = tk_nlocal;                        // the receiver belongs to this body alone
-    tk_local_add(tk_this_name(), ci);            // `this.field` inside the body
-    i64 keep = tk_this_enter_body(ci);           // ...and `this`/`base` themselves
-    i64 line = p_line();
-    uptr fl = p_file();
-    i64 f = parse_function(fty, fn, params);
-    tk_this_leave_body(keep);
-    tk_nlocal = mark;
-    set_nd_line(f, line);                        // the declaration starts at the {
-    set_nd_file(f, fl);
-    top_add(f);
+    i64 mi = tk_method_add(m, ci, sig, fn, np, nreq, d0, fty, tk_slot_take(ci, kind, m, sig, fn));
+    set_mt_vis_at(mi, vis);
+    set_mt_static_at(mi, stat);
+    tk_member_body(ci, fty, fn, params, stat);
     return off;
 }
 
 // one name of the `:` list, whose word is reserved by then (type_new), so the
-// raw lexeme is read and looked up in the type table
-i64 tk_conf_name(i64 base) {
+// raw lexeme is read and looked up in the type table. `proj` is the origin of
+// the class being declared -- the list is read before its row exists, and an
+// instance of a generic is read from a source that is no file at all.
+i64 tk_conf_name(i64 base, i64 proj) {
     uptr nm = p_name();
     i64 line = p_line();
     uptr fl = p_file();
@@ -607,6 +713,7 @@ i64 tk_conf_name(i64 base) {
     if (si < 0 && tk_trait_find(nm) >= 0)
         err_at2(fl, line, "teko: a trait is not a base class nor an interface; use `use`", nm);
     if (si < 0) err_at2(fl, line, "teko: unknown base class or interface", nm);
+    tk_check_type_use_from(si, proj, line, fl);
     if (tk_is_iface(si)) {
         tk_conf_add(si, line, fl, nm);
         return base;
@@ -620,11 +727,11 @@ i64 tk_conf_name(i64 base) {
 // `: Base`, `: Iface`, `: Base, IfaceA, IfaceB` -- one base class at most, and
 // it comes first; everything else in the list is an interface. Returns the base
 // class's row, or -1, and leaves the interfaces in conf_if/tk_nconf.
-i64 tk_class_conf() {
+i64 tk_class_conf(i64 proj) {
     i64 base = 0 - 1;
     tk_nconf = 0;
     loop {
-        base = tk_conf_name(base);
+        base = tk_conf_name(base, proj);
         if (!p_accept(K_COMMA)) break;
     }
     return base;
@@ -637,16 +744,18 @@ void tk_class() {
     i64 head_line = tk_line;                     // position of the `class` word
     uptr head_file = tk_file;
     p_next();                                    // the `class` word
+    i64 vis = tk_take_decl_vis();                // the `public`/`internal` before the word
+    i64 proj = tk_take_decl_proj();
     uptr name = tk_newname("class");
     if (p_id() == K_LT) {                        // class Name<T, const N: i64>
-        tk_gen_record(name, TK_KCLASS);          // recorded, not declared
+        tk_gen_record(name, TK_KCLASS, vis, proj);    // recorded, not declared
         return;
     }
     i64 base = 0 - 1;
     tk_nconf = 0;
-    if (p_accept(K_COLON)) base = tk_class_conf();
-    i64 ty = type_new(name, 8, 8, TK_INT);
-    i64 ci = tk_type_add(name, ty, base, TK_KCLASS);
+    if (p_accept(K_COLON)) base = tk_class_conf(proj);
+    i64 ty = tk_type_word(name);
+    i64 ci = tk_type_add(name, ty, base, TK_KCLASS, vis, proj);
     tk_slots_inherit(ci, base);
     tk_impls_inherit(ci, base);                  // the base's interfaces are the derived class's
     i64 c = 0;

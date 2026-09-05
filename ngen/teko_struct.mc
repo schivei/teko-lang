@@ -43,13 +43,34 @@
 // re-parsed by the very machine below; these two are what the declaration of a
 // type has to ask it before there is a type at all
 i64 tk_gen_find(uptr name);
-void tk_gen_record(uptr name, i64 kind);
+void tk_gen_record(uptr name, i64 kind, i64 vis, i64 proj);
+
+// teko_access.mc is included after this file too -- it reads the tables below --
+// and these three are what a type declaration has to ask it: the modifier that
+// came before the word, whether the file it is written in belongs to the
+// project, and the registration of the name itself, which is a word of the
+// language in three positions at once (a type, `Name.member`, and the statement
+// that starts with either)
+i64 tk_take_decl_vis();
+i64 tk_take_decl_proj();
+i64 tk_type_word(uptr name);
 
 // what a row of the type table declares: the three share the table because a
 // value of any of them is one 8-byte reference, and `.` has to tell them apart
 #define TK_KSTRUCT 0
 #define TK_KCLASS  1
 #define TK_KIFACE  2
+
+// where a member may be reached from, C#'s three words; a member with no
+// modifier at all is `private`
+#define TK_VPRIVATE   0
+#define TK_VPROTECTED 1
+#define TK_VPUBLIC    2
+
+// ...and where a TOP-LEVEL type may be reached from: `internal` is the code of
+// the project itself, and it is what a type with no modifier is
+#define TK_TINTERNAL 0
+#define TK_TPUBLIC   1
 
 uptr sr_name[TK_MAXSTRUCT];
 i64  sr_ty[TK_MAXSTRUCT];             // the id type_new returned for the name
@@ -64,12 +85,16 @@ i64  sr_m0[TK_MAXSTRUCT];             // an interface's slice [m0, m0+mn) of the
 i64  sr_mn[TK_MAXSTRUCT];
 i64  sr_i0[TK_MAXSTRUCT];             // a class's slice [i0, i0+ni) of the implemented-interface list
 i64  sr_ni[TK_MAXSTRUCT];
+i64  sr_vis[TK_MAXSTRUCT];            // TK_TPUBLIC or TK_TINTERNAL
+i64  sr_proj[TK_MAXSTRUCT];           // 1 when the project itself declared it
 i64  tk_nstruct = 0;
 
 uptr fd_name[TK_MAXFIELD];
 i64  fd_off[TK_MAXFIELD];
 i64  fd_ty[TK_MAXFIELD];
 i64  fd_nel[TK_MAXFIELD];             // elements of an INLINE array field, 0 for a scalar
+i64  fd_vis[TK_MAXFIELD];             // TK_VPRIVATE, TK_VPROTECTED or TK_VPUBLIC
+uptr fd_sym[TK_MAXFIELD];             // a STATIC field's global; 0 when it lives in the object
 i64  tk_nfield = 0;
 
 i64  ax_node[TK_MAXAX];               // the address node of an array field, and its shape
@@ -106,10 +131,14 @@ i64  sr_m0_at(i64 i)    { return ld64(sr_m0 + i * 8); }
 i64  sr_mn_at(i64 i)    { return ld64(sr_mn + i * 8); }
 i64  sr_i0_at(i64 i)    { return ld64(sr_i0 + i * 8); }
 i64  sr_ni_at(i64 i)    { return ld64(sr_ni + i * 8); }
+i64  sr_vis_at(i64 i)   { return ld64(sr_vis + i * 8); }
+i64  sr_proj_at(i64 i)  { return ld64(sr_proj + i * 8); }
 uptr fd_name_at(i64 i)  { return ld64(fd_name + i * 8); }
 i64  fd_off_at(i64 i)   { return ld64(fd_off + i * 8); }
 i64  fd_ty_at(i64 i)    { return ld64(fd_ty + i * 8); }
 i64  fd_nel_at(i64 i)   { return ld64(fd_nel + i * 8); }
+i64  fd_vis_at(i64 i)   { return ld64(fd_vis + i * 8); }
+uptr fd_sym_at(i64 i)   { return ld64(fd_sym + i * 8); }
 i64  ax_node_at(i64 i)  { return ld64(ax_node + i * 8); }
 i64  ax_ty_at(i64 i)    { return ld64(ax_ty + i * 8); }
 i64  ax_nel_at(i64 i)   { return ld64(ax_nel + i * 8); }
@@ -134,6 +163,8 @@ void set_sr_m0_at(i64 i, i64 v)     { st64(sr_m0 + i * 8, v); }
 void set_sr_mn_at(i64 i, i64 v)     { st64(sr_mn + i * 8, v); }
 void set_sr_i0_at(i64 i, i64 v)     { st64(sr_i0 + i * 8, v); }
 void set_sr_ni_at(i64 i, i64 v)     { st64(sr_ni + i * 8, v); }
+void set_sr_vis_at(i64 i, i64 v)    { st64(sr_vis + i * 8, v); }
+void set_sr_proj_at(i64 i, i64 v)   { st64(sr_proj + i * 8, v); }
 
 i64 tk_is_class(i64 si) { return sr_kind_at(si) == TK_KCLASS; }
 i64 tk_is_iface(i64 si) { return sr_kind_at(si) == TK_KIFACE; }
@@ -141,6 +172,8 @@ void set_fd_name_at(i64 i, uptr v)  { st64(fd_name + i * 8, v); }
 void set_fd_off_at(i64 i, i64 v)    { st64(fd_off + i * 8, v); }
 void set_fd_ty_at(i64 i, i64 v)     { st64(fd_ty + i * 8, v); }
 void set_fd_nel_at(i64 i, i64 v)    { st64(fd_nel + i * 8, v); }
+void set_fd_vis_at(i64 i, i64 v)    { st64(fd_vis + i * 8, v); }
+void set_fd_sym_at(i64 i, uptr v)   { st64(fd_sym + i * 8, v); }
 void set_ax_node_at(i64 i, i64 v)   { st64(ax_node + i * 8, v); }
 void set_ax_ty_at(i64 i, i64 v)     { st64(ax_ty + i * 8, v); }
 void set_ax_nel_at(i64 i, i64 v)    { st64(ax_nel + i * 8, v); }
@@ -395,6 +428,20 @@ i64 tk_field_find(i64 si, uptr name) {
     return 0 - 1;
 }
 
+// the type that DECLARES the field at index `fi`, which is the type an access
+// to it is checked against: a field found up the base chain belongs to the base,
+// not to the receiver's own type
+i64 tk_field_owner(i64 fi) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nstruct) break;
+        i64 first = sr_first_at(i);
+        if (fi >= first && fi < first + sr_count_at(i)) return i;
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
 // the field called `name` when the left side's type is NOT known statically --
 // a parameter, or a global, neither of which the core reports to a module. The
 // answer is the field itself when exactly ONE type declares that name, which is
@@ -490,20 +537,23 @@ void tk_xt_put(i64 n, i64 si, i64 ty, i64 pure) {
 void tk_xt_add(i64 n, i64 si, i64 pure) { tk_xt_put(n, si, sr_ty_at(si), pure); }
 
 // appends the field and extends the owner's slice, so a method parsed further
-// down the same body already sees the fields declared above it
-void tk_field_add(i64 si, uptr name, i64 off, i64 ty, i64 nel) {
+// down the same body already sees the fields declared above it. `sym` is the
+// global a STATIC field lives in, and 0 for one that lives in the object.
+void tk_field_add(i64 si, uptr name, i64 off, i64 ty, i64 nel, i64 vis, uptr sym) {
     if (tk_nfield == TK_MAXFIELD) err_at(tk_file, tk_line, "teko: too many fields");
     set_fd_name_at(tk_nfield, name);
     set_fd_off_at(tk_nfield, off);
     set_fd_ty_at(tk_nfield, ty);
     set_fd_nel_at(tk_nfield, nel);
+    set_fd_vis_at(tk_nfield, vis);
+    set_fd_sym_at(tk_nfield, sym);
     tk_nfield = tk_nfield + 1;
     set_sr_count_at(si, tk_nfield - sr_first_at(si));
 }
 
 // the row is appended BEFORE the body is read, so a field or a method body may
 // name the type being declared
-i64 tk_type_add(uptr name, i64 ty, i64 base, i64 kind) {
+i64 tk_type_add(uptr name, i64 ty, i64 base, i64 kind, i64 vis, i64 proj) {
     if (tk_nstruct == TK_MAXSTRUCT) err_at(tk_file, tk_line, "teko: too many type declarations");
     set_sr_name_at(tk_nstruct, name);
     set_sr_ty_at(tk_nstruct, ty);
@@ -518,6 +568,8 @@ i64 tk_type_add(uptr name, i64 ty, i64 base, i64 kind) {
     set_sr_mn_at(tk_nstruct, 0);
     set_sr_i0_at(tk_nstruct, 0);
     set_sr_ni_at(tk_nstruct, 0);
+    set_sr_vis_at(tk_nstruct, vis);
+    set_sr_proj_at(tk_nstruct, proj);
     tk_nstruct = tk_nstruct + 1;
     return tk_nstruct - 1;
 }
@@ -600,20 +652,37 @@ i64 tk_field_dim() {
     return n;
 }
 
+// what both shapes of a field declaration refuse before they place anything
+void tk_field_gate(i64 si, uptr m, i64 fty) {
+    if (fty == TY_VOID) err_at2(tk_file, tk_line, "teko: field of type void", m);
+    if (tk_field_find(si, m) >= 0) err_at2(tk_file, tk_line, "teko: duplicate field", m);
+}
+
 // places `m`, of type `fty`, at or after `off` and returns the next offset:
 // the natural alignment of the field's own width, the `#define` of the offset,
 // and the row in the field table. `nel` elements when the field is an array,
 // laid out inline, so the object grows with the constant the generic was
 // instantiated with.
-i64 tk_field_place(i64 si, uptr tname, uptr m, i64 fty, i64 nel, i64 off) {
-    if (fty == TY_VOID) err_at2(tk_file, tk_line, "teko: field of type void", m);
-    if (tk_field_find(si, m) >= 0) err_at2(tk_file, tk_line, "teko: duplicate field", m);
+i64 tk_field_place(i64 si, uptr tname, uptr m, i64 fty, i64 nel, i64 off, i64 vis) {
+    tk_field_gate(si, m, fty);
     i64 w = type_width(fty);
     off = (off + w - 1) & ~(w - 1);
     def_add(tk_cname(tname, m), off, tk_line, tk_file);
-    tk_field_add(si, m, off, fty, nel);
+    tk_field_add(si, m, off, fty, nel, vis, 0);
     if (nel > 0) return off + w * nel;
     return off + w;
+}
+
+// a STATIC field is one global of the field's own width, named `Type_field`, and
+// no part of the object at all -- so the layout, and every `#define` of an
+// offset after it, is what it would be if the field were not written
+void tk_static_field(i64 si, uptr tname, uptr m, i64 fty, i64 nel, i64 vis) {
+    tk_field_gate(si, m, fty);
+    uptr sym = tk_fname(tname, m);
+    i64 n = nel;
+    if (n == 0) n = 1;
+    top_add(tk_glb(TY_U8, sym, type_width(fty) * n));
+    tk_field_add(si, m, 0, fty, nel, vis, sym);
 }
 
 // ---- an array field, and the `[` that is the only way to reach one ----
@@ -726,13 +795,15 @@ void tk_struct() {
     i64 head_line = tk_line;                     // position of the `struct` word
     uptr head_file = tk_file;
     p_next();                                    // the `struct` word
+    i64 vis = tk_take_decl_vis();                // the `public`/`internal` before the word
+    i64 proj = tk_take_decl_proj();
     uptr name = tk_newname("struct");
     if (p_id() == K_LT) {                        // struct Name<T, const N: i64>
-        tk_gen_record(name, TK_KSTRUCT);         // recorded, not declared
+        tk_gen_record(name, TK_KSTRUCT, vis, proj);   // recorded, not declared
         return;
     }
-    i64 ty = type_new(name, 8, 8, TK_INT);       // a field of its own type parses
-    i64 si = tk_type_add(name, ty, 0 - 1, TK_KSTRUCT);   // no base, no vtable: offset 0
+    i64 ty = tk_type_word(name);                 // a field of its own type parses
+    i64 si = tk_type_add(name, ty, 0 - 1, TK_KSTRUCT, vis, proj);   // no base, no vtable: offset 0
     tk_use_reset();
     p_expect(K_LBRACE, "expected { in the struct body");
     i64 off = 0;

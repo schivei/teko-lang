@@ -38,6 +38,7 @@ i64 tk_new() {
         err_at2(fl, line, "teko: a trait is not a type; `new` needs a struct or a class", name);
     if (si < 0) err_at2(fl, line, "teko: unknown struct or class after `new`", name);
     if (tk_is_iface(si)) err_at2(fl, line, "teko: an interface has no object to allocate", name);
+    tk_check_type_use(si, line, fl);
     if (p_accept(K_LPAR)) p_expect(K_RPAR, "expected ) after the type name");
     tk_line = line;
     tk_file = fl;
@@ -148,6 +149,8 @@ i64 tk_call_method(i64 left, i64 si, uptr m, i64 line, uptr fl) {
     i64 args = tk_args(&na);
     i64 mi = tk_method_pick(si, m, na);
     if (mi < 0) tk_pick_refuse(mi, m, line, fl);
+    tk_check_member(mt_cls_at(mi), mt_vis_at(mi), m, line, fl);
+    if (mt_static_at(mi)) tk_reject_static_member(si, m, line, fl);
     return tk_emit_call(left, mi, args, na, line, fl);
 }
 
@@ -157,6 +160,7 @@ i64 tk_call_method(i64 left, i64 si, uptr m, i64 line, uptr fl) {
 // for the table, once as the receiver -- so, as with a virtual call, it is only
 // accepted where re-evaluating it is free.
 i64 tk_iface_call(i64 left, i64 si, uptr m, i64 line, uptr fl) {
+    tk_check_type_use(si, line, fl);             // an interface's methods are public
     if (tk_ifmeth_find(si, m) < 0)
         err_at2(fl, line, tk_join("teko: unknown member of ", sr_name_at(si)), m);
     i64 na = 0;
@@ -178,11 +182,22 @@ i64 tk_iface_call(i64 left, i64 si, uptr m, i64 line, uptr fl) {
     return r;
 }
 
+// a static member answers to its TYPE and to nothing else: an object of the type
+// is not where it lives, so `p.made` is refused instead of reading the object
+void tk_reject_static_member(i64 si, uptr m, i64 line, uptr fl) {
+    err_at(fl, line, tk_join3("teko: ", tk_join3(sr_name_at(si), ".", m),
+                              " is static; reach it through its type"));
+}
+
 // the member of a receiver whose type IS known: a field, then a method
 i64 tk_member_of(i64 left, i64 si, uptr m, i64 line, uptr fl) {
     if (tk_is_iface(si)) return tk_iface_call(left, si, m, line, fl);
     i64 fi = tk_field_find(si, m);
-    if (fi >= 0) return tk_field_use(left, fi, line, fl);
+    if (fi >= 0) {
+        tk_check_member(tk_field_owner(fi), fd_vis_at(fi), m, line, fl);
+        if (fd_sym_at(fi)) tk_reject_static_member(si, m, line, fl);
+        return tk_field_use(left, fi, line, fl);
+    }
     if (tk_method_named_find(si, m) >= 0) return tk_call_method(left, si, m, line, fl);
     err_at2(fl, line, tk_join("teko: unknown member of ", sr_name_at(si)), m);
     return 0;
