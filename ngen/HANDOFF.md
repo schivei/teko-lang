@@ -132,7 +132,17 @@ antes o sysroot que o link precisa, tudo com o próprio `mc` + LLVM da imagem:
 `schivei/mc` `scripts/sysroot-windows.sh`). A linha de link é a do próprio `mc`
 (`src/mc.windows-*.toml`): `-entry:mc_start -nodefaultlib -stack:8388608`.
 
-## 3.2 O mc que o CI usa hoje: 0.12.0 (2026-09-05)
+## 3.2 O mc que o CI usa hoje: 0.12.1 (2026-09-05, 05:26)
+
+**0.12.1 (PR #21, patch de cooperação):** `[target].libc = "gnu"|"musl"` (FAMÍLIA; a grafia
+soname é recusada), `[target].link = "dynamic"|"static"` (static = asserção; com importação
+recusa nomeando `[linker]`), flags `--libc/--link/--interp` só com `--exe`. O CI do ngen escolhe
+a grafia pela versão (`sort -V` vs 0.12.1) — nada a fazer. Baseline local no 0.12.1: 23/23.
+Resposta do mc ao D227: `on_jump` = `blk_depth` (blocos), a pilha de laços só existe no
+walker (`gen_walk.mc`), o parser não sabe o que é laço (`while`/`for` são `#rule`) —
+`p_loopdepth()` enfileirado como lacuna a preçar, não entra no M45. M45 em correção.
+
+(Registro anterior, 0.12.0:)
 
 **0.10.3 = M41.5** ("the follow-ups the ngen consumer exposed"): **`syntax_param(&f)`** +
 `p_decl_name()` — o hook de declaração de função que faltava (**C6 desbloqueado**); e
