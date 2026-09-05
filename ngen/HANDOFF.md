@@ -132,7 +132,19 @@ antes o sysroot que o link precisa, tudo com o próprio `mc` + LLVM da imagem:
 `schivei/mc` `scripts/sysroot-windows.sh`). A linha de link é a do próprio `mc`
 (`src/mc.windows-*.toml`): `-entry:mc_start -nodefaultlib -stack:8388608`.
 
-## 3.2 O mc que o CI usa hoje: 0.13.0 (2026-09-05, 06:28)
+## 3.2 O mc que o CI usa hoje: 0.14.1 (2026-09-05)
+
+**0.14.1 (PR #25, patch de cooperação):** `continue N;` no núcleo, espelho de `break N;` — N
+níveis de laço contados do mais interno; `continue;` = `continue 1;` (mesmo nó de antes, inerte,
+`nd_val` 0 lido como 1); `continue 0;` → `continue expects a positive level`; N além da
+profundidade → `continue out of range`; `continue outside loop` inalterado; `on_jump` recebe o nó
+ANTES da checagem de nível (o `depth` do gancho continua sendo profundidade de BLOCO, não de laço).
+Consumido pela entrega 5 crumb "adoção do 0.14.1": `tk_switch_rewrite_continue_stmt`
+(`ngen/teko_switch.mc`, era `tk_switch_no_continue_stmt`) e `tk_loop_rewrite_stmt`
+(`ngen/teko_loop.mc`) leem `nd_val` de `N_CONTINUE` a mesma forma que já liam de `N_BREAK`;
+`tk_rc_jump` (`ngen/teko_rc.mc`) idem. Baseline local no 0.14.1: 32/32.
+
+(Registro anterior, 0.13.0:)
 
 **0.13.0 (PR #22, M45):** `i32` (`type_new` pelo NÚCLEO, kind `TK_SINT`, sinal por kind); **uma
 chamada devolve o que declara** (D5) — todo `extern` que devolve C `int` passa a `extern i32`
@@ -839,12 +851,12 @@ direita, mesma precedência de `||` (`ngen/teko_ternary.mc`, novo).
   pego pelo rewrite de um `do`/`for` EXTERNO (`tk_loop_rewrite_stmt`), que enxerga o loop do switch
   como só mais um `N_LOOP` descoberto — a MESMA composição que já vale para loop-dentro-de-loop
   (plano §29). Prova: `break 2` atravessando um `switch` dentro de um `for` na fixture.
-- **`continue` dentro de um case É RECUSADO** (`tk_switch_no_continue_stmt`, profundidade 0
-  relativa ao corpo do case): o núcleo não tem `continue N` (`language.md` § 4, só "reinicia o
-  loop mais interno") e o loop do switch É o mais interno — reescrever para `break 1` sairia do
-  switch em vez de continuar o loop de fora (errado); sem esse mecanismo, a decisão do próprio
-  crumb foi recusar com mensagem clara em vez de contornar com flag. Um `continue` dentro de um
-  loop que o PRÓPRIO corpo do case abre passa normalmente.
+- **`continue` dentro de um case reescreve, não recusa mais** (mc 0.14.1, `continue N`; crumb
+  "adoção do 0.14.1", `tk_switch_rewrite_continue_stmt`): um `continue k` na profundidade 0 do case
+  vira `continue k + 1`, a MESMA regra de `break` (`tk_loop_rewrite_stmt`), nunca convertido a
+  `break` — o loop do switch é de uma volta só, continuá-lo direto é sempre seguro. Um `switch` sem
+  laço envolvente é interceptado com mensagem própria em vez do "continue out of range" cru do
+  núcleo. Um `continue` dentro de um loop que o PRÓPRIO corpo do case abre passa normalmente.
 - **Expression** (`x switch { 1 => a, 2 or 3 => b, _ when c => d, _ => e }`, `syntax_infix("switch",
   TK_TERN_PREC)`, D228): NENHUMA máquina própria — constrói a MESMA cadeia de placeholders
   `tk_ternary(...)` que `teko_ternary.mc`'s `?:` constrói, dobrada da ÚLTIMA armação para trás; a
@@ -1003,6 +1015,15 @@ o núcleo constrói para `-(a.x)` escrito com parênteses. `tk_bracket` ganhou u
 deferral de array GLOBAL (`-arr[i]` é valor, nunca lvalue, como em C#). AST das 31
 fixtures não tocadas byte-idêntica à base `e2d4d936`; `mc limits` `ok` (`intrin` 8/8,
 nada de novo registrado).
+
+**Errata (crumb "adoção do 0.14.1", 2026-09-05):** a guarda `tk_bracket_no_write` só protegia o `[`
+de array GLOBAL deferido — `tk_arr_index_of` (array LOCAL, `teko_array.mc`) e `tk_array_index`
+(campo-array, `teko_struct.mc`) aceitavam `=`/`+=`/`-=`/`++`/`--` sem consultá-la, e `!b[1] = 3` só
+era recusado por acidente (`value of type void` sobre o `!`, ou pior — `call to unknown function`
+no site de instanciação de um genérico, no caso de um campo-array). Os dois agora consultam a
+guarda antes de aceitar uma escrita e recusam com mensagem própria (`teko: the left side of = is
+not a place`); a declaração de `tk_bracket_no_write` mudou de `teko_params.mc` para
+`teko_prefix.mc`, seu dono lógico.
 
 ## 5.1 Armadilhas já pagas (não repita)
 

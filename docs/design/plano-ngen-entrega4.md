@@ -1454,6 +1454,27 @@ dentro de `switch`, `switch` sem `{`.
 dobra um nome bare no parse; um const qualificado só resolve num passe posterior); um `when` no
 braço `_` textualmente último de uma expression não é testado (é a base incondicional da dobra).
 
+**Errata (adoção do mc 0.14.1, `continue N`, 2026-09-05):** a recusa de `continue` num `case` acima
+FECHOU o motivo original (o núcleo não tinha `continue N`) -- o 0.14.1 tem, espelhando `break N`.
+`tk_switch_no_continue_stmt` virou `tk_switch_rewrite_continue_stmt` (`teko_switch.mc`): um
+`continue k` na profundidade 0 do case vira `continue k + 1`, a MESMA regra de `break`
+(`tk_loop_rewrite_stmt`, `teko_loop.mc`), nunca convertido a `break` -- o loop do switch é de uma
+volta só, continuá-lo direto é sempre seguro. `teko_loop.mc` ganhou a mesma generalização para
+`for`/`do`: um `continue k` que bate exatamente no nível do `for`/`do` corrente vira `break` (a
+mesma proteção que já existia para o `continue` sem número, generalizada); um que aponta mais longe
+segue como `continue k + 1`. Um `switch` sem laço envolvente é interceptado com mensagem própria
+(`teko: continue inside a switch needs an enclosing loop`) em vez do "continue out of range" cru do
+núcleo, que citaria um nível que a fonte nunca escreveu. `teko_rc.mc`'s `tk_rc_jump` lia `nd_val`
+só de `N_BREAK`; agora lê de ambos (0.14.1 dá `N_CONTINUE` o mesmo campo). Fixtures estendidas:
+`surface_switch.tk` (`continue` num case dentro de `for` e de `while`) e `surface_loops.tk`
+(`continue 2` num `for` aninhado; dois `while` aninhados com um objeto de cada lado do salto,
+provando que o release cobre os dois). De quebra: `tk_bracket_no_write` (a guarda do operando
+sinkado por um `- ! ~`, `teko_prefix.mc`) protegia só o `[` de array GLOBAL deferido -- `tk_arr_
+index_of` (`teko_array.mc`, array LOCAL) e `tk_array_index` (`teko_struct.mc`, campo-array) aceitavam
+`=` sem consultá-la; `!b[1] = 3` só era recusado por acidente (`value of type void` sobre o `!`).
+Os dois agora consultam a guarda e recusam com mensagem própria (`teko: the left side of = is not a
+place`).
+
 ## 39. Arrays fixos landados -- registro no parse (local) e num pass() (global), larguras, o que ficou fora (2026-09-05)
 
 `ngen/teko_array.mc` (novo). Um LOCAL é observável no parse (`on_stmt`, o mesmo mecanismo do
