@@ -1078,6 +1078,49 @@ Fila K2→K5 (§41(d)): **K2** `ref`/`out` (dois `type_new`, tabela de apontado,
 parâmetro não dependem dele); **K4** lambda/função local/`use` (estende `teko_deleg.mc`); **K5**
 `foreach` (`teko_loop.mc`).
 
+**Item 0 LANDADO** (entrega 5, 2026-09-05, commit separado antes do K2): `Op f = 5;` compilava
+limpo e segfaultava — `tk_deleg_var` só interceptava um inicializador `N_IDENT`. `tk_deleg_coerce`
+(`ngen/teko_deleg.mc`) é o validador único que os quatro sítios de um slot de delegate agora usam
+(var, atribuição de nome nu, `return`, argumento de chamada não-sobrecarregada): `null`, um valor
+já tipado (local/param/campo/retorno/chamada-aninhada-por-delegate, via `tk_deleg_expr_ty`), ou um
+nome de função compatível (embrulhado no mesmo thunk de sempre) passam; qualquer outra coisa é
+`teko: Op takes a function, another Op, or null`. Zero fixture mudou (`--dump-ast` byte-idêntico);
+a atribuição ganhou de graça a coerção de nome de função (`f = mul;` funciona agora). Ver plano §43.
+
+**K2 LANDADO** (entrega 5, D221/§41, 2026-09-05): `ref T`/`out T`, C#'s by-reference, sobre uma
+tabela de apontado chaveada pelo NÓ do parâmetro (não `(owner, idx)` — dois desvios medidos, ver
+plano §43). `ngen/teko_ref.mc` (novo) — `type_new("ref"/"out", 8, 8, TK_INT)`, a tabela
+`tk_rp_add`/`tk_rp_kind`/`tk_rp_pointee`, o mangling `tk_ty_sfx(p)`, o sítio obrigatório
+`syntax_expr("ref"/"out")` (`tk_ref_arg`/`tk_out_arg`, tageado por `tk_rfarg_tag` para o validador
+de chamada e o casador de sobrecarga distinguirem um endereço-por-`ref` de um valor que só parece
+um), o rebaixamento `tk_ref_pass` (ANTES de `tk_deleg_pass`, DEPOIS do oráculo — `x` vira `ldW(x)`,
+`x = e` vira `stW(x, e)` exceto pointee CONTADO, deixado para a exceção de `teko_rc.mc`), o
+prólogo DPS de `out` contado (`st64(x, 0);`) e a checagem barata "nunca atribuído". `teko_default.mc`
+(`tk_default_param` estendido para função livre), `teko_class.mc` (`tk_params` estendido para
+método; `tk_sig_of` usa `tk_ty_sfx`), `teko_over.mc` (`tk_ov_sig` idem; `tk_ov_arg_ty`/
+`tk_ov_args_fit` ganham a checagem de KIND, o que faz `f(i64)`/`f(ref i64)` resolverem por
+sobrecarga; `tk_ov_judge` recusa `f(ref i64)` + `f(out i64)`), `teko_rc.mc` (`tk_rc_assign` ganha a
+ÚNICA exceção: um parâmetro `ref`/`out` de tipo contado escreve por `tk_id(name)`, não
+`tk_addr(name)`). `teko_typeof.mc` não mudou NADA — `nd_type` do parâmetro já É o apontado por
+construção, então `tk_ty_scope_params` já servia de graça.
+
+Achado que exigiu correção (medido): o guard de entrada de `tk_ref_pass` só olhava `tk_nrp`
+(parâmetros `ref`/`out` DECLARADOS) — um `ref`/`out` usado só no ARGUMENTO contra um parâmetro POR
+VALOR não registra nenhum parâmetro em lugar nenhum, e o pass saía sem tocar a árvore, deixando
+`bump(ref a)` contra `void bump(i64 x)` compilar por engano. Corrigido: o guard também olha `tk_nrf`
+(argumentos `ref`/`out` escritos); e o passe caminha TODA função, não só uma que DECLARA `ref`/`out`
+— quem CHAMA raramente é uma delas.
+
+Fixture: `surface_refout.tk` (`expect-exit: 42`) — `ref` escalar com sobrecarga por valor, `out`
+duplo (`split`), `ref` sobre campo e elemento de array local, `ref` em método, `ref` de pointee
+CONTADO com `rt_live()`/destrutor provando a troca. Gate: 35/35; `--dump-ast` das 34 anteriores
+**byte-idêntico** a `5e83bb3a`; `mc limits ngen` `ok`, `intrin` 8/16 (zero crescimento). Probes (fora
+de `tests/`): `f(a)` sem `ref`; `ref` num parâmetro por valor (também para chamada de MÉTODO);
+`ref i64 x = 1` (default); `out` nunca atribuído; `f(ref i64)` + `f(out i64)`; `ref x;` como local.
+
+Dívidas: atribuição-por-caminho para `out` (herdada do §41); `f(out i64 a)` inline; `ref p.inner.x`
+(mais de um nível); `ref` sobre campo implícito (`this.x`) dentro do próprio corpo do método.
+
 ## 5.1 Armadilhas já pagas (não repita)
 
 1. **`mc --exe` emite Mach-O SEMPRE.** `schivei/mc` `src/main.mc:227` faz

@@ -60,6 +60,7 @@ i64 rc_lp[TK_MAXLOOP];                // the scope top at the head of each open 
 i64 tk_nlp = 0;
 i64 tk_rc_floor = 0;                  // where the body's own locals start: past the parameters
 i64 tk_rc_ret = 0 - 1;                // the declared return type of the function being walked
+i64 tk_rc_cur_fn = 0;                 // the N_FUNC this pass is walking (K2's own `ref`/`out` exception)
 i64 tk_nparked = 0;                   // temporaries parked so far: a change detector
 i64 tk_rc_swept = 0;                  // 1 when the statement swept its own temporaries
 i64 tk_rc_root = 0;                   // the unit, for the return type of a callee
@@ -160,18 +161,25 @@ void tk_rc_var(i64 n) {
 // `x = e;` on a local of class type: one call keeps both counts straight, and
 // the old object of the slot is released the moment it stops being reachable.
 // A PARAMETER is borrowed -- the caller's reference was never counted on entry,
-// so releasing it here would free an object the caller still holds.
+// so releasing it here would free an object the caller still holds. K2's own
+// exception: a `ref`/`out` parameter of counted type already IS the caller's
+// own slot address, so writing through it is exactly what the parameter is
+// for -- `x` itself is the destination, not `&x`.
 void tk_rc_assign(i64 n) {
     i64 li = tk_rc_index(nd_name(n));
     if (li < 0) return;
     if (!tk_is_counted(sc_ty_at(li))) return;
     tk_rc_at(n);
-    if (li < tk_rc_floor)
-        err_at2(tk_file, tk_line, "teko: a parameter of class type is borrowed; it is not reassigned",
-                nd_name(n));
+    i64 dest = tk_addr(nd_name(n));
+    if (li < tk_rc_floor) {
+        if (tk_rp_named_in(tk_rc_cur_fn, nd_name(n)) < 0)
+            err_at2(tk_file, tk_line, "teko: a parameter of class type is borrowed; it is not reassigned",
+                    nd_name(n));
+        dest = tk_id(nd_name(n));
+    }
     uptr fn = "rt_store";
     if (tk_rc_own(nd_a(n))) fn = "rt_store_own";
-    i64 call = tk_call2(fn, tk_addr(nd_name(n)), nd_a(n));
+    i64 call = tk_call2(fn, dest, nd_a(n));
     set_nd_kind(n, N_EXPRSTMT);
     set_nd_name(n, 0);
     set_nd_a(n, call);
@@ -455,6 +463,7 @@ void tk_rc_stmt(i64 n) {
 void tk_rc_fn(i64 f) {
     tk_nscope = 0;
     tk_nlp = 0;
+    tk_rc_cur_fn = f;
     tk_ty_scope_params(nd_a(f));
     tk_rc_floor = tk_nscope;
     tk_rc_ret = nd_type(f);

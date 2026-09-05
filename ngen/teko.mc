@@ -187,6 +187,7 @@
 #include "teko_array.mc"
 #include "teko_const.mc"
 #include "teko_ns.mc"
+#include "teko_ref.mc"
 #include "teko_iface.mc"
 #include "teko_trait.mc"
 #include "teko_generic.mc"
@@ -213,6 +214,7 @@ void user_init() {
     tk_access_init();
     tk_loop_init();
     tk_ns_init();
+    tk_ref_init();
 
     syntax("public",    &tk_public);
     syntax("internal",  &tk_internal);
@@ -246,6 +248,8 @@ void user_init() {
     syntax_expr("true", &tk_true);
     syntax_expr("false", &tk_false);
     syntax_expr("null", &tk_null);
+    syntax_expr("ref", &tk_ref_arg);
+    syntax_expr("out", &tk_out_arg);
     syntax_infix(".", 12, &tk_dot);
     syntax_infix("[", 12, &tk_bracket);
     syntax_infix("?", TK_TERN_PREC, &tk_tern_infix);
@@ -253,6 +257,7 @@ void user_init() {
 
     on_stmt(&tk_on_stmt);
     on_stmt(&tk_arr_on_stmt);
+    on_stmt(&tk_ref_on_stmt);
 
     // C6: a default parameter value in a free function's own list. The only
     // `syntax_param` registration in this compiler, so registration order
@@ -286,6 +291,13 @@ void user_init() {
 
     pass(&tk_params_pass);
     pass(&tk_typeof_pass);
+
+    // K2 (D221 §41): BEHIND the oracle (a parameter's own type is already the
+    // pointee, so nothing here needs it to have run) and AHEAD of every pass
+    // below, so a `ref`/`out` parameter reads and writes as `ldW(x)`/`stW(x,
+    // e)` before delegate/ternary/ops/overload/rc ever see the body
+    // (teko_ref.mc's own header spells the exception `tk_rc_assign` keeps).
+    pass(&tk_ref_pass);
 
     // K1 (D221 §41): BEHIND the oracle, whose scope walk (`tk_ty_pass_walk`)
     // this pass reuses to tell a delegate-typed local/parameter from any
