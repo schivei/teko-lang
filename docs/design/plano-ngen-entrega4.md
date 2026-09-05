@@ -556,3 +556,15 @@ ao começar cada lote**. teko→mc por `send_message` funciona.
   replayar de lá.** Se `partial class`/genérico importado virar bloqueio real, mandar o caso.
 - **`p_cp()`:** entra no lote do M45; até lá, acesso direto ao `cp` com comentário "temporário"
   (`teko_access.mc:253`).
+
+## 24. O ngen como pacote do mc (M44, futuro) — forma já definida
+
+`docs/specs/M44.md` §6: o pacote teko é do tipo **"both"**, como `<float>` — `[package]`
+com `files`, `lib = "rt.mc"` (o que um PROGRAMA inclui) e `module = "teko.mc"` (o que um
+COMPILADOR inclui, que **exporta `teko_init()` e nunca define `user_init`**; o projeto
+consumidor escreve as seis linhas do `user_init` chamando `teko_init()`). Precedente:
+`lib/user_float.mc`. Crumb quando o M44 sair: (1) `teko.mc` passa de `user_init()` para
+`teko_init()` exportado + um `user_init` mínimo no projeto `ngen/` (o CI continua igual);
+(2) `mc.toml` do `ngen/` ganha `[package] name = "teko"`, `files`, `lib`, `module`;
+(3) regra do M44: todo arquivo lido sob a raiz do pacote tem de estar em `files`. Sem
+mudança de superfície. Coordenar a numeração com o mc (sem 1.0.0 sem o ngen).
