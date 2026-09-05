@@ -157,10 +157,10 @@ uptr tk_op_spell(i64 tok) {
 uptr tk_op_list() { return "+ - * / % == != < <= > >= & | ^ << >> ! ~"; }
 
 // 1 when the token names an operator a type may declare with ONE parameter.
-// `+` is one of them, and its site is the one thing the core does not spell:
-// its prefix table holds `- ~ ! &` and nothing else (mc src/parse.mc ops_init),
-// so a unary `+` declaration is accepted and simply has no site to reach it
-// until the core grows the prefix.
+// `+` is one of them, and its site is `tk_unary_plus` below (M45's
+// `syntax_expr`/`p_cp` release): the core's own prefix table still holds only
+// `- ~ ! &` (mc src/parse.mc ops_init), so `+` reaches an N_UNARY through this
+// project's own handler instead.
 i64 tk_op_unary_ok(i64 tok) {
     if (tok == K_ADD)   return 1;
     if (tok == K_SUB)   return 1;
@@ -569,19 +569,24 @@ i64 tk_op_resolve(i64 tok, i64 np, i64 sa, i64 sb, i64 ta, i64 tb, i64 a, i64 b,
     return r;
 }
 
-// the call the site becomes, put in the node's own place so the parent keeps
-// pointing at it and the sibling list comes back untouched (hooks.md § pass()).
-// Its type is registered because an enclosing operator resolves against it --
-// and because that is what tells the reclaim the value is the caller's own.
+// puts `with` in `n`'s own place, siblings untouched (hooks.md § pass()): the
+// parent keeps pointing at `n`, and its content becomes `with`'s.
+void tk_ops_replace(i64 n, i64 with) {
+    i64 keep = nd_next(n);
+    node_assign(n, with);
+    set_nd_next(n, keep);
+}
+
+// the call the site becomes. Its type is registered because an enclosing
+// operator resolves against it -- and because that is what tells the reclaim
+// the value is the caller's own.
 void tk_ops_emit(i64 n, i64 r, i64 args, i64 line, uptr fl) {
     i64 mi = op_mi_at(r);
     tk_check_member(mt_cls_at(mi), mt_vis_at(mi), tk_op_member_name(op_tok_at(r)), line, fl);
     tk_line = line;
     tk_file = fl;
     i64 call = tk_call(mt_fn_at(mi), args);
-    i64 keep = nd_next(n);
-    node_assign(n, call);
-    set_nd_next(n, keep);
+    tk_ops_replace(n, call);
     i64 ret = mt_ret_at(mi);
     tk_xt_put(n, tk_struct_by_ty(ret), ret, 0);
 }
@@ -617,16 +622,22 @@ void tk_ops_binary(i64 n) {
     tk_ops_emit(n, r, list_append(a, b), line, fl);
 }
 
-// `-v`, `!v`, `~v`: the same resolution over one operand. The core reads no
-// other prefix into an N_UNARY (`&x` is an N_ADDR), so a token this pass cannot
-// spell never reaches here.
+// `-v`, `!v`, `~v`, `+v`: the same resolution over one operand. `-`, `!`, `~`
+// reach here through the core's own prefix table (`&x` is an N_ADDR, never an
+// N_UNARY); `+` reaches here through `tk_unary_plus` below, the one prefix
+// this project reads itself. Over a core type `+` is always the identity --
+// the core's own codegen has never seen an N_UNARY of `+` and must not --
+// so that is the one token collapsed into its own operand instead of erroring.
 void tk_ops_unary(i64 n) {
     tk_ops_operand(nd_a(n));
     i64 a = nd_a(n);
     i64 ta = tk_ty_of(a);
     i64 sa = tk_op_row(ta);
-    if (sa < 0) return;
     i64 tok = nd_op(n);
+    if (sa < 0) {
+        if (tok == K_ADD) tk_ops_replace(n, a);
+        return;
+    }
     i64 line = nd_line(n);
     uptr fl = nd_file(n);
     uptr sp = tk_op_spell(tok);
@@ -652,6 +663,24 @@ void tk_ops_visit(i64 n) {
         return;
     }
     if (k == N_UNARY) tk_ops_unary(n);
+}
+
+// the `+` prefix `mc`'s own table does not hold: `syntax_expr("+")` puts the
+// handler in PRIMARY position, and `parse_expr`'s own infix loop still owns
+// every `+` written between two operands (M45 release notes, 2026-09-05).
+// `parse_expr(11)`, one above the highest infix precedence (`--dump-rules`:
+// `*`/`/`/`%` sit at 10), reads exactly one unary-precedence operand and
+// consumes no infix `+` of its own. The node built is the N_UNARY the core
+// itself builds for `-v`, so `tk_ops_unary` above is the one place that
+// decides what `+v` becomes.
+i64 tk_unary_plus() {
+    i64 line = p_line();
+    uptr fl = p_file();
+    p_next();
+    i64 n = node_new(N_UNARY, line, fl);
+    set_nd_op(n, K_ADD);
+    set_nd_a(n, parse_expr(11));
+    return n;
 }
 
 i64 tk_ops_pass(i64 root) {
