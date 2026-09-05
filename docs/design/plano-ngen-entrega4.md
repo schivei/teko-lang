@@ -872,3 +872,189 @@ tipo e colapsa no próprio operando (`tk_ops_replace`) quando é um tipo do núc
 `N_INT` de 1/0 tipado `TY_I64` (como toda comparação, não `TY_U8`), reservados por `syntax_expr`.
 Gate: 25/25; AST das 22 fixtures não tocadas **byte-idêntica** contra o compilador da base
 `545b26b5` (0.13.0 dos dois lados); `mc limits` verdict `ok`.
+
+## 31. `namespace` / `using` / `import` — desenho (architect-first, 2026-09-05)
+
+Escopo: D218 ("`namespace`, açúcar sobre include; `using` ou `import`, tem exemplo pronto no mc"),
+D215 (C-like), D220 (`internal` = dir do `mc.toml`), D226 (seguir C#), D227 (RC só no pass).
+Precedente lido inteiro: `mini_compiler/examples/lang/lang_class.mc:568-666` (`lg_namespace`,
+`lg_using`, `lg_ns_path`, `lg_import`, `lg_ns_register`), `lang_expr.mc:266` (`lg_ns_expr`),
+`lang_type.mc:39` (`lg_resolve`), `lang_util.mc:33` (`lg_qualify`). A implementação é `.mc` — vale
+o estilo dos 20 módulos do `ngen/` (cabeçalho `//`), não o Javadoc das leis de `.tks`.
+
+### (a) Decisões
+
+1. **`namespace A.B { … }` (bloco) e `namespace A.B;` (file-scoped, C# 10), as duas.** Reabertura
+   = merge (é só um prefixo; não há nada a fundir). **Namespace aninhado em namespace: NÃO** —
+   `A.B` já dá a mesma árvore com um handler linear; aninhar pediria pilha de prefixos por nada.
+2. **Qualificado resolve por `syntax_stmt`/`syntax_expr` do 1º SEGMENTO, nunca pelo `tk_dot`.**
+   `tk_dot` é infixo: só roda depois de um operando esquerdo, e `geo` não é valor nem tipo —
+   ensiná-lo ao `.` exigiria um nó "sou namespace" (modelagem que o D217 recusa) e colidiria com a
+   lógica de receptor. O handler consome `geo . Circle` inteiro antes de o laço de Pratt ver o `.`,
+   então `tk_dot_follows` e o `Shape.made` estático ficam **intocados**: o namespace nunca chega a
+   `tk_type_stmt`. `geo.Circle.made + 1` funciona porque `tk_static_member` consome `. made` e a
+   Pratt retoma depois.
+3. **Segmento de namespace é lido com `p_name()`+`p_next()`, jamais `p_ident()`** — o 1º segmento
+   vira palavra reservada no registro e `p_ident()` exige `T_IDENT` (é o que `lg_declname` faz).
+4. **Nome REAL = `A__B__Circle`**, separador `__`, namespace primeiro (precedente `lg_qualify`).
+   `sr_name` guarda o nome cheio, então todo símbolo derivado (`A__B__Circle_new`, `_vt`, `_itab`,
+   `A__B__Circle_area`) já sai prefixado sem tocar em emissor nenhum. `$` foi considerado (prova de
+   não-colisão trivial) e **descartado**: exigiria provar `$` nas três tabelas de símbolo (ELF/
+   Mach-O/COFF) e no `--dump-asm` das 5 pernas do CI, custo que a guarda de (c) evita.
+5. **O nome CURTO de um tipo em namespace NÃO é `type_alias`.** É registrado como palavra com
+   handlers do ngen nas três posições (`syntax` de topo, `syntax_stmt`, `syntax_expr`) e a
+   identidade sai da lista de busca do ngen, no sítio. Causa-raiz: `alias_add`
+   (`mc/src/hooks.mc:456`) é append-only e `alias_find` devolve o ÚLTIMO — dois `Circle` em dois
+   namespaces dariam id errado **em silêncio**. Sem alias, `type_of_token` nunca responde pelo
+   curto e o ngen decide sempre. É o que entrega o ponto REAL do namespace: `geo.Circle` e
+   `mesh.Circle` coexistem.
+6. **Lista de busca (C#):** do namespace corrente para fora, prefixo a prefixo (`A.B` → `A__B__X`,
+   `A__X`, `X`), e só então os `using` do ARQUIVO. Declaração do nível vence `using` (é a ordem);
+   dois `using` no mesmo nível → `teko: ambiguous name X (a, b)`. `using` e file-scoped são
+   **por arquivo** (`nd_file`/`p_file()`, comparados por `str_eq`) — a semântica do C#.
+7. **Posição de DECLARAÇÃO nunca usa a lista de busca:** qualifica com o namespace corrente e
+   procura EXATO (`tk_struct_find(tk_ns_qualify(nome))`). Vale para o reabrir de `partial`
+   (`teko_class.mc:1321`), senão uma parte escrita em outro namespace reabriria a classe errada.
+8. **Função livre em namespace existe e é manglada** (`geo.area` → `geo__area`), por um `pass()`
+   novo — o core parseia a declaração e o sítio de chamada, e só um pass vê a unidade inteira.
+   `main` dentro de namespace é **recusado** (`teko: main is declared outside every namespace`);
+   `extern` em namespace é **recusado** (mantém o ABI do C, mesma regra do `teko_over.mc`); global
+   de topo em namespace é **recusado** (dívida, (e)).
+9. **Renomear só o que ainda não está qualificado.** O pass pula toda declaração cujo nome já
+   começa por um prefixo de namespace declarado — é o que impede `geo__Circle_new` (gerado pelo
+   ngen a partir de `sr_name`) de virar `geo__geo__Circle_new`.
+10. **Reescrita de chamada só quando o candidato qualificado EXISTE** (`decl_find >= 0`). Um
+    `rt_alloc` dentro de corpo gerado num arquivo com namespace é sondado como `geo__rt_alloc`, não
+    acha e fica plano. Nenhuma falha nova é silenciosa: o que não resolve já era erro de link.
+11. **`import A.B;` = `lex_include("A/B.tk")` + `using A.B` implícito**, once-only (o `lex_seen` do
+    `lex_include`, `mc/src/lex.mc:635`), relativo ao includer e depois a `[include].paths`. O
+    `#include "x.tk"` cru **continua existindo** (as fixtures o usam para `../lib/rt.mc`): `import`
+    é açúcar, não a única porta. Contrato do lookahead: chamar `lex_include` com o `;` ainda
+    corrente e só então `p_next()` (`lg_import`, `mc/docs/surface.md:1204`).
+12. **`internal` (D220) não muda uma linha.** `tk_origin_of_file` (`teko_access.mc:93`) decide por
+    prefixo do dir do `mc.toml`: arquivo importado de dentro de `ngen/` é projeto; de um root de
+    `[include].paths` fora dele (absoluto ou `../`) é externo. Verificado no código, não presumido.
+13. **`using`/`import` só no topo, antes de qualquer namespace** — dentro de um bloco são recusados
+    (o `using` é do arquivo; aceitá-lo aninhado prometeria um escopo que não temos).
+14. **Instanciação de genérico qualificada (`geo.Box<T,4>`) é recusada** com mensagem: o nome curto
+    do genérico resolve pela lista de busca e é a forma ensinada. Dívida barata, risco zero.
+
+### (b) Hook → uso
+
+| hook / API | uso |
+|---|---|
+| `syntax("namespace"/"using"/"import", &fn)` | substituem os três honest-stops de `teko.mc:155-157` |
+| `parse_top()` + `top_add()` | corpo do bloco (precedente `lg_namespace`); `parse_top` devolve 0 quando um `syntax` já fez `top_add` |
+| `do_directive()` | `#include`/`#define` dentro do bloco (o laço do `lg` não trata: seria erro cru) |
+| `lex_include(path, line)` | o `import` |
+| `type_new(cheio)` | identidade do tipo + a palavra `A__B__Circle` (inerte, como no `lg`) |
+| `syntax(curto, &tk_ns_top)` | `Circle f(Circle c)` no topo — a ÚNICA posição de tipo que o core lê sem hook |
+| `syntax_stmt(curto)` / `syntax_expr(curto)` | `tk_type_stmt`/`tk_type_expr` já existentes, agora com a lista de busca |
+| `syntax_param` (o de `teko_default.mc:61`, um só) | parâmetro tipado pelo nome curto; ramo novo ANTES do de default |
+| `syntax_stmt(seg0)` / `syntax_expr(seg0)` | `geo.Circle c = …;` / `geo.f(x)` / `geo.Circle.made` |
+| `parse_params()`/`parse_function()`/`p_set_decl_name()` | o handler de topo do nome curto |
+| `pass(&tk_ns_pass)` | mangle das funções livres + resolução do não-qualificado |
+| `decl_find`/`decl_valid`/`nd_name`/`set_nd_name`/`nd_file` | o pass |
+
+### (c) Mangling e prova de não-colisão
+
+Formas geradas hoje: (1) `S`, identificador da fonte; (2) `X_m`, membro/estático/vt; (3) `X__T…`,
+sufixo de sobrecarga (nomes de tipo) e de genérico (lexemas dos argumentos); (4) `f__k`, instância
+de `params` (k é dígito). Nova: (5) `NS__S`, com `NS` = segmentos juntados por `__`.
+
+(5) colide com (3) em princípio: `namespace A.B { class Circle }` e `A<B, Circle>` dão ambos
+`A__B__Circle`; `namespace A { i64 f(…) }` e um `i64 A(f x)` sobrecarregado dão ambos `A__f`. Com
+(4) não colide (segmento não é inteiro). A resposta **não é separador mágico, é a guarda**: toda
+identidade gerada aterrissa ou na tabela de tipos ou na lista de declarações da unidade, e as duas
+são consultáveis — `tk_type_add` recusa uma segunda linha com o mesmo nome cheio, e o passo de
+rename recusa quando `decl_find(cheio) >= 0`. Logo **nenhuma colisão é silenciosa**: vira
+`teko: the generated name is already declared: A__B__Circle`. Um nome de fonte escrito literalmente
+como `geo__area` é tratado como já-qualificado (D31.9) — consequência aceita do `__`.
+
+### (d) Crumbs
+
+**N1 — `namespace` + `using` + tipos qualificados** (branch `feat/ngen-namespace`).
+Arquivos: `ngen/teko_ns.mc` (novo), `teko.mc` (include + 3 `syntax`), `teko_struct.mc`
+(`tk_struct_find:425` ganha o fallback; `tk_newname:698` aceita palavra que é nome curto de tipo em
+namespace), `teko_access.mc` (`tk_type_word:379`, `tk_type_expr:281`, `tk_type_stmt:310`),
+`teko_class.mc:1310` / `teko_iface.mc:460` / `teko_trait.mc:178` / `teko_struct.mc:859` /
+`teko_generic.mc:254` (um `tk_ns_qualify` no nome declarado), `teko_generic.mc:495` (`tk_gen_ty`),
+`teko_expr.mc:46` (`tk_new` lê nome qualificado), `teko_default.mc:61` (ramo de parâmetro).
+Assinaturas novas (`teko_ns.mc`): `uptr tk_ns_current();` · `uptr tk_ns_qualify(uptr nome);` ·
+`void tk_ns_add(uptr cheio);` · `i64 tk_ns_find(uptr cheio);` · `void tk_ns_register(uptr seg0);` ·
+`uptr tk_ns_read_path(uptr pmem);` · `i64 tk_ns_resolve(uptr curto);` (lista de busca; −1 = nada,
+erro em ambiguidade) · `void tk_ns_short_word(uptr curto);` · `i64 tk_ns_short_known(uptr curto);` ·
+`i64 tk_ns_param_ty();` · `i64 tk_ns_top();` · `i64 tk_ns_stmt();` · `i64 tk_ns_expr();` ·
+`void tk_namespace();` · `void tk_using();`. Extração sem mudança de comportamento:
+`i64 tk_var_after_type(i64 ty, i64 line, uptr fl)` sai de `tk_gen_declstmt`
+(`teko_generic.mc:507`) e serve aos dois. Fixture `surface_namespace.tk` (+
+`ngen/tests/parts/ns_file.tk` para a forma file-scoped, trazido por `#include`, fora do glob): dois
+namespaces com uma classe `Circle` cada, uso qualificado, `using geo;` deixando o curto resolver
+dentro e fora, estático `geo.Circle.made`, reabertura do mesmo namespace, `A.B` aninhado;
+`expect-exit: 42`. Gate: 26/26 no exit esperado; `--dump-ast` das 25 anteriores **byte-idêntico**;
+`mc limits` `ok`; probes de recusa FORA de `tests/`: dois `using` ambíguos, `namespace` sem `{` nem
+`;`, tipo curto sem `using` e sem qualificação, `extern`/global/`main` dentro de namespace.
+
+**N2 — funções livres em namespace** (branch `feat/ngen-namespace-fn`). Arquivos: `teko_ns.mc`
+(`i64 tk_ns_pass(i64 root);`, `uptr tk_ns_of_name(uptr nome);`,
+`i64 tk_ns_rewrite_call(i64 n, uptr ns, uptr fl);`), `teko.mc` (`pass(&tk_ns_pass)` **depois de
+`tk_partial_pass` e antes de `tk_params_pass`** — o nome tem de estar final antes de todo pass que
+censa por nome), `teko_default.mc` (`void tk_default_rename(uptr velho, uptr novo);` trocando a
+chave `fpd_name`, comparada por PONTEIRO em `tk_default_row_of_name:130` — sem isso o default de
+uma função em namespace some). Duas varreduras, na ordem do `teko_over.mc`: renomeia todas as
+declarações, depois resolve os sítios. Fixture `surface_namespace_fn.tk`: chamada qualificada,
+chamada não-qualificada de dentro do próprio namespace, `using` resolvendo o curto, sobrecarga (C4)
+e default (C6) sobre função em namespace, `main` no topo; `expect-exit: 42`. Gate igual ao N1
+(27/27, AST das 26 idêntica) + prova de no-op do pass (AST idêntica quando não há namespace).
+
+**N3 — `import`** (branch `feat/ngen-import`). Arquivos: `teko_ns.mc` (`void tk_import();`,
+`uptr tk_ns_path_of(uptr cheio);`), `teko.mc` (troca do honest-stop). Fixture `surface_import.tk` +
+`ngen/tests/parts/geo.tk` (este com `namespace parts.geo;` file-scoped): `import parts.geo;` duas
+vezes (prova do once-only), uso pelo `using` implícito e pela forma qualificada, classe sem
+modificador (`internal`) alcançada porque o arquivo está dentro do projeto; `expect-exit: 42`.
+Gate igual + probe de recusa: `import` de namespace sem arquivo.
+
+**Ritual (os três):** `rm -rf ngen/build` + build do zero, laço `--entry-only` com TODAS as
+fixtures, `--dump-ast` byte-idêntico nas anteriores, `mc limits ngen` `ok`, e **config RELATIVO com
+cwd no repo** (D224: config absoluto cega o `tk_origin_of_file` e nenhuma checagem de `internal`
+dispara).
+
+### (e) Fora do escopo (dívida) e pedido ao mc
+
+Dívida, registrada e não escondida: cast para nome curto de namespace (`(Circle) x` cai no
+`type_of_token` do core, que não responde pelo curto — a mensagem é a do core); global de topo,
+`extern` e `main` dentro de namespace (recusados); `using` dentro de bloco; alias de `using`
+(`using G = geo;`) e `using static`; genérico qualificado (D31.14); namespace aninhado (D31.1).
+
+Pedido ao mc (texto pronto para enviar):
+> O `ngen` precisa, para `namespace`/`import`, de três funções do core que o `examples/lang` já usa
+> mas que não estão nas tabelas do `docs/reference/hooks.md` §4: `lex_include(path, line)`
+> (`lang_class.mc:665`), `parse_top()` (`lang_class.mc:609`) e `do_directive()` (para `#include`
+> dentro de um corpo que o módulo parseia). Pedimos publicá-las na doc de hooks — ou nomear a
+> alternativa suportada. Achado adjacente: `alias_add` aceita registrar o mesmo lexema duas vezes e
+> `alias_find` devolve o último, sem diagnóstico; um segundo `type_alias` do mesmo nome hoje troca
+> o tipo de um programa em silêncio.
+
+### (f) Riscos
+
+1. **Colisão `__`** — mitigada pela guarda de (c); sem ela seria silenciosa. Reavaliar `$` se a
+   guarda alguma vez disparar em código real.
+2. **Ordem do pass do N2** — antes de `params`/`over`/`default`; errar aqui vira "wrong number of
+   arguments" em vez de erro claro. A prova de no-op e a fixture de C4/C6 sobre namespace cobrem.
+3. **`fpd_name` por ponteiro** (`teko_default.mc:124-135`) — o rename tem de gravar o MESMO ponteiro
+   que foi para `set_nd_name`, senão a 4ª rodada do `teko_over.mc` erra.
+4. **1º segmento vira palavra reservada program-wide** (`geo` deixa de ser nome de variável) —
+   inerente ao `word_add` do mc, o mesmo do `lg`; documentar na fixture.
+5. **Corpo de bloco sem ramo de `T_DIR`/`K_EXTERN`** — sem ele, um `#include` dentro do bloco morre
+   com erro do core sem relação com a causa.
+6. **`region crosses a file boundary`** (falso positivo conhecido, §23/§26) — pode aparecer se um
+   genérico for a última declaração de um arquivo importado; contorno `;`, correção vem do mc.
+7. **Escopo híbrido** (alerta da sessão do mc, §23): o namespace é decidido no PARSE para tipos e no
+   PASS para funções. Não é a tabela de locais, são domínios disjuntos (tipo × declaração de topo),
+   mas fica registrado: qualquer regra que precise dos dois ao mesmo tempo é sinal de erro.
+
+**Tensões de lei:** nenhuma aberta. D215 × C#: `namespace`/`using` são forma C-like e o D218/D226
+os nomeia — sem tensão. C# escopa nome por arquivo e o mc reserva palavra program-wide: resolvido
+por D31.5 (o ngen é dono da resolução do nome curto), com o cast como única fresta, declarada. D217
+(sem Variant): namespace é resolvido a NOME no parse, nada dinâmico. D227: o pass novo corre antes
+do `tk_rc_pass`, que continua sendo o último.
