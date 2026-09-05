@@ -44,6 +44,19 @@ i64 tk_bool_lit(i64 v) {
 i64 tk_true()  { return tk_bool_lit(1); }
 i64 tk_false() { return tk_bool_lit(0); }
 
+// `null` (K1, D221 decision 9): an ordinary `N_INT` of 0, typed `TY_UPTR` --
+// `rc_dec(0)`/`rt_own(0)` (ngen/lib/rt.mc) are already no-ops over it, so a
+// delegate, a class or an interface local set to it needs no special case.
+i64 tk_null() {
+    i64 line = p_line();
+    uptr fl = p_file();
+    p_next();
+    i64 n = node_new(N_INT, line, fl);
+    set_nd_val(n, 0);
+    set_nd_type(n, TY_UPTR);
+    return n;
+}
+
 void tk_types_init() {
     type_alias("bool",  TY_U8);
     type_alias("char",  TY_U32);
