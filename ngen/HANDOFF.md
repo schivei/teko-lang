@@ -1298,6 +1298,46 @@ PARÂMETRO da função declarante; captura por referência de tipo CONTADO; `op.
 em argumento de função LIVRE sem `new Op(...)` (a forma explícita já cobre esse caso, então esta
 dívida do §41(e) está fechada na prática -- `apply(new Op((i64 x) => x - 1), 43)` já funciona).
 
+**K4b LANDADO** (entrega 5, D221/§41, 2026-09-05): fecha as três ressalvas do verificador do K4.
+
+1. **Captura de delegate POR VALOR quebrava.** O prólogo gerado (`Op inner = ld64(addr);`) é um
+   `N_CALL` que `tk_deleg_coerce` (a mesma passada `tk_deleg_pass`) recusava. Corrigido marcando o
+   nó do `ld64` com o tipo do delegate (`tk_xt_put`), o mesmo idioma que `tk_field_use` já usa para
+   um load de campo delegate — o nó é o FINAL (nada o copia depois), então a marcação resolve sem
+   tocar `tk_deleg_coerce`.
+2. **A recusa de `&`-captura escapando era por FORMA LITERAL, não por TAINT.** `tk_lam_escapes` só
+   reconhecia o `N_CALL` do alocador — `Op f = new Op(...) use (&acc) => ...; return f;`
+   (indireção por variável) e `cb = new Op(...) use (&x) => ...;` com `this` implícito (não passava
+   por `tk_field_use`) escapavam sem aviso. Corrigido com um taint flow-insensitivo por NOME (um
+   novo `on_stmt`, `tk_lam_taint_stmt`, marca o nome escrito por um `N_VAR`/`N_ASSIGN` cujo lado
+   direito já escapa) — `tk_lam_escapes` aceita agora o `N_CALL` OU um `N_IDENT` tainted, checado em
+   `return`, campo explícito, campo estático, campo implícito via `this` (`tk_this_assign`, novo) e
+   elemento de `T[]` (`tk_ha_index`, novo). Array FIXO de delegate não precisou de check — já é
+   inalcançável (`teko_array.mc` recusa qualquer linha da tabela de tipos como elemento).
+3. **Grafia contextual e curta.** `(` de expressão continua SEM hook (o risco do §46 seguiu
+   correto). A contextual entra nos pontos que já conhecem o tipo alvo antes do inicializador:
+   `Op f = <init>;` (`tk_type_stmt`, teko_access.mc, desviando para `tk_deleg_var_stmt` quando o
+   tipo é um delegate ESCALAR — `Op[] ops` cai fora via `tk_bracket_follows`) e um argumento de
+   MÉTODO sem sobrecarga (`tk_call_method_args`/`tk_args_typed`, teko_expr.mc, gated por
+   `tk_method_name_count(si, m) == 1` — picar overload por nome só, sem contar argumentos ainda,
+   não dá para saber qual sinatura vale). A decisão `(`-é-lambda usa um LOOKAHEAD NÃO-CONSUMIDOR
+   (`tk_paren_lambda_follows`, varredura de bytes a partir de `p_cp()`) em vez de
+   `p_skip_balanced`+`p_push_source`: medido que o push descarta o lookahead pendente (o `=>` que a
+   decisão precisa) assim que uma fonte nova é empurrada — `p_push_source` certo é para replay
+   DEPOIS que a decisão já foi tomada por outro meio, não para decidir. `tk_lambda_build` virou um
+   wrapper fino sobre `tk_lambda_finish` (o rabo compartilhado), reusado pela forma curta
+   (`tk_deleg_short_lambda`, um parâmetro implícito do tipo que o delegate já declara).
+
+Fixture: `surface_lambda.tk` ganha `deleg_byval_check` (item 1), `contextual_check`/`short_check`
+(item 3) e uma chamada contextual em `method_check`. Item 2 não ganha fixture — as recusas ficam em
+probes fora de `tests/`. Gate: 38/38; `--dump-ast` das 37 anteriores byte-idêntico à base `68b38174`
+(`same=37 diff=0`); `mc limits ngen` `verdict ok`, `intrin` 8/16 em ambos os lados.
+
+**Dívidas que seguem abertas** (não fechadas por este crumb, registradas): `return (params) => e;`
+(o `return` é palavra do núcleo, sem hook — fica `return new Op(...)`); captura por referência de um
+tipo CONTADO (herdada do K4); captura de um PARÂMETRO da função declarante (herdada do K4);
+`op.Invoke(x)`/`Func<>`/`Action<>`/`params T[]` embalando lambda (herdadas do §41(e)).
+
 ## 5.1 Armadilhas já pagas (não repita)
 
 1. **`mc --exe` emite Mach-O SEMPRE.** `minicompiler/mc` `src/main.mc:227` faz
