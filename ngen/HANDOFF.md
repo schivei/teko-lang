@@ -435,8 +435,12 @@ a forma velha do C5 (receptor implícito) deixa de ser aceita, com mensagem pró
   de ser do tipo declarante. Três rodadas, nessa ordem — **exata**, **literal** (a do C4: um
   `N_INT` cai em `i64` na 1ª e em qualquer inteiro do core na 2ª) e **base** (operando de tipo
   DERIVADO num parâmetro da base — zero bits de conversão, o objeto derivado já é um da base).
-  Duas declarações na mesma rodada = ambiguidade recusada. `2 + v` (reversed) e `-a` (unário)
-  resolvem por essa mesma máquina.
+  Duas declarações na mesma rodada = ambiguidade recusada, **exceto na rodada base**: entre
+  `GrandBase`/`MidA`/`Kid` sem redeclarar, `Kid + 2` escolhe o operador de `MidA` (o ancestral
+  MAIS PRÓXIMO), pelo "better function member" do C# (§12.6.4) — `tk_op_pick_best` mede a
+  distância na cadeia de `base` de cada candidato e só desempata quando um domina o outro nos
+  dois operandos; ambiguidade real entre bases não-relacionadas segue recusada. `2 + v`
+  (reversed) e `-a` (unário) resolvem por essa mesma máquina.
 - **Pares obrigatórios** (`==`/`!=`, `<`/`>`, `<=`/`>=`) checados quando a unidade fecha (no
   `pass`), então `partial class` pode escrever as duas metades em partes diferentes.
 - **Visibilidade checada NO SÍTIO** (`tk_check_member`, o achado 3 do crumb de membros que o C5
