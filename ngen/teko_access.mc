@@ -1,0 +1,304 @@
+// teko_access.mc -- who may reach what (D220, dono 2026-09-04), spelled the way
+// C# spells it and with C#'s own defaults:
+//
+//   public class Shape {              a type with no modifier is `internal`
+//       public i64 side;              a member with no modifier is `private`
+//       protected i64 seed;           the type and the ones derived from it
+//       public static i64 made;       one global, `shape_made`, no part of the object
+//       public static i64 tally() {   no receiver: `Shape.tally()`
+//           return made;
+//       }
+//   }
+//
+// **`internal` is the code of the PROJECT.** The mc core has no compilation unit
+// to hang an assembly on (`docs/reference/core-language.md:422` -- everything
+// arrives through `#include` into one source), so the unit is decided here, by
+// the ORIGIN of the declaration, and the rule is exactly this:
+//
+//   a declaration belongs to the project when the file it was read from is a
+//   path INSIDE the project's directory -- the directory holding the `mc.toml`
+//   the build was given, and, with no config at all (the single-file CLI), the
+//   directory holding the entry source. Everything else is external: an absolute
+//   path, a path that climbs out of it (`../other/lib.tk`), and a bundled
+//   `#include <name>`, which is a name and not a path at all.
+//
+// Every file name the lexer produces is normalised against the same place the
+// config is (`path_join`/`path_norm`, mc `src/lex.mc`), so a plain prefix
+// answers the question with no syscall and no guess. Two origins are
+// distinguished, the project and everything else, so `internal` reads as "the
+// declaration and the use site have the same origin".
+//
+// A declaration that is not read from a file at all -- a generic instance, whose
+// source is pushed (`p_push_source`) under a frame name, and a trait's members,
+// which are copied into the class that uses them -- does not ask the question:
+// the instance is handed the TEMPLATE's origin (teko_generic.mc) and a copied
+// member becomes a member of the class, with the class's own origin.
+//
+// The type's name is registered here too, and in three positions at once: as a
+// type (`type_new`), as an expression (`Shape.made`, which `parse_primary` would
+// otherwise refuse -- a type word is no expression), and as a statement, which
+// is where both `Shape.made = 1;` and `Shape s = new Shape;` arrive.
+
+// the modifier a top-level declaration carried, and the origin of the file it
+// was written in; -1 in both means "nothing was said", which is C#'s `internal`
+// and the origin of whatever file the parser is standing in
+i64 tk_decl_vis  = 0 - 1;
+i64 tk_decl_proj = 0 - 1;
+
+uptr tk_proj_dir = 0;                 // the project's directory, no trailing '/'
+i64  tk_proj_len = 0;
+
+i64 tk_pass_proj = 0 - 1;             // the origin of the function the pass walks
+
+i64 tk_dot_tok = 0;                   // the `.` token, interned once at startup
+
+// how many bytes of `p` are its directory: everything before the last '/', and
+// nothing at all for a name with no '/' in it
+i64 tk_dir_len(uptr p) {
+    i64 n = cstrlen(p);
+    i64 cut = 0;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        if (ld8(p + i) == '/') cut = i;
+        i = i + 1;
+    }
+    return cut;
+}
+
+// the directory the compilation is rooted at, read once, before the first token:
+// `mc build` has already parsed the config by then, and the lexer has already
+// been given the entry source
+void tk_access_init() {
+    uptr p = cfg_file;
+    if (p == 0) p = lex_file();
+    tk_proj_dir = p;
+    tk_proj_len = tk_dir_len(p);
+    tk_dot_tok = word_add(".");
+}
+
+// 1 when `f` starts with the project's directory followed by a '/'
+i64 tk_under_proj(uptr f) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_proj_len) break;
+        if (ld8(f + i) != ld8(tk_proj_dir + i)) return 0;
+        i = i + 1;
+    }
+    return ld8(f + tk_proj_len) == '/';
+}
+
+// 1 when the file `f` is the project's own code
+i64 tk_origin_of_file(uptr f) {
+    if (f == 0) return 0;
+    if (ld8(f) == '/') return 0;                 // an absolute path is somewhere else
+    if (tk_proj_len > 0) return tk_under_proj(f);
+    if (ld8(f) != '.') return 1;                 // the project is the whole directory
+    return ld8(f + 1) != '.';                    // ...except what climbs out of it
+}
+
+// ---- the modifier a top-level declaration carries ----
+void tk_set_decl(i64 vis, i64 proj) {
+    tk_decl_vis = vis;
+    tk_decl_proj = proj;
+}
+
+i64 tk_take_decl_vis() {
+    i64 v = tk_decl_vis;
+    tk_decl_vis = 0 - 1;
+    if (v < 0) return TK_TINTERNAL;              // C#'s default for a top-level type
+    return v;
+}
+
+i64 tk_take_decl_proj() {
+    i64 p = tk_decl_proj;
+    tk_decl_proj = 0 - 1;
+    if (p < 0) return tk_origin_of_file(p_file());
+    return p;
+}
+
+// ---- where the parser or the pass is standing ----
+// the type whose body the code being read belongs to, or -1. The two phases are
+// disjoint -- a body is parsed, and only then is the unit walked -- so one of
+// the two answers and the other is -1.
+i64 tk_site_class() {
+    if (tk_body_class >= 0) return tk_body_class;
+    return tk_pass_class;
+}
+
+// ...and whether that code is the project's own
+i64 tk_site_project() {
+    i64 si = tk_site_class();
+    if (si >= 0) return sr_proj_at(si);
+    if (tk_pass_proj >= 0) return tk_pass_proj;
+    return tk_origin_of_file(p_file());
+}
+
+// ---- the checks ----
+void tk_deny_type(i64 si, i64 line, uptr fl) {
+    err_at(fl, line, tk_join3("teko: ", sr_name_at(si), " is internal to another project"));
+}
+
+// reaching for the type itself -- `new`, `Name.member`, a base class, an
+// interface: an `internal` one answers only to code of its own project
+void tk_check_type_use_from(i64 si, i64 proj, i64 line, uptr fl) {
+    if (sr_vis_at(si) == TK_TPUBLIC) return;
+    if (sr_proj_at(si) == proj) return;
+    tk_deny_type(si, line, fl);
+}
+
+void tk_check_type_use(i64 si, i64 line, uptr fl) {
+    tk_check_type_use_from(si, tk_site_project(), line, fl);
+}
+
+void tk_deny_member(uptr what, i64 owner, uptr m, i64 line, uptr fl) {
+    err_at(fl, line, tk_join3("teko: ", tk_join3(sr_name_at(owner), ".", m), what));
+}
+
+// one member of `owner`, reached from wherever the parser or the pass is: the
+// type has to be reachable first, and then the member itself -- `private` is the
+// declaring type alone, `protected` is that type and the ones derived from it,
+// and a member copied from a trait belongs to the class that copied it
+void tk_check_member(i64 owner, i64 vis, uptr m, i64 line, uptr fl) {
+    tk_check_type_use(owner, line, fl);
+    if (vis == TK_VPUBLIC) return;
+    i64 site = tk_site_class();
+    if (vis == TK_VPRIVATE) {
+        if (site == owner) return;
+        tk_deny_member(" is private", owner, m, line, fl);
+    }
+    if (site >= 0 && tk_is_ancestor(owner, site)) return;
+    tk_deny_member(" is protected", owner, m, line, fl);
+}
+
+// ---- `Name.member`: the static access ----
+// the field the type declares under `m`, or -1; the answer walks the base chain,
+// so `Derived.made` reaches the base's own static field, as it does in C#
+i64 tk_static_field_of(i64 si, uptr m, i64 line, uptr fl) {
+    i64 fi = tk_field_find(si, m);
+    if (fi < 0) return 0 - 1;
+    tk_check_member(tk_field_owner(fi), fd_vis_at(fi), m, line, fl);
+    if (fd_sym_at(fi) == 0)
+        err_at(fl, line, tk_join3("teko: ", tk_join3(sr_name_at(si), ".", m),
+                                  " is an instance member; reach it through an object"));
+    return fi;
+}
+
+// `Name.field` / `Name.field = e` -- the global the static field lives in, read
+// or written at the field's own width
+i64 tk_static_use(i64 fi, i64 line, uptr fl) {
+    i64 fty = fd_ty_at(fi);
+    i64 addr = tk_id(fd_sym_at(fi));
+    tk_line = line;
+    tk_file = fl;
+    if (fd_nel_at(fi) > 0) return tk_array_of(addr, fi, line, fl);
+    if (p_accept(K_ASSIGN)) {
+        i64 v = parse_expr(0);
+        tk_line = line;
+        tk_file = fl;
+        return tk_call2(tk_stn(fty), addr, v);
+    }
+    i64 r = tk_call(tk_ldn(fty), addr);
+    tk_xt_put(r, tk_struct_by_ty(fty), fty, 1);
+    return r;
+}
+
+// `Name.m(...)` -- a direct call to the method's own symbol, with no receiver at
+// all, which is what makes it the shape a static method is called in
+i64 tk_static_call(i64 si, uptr m, i64 line, uptr fl) {
+    i64 na = 0;
+    i64 args = tk_args(&na);
+    i64 mi = tk_method_pick(si, m, na);
+    if (mi < 0) tk_pick_refuse(mi, m, line, fl);
+    tk_check_member(mt_cls_at(mi), mt_vis_at(mi), m, line, fl);
+    if (!mt_static_at(mi))
+        err_at(fl, line, tk_join3("teko: ", tk_join3(sr_name_at(si), ".", m),
+                                  " is an instance member; reach it through an object"));
+    tk_line = line;
+    tk_file = fl;
+    args = tk_fill_defaults(args, na, mt_np_at(mi), mt_nreq_at(mi), mt_d0_at(mi));
+    i64 r = tk_call(mt_fn_at(mi), args);
+    i64 rs = tk_struct_by_ty(mt_ret_at(mi));
+    if (rs >= 0) tk_xt_add(r, rs, 0);
+    return r;
+}
+
+// the member half of `Name.member`, with the type word already read
+i64 tk_static_member(i64 si, i64 line, uptr fl) {
+    if (!p_accept(tk_dot_tok)) err_at2(fl, line, "teko: a type name reaches its static members", sr_name_at(si));
+    tk_check_type_use(si, line, fl);
+    uptr m = p_ident();
+    if (p_id() == K_LPAR) return tk_static_call(si, m, line, fl);
+    i64 fi = tk_static_field_of(si, m, line, fl);
+    if (fi < 0) err_at2(fl, line, tk_join("teko: unknown static member of ", sr_name_at(si)), m);
+    return tk_static_use(fi, line, fl);
+}
+
+// the type word in EXPRESSION position, which the core's parse_primary has
+// nothing to do with: `Shape.made`, `Shape.tally()`
+i64 tk_type_expr() {
+    i64 line = p_line();
+    uptr fl = p_file();
+    i64 si = tk_struct_find(p_name());
+    p_next();                                    // the type word
+    return tk_static_member(si, line, fl);
+}
+
+// 1 when a `.` comes right after the current token, which is the one thing that
+// tells `Shape.made = 1;` from `Shape s = new Shape;`. The parser keeps a single
+// token of lookahead, so the answer is read from the source the lexer is about
+// to read the next token from -- `cp`, the very cursor the core's own
+// `stmt_syntax` guard compares (mc `src/parse.mc`).
+i64 tk_dot_follows() {
+    uptr p = cp;
+    uptr e = p_src_end();
+    loop {
+        if (p >= e) return 0;
+        i64 c = ld8(p);
+        if (c != ' ' && c != 9 && c != 10 && c != 13) break;
+        p = p + 1;
+    }
+    return ld8(p) == '.';
+}
+
+// the type word in STATEMENT position. A declaration is the core's own
+// `parse_var`, entered with the type word still unread, so `Point p = new Point;`
+// is the very statement it always was; a static access is an ordinary
+// expression, because the type word opens one (tk_type_expr above).
+i64 tk_type_stmt() {
+    i64 line = p_line();
+    uptr fl = p_file();
+    if (!tk_dot_follows()) return parse_var(line, fl, sr_ty_at(tk_struct_find(p_name())));
+    i64 e = parse_expr(0);
+    p_expect(K_SEMI, "expected ; after the static member");
+    tk_line = line;
+    tk_file = fl;
+    return tk_stmt(e);
+}
+
+// ---- `public class X { }` / `internal struct Y { }` ----
+// The modifier opens the declaration, so it is a word of its own at top level;
+// `private`/`protected`/`static` are not, because they are only ever written on
+// a member, where this module is the parser and reads them as it finds them.
+void tk_decl_mod(i64 vis) {
+    i64 line = p_line();
+    uptr fl = p_file();
+    p_next();                                    // the modifier
+    tk_set_decl(vis, tk_origin_of_file(fl));
+    if (tk_word("class"))     { tk_class();     return; }
+    if (tk_word("struct"))    { tk_struct();    return; }
+    if (tk_word("interface")) { tk_interface(); return; }
+    if (tk_word("trait"))     { tk_trait();     return; }
+    err_at2(fl, line, "teko: the modifier opens a class, a struct, an interface or a trait", p_name());
+}
+
+void tk_public()   { tk_decl_mod(TK_TPUBLIC); }
+void tk_internal() { tk_decl_mod(TK_TINTERNAL); }
+
+// a type's name is a word of the language in three positions at once
+i64 tk_type_word(uptr name) {
+    i64 ty = type_new(name, 8, 8, TK_INT);
+    syntax_expr(name, &tk_type_expr);
+    syntax_stmt(name, &tk_type_stmt);
+    return ty;
+}

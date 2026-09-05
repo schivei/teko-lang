@@ -201,17 +201,32 @@ uptr tk_mt_name(uptr cls, uptr iface) {
 // Rect  ->  rect_itab                (the { count, (id, mt)* } the vtable points at)
 uptr tk_itab_name(uptr cls) { return tk_join(tk_case(cls, 0), "_itab"); }
 
+// the modifiers an interface member may carry: `public` says out loud what an
+// interface member already is, and nothing else is taught. A static one would
+// need a body of its own (C# 8), which this port does not read yet.
+void tk_iface_mods() {
+    loop {
+        if (tk_word("public")) { p_next(); continue; }
+        if (tk_word("private") || tk_word("protected"))
+            err_at2(p_file(), p_line(), "teko: an interface member is public", p_name());
+        if (tk_word("static"))
+            err_at(p_file(), p_line(), "teko: a static interface method needs a body; not taught yet");
+        break;
+    }
+}
+
 // one signature of the body: `T m(...);` and nothing else -- an interface
 // declares no field, and says so rather than failing inside the parameter list
 void tk_iface_member(i64 si) {
+    tk_iface_mods();
     i64 rty = p_type();
     uptr m = p_ident();
     if (p_id() != K_LPAR) err_at2(tk_file, tk_line, "teko: an interface declares methods, not fields", m);
     i64 np = 0;
     i64 nreq = 0;
     i64 d0 = tk_ndflt;
-    i64 params = tk_params(&np, &nreq, 1);       // the list itself is the class's business
-    uptr sig = tk_sig_of(params);
+    i64 params = tk_params(&np, &nreq, 1, 1);    // the list itself is the class's business
+    uptr sig = tk_sig_of(params, 1);
     if (tk_ifmeth_sig_find(si, m, sig) >= 0) err_at2(tk_file, tk_line, "teko: duplicate interface method", m);
     p_expect(K_SEMI, "expected ; after the interface method");
     tk_ifmeth_add(m, sig, np, nreq, d0, rty);
@@ -225,9 +240,11 @@ void tk_interface() {
     i64 head_line = tk_line;                     // position of the `interface` word
     uptr head_file = tk_file;
     p_next();                                    // the `interface` word
+    i64 vis = tk_take_decl_vis();                // the `public`/`internal` before the word
+    i64 proj = tk_take_decl_proj();
     uptr name = tk_newname("interface");
-    i64 ty = type_new(name, 8, 8, TK_INT);       // a name of its own type parses
-    i64 si = tk_type_add(name, ty, 0 - 1, TK_KIFACE);
+    i64 ty = tk_type_word(name);                 // a name of its own type parses
+    i64 si = tk_type_add(name, ty, 0 - 1, TK_KIFACE, vis, proj);
     set_sr_m0_at(si, tk_nifmeth);
     p_expect(K_LBRACE, "expected { in the interface body");
     loop {

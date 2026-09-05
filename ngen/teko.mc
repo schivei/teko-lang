@@ -51,6 +51,13 @@
 //   T operator+(U b)  inside a class or struct body            a contextual word
 //   a + b  /  (a + b) == c                                     pass() over N_BINARY
 //
+// What entrega 5's member crumb adds (D220, teko_access.mc) -- C#'s modifiers,
+// with C#'s defaults (a type is `internal`, a member is `private`):
+//   public/internal before class/struct/interface/trait        syntax      (M12)
+//   public/private/protected/static on a member                read by tk_member
+//   Name.field, Name.field = e, Name.m(...)                    syntax_expr (M21)
+//   the statement either of those two opens                    syntax_stmt (M21.5)
+//
 // Everything else in docs/design/port-teko-mc.md §3 (types/classes,
 // generics, error-union, `service`/DI, concurrency, the
 // rest of the stdlib) is a later entrega and is not stubbed here: it does
@@ -65,6 +72,7 @@
 #include "teko_generic.mc"
 #include "teko_class.mc"
 #include "teko_this.mc"
+#include "teko_access.mc"
 #include "teko_typeof.mc"
 #include "teko_stmt.mc"
 #include "teko_expr.mc"
@@ -75,7 +83,10 @@
 void user_init() {
     tk_types_init();
     tk_float_init();
+    tk_access_init();
 
+    syntax("public",    &tk_public);
+    syntax("internal",  &tk_internal);
     syntax("class",     &tk_class);
     syntax("interface", &tk_interface);
     syntax("trait",     &tk_trait);

@@ -229,12 +229,14 @@ void tk_ty_pass_walk(i64 root, uptr visit) {
         if (nd_kind(f) == N_FUNC) {
             tk_nscope = 0;
             tk_this_enter_fn(nd_name(f));        // the type an unqualified name belongs to
+            tk_pass_proj = tk_origin_of_file(nd_file(f));   // ...and where its code came from
             tk_ty_scope_params(nd_a(f));
             tk_ty_walk_list(nd_b(f), visit);
         }
         f = nd_next(f);
     }
     tk_nscope = 0;
+    tk_pass_proj = 0 - 1;
     tk_this_leave_fn();
 }
 
@@ -343,11 +345,14 @@ i64 tk_pend_method(i64 pi, i64 si, uptr pty, uptr ppure) {
         err_at2(tk_file, tk_line, "teko: the member is a method; call it with ()", m);
     i64 mi = tk_method_pick(si, m, pd_na_at(pi));
     if (mi < 0) tk_pick_refuse(mi, m, tk_line, tk_file);
+    tk_check_member(mt_cls_at(mi), mt_vis_at(mi), m, tk_line, tk_file);
+    if (mt_static_at(mi)) tk_reject_static_member(si, m, tk_line, tk_file);
     return tk_pend_emit_method(pi, mi, pty, ppure);
 }
 
 i64 tk_pend_iface(i64 pi, i64 si, uptr pty, uptr ppure) {
     uptr m = pd_name_at(pi);
+    tk_check_type_use(si, tk_line, tk_file);     // an interface's methods are public
     if (tk_ifmeth_find(si, m) < 0)
         err_at2(tk_file, tk_line, tk_join("teko: unknown member of ", sr_name_at(si)), m);
     if (pd_form_at(pi) != TK_PCALL)
@@ -372,7 +377,11 @@ i64 tk_pend_emit(i64 pi, i64 si, uptr pty, uptr ppure) {
     uptr m = pd_name_at(pi);
     if (tk_is_iface(si)) return tk_pend_iface(pi, si, pty, ppure);
     i64 fi = tk_field_find(si, m);
-    if (fi >= 0) return tk_pend_field(pi, fi, pty, ppure);
+    if (fi >= 0) {
+        tk_check_member(tk_field_owner(fi), fd_vis_at(fi), m, tk_line, tk_file);
+        if (fd_sym_at(fi)) tk_reject_static_member(si, m, tk_line, tk_file);
+        return tk_pend_field(pi, fi, pty, ppure);
+    }
     if (tk_method_named_find(si, m) >= 0) return tk_pend_method(pi, si, pty, ppure);
     err_at2(tk_file, tk_line, tk_join("teko: unknown member of ", sr_name_at(si)), m);
     return 0;
@@ -389,7 +398,12 @@ i64 tk_pend_by_name(i64 pi, uptr pty, uptr ppure) {
     i64 fi = tk_field_by_name(m);
     if (fi == 0 - 2)
         err_at2(tk_file, tk_line, "teko: the type of the left side of `.` is not known here", m);
-    if (fi >= 0) return tk_pend_field(pi, fi, pty, ppure);
+    if (fi >= 0) {
+        i64 owner = tk_field_owner(fi);
+        tk_check_member(owner, fd_vis_at(fi), m, tk_line, tk_file);
+        if (fd_sym_at(fi)) tk_reject_static_member(owner, m, tk_line, tk_file);
+        return tk_pend_field(pi, fi, pty, ppure);
+    }
     i64 si = tk_ifmeth_by_name(m);
     if (si == 0 - 2)
         err_at2(tk_file, tk_line, "teko: the type of the left side of `.` is not known here", m);
@@ -399,6 +413,8 @@ i64 tk_pend_by_name(i64 pi, uptr pty, uptr ppure) {
         err_at2(tk_file, tk_line, "teko: the member is a method; call it with ()", m);
     i64 mi = tk_method_by_name(m, pd_na_at(pi));
     if (mi < 0) tk_loose_refuse(mi, m, tk_line, tk_file);
+    tk_check_member(mt_cls_at(mi), mt_vis_at(mi), m, tk_line, tk_file);
+    if (mt_static_at(mi)) tk_reject_static_member(mt_cls_at(mi), m, tk_line, tk_file);
     return tk_pend_emit_method(pi, mi, pty, ppure);
 }
 
