@@ -43,3 +43,11 @@ i64 tk_unary_rewrap(i64 n, i64 inner) {
     set_nd_a(u, below);
     return u;
 }
+
+// set while a recursive `tk_bracket` call (teko_params.mc) is resolving the
+// base of a `- ! ~` chain: the base is never itself the WRITE target the
+// source named -- `-arr[i]` is a value, never an lvalue, in C# as much as
+// here -- so every write form `[`'s own handlers read (`=`, `+=`/`-=`,
+// `++`/`--`) stays off for it, exactly as it already is for any other
+// non-bare-identifier receiver.
+i64 tk_bracket_no_write = 0;

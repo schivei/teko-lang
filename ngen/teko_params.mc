@@ -108,13 +108,6 @@ void set_vi_name_at(i64 i, uptr v)  { st64(vi_name + i * 8, v); }
 // but never builds and never lowers, so an index this pass does not rewrite is
 // impossible to miss.
 //
-// set while a recursive `tk_bracket` call is resolving the base of a `- ! ~`
-// chain below (teko_prefix.mc): the base is never itself the WRITE target the
-// source named -- `-arr[i]` is a value, never an lvalue, in C# as much as here
-// -- so the `nd_kind(left) == N_IDENT` global-array deferral stays off for it,
-// exactly as it already is for any other non-bare-identifier receiver.
-i64 tk_bracket_no_write = 0;
-
 i64 tk_bracket(i64 left) {
     i64 base = tk_unary_base(left);
     if (base != left) {
