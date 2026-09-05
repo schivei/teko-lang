@@ -23,8 +23,26 @@
 // member's name: a name that only ANOTHER type declares is not this receiver's
 // member, and calling it would be a call to a foreign type's method.
 
-// new Name  /  new Name()  -- the allocation is the generated constructor's, so
-// nothing here knows the type's size; `new` only names it.
+// the allocator `new Name(args)` calls: the one of the constructor the arguments
+// pick, or the plain `Name_new()` when the class declares none. A constructor is
+// not inherited, so only the class's own are candidates, and `new Name` with no
+// argument on a class that declares no constructor taking none is the zeroed
+// object every class written before constructors existed already got.
+uptr tk_new_pick(i64 si, uptr name, uptr pargs, i64 na, i64 line, uptr fl) {
+    i64 mi = tk_ctor_pick(si, na);
+    if (mi == 0 - 3)
+        err_at2(fl, line, "teko: ambiguous constructor; two of them take this many arguments", name);
+    if (mi < 0) {
+        if (na > 0) err_at2(fl, line, "teko: no constructor of this class takes these arguments", name);
+        return tk_ctor_name(name);
+    }
+    tk_check_member(mt_cls_at(mi), mt_vis_at(mi), name, line, fl);
+    st64(pargs, tk_fill_defaults(ld64(pargs), na, mt_np_at(mi), mt_nreq_at(mi), mt_d0_at(mi)));
+    return tk_new_sym(name, mt_sig_at(mi));
+}
+
+// new Name  /  new Name(args)  -- the allocation is the generated allocator's,
+// so nothing here knows the type's size; `new` only names it.
 i64 tk_new() {
     i64 line = p_line();
     uptr fl = p_file();
@@ -41,10 +59,13 @@ i64 tk_new() {
     if (sr_abst_at(si)) err_at2(fl, line, "teko: an abstract class is not instantiated", name);
     tk_check_type_use(si, line, fl);
     tk_close_open(si);                           // `new` is what the constructor is emitted for
-    if (p_accept(K_LPAR)) p_expect(K_RPAR, "expected ) after the type name");
+    i64 na = 0;
+    i64 args = 0;
+    if (p_id() == K_LPAR) args = tk_args(&na);
     tk_line = line;
     tk_file = fl;
-    i64 n = tk_call(tk_ctor_name(name), 0);
+    uptr fn = tk_new_pick(si, name, &args, na, line, fl);
+    i64 n = tk_call(fn, args);
     tk_xt_add(n, si, 0);                         // it allocates: never re-evaluated
     return n;
 }
@@ -87,7 +108,7 @@ i64 tk_field_use(i64 left, i64 fi, i64 line, uptr fl) {
         i64 v = parse_expr(0);
         tk_line = line;
         tk_file = fl;
-        return tk_call2(tk_stn(fty), addr, v);
+        return tk_os_mark(tk_call2(tk_stn(fty), addr, v), fty);
     }
     i64 r = tk_call(tk_ldn(fty), addr);
     tk_xt_put(r, tk_struct_by_ty(fty), fty, 1);  // struct: `a.b.c`; scalar: its own type
