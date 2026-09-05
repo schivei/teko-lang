@@ -857,6 +857,14 @@ direita, mesma precedência de `||` (`ngen/teko_ternary.mc`, novo).
   `break` — o loop do switch é de uma volta só, continuá-lo direto é sempre seguro. Um `switch` sem
   laço envolvente é interceptado com mensagem própria em vez do "continue out of range" cru do
   núcleo. Um `continue` dentro de um loop que o PRÓPRIO corpo do case abre passa normalmente.
+- **Errata (crumb "guarda do continue sem laço", 2026-09-05):** a checagem acima corria no PARSE
+  (`tk_realloop_depth`, só `while`/`do`/`for`) e dava falso positivo num `loop { }` cru envolvente
+  (o núcleo não avisa módulos de laço bare); movida para um `pass()` (`tk_switch_guard_pass`,
+  registrado logo após `tk_ternary_pass`, ANTES de `tk_rc_pass` — esse relocaliza o `continue` pra
+  um índice de nó novo ao envolvê-lo em release, plano §38 detalha) que enxerga TODO `N_LOOP`
+  igual, bare incluso; só olha um `continue` bare marcado (`sw_bare`, `teko_switch.mc` — nunca um
+  campo do próprio nó, que corromperia `--dump-ast`/`tk_clone`) contra o `N_LOOP` que o número
+  alcança, contando um `loop {}` de switch (`nd_val=TK_SWITCH_LOOP_MARK`) como inválido também.
 - **Expression** (`x switch { 1 => a, 2 or 3 => b, _ when c => d, _ => e }`, `syntax_infix("switch",
   TK_TERN_PREC)`, D228): NENHUMA máquina própria — constrói a MESMA cadeia de placeholders
   `tk_ternary(...)` que `teko_ternary.mc`'s `?:` constrói, dobrada da ÚLTIMA armação para trás; a

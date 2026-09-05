@@ -6,10 +6,13 @@
 // EXPRESSION as sugar over a ternary chain (an initializer, a `return`, one
 // arm's own value another switch expression, `or` between labels, `when`,
 // and object arms proving no extra allocation). `sum_skip_even_for`/
-// `sum_skip_even_while`, checked below, add `continue N` (mc 0.14.1): a
-// bare `continue` written directly in a `case` reaches past the switch's own
-// loop into the REAL one the source meant, inside a `for` and inside a
-// `while`.
+// `sum_skip_even_while`/`sum_skip_even_loop`, checked below, add `continue N`
+// (mc 0.14.1): a bare `continue` written directly in a `case` reaches past
+// the switch's own loop into the REAL one the source meant, inside a `for`,
+// a `while` and a bare `loop { }` (the fix this crumb makes: the mc core
+// gives no parse-time signal for the last one). `sum_once_per_i` nests a
+// bare `loop { }` inside a `for`, with the switch inside the `loop`, proving
+// the `continue` still reaches only the innermost of the two.
 //
 // expect-exit: 42
 
@@ -143,6 +146,50 @@ i64 sum_skip_even_while(i64 n) {
     return s;
 }
 
+// the same `continue` in a `case`, inside a BARE `loop { }`: the mc core
+// gives a module no parse-time signal for one, only for `while`/`do`/`for`
+// (teko_switch.mc's own header), so this is what proves the tree-walking
+// guard sees it as a real loop just the same.
+i64 sum_skip_even_loop(i64 n) {
+    i64 s = 0;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i = i + 1;
+        switch (i % 2) {
+            case 0:
+                continue;
+            default:
+                break;
+        }
+        s = s + i;
+    }
+    return s;
+}
+
+// a bare `loop { }` inside a `for`, with the switch inside the `loop`: the
+// `continue` reaches only the INNERMOST loop -- the bare one, not the `for`
+// -- so each outer `i` adds itself exactly once, on the inner loop's own odd
+// pass.
+i64 sum_once_per_i(i64 n) {
+    i64 s = 0;
+    for (i64 i = 1; i <= n; i++) {
+        i64 j = 0;
+        loop {
+            if (j >= 2) break;
+            j = j + 1;
+            switch (j % 2) {
+                case 0:
+                    continue;
+                default:
+                    break;
+            }
+            s = s + i;
+        }
+    }
+    return s;
+}
+
 i64 main() {
     if (classify(1) != 10) return 1;
     if (classify(2) != 20) return 2;
@@ -190,6 +237,8 @@ i64 main() {
 
     if (sum_skip_even_for(6) != 9) return 27;    // 1 + 3 + 5
     if (sum_skip_even_while(6) != 9) return 28;  // 1 + 3 + 5
+    if (sum_skip_even_loop(6) != 9) return 29;   // 1 + 3 + 5
+    if (sum_once_per_i(6) != 21) return 30;      // 1 + 2 + 3 + 4 + 5 + 6
 
     return 42;
 }
