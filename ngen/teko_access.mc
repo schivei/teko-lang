@@ -237,7 +237,7 @@ i64 tk_static_use(i64 fi, i64 line, uptr fl) {
         i64 v = parse_expr(0);
         tk_line = line;
         tk_file = fl;
-        return tk_call2(tk_stn(fty), addr, v);
+        return tk_os_mark(tk_call2(tk_stn(fty), addr, v), fty);
     }
     i64 r = tk_call(tk_ldn(fty), addr);
     tk_xt_put(r, tk_struct_by_ty(fty), fty, 1);
