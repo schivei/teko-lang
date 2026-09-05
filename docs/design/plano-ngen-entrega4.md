@@ -781,3 +781,82 @@ Fixture nova `surface_default_free.tk` (1 e 2 defaults, chamada com 0/1/2/3 argu
 sobrecarga sem-default vencendo, chamada dentro do corpo de um método de classe). Gate:
 24/24 em exit esperado; AST das 23 fixtures anteriores byte-idêntica à base `2af755e5`;
 `mc limits` verdict `ok`.
+
+## 29. `while`/`do`/`for` landados — rebaixamentos, rewrite de saltos, tokens (2026-09-05)
+
+**Rebaixamentos** (`ngen/teko_loop.mc`, novo), literalmente os do crumb:
+`while (c) stmt` → `loop { if (!(c)) break; stmt }`; `do stmt while (c);` →
+`loop { loop { stmt break; } if (!(c)) break; }`; `for (init;cond;step) stmt` →
+`{ init loop { if (!(cond)) break; loop { stmt break; } step; } }`. Os três nascem já em
+`N_LOOP`/`N_IF`/`N_BREAK`/`N_BLOCK` do núcleo — nenhum pass a mais precisa saber que veio de
+`while`/`for`, o `tk_rc_pass`/`tk_ops_pass`/`tk_typeof_pass` caminham a árvore igual à de um
+`loop`/`if` escrito à mão.
+
+**Rewrite de saltos** (`tk_loop_rewrite_stmt`, chamado só por `do`/`for` — `while` não precisa,
+seu corpo já fica na profundidade que o programador escreveu): caminha o corpo ANTES de embrulhar,
+contando `N_LOOP` do PRÓPRIO corpo entre ele e cada `break`/`continue`. Regra única, testada e
+comprovada por indução na composição aninhada: `break k` com `k > profundidade` vira `break k+1`
+(precisa ultrapassar o embrulho que este passe está prestes a acrescentar); `k <= profundidade`
+fica intocado (já mira um loop que o PRÓPRIO corpo abriu, business as usual); `continue` na
+profundidade 0 vira `break 1` (cai onde o `break;` do embrulho cairia — a condição/o passo);
+`continue` em profundidade > 0 fica intocado. A dúvida que mais preocupou ao desenhar foi a
+COMPOSIÇÃO: um `for` dentro de outro `for`, com `break 2` do usuário mirando os DOIS. Passo a
+passo (fixture `surface_loops.tk`, bloco "nested"): o `for` interno aplica sua própria regra
+primeiro (na sua própria chamada de `tk_for()`, que termina ANTES do `for` externo processar o
+corpo dele), levando `break 2` a `break 3`; quando o `for` externo caminha ESSA árvore já
+reescrita, ele vê o `break 3` na profundidade 2 (dois `N_LOOP` do `for` interno entre o topo do
+corpo externo e o break) — `3 > 2` → vira `break 4`. `break 4` sai dos quatro `N_LOOP` nativos (os
+dois pares um-tiro-mais-condição de cada `for`), que é exatamente sair dos dois `for`s por
+completo, sem re-executar nada. A prova por `break N` (não sequencial: `language.md` §4, o
+exemplo de dois `loop`s aninhados salta os DOIS de uma vez para `return s`, não um de cada vez) é
+o que garante a composição: um `break` que o `for` interno já corrigiu para escapar DELE por
+inteiro fica, para o `for` externo, "um break que já ultrapassa tudo que EU abri" — e ganha só
+mais um `+1`, nunca dois. Confirmado rodando a fixture: `innerHits=1`, `outerHits=0` (o `for`
+externo nunca chega a incrementar `outerHits`, prova de que o `break` saiu por completo antes da
+1ª iteração terminar).
+
+**Tokens de `++`/`--`/`+=`/`-=` — opção escolhida e por quê.** O crumb pedia (A) `syntax_infix`
+devolvendo o nó de atribuição direto, ou (B) empurrar o `#token`+`#rule` do próprio
+`lib/prelude.mc` por `p_push_source`. Nenhuma das duas é exatamente como o crumb descreveu, e o
+motivo de desviar de cada uma é a razão de escolher a combinação final:
+- **(A) puro não funciona:** `syntax_infix` roda em POSIÇÃO DE EXPRESSÃO — o nó que o handler
+  devolve tem que ser uma EXPRESSÃO válida, e `N_ASSIGN` só é tratado no dispatch de STATEMENT
+  (`gen_walk.mc`/`gen_resolve.mc`, ao lado de `N_LOOP`/`N_IF`/`N_BREAK`) — nunca no avaliador de
+  expressão. Devolver um `N_ASSIGN` ali quebraria a passagem por `N_EXPRSTMT`. A ÚNICA forma de
+  fazer (A) funcionar seria sintetizar `st64(&x, ld64(&x)+e)` (ponteiro cru), o que É uma
+  expressão válida — mas perde a semântica: bypassa `operator+` de uma classe (C5b) e o RC de `x`
+  (`teko_rc.mc` só reconhece `N_ASSIGN`, não uma chamada a `st64`), regredindo exatamente a
+  garantia que D197 pede para primitivas de bypass. Registrar aqui por que (A) foi descartada, não
+  só que foi.
+- **(B) puro (`#token` PRÓPRIO na string empurrada) é redundante:** `word_add("+=")` (a MESMA
+  chamada que `syntax`/`syntax_stmt`/`syntax_infix` fazem por baixo) já registra o token — chamar
+  de novo dentro de um `#token` na string empurrada seria um segundo registro do mesmo lexema
+  (inofensivo, `tok_add` deduplica por texto, mas sem propósito). E `word_add` sozinho NÃO chega
+  na forma solta `x += e;`: passado o `ident = expr` do núcleo, o único fallback que
+  `parse_stmt_core` tenta é `rule_find` no PRÓXIMO token — que só um `#rule` de verdade povoa.
+- **A combinação landada:** `word_add` registra os quatro tokens (sem `#token`), e SÓ o texto das
+  quatro linhas `#rule stmt: ...` de `lib/prelude.mc` é empurrado por `p_push_source` a partir de
+  `tk_loop_init()` (chamado de `user_init()`). Isso funciona porque `drv_parse` (`driver.mc`) chama
+  `lex_init(entry)` → `user_init()` → `parse_unit()`, NESSA ORDEM — o push acontece DEPOIS do
+  arquivo de entrada já estar empilhado mas ANTES do primeiro `next()` de `parse_unit()`, então o
+  texto empurrado é o PRIMEIRO a ser lido, processado como `#rule`/diretiva, e o lexer volta
+  sozinho ao arquivo de entrada ao esgotar (a mesma semântica de `#include` que a doc de
+  `p_push_source` promete). Medido: as quatro linhas landam como `#rule`s de verdade (confirmado
+  pelo próprio `x += 3;`/`z++;`/`z--;`/`z -= 2;` da fixture rebaixando para `x = x + e;` e
+  passando pelo `operator+`/RC genéricos, não por um caminho especial). O passo de `for` (`i++`
+  etc.) NÃO passa pelo `#rule` — lê os mesmos tokens diretamente (não há `;` de fechamento ali
+  para o `#rule` casar) e constrói o `N_ASSIGN` à mão, reaproveitando os MESMOS `tk_plus_tok`/
+  `tk_minus_tok` que `word_add` já expôs.
+
+Gate: `rm -rf ngen/build` + build do zero limpo; laço `--entry-only` 25/25 em exit esperado
+(24 antigas + `surface_loops.tk` nova); AST das 24 fixtures anteriores **byte-idêntica**
+(`diff -rq` vazio); `mc limits ngen` verdict `ok` (o `ld: unknown file type` que o mesmo comando
+imprime depois é pré-existente — o `[target]` de `ngen/mc.toml` mira linux/x86_64 e o link do
+`.o` ELF falha em QUALQUER host macOS, com ou sem este crumb; confirmado reproduzindo no commit
+base antes da mudança). Cinco probes de recusa fora de `ngen/tests/`: `while` sem parênteses →
+`expected ( after while`; `for` com um `;` faltando → `expected ; after for condition`;
+`i64 while = 1;` → `name reserved by a syntax/type_alias registration: while`; `break 3` além de
+um único `for` → `break out of range` (checagem do NÚCLEO, na compilação completa — não aparece
+em `--dump-ast`, só no passe de resolve/codegen); variável do `init` usada depois do `for` →
+`unknown name` (mesma checagem de escopo léxico que qualquer bloco já tem, porque o `for` é um
+`N_BLOCK` de verdade — nada de tabela de escopo própria precisou ser ensinada).
