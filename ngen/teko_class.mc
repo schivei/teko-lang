@@ -506,10 +506,25 @@ i64 tk_vt_slots(i64 ci, uptr vt) {
     return stmts;
 }
 
-// the function of `ci` answering the interface method `k`: the class's method of
+// the member the class never declared, named the way the source named it: an
+// accessor is one half of a PROPERTY, so the message says which half of which
+// property is missing rather than the `get_X` nothing was written as
+void tk_conform_missing(i64 k, uptr iname, uptr m) {
+    if (im_prop_at(k) == 0)
+        err_at2(tk_file, tk_line, tk_join3("teko: method of `", iname, "` not implemented"), m);
+    uptr half = "teko: the `get` of a property of `";
+    if (im_prop_at(k) == 2) half = "teko: the `set` of a property of `";
+    err_at2(tk_file, tk_line, tk_join3(half, iname, "` not implemented"),
+            xstrdup(m + 4, cstrlen(m) - 4));
+}
+
+// the function of `ci` answering the interface member `k`: the class's method of
 // the same NAME and the same PARAMETER TYPES, so a class that overloads the name
-// still publishes the one the interface asked for. This is where "interface
-// method not implemented" comes from, and the three signature checks with it.
+// still publishes the one the interface asked for. A member the interface gave a
+// DEFAULT BODY to answers with the interface's own symbol when the class says
+// nothing about it, and a `static abstract` one has to be answered by a static
+// method of the type. This is where "interface method not implemented" comes
+// from, and the signature checks with it.
 uptr tk_conform(i64 ci, i64 k, uptr iname) {
     uptr m = im_name_at(k);
     i64 mi = tk_method_sig_find(ci, m, im_sig_at(k));
@@ -518,13 +533,15 @@ uptr tk_conform(i64 ci, i64 k, uptr iname) {
             err_at2(tk_file, tk_line, "teko: method with a return type different from the interface", m);
         if (mt_vis_at(mi) != TK_VPUBLIC)
             err_at2(tk_file, tk_line, "teko: the method of an interface is implemented by a public one", m);
-        if (mt_static_at(mi))
+        if (mt_static_at(mi) && !im_static_at(k))
             err_at2(tk_file, tk_line, "teko: a static method implements no interface", m);
+        if (!mt_static_at(mi) && im_static_at(k))
+            err_at2(tk_file, tk_line, "teko: the interface declares the member `static abstract`", m);
         return mt_fn_at(mi);
     }
+    if (im_def_at(k)) return im_def_at(k);       // the interface's own body answers for it
     mi = tk_method_named_find(ci, m);            // the name is there: say what differs
-    if (mi < 0)
-        err_at2(tk_file, tk_line, tk_join3("teko: method of `", iname, "` not implemented"), m);
+    if (mi < 0) tk_conform_missing(k, iname, m);
     if (mt_np_at(mi) != im_np_at(k))
         err_at2(tk_file, tk_line, "teko: method with an arity different from the interface", m);
     if (mt_ret_at(mi) != im_ret_at(k))
@@ -535,18 +552,27 @@ uptr tk_conform(i64 ci, i64 k, uptr iname) {
 
 // u8 class_iface_mt[n * 8], and the stores that fill it: the class's own
 // implementation of each method, in the interface's declaration order, so the
-// slot a dispatch indexes means the same thing for every conforming class
+// slot a dispatch indexes means the same thing for every conforming class. A
+// `static abstract` member is checked like the others and takes no slot: it has
+// no receiver, so there is nothing for a table of this shape to hold.
 i64 tk_mt_fill(i64 ci, uptr cls, i64 fi) {
     uptr iname = sr_name_at(fi);
     uptr mt = tk_mt_name(cls, iname);
-    i64 n = sr_mn_at(fi);
-    top_add(tk_glb(TY_U8, mt, n * 8));
+    i64 bytes = tk_ifinst(fi) * 8;
+    if (bytes == 0) bytes = 8;
+    top_add(tk_glb(TY_U8, mt, bytes));
     i64 stmts = 0;
+    i64 slot = 0;
     i64 j = 0;
     loop {
-        if (j >= n) break;
-        i64 dst = tk_bin(K_ADD, tk_id(mt), tk_int(j * 8));
-        stmts = list_append(stmts, tk_stmt(tk_call2("st64", dst, tk_addr(tk_conform(ci, sr_m0_at(fi) + j, iname)))));
+        if (j >= sr_mn_at(fi)) break;
+        i64 k = sr_m0_at(fi) + j;
+        uptr fn = tk_conform(ci, k, iname);
+        if (!im_static_at(k)) {
+            i64 dst = tk_bin(K_ADD, tk_id(mt), tk_int(slot * 8));
+            stmts = list_append(stmts, tk_stmt(tk_call2("st64", dst, tk_addr(fn))));
+            slot = slot + 1;
+        }
         j = j + 1;
     }
     return stmts;

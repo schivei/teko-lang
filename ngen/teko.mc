@@ -63,6 +63,7 @@
 //   T Name { get; set; }  /  { get => e; set => s; }  /  { get { } }
 //   `value` inside a `set`, visibility per accessor, virtual/override/static
 //   p.Name, p.Name = e, Name (inside the type), Type.Name for a static one
+//   interface: T Name { get; set; }, a method WITH a body, `static abstract`
 //
 // Everything else in docs/design/port-teko-mc.md §3 (types/classes,
 // generics, error-union, `service`/DI, concurrency, the

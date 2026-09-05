@@ -373,9 +373,27 @@ i64 tk_pend_method(i64 pi, i64 si, uptr pty, uptr ppure) {
     return tk_pend_emit_method(pi, mi, pty, ppure);
 }
 
+// `s.X` / `s.X = e` on an interface-typed receiver the oracle answered for
+i64 tk_pend_iface_prop(i64 pi, i64 si, uptr pty, uptr ppure) {
+    uptr m = pd_name_at(pi);
+    if (pd_form_at(pi) == TK_PCALL)
+        err_at2(tk_file, tk_line, "teko: the member is a property; it is not called", m);
+    i64 wantset = 0;
+    i64 args = 0;
+    if (pd_form_at(pi) == TK_PSTORE) {
+        wantset = 1;
+        args = pd_arg_at(pi);
+    }
+    i64 j = tk_ifprop_pick(si, m, wantset, tk_line, tk_file);
+    st64(pty, im_ret_at(sr_m0_at(si) + j));
+    st64(ppure, 0);
+    return tk_itab_emit(pd_recv_at(pi), si, j, args, m, tk_line, tk_file);
+}
+
 i64 tk_pend_iface(i64 pi, i64 si, uptr pty, uptr ppure) {
     uptr m = pd_name_at(pi);
-    tk_check_type_use(si, tk_line, tk_file);     // an interface's methods are public
+    tk_check_type_use(si, tk_line, tk_file);     // an interface's members are public
+    if (tk_prop_find(si, m) >= 0) return tk_pend_iface_prop(pi, si, pty, ppure);
     if (tk_ifmeth_find(si, m) < 0)
         err_at2(tk_file, tk_line, tk_join("teko: unknown member of ", sr_name_at(si)), m);
     if (pd_form_at(pi) != TK_PCALL)
@@ -385,15 +403,9 @@ i64 tk_pend_iface(i64 pi, i64 si, uptr pty, uptr ppure) {
     if (j < 0) tk_pick_refuse(j, m, tk_line, tk_file);
     i64 k = sr_m0_at(si) + j;
     i64 args = tk_fill_defaults(pd_arg_at(pi), na, im_np_at(k), im_nreq_at(k), im_d0_at(k));
-    i64 left = pd_recv_at(pi);
-    if (!tk_pure(left))
-        err_at2(tk_file, tk_line, "teko: an interface call needs a name or a field on the left", m);
     st64(pty, im_ret_at(k));
     st64(ppure, 0);
-    i64 vt = tk_call("ld64", tk_clone(left));
-    i64 mt = tk_call2("tk_itab", vt, tk_int(si));
-    i64 fnp = tk_call("ld64", tk_bin(K_ADD, mt, tk_int(j * 8)));
-    return tk_call("callp", list_append(list_append(fnp, left), args));
+    return tk_itab_emit(pd_recv_at(pi), si, j, args, m, tk_line, tk_file);
 }
 
 i64 tk_pend_emit(i64 pi, i64 si, uptr pty, uptr ppure) {
@@ -431,7 +443,11 @@ i64 tk_pend_by_name(i64 pi, uptr pty, uptr ppure) {
     i64 pj = tk_prop_by_name(m);
     if (pj == 0 - 2)
         err_at2(tk_file, tk_line, "teko: the type of the left side of `.` is not known here", m);
-    if (pj >= 0) return tk_pend_prop(pi, pr_cls_at(pj), pty, ppure);
+    if (pj >= 0) {
+        i64 owner = pr_cls_at(pj);
+        if (tk_is_iface(owner)) return tk_pend_iface_prop(pi, owner, pty, ppure);
+        return tk_pend_prop(pi, owner, pty, ppure);
+    }
     i64 si = tk_ifmeth_by_name(m);
     if (si == 0 - 2)
         err_at2(tk_file, tk_line, "teko: the type of the left side of `.` is not known here", m);

@@ -176,7 +176,10 @@ void tk_this_enter_fn(uptr fn) {
     tk_pass_class = 0 - 1;
     tk_pass_static = 0;
     tk_pass_acc = 0;
-    if (mi < 0) return;
+    if (mi < 0) {
+        tk_pass_class = tk_iface_of_def(fn);     // an interface's own default body
+        return;
+    }
     tk_pass_class = mt_cls_at(mi);
     tk_pass_static = mt_static_at(mi);
     tk_pass_acc = mt_prop_at(mi);
@@ -339,6 +342,48 @@ void tk_this_call(i64 n) {
     tk_xt_put(n, tk_struct_by_ty(mt_ret_at(mi)), mt_ret_at(mi), 0);
 }
 
+// ---- inside an interface's own default body ----
+// `this` there is the IMPLEMENTING object, seen as the interface: the members a
+// name may reach are the interface's, and each of them dispatches through the
+// itab, so the class's own implementation answers and a default that calls
+// another member is not a call to itself.
+void tk_this_iface_call(i64 n) {
+    uptr m = nd_name(n);
+    if (tk_ifmeth_find(tk_pass_class, m) < 0) return;
+    tk_this_at(n);
+    i64 na = tk_arg_count(nd_a(n));
+    i64 j = tk_ifmeth_pick(tk_pass_class, m, na);
+    if (j < 0) tk_pick_refuse(j, m, tk_line, tk_file);
+    i64 k = sr_m0_at(tk_pass_class) + j;
+    i64 args = tk_fill_defaults(nd_a(n), na, im_np_at(k), im_nreq_at(k), im_d0_at(k));
+    tk_node_replace(n, tk_itab_emit(tk_this_recv(), tk_pass_class, j, args, m, tk_line, tk_file));
+    tk_xt_put(n, tk_struct_by_ty(im_ret_at(k)), im_ret_at(k), 0);
+}
+
+void tk_this_iface_prop(i64 n, i64 wantset) {
+    uptr m = nd_name(n);
+    if (tk_ty_scope_find(m) >= 0) return;
+    if (tk_prop_find(tk_pass_class, m) < 0) return;
+    tk_this_at(n);
+    i64 args = 0;
+    if (wantset) args = nd_a(n);
+    i64 j = tk_ifprop_pick(tk_pass_class, m, wantset, tk_line, tk_file);
+    i64 r = tk_itab_emit(tk_this_recv(), tk_pass_class, j, args, m, tk_line, tk_file);
+    if (wantset) {
+        tk_node_replace(n, tk_stmt(r));
+        return;
+    }
+    i64 rty = im_ret_at(sr_m0_at(tk_pass_class) + j);
+    tk_node_replace(n, r);
+    tk_xt_put(n, tk_struct_by_ty(rty), rty, 0);
+}
+
+void tk_this_iface_fix(i64 n, i64 k) {
+    if (k == N_IDENT)  { tk_this_iface_prop(n, 0); return; }
+    if (k == N_ASSIGN) { tk_this_iface_prop(n, 1); return; }
+    if (k == N_CALL)     tk_this_iface_call(n);
+}
+
 // the three shapes an unqualified member takes, asked of every node of a
 // method's body -- and of nothing else, because outside a method there is no
 // `this` for a name to belong to
@@ -346,6 +391,10 @@ void tk_this_fix(i64 n) {
     if (n == 0) return;
     if (tk_pass_class < 0) return;
     i64 k = nd_kind(n);
+    if (tk_is_iface(tk_pass_class)) {
+        tk_this_iface_fix(n, k);
+        return;
+    }
     if (k == N_IDENT)  { tk_this_ident(n);  return; }
     if (k == N_ASSIGN) { tk_this_assign(n); return; }
     if (k == N_CALL)     tk_this_call(n);

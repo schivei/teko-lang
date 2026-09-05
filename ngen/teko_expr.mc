@@ -156,11 +156,8 @@ i64 tk_call_method(i64 left, i64 si, uptr m, i64 line, uptr fl) {
 
 // `s.m(...)` where `s` is of INTERFACE type: the class is only known at run
 // time, so the method table comes from the object's own itab (`tk_itab`,
-// ngen/lib/rt.mc) and the call is indirect. The receiver is read twice -- once
-// for the table, once as the receiver -- so, as with a virtual call, it is only
-// accepted where re-evaluating it is free.
+// ngen/lib/rt.mc) and the call is indirect (teko_iface.mc's tk_itab_emit).
 i64 tk_iface_call(i64 left, i64 si, uptr m, i64 line, uptr fl) {
-    tk_check_type_use(si, line, fl);             // an interface's methods are public
     if (tk_ifmeth_find(si, m) < 0)
         err_at2(fl, line, tk_join("teko: unknown member of ", sr_name_at(si)), m);
     i64 na = 0;
@@ -171,15 +168,34 @@ i64 tk_iface_call(i64 left, i64 si, uptr m, i64 line, uptr fl) {
     tk_line = line;
     tk_file = fl;
     args = tk_fill_defaults(args, na, im_np_at(k), im_nreq_at(k), im_d0_at(k));
-    if (!tk_pure(left))
-        err_at2(fl, line, "teko: an interface call needs a name or a field on the left", m);
-    i64 vt = tk_call("ld64", tk_clone(left));
-    i64 mt = tk_call2("tk_itab", vt, tk_int(si));
-    i64 fnp = tk_call("ld64", tk_bin(K_ADD, mt, tk_int(j * 8)));
-    i64 r = tk_call("callp", list_append(list_append(fnp, left), args));
+    i64 r = tk_itab_emit(left, si, j, args, m, line, fl);
     i64 rs = tk_struct_by_ty(im_ret_at(k));
     if (rs >= 0) tk_xt_add(r, rs, 0);
     return r;
+}
+
+// `s.X` / `s.X = e` where `s` is of interface type: the accessor the interface
+// declared, reached through the same itab the methods are reached through
+i64 tk_iface_prop_use(i64 left, i64 si, uptr m, i64 line, uptr fl) {
+    if (p_id() == K_LPAR) err_at2(fl, line, "teko: the member is a property; it is not called", m);
+    i64 wantset = 0;
+    i64 args = 0;
+    if (p_accept(K_ASSIGN)) {
+        wantset = 1;
+        args = parse_expr(0);
+    }
+    i64 j = tk_ifprop_pick(si, m, wantset, line, fl);
+    i64 r = tk_itab_emit(left, si, j, args, m, line, fl);
+    i64 rs = tk_struct_by_ty(im_ret_at(sr_m0_at(si) + j));
+    if (rs >= 0) tk_xt_add(r, rs, 0);
+    return r;
+}
+
+// the member of a receiver of interface type: a property of it, or a method
+i64 tk_iface_member_of(i64 left, i64 si, uptr m, i64 line, uptr fl) {
+    tk_check_type_use(si, line, fl);             // an interface's members are public
+    if (tk_prop_find(si, m) >= 0) return tk_iface_prop_use(left, si, m, line, fl);
+    return tk_iface_call(left, si, m, line, fl);
 }
 
 // a static member answers to its TYPE and to nothing else: an object of the type
@@ -192,7 +208,7 @@ void tk_reject_static_member(i64 si, uptr m, i64 line, uptr fl) {
 // the member of a receiver whose type IS known: a field, then a property, then
 // a method
 i64 tk_member_of(i64 left, i64 si, uptr m, i64 line, uptr fl) {
-    if (tk_is_iface(si)) return tk_iface_call(left, si, m, line, fl);
+    if (tk_is_iface(si)) return tk_iface_member_of(left, si, m, line, fl);
     i64 fi = tk_field_find(si, m);
     if (fi >= 0) {
         tk_check_member(tk_field_owner(fi), fd_vis_at(fi), m, line, fl);
