@@ -62,25 +62,31 @@ jobs:
           # `[linker]` the built-in `macho-exe` backend writes and signs the
           # executable itself (docs/guide/50-cross-compile.md), which is the
           # only shape that works there.
+          # Since mc 0.12.0 (M42) the Linux executable slot is filled: `mc build`
+          # writes a dynamic ELF itself, no `[linker]` and no sysroot. The loader
+          # and soname default to musl; the runners are glibc, so `[target]`
+          # names the glibc pair (mc docs/build.md § [target].interp/.libc) --
+          # a musl-interp binary on ubuntu is `not found` ("mc: cannot run").
           - runner: ubuntu-latest
             os: linux
             arch: x86_64
             asset: x86_64
             exe: ''
-            config: |
-              [linker]
-              cmd  = "cc"
-              args = ["-o", "{out}", "{obj}"]
+            target_tail: |
+              interp = "/lib64/ld-linux-x86-64.so.2"
+              libc   = "libc.so.6"
+            config: ''
           - runner: ubuntu-24.04-arm
             os: linux
             arch: aarch64
             asset: arm64
             exe: ''
-            config: |
-              [linker]
-              cmd  = "cc"
-              args = ["-o", "{out}", "{obj}"]
+            target_tail: |
+              interp = "/lib/ld-linux-aarch64.so.1"
+              libc   = "libc.so.6"
+            config: ''
           - runner: macos-latest
+            target_tail: ''
             os: macos
             arch: aarch64
             asset: arm64
@@ -93,6 +99,7 @@ jobs:
           # `-stack:` is there because the default reserve is 1 MiB on Windows
           # against 8 MiB elsewhere, and the compiler is written for the latter.
           - runner: windows-latest
+            target_tail: ''
             os: windows
             arch: x86_64
             asset: x86_64
@@ -107,6 +114,7 @@ jobs:
                       "-stack:8388608", "-out:{out}", "{obj}",
                       "{sysroot}/winstart.obj", "{sysroot}/mcrt.obj", "{sysroot}/kernel32.lib"]
           - runner: windows-11-arm
+            target_tail: ''
             os: windows
             arch: aarch64
             asset: arm64
@@ -125,6 +133,7 @@ jobs:
       MC_ARCH: ${{ matrix.arch }}
       MC_ASSET: ${{ matrix.asset }}
       MC_CONFIG_TAIL: ${{ matrix.config }}
+      MC_TARGET_TAIL: ${{ matrix.target_tail }}
       EXE: ${{ matrix.exe }}
       # MSYS rewrites an argument that looks like a path, and every dash-form
       # lld-link option does (`schivei/mc` docs/guide/95-windows-host.md § 4).
@@ -308,6 +317,7 @@ jobs:
             | sed -e "s#^os   = .*#os   = \"$MC_OS\"#" \
                   -e "s#^arch = .*#arch = \"$MC_ARCH\"#" \
                   -e "s#^out   = .*#out   = \"build/teko-hello$EXE\"#" \
+            | awk -v tail="$MC_TARGET_TAIL" '{ print } /^arch = / && tail != "" { printf "%s", tail }' \
             >ngen/mc.ci.toml
           printf '\n%s\n' "$MC_CONFIG_TAIL" >>ngen/mc.ci.toml
           cat ngen/mc.ci.toml

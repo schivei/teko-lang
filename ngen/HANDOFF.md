@@ -432,6 +432,14 @@ construtor/destrutor (D218) → C5b operadores estáticos (D218; C5 landado est�
     não é lido pela varredura (só espaço em branco), e o caso cai na recusa clara
     do `parse_var`, nunca em silêncio.
 
+14. **mc ≥ 0.12.0 (M42): o `mc build` Linux escreve ELF dinâmico SEM `[linker]`, com loader
+    e soname **musl por default**.** Num runner glibc (ubuntu) o compilador ensinado sai com
+    `interp` de musl e o `mc build` falha em `mc: cannot run: ngen/build/mc-teko`. As pernas
+    Linux do CI nomeiam o par glibc no `[target]` (`interp = "/lib64/ld-linux-x86-64.so.2"` ou
+    `"/lib/ld-linux-aarch64.so.1"`, `libc = "libc.so.6"` — mc `docs/build.md` §`[target]`) e
+    não têm mais `[linker]`. `ngen/mc.toml` versionado (linux/x86_64 + `[linker] cc`) segue
+    intacto; o CI deriva o config por perna.
+
 ## 6. Comunicação — coordenador remoto + sessão local
 
 **Sessão remota coordenadora**: guarda o histórico completo da virada (por que o
