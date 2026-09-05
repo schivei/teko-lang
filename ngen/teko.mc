@@ -150,6 +150,16 @@
 //   c1 ? a : c2 ? b : d                 right-associative, lazy either way
 //   while (c ? 1 : 0) { ... }           the hoist lands inside the loop's own body
 //
+// What entrega 5's `switch` crumb adds -- both of C#'s own spellings
+// (D222/D228, teko_switch.mc): the statement rebaixed at parse time to a
+// one-lap `loop`/`if` chain (teko_loop.mc's own shape), and the expression as
+// sugar over the ternary's own placeholder chain (D228, no machinery of its
+// own):
+//   switch (x) { case 1: ... break; case 2: case 3: ... break; default: ... }  syntax_stmt
+//   case N when cond:                   a guarded label; `default` moves last
+//   break; / break N;                    the switch counts as ONE loop level
+//   x switch { 1 => a, 2 or 3 => b, _ when c => d, _ => e }                    syntax_infix
+//
 // Everything else in docs/design/port-teko-mc.md §3 (types/classes,
 // generics, error-union, `service`/DI, concurrency, the
 // rest of the stdlib) is a later entrega and is not stubbed here: it does
@@ -178,6 +188,7 @@
 #include "teko_ops.mc"
 #include "teko_rc.mc"
 #include "teko_loop.mc"
+#include "teko_switch.mc"
 
 void user_init() {
     tk_types_init();
@@ -204,9 +215,10 @@ void user_init() {
     syntax_stmt("const", &tk_stop_const);
     syntax_stmt("match", &tk_stop_match);
     syntax_stmt("when",  &tk_stop_when);
-    syntax_stmt("while", &tk_while);
-    syntax_stmt("do",    &tk_do);
-    syntax_stmt("for",   &tk_for);
+    syntax_stmt("while",  &tk_while);
+    syntax_stmt("do",     &tk_do);
+    syntax_stmt("for",    &tk_for);
+    syntax_stmt("switch", &tk_switch_stmt);
 
     syntax("struct", &tk_struct);
 
@@ -218,6 +230,7 @@ void user_init() {
     syntax_infix(".", 12, &tk_dot);
     syntax_infix("[", 12, &tk_bracket);
     syntax_infix("?", TK_TERN_PREC, &tk_tern_infix);
+    syntax_infix("switch", TK_TERN_PREC, &tk_switch_infix);
 
     on_stmt(&tk_on_stmt);
 

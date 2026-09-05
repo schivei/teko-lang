@@ -110,6 +110,7 @@ void tk_tern_at(i64 n) {
 }
 
 void tk_tern_scan(i64 n, uptr out);
+void tk_tern_hoist_var(i64 n, uptr out);
 void tk_tern_stmt(i64 n, uptr pre);
 i64  tk_tern_stmts(i64 head);
 void tk_tern_branch(i64 n);
@@ -167,6 +168,8 @@ void tk_tern_scan(i64 n, uptr out) {
         if (n == 0) break;
         if (nd_kind(n) == N_CALL && str_eq(nd_name(n), "tk_ternary")) {
             tk_tern_lower(n, out);
+        } else if (nd_kind(n) == N_VAR) {
+            tk_tern_hoist_var(n, out);
         } else {
             tk_tern_scan(nd_a(n), out);
             tk_tern_scan(nd_b(n), out);
@@ -175,6 +178,27 @@ void tk_tern_scan(i64 n, uptr out) {
         }
         n = nd_next(n);
     }
+}
+
+// a real `N_VAR` node another module (teko_switch.mc's own operand hoist,
+// D222) embeds mid-expression as a placeholder: an `N_VAR` never legitimately
+// sits inside an expression on its own, so finding one here always means a
+// value has to be read exactly once before the ternary chain around it
+// starts testing conditions. Hoisted into `*out` -- unconditionally, same as
+// a ternary's own `c` -- and the node itself is overwritten in place by a
+// bare read of the name it declares, `tk_tern_lower`'s own "build fresh,
+// rewrite the original in place" shape.
+void tk_tern_hoist_var(i64 n, uptr out) {
+    uptr nm = nd_name(n);
+    i64 ty = nd_type(n);
+    i64 init = nd_a(n);
+    tk_tern_scan(init, out);
+    tk_ty_scope_add(nm, ty);
+    tk_tern_at(n);
+    st64(out, list_append(ld64(out), tk_var(ty, nm, init)));
+    i64 keep = nd_next(n);
+    node_assign(n, tk_id(nm));
+    set_nd_next(n, keep);
 }
 
 // the single statement an `if`/`loop` may carry instead of a block: fenced

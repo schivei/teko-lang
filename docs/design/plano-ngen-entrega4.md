@@ -1415,3 +1415,41 @@ a name" -- o resultado do ternário nunca é um `N_IDENT`).
 hoistada para ANTES do statement que os continha -- um `f(x++, c ? a : b)` teria a chamada rodando
 depois do hoist no MESMO statement (sem operador `++` de efeito em posição de expressão hoje, o
 risco é teórico, registrado por completude).
+
+## 38. `switch` landado -- statement como loop de uma volta, expression como açúcar sobre ternário (D222/D228, 2026-09-05)
+
+D222 (statement + expression, `break N` atravessa, `when` = guarda) e D228 (expression = açúcar
+sobre a cadeia de ternários, sem máquina própria). `ngen/teko_switch.mc` (novo); `ngen/teko_ternary.mc`
+ganhou `tk_tern_hoist_var` (um segundo tipo de placeholder que `tk_tern_scan` reconhece: um `N_VAR`
+real embutido no meio de uma expressão, hoisted incondicionalmente igual à condição `c` de um
+ternário -- o que a `switch` expression usa para ler um `x` não-simples uma única vez).
+
+**Statement, no parse:** `loop { if (t==1) {...break;} if (t==2||t==3) {...break;} ... {default;
+break;} break; }`, `x` lido uma vez num `i64 $t` local. `break`/`break N` no corpo NÃO são
+reescritos (o loop do switch já é o nível que a fonte vê); um `do`/`for` externo que envolve o
+switch continua enxergando-o como só mais um `N_LOOP` no seu próprio `tk_loop_rewrite_stmt`, e a
+composição sai certa sem nada extra aqui -- prova: `break 2` atravessando um `switch` dentro de um
+`for` na fixture. `continue` no corpo do case é RECUSADO (não há `continue N` no núcleo; reescrever
+para `break 1` sairia do switch, não continuaria o loop de fora -- a decisão que o próprio crumb já
+antecipava, tomada sem precisar subir).
+
+**Expression, sem máquina própria:** dobra `tk_ternary(cond, expr, tk_ternary(...))` da última
+armação para trás; a condição da última NUNCA é testada (é a base incondicional), por isso exige-se
+ao menos um `_` em algum lugar. `x` não-simples: um `N_VAR` embutido, hoisted pelo MESMO passe do
+ternário.
+
+**Dois achados corrigidos no processo:** `when` já estava reservado (`syntax_stmt`, entrega 1) --
+`tk_kw` (só casa `T_IDENT`) nunca bate contra a palavra reservada; trocado por `tk_word` (a mesma
+distinção que `teko_class.mc`'s próprio cabeçalho já documenta). E `syntax_infix` entrega o
+operador JÁ CONSUMIDO ao handler -- `tk_switch_infix` não pode chamar `p_next()` de novo (o
+`tk_tern_infix` do ternário já não chamava); o bug apareceu como "expected { after switch" comendo
+o `{` de verdade.
+
+**Fixture** `surface_switch.tk` (31/31 em exit 42). AST das 30 fixtures anteriores byte-idêntica
+contra `3f223f9a`. `mc limits ngen` `ok`. Seis probes fora de `tests/`, todas recusadas com mensagem
+clara: braço sem `break`, `case` duplicado, `case` não-constante, expression sem `_`, `continue`
+dentro de `switch`, `switch` sem `{`.
+
+**Dívidas registradas:** `case`/braço com um const NAMESPACED não resolve (o `#define` do núcleo só
+dobra um nome bare no parse; um const qualificado só resolve num passe posterior); um `when` no
+braço `_` textualmente último de uma expression não é testado (é a base incondicional da dobra).

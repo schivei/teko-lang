@@ -823,7 +823,63 @@ direita, mesma precedência de `||` (`ngen/teko_ternary.mc`, novo).
 - **Dívida documental do `const` ainda aberta (registrada no §5, não fechada aqui):** o array LOCAL
   comum sem `[i]=v;` (achado do crumb `const`) segue sem fechamento — fora do escopo do ternário.
 
-**Fila:** `switch` (D222) → closures/`ref`/`out` (D221, architect-first) →
+**Entrega 5 — SWITCH LANDADO** (D222/D228, plano §19/§38; 31 fixtures): as duas vertentes do C#,
+`ngen/teko_switch.mc` (novo).
+- **Statement** (`syntax_stmt("switch")`) rebaixa, no PARSE, a um `loop` de uma volta: `x` lido
+  UMA vez (`i64 $t = x;`, o 1º statement do loop), um `if` por grupo de rótulos que compartilha um
+  corpo (`case 2: case 3: … break;` — rótulo vazio cai no próximo; corpo não-vazio tem de terminar
+  em `break`/`return`/`continue`/`break N`, senão `teko: control cannot fall out of a case`),
+  `default` (em qualquer posição — movido para o FIM da sequência de `if`s, C#), `case <const> when
+  <cond>:` (sem pattern de tipo — só constante+guarda opcional) e um `break;` incondicional final
+  que fecha o loop mesmo sem match. `case` duplicado (mesmo valor, sem guarda) e `default` duplicado
+  são recusados; `default` combinado com um `case` no MESMO grupo gera as duas coisas (o `if`
+  posicional E o corpo clonado como fallback, `tk_clone_list`).
+- **`break`/`break N` no corpo do case NÃO são reescritos** — o loop do switch já É o nível que a
+  fonte enxerga, então um `break;` cru já sai do switch; um `break N` que alcança mais longe é
+  pego pelo rewrite de um `do`/`for` EXTERNO (`tk_loop_rewrite_stmt`), que enxerga o loop do switch
+  como só mais um `N_LOOP` descoberto — a MESMA composição que já vale para loop-dentro-de-loop
+  (plano §29). Prova: `break 2` atravessando um `switch` dentro de um `for` na fixture.
+- **`continue` dentro de um case É RECUSADO** (`tk_switch_no_continue_stmt`, profundidade 0
+  relativa ao corpo do case): o núcleo não tem `continue N` (`language.md` § 4, só "reinicia o
+  loop mais interno") e o loop do switch É o mais interno — reescrever para `break 1` sairia do
+  switch em vez de continuar o loop de fora (errado); sem esse mecanismo, a decisão do próprio
+  crumb foi recusar com mensagem clara em vez de contornar com flag. Um `continue` dentro de um
+  loop que o PRÓPRIO corpo do case abre passa normalmente.
+- **Expression** (`x switch { 1 => a, 2 or 3 => b, _ when c => d, _ => e }`, `syntax_infix("switch",
+  TK_TERN_PREC)`, D228): NENHUMA máquina própria — constrói a MESMA cadeia de placeholders
+  `tk_ternary(...)` que `teko_ternary.mc`'s `?:` constrói, dobrada da ÚLTIMA armação para trás; a
+  condição da última armação NUNCA é testada (é a base incondicional da cadeia) — por isso exige-se
+  ao menos um braço `_` em algum lugar (`teko: a switch expression needs a` _` arm` se faltar),
+  idealmente o último escrito. `or` só entre constantes (sem patterns). `x`, se não for um nome
+  simples, é lido uma vez via um `N_VAR` real embutido NO MEIO da expressão (`teko_switch.mc`'s
+  `tk_switch_xleft`) — hoisted pelo MESMO passe do ternário (`teko_ternary.mc` ganhou
+  `tk_tern_hoist_var`, reconhecendo um `N_VAR` embutido como um segundo tipo de placeholder, ao
+  lado de `tk_ternary`; hoisted incondicionalmente, igual à condição `c` de um ternário comum).
+  Prova de avaliação única: `switchval(v) switch {...}` incrementa um contador exatamente 1×.
+- **Achado no registro:** `when` já estava reservado (`syntax_stmt("when", &tk_stop_when)`, entrega
+  1) — `tk_kw("when")` (que só casa `T_IDENT`) nunca bate contra a palavra reservada; corrigido para
+  `tk_word("when")` (`teko_class.mc`, "a mesma pergunta para uma palavra que TAMBÉM pode estar
+  reservada"). E `syntax_infix` já entrega o operador CONSUMIDO ao handler (`hooks.md` § syntax_infix
+  — "the operator already consumed") — `tk_switch_infix` não deve chamar `p_next()` de novo (o
+  `tk_tern_infix` do ternário já não chamava; o erro apareceu como "expected { after switch" comendo
+  o `{` de verdade).
+- **Fixture** `surface_switch.tk` (31/31 em exit 42): `case` múltiplo, fall-through de rótulos
+  vazios, `default` fora de ordem combinado com um `case`, `when`, `const` como rótulo, `break 2`
+  atravessando um `for`, `switch` dentro de método (`Bucket.describe`), expression em inicializador
+  E em `return`, aninhada (o valor de um braço é outro `x switch {...}`), `or`, `when`, braços de
+  objeto (`rt_live()` prova que a escolha não aloca). AST das **30 fixtures anteriores**
+  byte-idêntica contra o compilador da base `3f223f9a`. `mc limits ngen` `ok` (`intrin` segue 8/8 —
+  nenhum registrado). Probes fora de `tests/`: braço sem `break` → recusa; `case` duplicado →
+  recusa; `case` não-constante → recusa; `switch` expression sem `_` → recusa; `continue` dentro de
+  `switch` → recusa (decisão acima); `switch` sem `{` → recusa do núcleo.
+- **Dívida registrada:** um `case`/braço namespaced (`geo.N`) não resolve como rótulo — o `#define`
+  do núcleo dobra um nome BARE no parse, mas um const namespaced só resolve num passe posterior
+  (`teko_ns.mc`), depois que o rótulo já teria de estar dobrado; fora do escopo deste crumb. Um
+  `when` guardando o braço `_` TEXTUALMENTE ÚLTIMO da expression não é testado (é a base
+  incondicional da dobra) — escrever a guarda no último braço é ignorado; documentado, não
+  fechado (o núcleo não tem exceção em runtime para cobrir o caso sem match).
+
+**Fila:** closures/`ref`/`out` (D221, architect-first) →
 compilador teko de `<mc/core_min>` (plano §26). **Fora:** `var`, `type`, `match`, Variant,
 método parcial, nested, `foreach` (precisa de iteráveis), herança de interface, `using G = geo;`/
 `using static`, genérico qualificado (D31.14), namespace aninhado (D31.1).
