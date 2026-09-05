@@ -405,3 +405,14 @@ sombreia campo), e `base.m()` chama a implementação da base direto (precedente
 `teko_struct.mc`, `teko_expr.mc`, `teko_typeof.mc` e as 18 fixtures — por isso vem
 **antes** do reclaim e do C5b, que escreveriam código na forma velha. Prova: 18/18 na
 forma nova; `grep -c "self" ngen/tests` = 0; `base.m()` numa fixture existente.
+
+## 17. D220 — visibilidade e `static`; fila revista (2026-09-04, noite)
+
+Crumb **"membros C#"**: `public`/`private`/`protected`/`static` em membros, `public`/`internal`
+em tipos; defaults do C# (tipo → `internal`, membro → `private`) **a ratificar**; `internal` =
+mesmo arquivo-fonte (`nd_file`), porque o mc não tem TU; checagem no `.`, na chamada, no
+`new` e no `base.` — nos dois caminhos (parse e pass); `protected` = próprio tipo e derivadas;
+`static` = sem receptor (é o que o operador do C5b usa; membro estático acessado por
+`Tipo.m()`); nested **não**. Fixtures ganham `public` onde acessam de fora.
+**Fila da entrega 5:** `this`/`base` (em voo) → **membros C#** → reclaim c/ ctor/dtor → C5b
+operadores estáticos → `while`/`for` → `namespace`/`import`/`using` → `const`.

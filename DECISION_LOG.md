@@ -1157,6 +1157,21 @@ Verificador reproduziu o crash instrumentando com ASan+UBSan (as flags do CI pro
 - **CONSERTO (dispatch):** `cg_emit_self_addr` tem que PARAR de escapar o endereço de um temp cujo escopo é o próprio statement-expression — hoist do `_rcvN` pra um escopo que sobrevive à chamada externa inteira, OU passar receptor tipo-valor por valor (Region/Arena são structs de 8B, métodos leem self). Root-cause, não workaround; conserta a CLASSE (todo receptor não-endereçável), não só o sítio arena.
 - **LEI DE PROCESSO (endurece D163/D164):** o fixpoint no sandbox NÃO pega UB que só crasha sob certos toolchains — **o gate de verificador de compiler-core passa a incluir um build ASan+UBSan** (`-fsanitize=address,undefined -fno-omit-frame-pointer -g`) do gen0 compilando o tip, além do fixpoint. Barato, pega stack-use-after-scope/UAF/OOB que o build seco esconde. (A ser gravado na CLAUDE.md.)
 
+### D220 · DONO: `public`/`private`/`protected`/`static` como em C#; `internal` se o mc permitir restringir; SEM classes aninhadas (dono 2026-09-04) 🔧 SUPERFÍCIE
+- **Modificadores como em C#:** `public`, `private`, `protected`, `static` em membros; `public`/
+  `internal` em tipos de topo. **Defaults do C#** (a ratificar): tipo de topo sem modificador é
+  `internal`; membro sem modificador é `private`. Consequência: as fixtures que hoje leem `p.side`
+  de fora passam a escrever `public i64 side;`.
+- **`internal`:** o mc **não tem unidade de compilação** (`core-language.md:422` — tudo entra por
+  `#include` num arquivo só), então não há "assembly". Mas toda visibilidade é checagem do MÓDULO
+  (o core nunca checa acesso; o `lx` faz por mangling) e o módulo conhece a origem de cada
+  declaração (`p_file()`/`nd_file`). **Logo `internal` é ensinável, com unidade = arquivo-fonte**
+  (o `import` é `#include`). Incluir, com essa unidade — a ratificar pelo dono.
+- **Classes/structs aninhadas: NÃO.** Regra do dono: só se o mc não conseguisse restringir
+  acesso como C#; como consegue (via ensino), não há nested.
+- **Ordem:** este crumb entra depois do `this`/`base` (D219) e **antes** do reclaim
+  (construtor/destrutor `public`) e do C5b (`public static … operator+`).
+
 ### D219 · DONO: métodos SEM `self` — `this` implícito e `base`, como em C# (dono 2026-09-04) 🔧 SUPERFÍCIE
 O `self` explícito na lista de parâmetros é a forma do `lx`, não a do teko-mc. **Prefira a forma
 inferida do C#:** o método não declara o receptor — `i64 area() { return side; }` —, o
