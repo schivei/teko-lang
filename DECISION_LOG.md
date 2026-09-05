@@ -1170,7 +1170,10 @@ si mesma** até o ponto fixo (`teko1 → teko2 → teko3` byte-idênticos), como
 Caminho: (1) hoje, `<mc/core>` + `teko.mc`; (2) M41: recriar o compilador teko das partes que a
 teko usa, `subcommand` para o driver (`teko build`), `type_disable`/`intrinsic_disable` para o que
 a teko redefine; (3) M44: o ngen como pacote (`teko_init()`); (4) auto-hospedagem: módulos do
-ngen em teko, fixpoint. Coordenado com o mc (sem 1.0.0 sem o ngen).
+ngen em teko, fixpoint. Coordenado com o mc (sem 1.0.0 sem o ngen). **Complemento (dono):** o 1.0.0 do mc trará itens
+novos de roadmap — até um **gerenciador de pacotes** —, e a teko usará **dois sistemas de
+pacotes**: o dela e o do mc. Roadmap pedido à sessão do mc por arquivo (`NOTICES-teko.md`);
+a entrega 5 se ordena pelo que vem do lado do mc, sem duplicar do lado da teko o que ele entrega.
 
 ### D224 · DONO: classes abstratas como C#; classes/métodos PARCIAIS em avaliação (dono 2026-09-04) 🔧 SUPERFÍCIE
 - **`abstract` como em C# (ruling):** `abstract class Shape { public abstract i64 area(); }` —
