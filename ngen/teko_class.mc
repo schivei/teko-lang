@@ -829,11 +829,11 @@ i64 tk_base_ctor_call(i64 bc, i64 args, i64 na, i64 line, uptr fl) {
     i64 mi = tk_ctor_pick(bc, na);
     if (mi == 0 - 3)
         err_at2(fl, line, "teko: ambiguous base constructor; two of them take this many arguments",
-                sr_name_at(bc));
+                tk_ns_dotted(sr_name_at(bc)));
     if (mi < 0) {
         if (na > 0)
             err_at2(fl, line, "teko: no constructor of the base class takes these arguments",
-                    sr_name_at(bc));
+                    tk_ns_dotted(sr_name_at(bc)));
         return 0;                                // it declares none: nothing to run
     }
     tk_check_member(mt_cls_at(mi), mt_vis_at(mi), sr_name_at(bc), line, fl);
@@ -873,12 +873,12 @@ i64 tk_base_init(i64 ci) {
         if (!tk_base_needs_init(bc))
             return tk_base_ctor_call(bc, 0, 0, line, fl);
         err_at2(fl, line, "teko: the base class has no constructor taking no argument; write `: base(...)`",
-                sr_name_at(bc));
+                tk_ns_dotted(sr_name_at(bc)));
         return 0;
     }
     if (!tk_kw("base")) err_at2(p_file(), p_line(), "teko: a constructor chains to `base`", p_name());
     p_next();                                    // the `base` word
-    if (bc < 0) err_at2(fl, line, "teko: `base` in a type with no base class", sr_name_at(ci));
+    if (bc < 0) err_at2(fl, line, "teko: `base` in a type with no base class", tk_ns_short_of(sr_name_at(ci)));
     i64 na = 0;
     i64 args = tk_args(&na);
     return tk_base_ctor_call(bc, args, na, line, fl);
@@ -959,14 +959,15 @@ i64 tk_member(i64 ci, uptr name, i64 off, i64 ti) {
         err_at(tk_file, tk_line, "teko: a static member is not abstract");
     if (kind && stat)
         err_at(tk_file, tk_line, "teko: a static member has no vtable slot; it is not virtual");
+    uptr short_ci = tk_ns_short_of(sr_name_at(ci));   // the short name the dev wrote its own type as
     i64 fty = tk_gen_ty();
     if (p_id() == K_LPAR) {                      // the type's own name, then `(`
         if (fty != sr_ty_at(ci))
-            err_at2(p_file(), p_line(), "teko: a member declaration needs a name", sr_name_at(ci));
+            err_at2(p_file(), p_line(), "teko: a member declaration needs a name", short_ci);
         return tk_member_ctor(ci, name, off, ti, vis, stat, kind);
     }
-    if (tk_word(tk_ns_short_of(sr_name_at(ci))))  // `void Name(...)`, C#'s own mistake
-        err_at2(p_file(), p_line(), "teko: a constructor is written without a return type", sr_name_at(ci));
+    if (tk_word(short_ci))                        // `void Name(...)`, C#'s own mistake
+        err_at2(p_file(), p_line(), "teko: a constructor is written without a return type", short_ci);
     i64 isop = 0;
     uptr m = tk_op_name(&isop);                  // `operator+` names the method `op_add`
     if (p_id() == K_LBRACE) {                    // `T Name { get; set; }`: a property
@@ -1030,21 +1031,22 @@ i64 tk_conf_name(i64 base, i64 proj) {
     uptr fl = p_file();
     uptr seg0mem = xalloc(8);
     uptr nm = tk_ns_read_path(seg0mem);
+    uptr disp = tk_ns_dotted(nm);                 // what a message shows: the dev's own `A.B` spelling
     i64 si = 0 - 1;
     if (str_eq(nm, ld64(seg0mem))) si = tk_struct_find(nm);
     else si = tk_struct_find_exact(nm);
     if (si < 0 && tk_trait_find(nm) >= 0)
-        err_at2(fl, line, "teko: a trait is not a base class nor an interface; use `use`", nm);
-    if (si < 0) err_at2(fl, line, "teko: unknown base class or interface", nm);
+        err_at2(fl, line, "teko: a trait is not a base class nor an interface; use `use`", disp);
+    if (si < 0) err_at2(fl, line, "teko: unknown base class or interface", disp);
     tk_check_type_use_from(si, proj, line, fl);
     if (tk_is_iface(si)) {
-        tk_conf_add(si, line, fl, nm);
+        tk_conf_add(si, line, fl, disp);
         return base;
     }
-    if (!tk_is_class(si)) err_at2(fl, line, "teko: a base has to be a class, not a struct", nm);
-    if (base >= 0) err_at2(fl, line, "teko: a class has one base class", nm);
+    if (!tk_is_class(si)) err_at2(fl, line, "teko: a base has to be a class, not a struct", disp);
+    if (base >= 0) err_at2(fl, line, "teko: a class has one base class", disp);
     tk_close_open(si);                           // a base is whole before it is derived from
-    if (tk_nconf > 0) err_at2(fl, line, "teko: the base class comes before the interfaces", nm);
+    if (tk_nconf > 0) err_at2(fl, line, "teko: the base class comes before the interfaces", disp);
     return si;
 }
 
@@ -1269,10 +1271,11 @@ void tk_class_reconf(i64 ci, i64 proj, i64 line, uptr fl) {
     tk_nconf = 0;
     i64 base = tk_class_conf(proj);
     if (base >= 0) {
-        if (sr_base_at(ci) >= 0) err_at2(fl, line, "teko: a class has one base class", sr_name_at(ci));
+        uptr short_ci = tk_ns_short_of(sr_name_at(ci));
+        if (sr_base_at(ci) >= 0) err_at2(fl, line, "teko: a class has one base class", short_ci);
         if (tk_class_has_member(ci))
             err_at2(fl, line, "teko: the base class is named in a part that comes before the members",
-                    sr_name_at(ci));
+                    short_ci);
         tk_base_take(ci, base);
     }
     tk_conf_apply(ci);
@@ -1280,15 +1283,19 @@ void tk_class_reconf(i64 ci, i64 proj, i64 line, uptr fl) {
 
 // the part of a partial class that is not the first: the row is there already,
 // and this declaration adds members to it. The modifiers of a type either say
-// what the first part said or say nothing at all.
+// what the first part said or say nothing at all. `nm` is what the dev wrote
+// its own class as, already qualified by `tk_ns_qualify` -- the short form is
+// what a message shows (`tk_ns_short_of`), the same convention `tk_member`'s
+// own constructor check gives the class's own name.
 i64 tk_class_reopen(uptr nm, i64 vis, i64 abst, i64 line, uptr fl) {
     i64 si = tk_struct_find_exact(nm);
-    if (!tk_is_class(si)) err_at2(fl, line, "teko: only a class is partial", nm);
-    if (sr_part_at(si) == TK_PWHOLE) err_at2(fl, line, "teko: the type is declared without `partial`", nm);
-    if (sr_part_at(si) == TK_PDONE) err_at2(fl, line, "teko: this part comes after the type was used", nm);
+    uptr short_nm = tk_ns_short_of(nm);
+    if (!tk_is_class(si)) err_at2(fl, line, "teko: only a class is partial", short_nm);
+    if (sr_part_at(si) == TK_PWHOLE) err_at2(fl, line, "teko: the type is declared without `partial`", short_nm);
+    if (sr_part_at(si) == TK_PDONE) err_at2(fl, line, "teko: this part comes after the type was used", short_nm);
     if (vis >= 0 && vis != sr_vis_at(si))
-        err_at2(fl, line, "teko: the parts disagree on `public`/`internal`", nm);
-    if (abst && !sr_abst_at(si)) err_at2(fl, line, "teko: the parts disagree on `abstract`", nm);
+        err_at2(fl, line, "teko: the parts disagree on `public`/`internal`", short_nm);
+    if (abst && !sr_abst_at(si)) err_at2(fl, line, "teko: the parts disagree on `abstract`", short_nm);
     return si;
 }
 
@@ -1383,4 +1390,3 @@ i64 tk_partial_pass(i64 root) {
 }
 
 void tk_stop_type()      { i64 l = p_line(); uptr f = p_file(); p_next(); err_at(f, l, "teko: type not taught yet"); }
-void tk_stop_import()    { i64 l = p_line(); uptr f = p_file(); p_next(); err_at(f, l, "teko: import not taught yet"); }

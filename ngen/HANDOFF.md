@@ -657,9 +657,55 @@ dentro de um namespace, mangled e resolvida por um `pass()` (`teko_ns.mc`'s `tk_
   `main`/`extern`/global em namespace FILE-SCOPED; dois `using` ambíguos; chamada sem namespace
   nem `using` (erro do core); `rt_live()` bare de dentro de um namespace; `void Name(...)`.
 
-**Fila:** `import` (N3) → `const` → `switch` (D222) → closures/`ref`/`out` (D221,
-architect-first) → compilador teko de `<mc/core_min>` (plano §26). **Fora:** `var`, `type`,
-`match`, Variant, método parcial, nested, `foreach` (precisa de iteráveis).
+**Entrega 5 — N3 LANDADO, série namespace fechada** (D218/D226, plano §31/§34; 28/28 em exit
+esperado — hello.tk + 27 fixtures do glob): `import A.B;`, sugar sobre o `lex_include` do core
+mais um `using A.B;` implícito, e dois consertos de dívida do verificador do N2.
+- **`teko_ns.mc`'s `tk_import`** — `lex_include(tk_ns_path_of(full), line)` com o contrato do
+  lookahead (`lex_include` chamado ainda sobre o `;`, `p_next()` só depois); once-only pelo
+  `lex_seen` do próprio core (uma reabertura não empurra o arquivo de novo, só repete a `using`,
+  inofensivo). `tk_ns_path_of` reusa o mesmo scanner de `tk_ns_dotted` (`tk_ns_sep_replace`),
+  trocando "__" por "/" e sufixando `.tk`. Recusado dentro de um bloco de namespace aberto
+  (mesmo guard de `tk_namespace`) e recusado quando o ARQUIVO do `import` já declarou um
+  namespace seu (D31.13, "no topo, antes de qualquer namespace") — a tabela nova `nsd_file`
+  marca isso por `p_file()` no instante em que `tk_namespace` roda, então um namespace
+  declarado dentro do arquivo IMPORTADO (outro arquivo) nunca marca o importador, e o
+  once-only da segunda `import` nunca reroda o corpo pra marcar duas vezes.
+- **Item 2 (dívida do verificador do N2) — `&f` de função em namespace.** `tk_ns_walk_calls_in`
+  (sweep 2) só reescrevia `N_CALL`; estendido a `N_ADDR` (o nó de `&nome`, que carrega o nome
+  bare do mesmo jeito que uma chamada) — `tk_ns_rewrite_call` já lê/escreve por `nd_name`,
+  então o mesmo rewrite serve os dois sem código novo. A forma QUALIFICADA (`&geo.f`) precisou
+  de ensino: o core exige que o operando de `&` seja `N_IDENT`, e `tk_ns_qualified_call` só
+  sabia montar `N_CALL`. Agora, quando o nome não é seguido de `(`, devolve `tk_id(full)` (um
+  `N_IDENT` bare com o nome cheio) em vez de errar "unresolved qualified name" — mesma filosofia
+  do D31.10 (uma referência que não existe chega ao linker faltando, não é checada aqui).
+- **Item 3 — convenção de mensagem.** `teko: a constructor is written without a return type:
+  geo__Circle` interpolava o nome QUALIFICADO onde o dev escreveu o CURTO (o nome de uma classe
+  dentro do próprio corpo dela nunca carrega o namespace) — corrigido com `tk_ns_short_of`.
+  Convenção adotada, aplicada em `teko_class.mc` e `teko_trait.mc` (grep completo dos dois):
+  **nome da PRÓPRIA declaração** (a classe sendo lida agora, `tk_member`/`tk_base_init`/
+  `tk_class_reconf`/`tk_class_reopen`) mostra o **CURTO** (`tk_ns_short_of`), porque o dev nunca
+  o escreve qualificado; **nome REFERENCIADO** (o `:` de base/interface em `tk_conf_name`, o
+  `use` de trait em `tk_use`, e as mensagens de `base(...)` sobre a base em `tk_base_ctor_call`/
+  `tk_base_init`) mostra **`A.B.Nome`** (`tk_ns_dotted`, novo — reusa o mesmo scanner de
+  `tk_ns_path_of`), porque é exatamente o que o dev pode ter escrito. `nm`/`full`/`acc` (o texto
+  cru, "__"-juntado) seguem dirigindo toda resolução; só o argumento passado à mensagem muda.
+  (`teko_access.mc`'s `tk_deny_member`/`tk_check_member` — a mensagem `X.m is private` — usa um
+  formato próprio, hífen entre `sr_name_at(owner)` e o membro; fora do grep pedido pelo crumb,
+  registrado como achado adjacente, não tocado aqui.)
+- **Fixture** `surface_import.tk` + `ngen/tests/parts/geo.tk` (com `namespace parts.geo;`
+  file-scoped): `import parts.geo;` DUAS vezes (once-only), `Circle` sem modificador
+  (`internal` por D220) alcançada de dentro do projeto, forma qualificada
+  (`parts.geo.Circle`/`parts.geo.twice`) e bare via o `using` implícito, `&twice`/
+  `&parts.geo.twice` cada um passado a `callp`. AST das **27 fixtures anteriores** (as 26 do
+  glob + `hello.tk`) **byte-idêntico** contra o compilador da base `5e401b01`; `mc limits ngen`
+  `ok`. Probes fora de `tests/`: `import` de namespace sem arquivo (`mc: cannot open:
+  .../nope/here.tk`, a mensagem crua do core); `import` dentro de `namespace { }` (recusa);
+  `import` depois de um `namespace` no MESMO arquivo (recusa).
+
+**Fila:** `const` → `switch` (D222) → closures/`ref`/`out` (D221, architect-first) →
+compilador teko de `<mc/core_min>` (plano §26). **Fora:** `var`, `type`, `match`, Variant,
+método parcial, nested, `foreach` (precisa de iteráveis), herança de interface, `using G = geo;`/
+`using static`, genérico qualificado (D31.14), namespace aninhado (D31.1).
 
 **Dívida achada pelo verificador do C6 (registrada aqui, crumb futuro):** o `ngen` é um parser de
 UMA passada — um tipo/classe precisa estar declarado ANTES do primeiro uso no arquivo, o que C#

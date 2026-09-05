@@ -1174,3 +1174,61 @@ de namespace FILE-SCOPED; dois `using` com a mesma função ambígua (`teko: amb
 b)`); chamada sem namespace nem `using` (erro do core, `call to unknown function`); chamada bare a
 uma função do runtime (`rt_live`) de dentro de um namespace, achatada e ligada normalmente;
 `void Name(...)` dentro de namespace.
+
+## 34. N3 landado — `import` e o fecho da série namespace (2026-09-05, errata)
+
+`feat/ngen-import`, `teko_ns.mc` (`tk_import`, `tk_ns_path_of`, `tk_ns_sep_replace`/
+`tk_ns_dotted`, `tk_ns_file_saw_ns`/`tk_ns_mark_file_saw_ns`), `teko.mc` (troca do honest-stop),
+`teko_class.mc`/`teko_trait.mc` (convenção de mensagem). 28/28 em exit esperado (`hello.tk` + as
+27 do glob); `--dump-ast` das 27 fixtures anteriores **byte-idêntico** contra `5e401b01`; `mc
+limits ngen` `ok`.
+
+**`tk_import`** é sugar mecânico sobre o `lex_include` do core, no precedente exato de
+`lang_class.mc`'s `lg_import` (`mini_compiler/examples/lang/lang_class.mc:657`): lê o caminho com
+`tk_ns_read_path` (sem consumir o `;`), chama `lex_include` AINDA sobre o `;` (o contrato do
+lookahead), só então `p_next()`, e adiciona a `using` implícita antes do include — o once-only é
+inteiramente do `lex_seen` do core, nada de tabela própria. `tk_ns_path_of("A__B")` = `"A/B.tk"`,
+via o mesmo scanner que converte "__" em um separador dado (`tk_ns_sep_replace`), reusado por
+`tk_ns_dotted` (item 3 abaixo) trocando por `.` em vez de `/`.
+
+**Posição — D31.13, "no topo, antes de qualquer namespace".** Dois guards: `tk_ns_current() != 0`
+(dentro de um bloco de namespace aberto, mesma checagem que `tk_namespace` já faz contra
+aninhamento) e uma tabela NOVA, `nsd_file`, que marca (por `p_file()`) todo arquivo em que
+`tk_namespace` roda — bloco OU file-scoped, o import cheque contra ISSO, não contra um flag
+global: um namespace declarado dentro do arquivo IMPORTADO é desse arquivo, nunca do importador,
+então a fixture do once-only (duas `import parts.geo;` seguidas, cujo alvo declara seu próprio
+`namespace parts.geo;`) não se autoderruba.
+
+**Item 2, a dívida do verificador do N2 — `&f`/`&geo.f`.** `tk_ns_walk_calls_in` (sweep 2)
+reescrevia só `N_CALL`; `N_ADDR` (o nó que `&nome` produz, carregando o nome bare do mesmo jeito)
+entra na mesma condição — `tk_ns_rewrite_call` já opera por `nd_name`, então zero código novo
+resolve `&f`. A forma qualificada precisou de ensino de verdade: o core exige que o operando de
+`&` seja `N_IDENT` (`mc/src/parse.mc:892`), e `tk_ns_qualified_call` só sabia montar `N_CALL`.
+Agora, sem um `(` a seguir, devolve `tk_id(full)` em vez de errar — a mesma filosofia D31.10 (uma
+referência que não existe chega ao linker faltando, não é checada aqui) estendida de "chamada" a
+"referência".
+
+**Item 3, a convenção de mensagem — decidida e aplicada.** Grep completo de `sr_name_at`/nome
+qualificado em mensagem ao dev por `teko_class.mc` e `teko_trait.mc` (o `use` de trait vive lá, a
+mesma classe de bug que `tk_conf_name` do N1b já tinha). Duas categorias, nunca confundidas com a
+resolução em si (que segue sobre o texto cru "__"-juntado, intocado):
+- **nome da PRÓPRIA declaração** (a classe/`ci` sendo lida agora) → `tk_ns_short_of` — o dev nunca
+  escreve o namespace ao se referir ao próprio tipo de dentro dele mesmo (o construtor sem tipo de
+  retorno é o caso canônico: `Circle(...)`, nunca `geo.Circle(...)`);
+- **nome REFERENCIADO** (a base/interface de `tk_conf_name`, o trait de `tk_use`, a base de
+  `tk_base_ctor_call`/`tk_base_init`) → `tk_ns_dotted` — o texto que `tk_ns_read_path` leu É
+  exatamente o que o dev escreveu, só com "__" no lugar de ".".
+`teko_access.mc`'s `tk_deny_member` (a mensagem `X.m is private`) tem formato próprio e fica FORA
+do grep pedido pelo crumb — achado adjacente, registrado, não tocado.
+
+**Fixture** `surface_import.tk` + `ngen/tests/parts/geo.tk` (`namespace parts.geo;`
+file-scoped): `import` duas vezes, `Circle` sem modificador (`internal`, D220) alcançada de
+dentro do projeto, forma qualificada e bare (via o `using` implícito), `&twice`/
+`&parts.geo.twice` cada um passado a `callp`. **Probes de recusa** (fora de `ngen/tests/`):
+`import` de namespace sem arquivo (a mensagem crua do core, `cannot open`); `import` dentro de
+`namespace { }`; `import` depois de um `namespace` no MESMO arquivo.
+
+**Dívidas fechadas nesta série:** `&f` (item 2 acima). **Dívidas que seguem em aberto (fila,
+`docs/design/port-teko-mc.md` + HANDOFF §5):** herança de interface, `using G = geo;`/`using
+static`, genérico qualificado (D31.14), namespace aninhado (D31.1), ordem-livre de
+tipo/declaração (§5.1 item 7). Próximo da fila: `const`, depois `switch` (D222).

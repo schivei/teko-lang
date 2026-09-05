@@ -128,6 +128,12 @@
 //                                                                 syntax_stmt
 //   area(x)     (bare, from inside geo or through a `using geo;`) pass()
 //
+// What entrega 5's N3 crumb adds -- `import`, sugar over the core's own
+// `lex_include` plus an implicit `using` (teko_ns.mc's own `tk_import`):
+//   import parts.geo;             (once-only, "parts/geo.tk")      syntax
+//   Circle c = new Circle();  parts.geo.twice(x)  &twice           the
+//                              bare/qualified forms `using` already gives
+//
 // Everything else in docs/design/port-teko-mc.md §3 (types/classes,
 // generics, error-union, `service`/DI, concurrency, the
 // rest of the stdlib) is a later entrega and is not stubbed here: it does
@@ -171,7 +177,7 @@ void user_init() {
     syntax("trait",     &tk_trait);
     syntax("type",      &tk_stop_type);
     syntax("namespace", &tk_namespace);
-    syntax("import",    &tk_stop_import);
+    syntax("import",    &tk_import);
     syntax("using",     &tk_using);
 
     syntax_stmt("{",     &tk_block);

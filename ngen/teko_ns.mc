@@ -1,8 +1,8 @@
 // teko_ns.mc -- `namespace A.B { ... }` / `namespace A.B;` (file-scoped, C# 10),
 // `using A.B;` and qualified type names (entrega 5, crumb N1; plano-ngen-
-// entrega4.md §31), and a free function declared inside a namespace, mangled
-// and resolved by `tk_ns_pass` (crumb N2, §31/§33). `import` (N3) is the one
-// piece still out.
+// entrega4.md §31), a free function declared inside a namespace, mangled and
+// resolved by `tk_ns_pass` (crumb N2, §31/§33), and `import A.B;`, sugar over
+// `lex_include` plus an implicit `using` (crumb N3, §31/§34).
 //
 // The precedent read whole is `mini_compiler/examples/lang/lang_class.mc:568-666`
 // (`lg_namespace`, `lg_using`, `lg_ns_path`, `lg_ns_register`) and
@@ -143,6 +143,11 @@ i64  nsb_node[TK_MAXNSB];              // the N_FUNC/N_PROTO node `parse_top` re
 uptr nsb_ns[TK_MAXNSB];                // ...and the namespace the block loop stood in
 i64  tk_nnsb = 0;
 
+#define TK_MAXNSD   32                 // files that have opened a namespace of their own
+
+uptr nsd_file[TK_MAXNSD];              // a file that declared a namespace, block OR file-scoped
+i64  tk_nnsd = 0;
+
 uptr tk_cur_ns = 0;                    // the BLOCK-form namespace currently open, or 0
 i64  tk_ns_dot = 0;                    // the `.` token, interned once at startup
 uptr tk_ns_call_site = 0;              // the namespace of the function `tk_ns_pass`'s sweep 2 walks
@@ -185,6 +190,8 @@ i64  nsb_node_at(i64 i) { return ld64(nsb_node + i * 8); }
 void set_nsb_node_at(i64 i, i64 v) { st64(nsb_node + i * 8, v); }
 uptr nsb_ns_at(i64 i)   { return ld64(nsb_ns + i * 8); }
 void set_nsb_ns_at(i64 i, uptr v)   { st64(nsb_ns + i * 8, v); }
+uptr nsd_file_at(i64 i) { return ld64(nsd_file + i * 8); }
+void set_nsd_file_at(i64 i, uptr v) { st64(nsd_file + i * 8, v); }
 
 // ---- the namespaces known, the segment words and the short type words ----
 i64 tk_ns_find(uptr cheio) {
@@ -348,6 +355,41 @@ uptr tk_ns_short_of(uptr nome) {
     if (ns == 0) return nome;
     return nome + cstrlen(ns) + 2;
 }
+
+// `s`, with every "__" separator turned into the single byte `sep` -- the one
+// shape a name built purely from `tk_ns_read_path`/`tk_ns_walk` segments
+// takes, so a blind scan is safe with no risk of touching an unrelated "__"
+// (an overload's type suffix, a generic's argument list): neither of those
+// ever reaches this function, only a path the dev wrote with `.`s.
+uptr tk_ns_sep_replace(uptr s, i64 sep) {
+    i64 n = cstrlen(s);
+    uptr d = xalloc(n + 1);
+    i64 i = 0;
+    i64 j = 0;
+    loop {
+        if (i >= n) break;
+        if (ld8(s + i) == '_' && i + 1 < n && ld8(s + i + 1) == '_') {
+            st8(d + j, sep);
+            j = j + 1;
+            i = i + 2;
+            continue;
+        }
+        st8(d + j, ld8(s + i));
+        j = j + 1;
+        i = i + 1;
+    }
+    st8(d + j, 0);
+    return d;
+}
+
+// a dotted path back from the "__"-joined internal spelling -- what a
+// diagnostic shows for a name the dev wrote as `A.B` (`teko_class.mc`'s
+// `tk_conf_name`, `teko_trait.mc`'s `tk_use`, and this module's own
+// qualified-call/segment-walk messages below), never the internal separator.
+uptr tk_ns_dotted(uptr s) { return tk_ns_sep_replace(s, '.'); }
+
+// `A.B` -> `A/B.tk`, the file `import A.B;` reads (§31 (a).11)
+uptr tk_ns_path_of(uptr cheio) { return tk_join(tk_ns_sep_replace(cheio, '/'), ".tk"); }
 
 // the index of the last "__" strictly before `len` in `s`, or -1 when there is
 // none left -- what lets the search order below try each shorter prefix of
@@ -516,23 +558,27 @@ i64 tk_var_after_type(i64 ty, i64 line, uptr fl) {
     return tk_var(ty, vn, init);
 }
 
-// `geo.area(x)` -- a free function's own call, qualified (entrega 5, crumb
-// N2). `tk_ns_walk` has already consumed the `.` before giving up on `ns` as
-// a type (neither `ns` nor `ns.name` names one), so the parser stands
-// exactly on the function's own short name; the symbol built here is
-// trusted outright, with no `decl_find` to ask (a call may be written above
-// the declaration it targets, and this runs at PARSE time, long before
-// `tk_ns_pass` mangles that declaration to the same name) -- an `area` that
-// turns out not to exist reaches the linker as a missing symbol, same as
-// any other call this compiler never taught to guess.
+// `geo.area(x)` -- a free function's own reference, qualified (entrega 5,
+// crumb N2 for the call, crumb N3 for the bare form `&geo.area` needs).
+// `tk_ns_walk` has already consumed the `.` before giving up on `ns` as a
+// type (neither `ns` nor `ns.name` names one), so the parser stands exactly
+// on the function's own short name. A `(` reads the call the way it always
+// has; anything else is a plain reference to the same symbol -- `&geo.area`'s
+// own operand, which the core's own `&` demands be an `N_IDENT` (`tk_id`).
+// The symbol built here is trusted outright either way, with no `decl_find`
+// to ask (a call/reference may be written above the declaration it targets,
+// and this runs at PARSE time, long before `tk_ns_pass` mangles that
+// declaration to the same name) -- one that turns out not to exist reaches
+// the linker as a missing symbol, same as any other reference this compiler
+// never taught to guess.
 i64 tk_ns_qualified_call(uptr ns, i64 line, uptr fl) {
     uptr fname = p_ident();
     uptr full = tk_join3(ns, "__", fname);
-    if (p_id() != K_LPAR) err_at2(fl, line, "teko: unresolved qualified name", full);
-    i64 na = 0;
-    i64 args = tk_args(&na);
     tk_line = line;
     tk_file = fl;
+    if (p_id() != K_LPAR) return tk_id(full);
+    i64 na = 0;
+    i64 args = tk_args(&na);
     return tk_call(full, args);
 }
 
@@ -552,7 +598,7 @@ i64 tk_ns_seg_stmt() {
     uptr acc = tk_ns_walk(seg0);
     i64 si = tk_struct_find_exact(acc);
     if (si < 0) {
-        if (tk_ns_find(acc) < 0) err_at2(fl, line, "teko: unresolved qualified name", acc);
+        if (tk_ns_find(acc) < 0) err_at2(fl, line, "teko: unresolved qualified name", tk_ns_dotted(acc));
         i64 e = tk_ns_qualified_call(acc, line, fl);
         p_expect(K_SEMI, "expected ; after the call");
         tk_line = line;
@@ -567,9 +613,10 @@ i64 tk_ns_seg_stmt() {
     return tk_stmt(e);
 }
 
-// `geo.Circle.made` / `geo.Circle.tally()` / `geo.area(x)` in expression
-// position -- a static access when `acc` IS a type, a free function's own
-// call when it names a namespace instead
+// `geo.Circle.made` / `geo.Circle.tally()` / `geo.area(x)` / `&geo.area` in
+// expression position -- a static access when `acc` IS a type, a free
+// function's own call or bare reference when it names a namespace instead
+// (`tk_ns_qualified_call`'s own non-call branch, entrega 5's N3)
 i64 tk_ns_seg_expr() {
     i64 line = p_line();
     uptr fl = p_file();
@@ -578,7 +625,7 @@ i64 tk_ns_seg_expr() {
     uptr acc = tk_ns_walk(seg0);
     i64 si = tk_struct_find_exact(acc);
     if (si >= 0) return tk_static_member(si, line, fl);
-    if (tk_ns_find(acc) < 0) err_at2(fl, line, "teko: unresolved qualified name", acc);
+    if (tk_ns_find(acc) < 0) err_at2(fl, line, "teko: unresolved qualified name", tk_ns_dotted(acc));
     return tk_ns_qualified_call(acc, line, fl);
 }
 
@@ -723,12 +770,18 @@ i64 tk_ns_rewrite_call(i64 n, uptr ns, uptr fl) {
 }
 
 // every node of one function's body, in no particular scope order -- sweep 2
-// only ever reads a call's own name, never a local's, so it needs none of
-// `teko_typeof.mc`'s scope bookkeeping
+// only ever reads a call's or an address-of's own name, never a local's, so
+// it needs none of `teko_typeof.mc`'s scope bookkeeping. `N_ADDR` (entrega 5,
+// crumb N3, closing a debt the N2 verifier found) is `&f`'s own node, built
+// by the core with the bare name still on it because a namespaced `f` is
+// left BARE by the parser like any other free function (§31's own header) --
+// `tk_ns_rewrite_call` reads/writes `nd_name` either way, so the one rewrite
+// already proven for a call serves an address-of unchanged.
 void tk_ns_walk_calls_in(i64 n) {
     loop {
         if (n == 0) break;
-        if (nd_kind(n) == N_CALL) tk_ns_rewrite_call(n, tk_ns_call_site, nd_file(n));
+        i64 k = nd_kind(n);
+        if (k == N_CALL || k == N_ADDR) tk_ns_rewrite_call(n, tk_ns_call_site, nd_file(n));
         tk_ns_walk_calls_in(nd_a(n));
         tk_ns_walk_calls_in(nd_b(n));
         tk_ns_walk_calls_in(nd_c(n));
@@ -769,11 +822,37 @@ i64 tk_ns_pass(i64 root) {
 // form too). Nesting is not taught (§31 (a).1: `A.B` already gives the same
 // tree with one linear handler); a `namespace` read while another is already
 // open is refused rather than silently prefixing one onto the other.
+//
+// `nsd_file` below (entrega 5, crumb N3) notes every file that has opened a
+// namespace of its own, block-form or file-scoped: `import`'s own ordering
+// rule (D31.13, "at the top, before any namespace") asks whether the FILE an
+// `import` is written in has already declared one -- a namespace declared
+// inside an IMPORTED file is that file's own, not the importer's, so it
+// never marks the importer, and the once-only re-`import` of an already-
+// brought-in namespace never runs its body a second time to mark it twice.
+i64 tk_ns_file_saw_ns(uptr fl) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nnsd) break;
+        if (str_eq(nsd_file_at(i), fl)) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+void tk_ns_mark_file_saw_ns(uptr fl) {
+    if (tk_ns_file_saw_ns(fl)) return;
+    if (tk_nnsd == TK_MAXNSD) err_at(fl, tk_line, "teko: too many files declaring a namespace");
+    set_nsd_file_at(tk_nnsd, fl);
+    tk_nnsd = tk_nnsd + 1;
+}
+
 void tk_namespace() {
     i64 line = p_line();
     uptr fl = p_file();
     p_next();                                    // the `namespace` word
     if (tk_ns_current() != 0) err_at(fl, line, "teko: a nested namespace is not taught");
+    tk_ns_mark_file_saw_ns(fl);
     uptr seg0mem = xalloc(8);
     uptr full = tk_ns_read_path(seg0mem);
     uptr seg0 = ld64(seg0mem);
@@ -818,4 +897,31 @@ void tk_using() {
     uptr full = tk_ns_read_path(seg0mem);
     p_expect(K_SEMI, "expected ; after using");
     tk_ns_using_add(fl, line, full);
+}
+
+// `import A.B;` -- exactly `#include "A/B.tk"` plus an implicit `using A.B;`
+// (§31 (a).11): the include goes through the core's own `lex_include`, so it
+// obeys the includer's directory and then `[include].paths`, and it is
+// once-only, by the same `lex_seen` a plain `#include` already relies on --
+// reopening a namespace already brought in merges by construction and adds
+// nothing the first `import` did not. Refused inside an open namespace BLOCK
+// and refused once the file it is written in has already opened a namespace
+// of its own (D31.13, "at the top, before any namespace" -- a namespace
+// declared inside the IMPORTED file is a different file's own and does not
+// count, `tk_ns_mark_file_saw_ns`'s own header). The `#include "x.tk"` form
+// keeps working unchanged: `import` is one door onto the same mechanism, not
+// the only one.
+void tk_import() {
+    i64 line = p_line();
+    uptr fl = p_file();
+    p_next();                                    // the `import` word
+    if (tk_ns_current() != 0) err_at(fl, line, "teko: import is refused inside a namespace");
+    if (tk_ns_file_saw_ns(fl))
+        err_at(fl, line, "teko: import comes before every namespace in its own file");
+    uptr seg0mem = xalloc(8);
+    uptr full = tk_ns_read_path(seg0mem);
+    if (p_id() != K_SEMI) err_at2(fl, line, "teko: expected ; after import", tk_ns_dotted(full));
+    tk_ns_using_add(fl, line, full);
+    lex_include(tk_ns_path_of(full), line);       // the lookahead contract: still on the `;`
+    p_next();
 }
