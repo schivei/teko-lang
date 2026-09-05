@@ -107,7 +107,23 @@ void set_vi_name_at(i64 i, uptr v)  { st64(vi_name + i * 8, v); }
 // infix_set clears the handler column). The node is an N_INDEX the core defines
 // but never builds and never lowers, so an index this pass does not rewrite is
 // impossible to miss.
+//
+// set while a recursive `tk_bracket` call is resolving the base of a `- ! ~`
+// chain below (teko_prefix.mc): the base is never itself the WRITE target the
+// source named -- `-arr[i]` is a value, never an lvalue, in C# as much as here
+// -- so the `nd_kind(left) == N_IDENT` global-array deferral stays off for it,
+// exactly as it already is for any other non-bare-identifier receiver.
+i64 tk_bracket_no_write = 0;
+
 i64 tk_bracket(i64 left) {
+    i64 base = tk_unary_base(left);
+    if (base != left) {
+        i64 saved = tk_bracket_no_write;
+        tk_bracket_no_write = 1;
+        i64 inner = tk_bracket(base);
+        tk_bracket_no_write = saved;
+        return tk_unary_rewrap(left, inner);
+    }
     i64 x = tk_ax_find(left);                    // an ARRAY FIELD, whose length is known
     if (x >= 0) return tk_array_index(left, x);  // here: teko_struct.mc lowers it now
     if (nd_kind(left) == N_IDENT) {
@@ -118,7 +134,7 @@ i64 tk_bracket(i64 left) {
     uptr fl = p_file();
     i64 idx = parse_expr(0);
     p_expect(K_RBRACK, "expected ] after the index");
-    if (nd_kind(left) == N_IDENT && tk_arr_write_follows())
+    if (!tk_bracket_no_write && nd_kind(left) == N_IDENT && tk_arr_write_follows())
         return tk_arr_defer_write(left, idx, line, fl);   // maybe a GLOBAL array; the pass decides
     i64 n = node_new(N_INDEX, line, fl);
     set_nd_a(n, left);

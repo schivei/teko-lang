@@ -26,6 +26,12 @@
 // And the core keeps its own arithmetic: the `i64` sum and the `u8` comparison
 // below are the same nodes they were before this construct existed.
 //
+// `.`/`[` bind tighter than `- ! ~` (teko_prefix.mc): `!b[1]`, `-a.x` and
+// `~g[2]` are the bracket/member resolved first and the unary wrapped around
+// that, not the reverse -- the core's own prefix table reads `- ! ~` before
+// `syntax_expr` is ever consulted, so `tk_dot`/`tk_bracket` sink through the
+// chain themselves.
+//
 // expect-exit: 42
 
 #include "../lib/rt.mc"
@@ -93,6 +99,14 @@ class Kid : MidA {
     public i64 tag;
 }
 
+class Flag {
+    public bool on;
+
+    public bool flag() {
+        return on;
+    }
+}
+
 // both operands are PARAMETERS: nothing types them while the body is parsed,
 // and the oracle answers from the pass, where the whole unit exists
 Vec combine(Vec a, Vec b) {
@@ -142,6 +156,34 @@ i64 main() {
 
     i64 i = 5;
     if (+i != i) return 13;                      // `+` over a core type: the identity
+
+    i64 barr[2];
+    barr[0] = 1;
+    barr[1] = 0;
+    if (!barr[1] != 1) return 14;                 // !b[1]: the bracket binds first
+
+    i64 iarr[2];
+    iarr[0] = 6;
+    iarr[1] = 9;
+    if (-iarr[0] != -6) return 15;                // -a[0]
+
+    Flag flg = new Flag;
+    flg.on = false;
+    if (!flg.on != 1) return 16;                  // !f.on: a field
+
+    Vec pv = new Vec;
+    pv.x = 9;
+    pv.y = 0;
+    if (-pv.x != -9) return 17;                   // -p.x: a field, over the core's own i64
+
+    i64 garr[3];
+    garr[2] = 5;
+    if (~garr[2] != -6) return 18;                // ~g[2]
+
+    flg.on = true;
+    if (!flg.flag() != 0) return 19;              // !c.flag(): a method
+
+    if (-(-iarr[1]) != 9) return 20;              // -(-a[1])
 
     Vec s = a + b;
     return s.x + s.y;

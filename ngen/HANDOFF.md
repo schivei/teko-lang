@@ -988,6 +988,22 @@ sugeriu no alerta do §23 do plano ("candidato a unificar, o pass como fonte ún
 o reclaim/RC entrar"). A pilha de locais do parse fica intacta e segue fazendo o que
 sempre fez, resolver `.`. **Nada ficou híbrido.**
 
+**Entrega 5 — PREFIXOS VEEM PÓS-FIXOS LANDADO** (32 fixtures, `surface_operator.tk`
+estendida): `!b[1]`, `-a.x`, `~g[2]` — `.`/`[` (`syntax_infix`, prec 12) agora binding
+mais apertado que `- ! ~`, como em C#. **Não é `syntax_expr("-", ...)`** (a rota do `+`
+não se generaliza): medido com um handler forçado a devolver um valor distinto, ele nunca
+disparou para `-x` — `parse_unary()` do núcleo acha `-`/`!`/`~` na sua PRÓPRIA tabela de
+prefixo (`ops_init`) e resolve o `N_UNARY` ali, sem nunca chegar em `parse_primary` (onde
+`syntax_expr` mora). Só `+` reaparece por `syntax_expr` porque `ops_init` nunca o
+registrou. A correção real é em `tk_dot`/`tk_bracket` (`ngen/teko_prefix.mc`, novo):
+sinkam pela cadeia de `- ! ~` até o operando de verdade, resolvem o `.`/`[` NELE, e
+reembrulham o resultado na mesma cadeia — `-a.x` vira o mesmo `N_UNARY(-, DOT(a,x))` que
+o núcleo constrói para `-(a.x)` escrito com parênteses. `tk_bracket` ganhou uma guarda
+(`tk_bracket_no_write`) para o operando-base de uma cadeia sinkada nunca virar alvo do
+deferral de array GLOBAL (`-arr[i]` é valor, nunca lvalue, como em C#). AST das 31
+fixtures não tocadas byte-idêntica à base `e2d4d936`; `mc limits` `ok` (`intrin` 8/8,
+nada de novo registrado).
+
 ## 5.1 Armadilhas já pagas (não repita)
 
 1. **`mc --exe` emite Mach-O SEMPRE.** `schivei/mc` `src/main.mc:227` faz
@@ -1090,6 +1106,18 @@ sempre fez, resolver `.`. **Nada ficou híbrido.**
     CONSTRUÍDA internamente (o próprio `tk_ns_resolve`, o reopen check de `partial`, uma busca por
     nome já manglado) chamar a versão exata — só o sítio que lê o que a FONTE escreveu chama a
     versão com fallback.
+
+17. **Um prefixo do NÚCLEO nunca vê o pós-fixo do MÓDULO.** `parse_unary()` checa a
+    própria tabela de prefixo (`ops_init`: `- ~ ! &`) ANTES de `parse_primary` — onde
+    `syntax_expr` mora — e lê o operando por recursão direta em `parse_unary()`, que nunca
+    consulta `.`/`[` (`syntax_infix`, prec 12). `!b[1]` chega no `[` já como `N_UNARY(!,
+    b)`: o núcleo devolveu o unário ANTES de o `[` do módulo ter a chance de aparecer.
+    Registrar `syntax_expr("-", ...)` não conserta nada — é código morto, medido com um
+    handler forçado a devolver um valor distinto que nunca disparou para `-x`. Só `+`
+    escapa dessa armadilha (M45's `tk_unary_plus`) porque `ops_init` nunca o registrou, daí
+    ele cai em `parse_primary` como um token comum. A correção é do lado do PÓS-fixo, não
+    do prefixo: `tk_dot`/`tk_bracket` sinkam pela cadeia de `- ! ~` que RECEBERAM como
+    `left`, resolvem contra o operando de verdade, e reembrulham (`ngen/teko_prefix.mc`).
 
 ## 5.2 Canal com a sessão do mc
 

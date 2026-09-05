@@ -167,6 +167,7 @@
 // language this compiler accepts.
 
 #include "teko_type.mc"
+#include "teko_prefix.mc"
 #include "teko_float.mc"
 #include "teko_struct.mc"
 #include "teko_array.mc"

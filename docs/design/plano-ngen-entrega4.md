@@ -1487,3 +1487,19 @@ fall out of a case" mesmo terminando em `break`. Recursa em `N_BLOCK` agora, com
 **Fixture** `surface_arrays.tk` (32/32 em exit 42). AST das 31 fixtures anteriores byte-idêntica
 contra `6cf49db1`, exceto `surface_switch.tk` (o fix acima) -- idêntica entre o commit do fix e
 este. `mc limits ngen` `ok`.
+
+## 40. Prefixos veem pós-fixos -- `.`/`[` mais apertado que `- ! ~` (2026-09-05)
+
+`!b[1]` era `(!b)[1]`, `-a.x` era `(-a).x`: `parse_unary()` do núcleo acha `- ! ~` na sua PRÓPRIA
+tabela de prefixo (`ops_init`) antes de `parse_primary` -- onde `syntax_expr` mora -- e lê o
+operando por recursão direta em `parse_unary()`, que nunca consulta `.`/`[` (`syntax_infix`, prec
+12). `syntax_expr("-", ...)` não conserta nada (código morto, medido); só `+` escapa da armadilha
+porque `ops_init` nunca o registrou. Correção em `ngen/teko_prefix.mc` (novo): `tk_dot`/`tk_bracket`
+sinkam pela cadeia de `- ! ~` que RECEBERAM como `left` até o operando de verdade, resolvem o
+`.`/`[` nele, e reembrulham -- o mesmo `N_UNARY` que o núcleo constrói para `-(a.x)` escrito com
+parênteses. `tk_bracket` ganhou uma guarda (`tk_bracket_no_write`) para o operando-base de uma
+cadeia sinkada nunca virar alvo do deferral de array GLOBAL.
+
+**Fixture** `surface_operator.tk` estendida (32/32 em exit 42, sem fixture nova): `!b[1]`, `-a[0]`,
+`!f.on`, `-p.x`, `~g[2]`, `!c.flag()`, `-(-a[1])`. AST das 31 fixtures não tocadas byte-idêntica
+contra `e2d4d936`. `mc limits ngen` `ok` (`intrin` 8/8).
