@@ -1342,3 +1342,76 @@ instanciado pelo NOME de um const (`tk_gen_targs` ganhou o ramo `T_IDENT`). Loca
 propósito (`#define` é tabela única do programa). 29 fixtures, AST das 28 anteriores
 byte-idêntica. HANDOFF.md §5 "CONST LANDADO" tem o detalhe completo, inclusive as dívidas
 achadas (array local sem `[i]=v;`, redefinição cai num guard diferente do esperado).
+
+## 37. Ternário `c ? a : b` landado -- hoist num pass() (D228, 2026-09-05)
+
+D228: operador ternário, associativo à direita, mesma precedência de `||`. `ngen/teko_ternary.mc`
+(novo). `syntax_infix("?", TK_TERN_PREC, &tk_tern_infix)` só constrói um placeholder
+(`tk_ternary(c, a, b)`, o mesmo truque do `tk_defer_member` de `teko_typeof.mc` -- se o passe não
+rodar, o núcleo recusa `call to unknown function`, nunca miscompila). **`TK_TERN_PREC` é 1, não
+0** -- o crumb sugeria "0 ou o menor valor abaixo de `||`", mas `syntax_infix` recusa precedência
+fora de 1..100 (`mc docs/reference/hooks.md` § `syntax_infix`), e 1 já é a linha mais baixa da
+tabela (`language.md` §3), empatada com `||`; ler `b` com `parse_expr(TK_TERN_PREC)` (o MESMO
+piso passado ao próprio operador, não piso+1) é o que dá a associatividade à direita -- um `?`
+achado enquanto `b` está sendo lido é oferecido ao mesmo piso e cai no MESMO handler,
+recursivamente.
+
+**Posição do passe -- desvio do crumb, justificado.** O crumb sugeria registrar logo depois de
+`tk_ns_pass` e antes de `tk_params_pass`. Medido que não dá: `tk_ty_of` (o oráculo de
+`teko_typeof.mc` que este passe usa para tipar os dois braços) só enxerga o tipo de um `.` sobre
+receptor que o parser não tipou (parâmetro, campo de tipo estático desconhecido) DEPOIS que
+`tk_typeof_pass` reescreveu o placeholder deferido (`tk_unresolved_member`) no load/call que ele
+representa -- antes disso o placeholder é uma chamada a um nome que nada declara, e `tk_ty_of`
+responde -1, o mesmo "não sei" que daria pra um braço com tipo genuinamente desconhecido. Rodar
+antes do oráculo faria um braço com `.` deferido falhar com "tipos diferentes" mesmo quando os
+dois braços são, de fato, do mesmo tipo. `teko_rc.mc` roda por último pelo MESMO motivo (o
+cabeçalho desse arquivo já registra: "depois que teko_typeof.mc resolveu todo acesso deferido e
+todo nó tem seu tipo"). Registrado **logo depois de `tk_typeof_pass`, antes de `tk_ops_pass`**:
+`params`/`typeof`, que rodam ANTES do ternário, nunca olham a FORMA da árvore (bloco/if/statement),
+só censo por nome/tipo, então não perdem nada vendo o placeholder ainda intacto; `ops`/`default`/
+`over`/`rc`, todos DEPOIS, passam a ver `if`/local comuns -- nenhum precisa aprender o que um
+ternário é.
+
+**Mecanismo do hoist (`tk_tern_lower`/`tk_tern_scan`/`tk_tern_stmt`/`tk_tern_branch`,
+`teko_ternary.mc`):** cada `tk_ternary(c, a, b)` vira `T $t = 0; if (c) { $t = a; } else { $t = b;
+}` inserido ANTES do statement envolvente, com o placeholder trocado por `$t` (`N_IDENT`) no
+lugar exato -- a mesma forma "detach + node_assign + set_nd_next(keep)" que `teko_ns.mc`'s
+`tk_ns_ident_to_const` e `teko_rc.mc`'s `tk_rc_park`/`tk_rc_hoist_cond` já usam. `T` sai de
+`tk_ty_of(a)` comparado a `tk_ty_of(b)`; os dois braços são reduzidos (`tk_tern_scan`) ANTES da
+comparação de tipo, e o `$t` recém-criado entra na MESMA tabela de escopo que `teko_typeof.mc`
+mantém (`tk_ty_scope_add`) -- é o que deixa um ternário aninhado responder pelo seu próprio tipo
+quando o externo pergunta.
+
+**Preguiça com aninhamento -- o ponto que o crumb pedia atenção especial.** `c` é hoistado junto
+da lista que o `if` também entra (roda incondicionalmente, então não custa nada); `a` e `b` são
+cada um reduzido para dentro do SEU PRÓPRIO ramo (`thenOut`/`elseOut`), nunca para o preâmbulo
+comum -- é essa escolha, não a ORDEM "de dentro pra fora" em si, que preserva a preguiça: um
+ternário aninhado num braço (`c ? (x?y:z) : w`, ou o encadeamento à direita `c1 ? a : c2 ? b : d`,
+que o parser right-recursivo já entrega como `tk_ternary(c1, a, tk_ternary(c2, b, d))` -- a MESMA
+forma de árvore) tem seu próprio `if` construído DENTRO do ramo que o contém, então só roda quando
+aquele ramo é tomado. Provado por probe fora de `tests/`: `0!=0 ? side(1) : (1!=0 ? side(2) :
+side(3))` chama `side` uma vez.
+
+**Condição de `while`/`for`:** como `teko_loop.mc` já rebaixa para `loop { if (!(c)) break; ... }`
+antes deste passe rodar, um ternário na condição cai dentro do `if (!(c))` -- o "statement
+envolvente" É esse `if`, que já está dentro do bloco do corpo do loop, então o hoist entra ali e
+reavalia a cada volta. Provado na fixture (`while (i < 5 ? 1 : 0)`, laço termina com `i==5`).
+
+**`return`/`if` sem chaves:** `tk_tern_branch` só embrulha o statement solto num bloco quando ele
+de fato hoistou algo -- a mesma cerca que `tk_rc_branch` já usa para um temporário parked
+(`teko_rc.mc`). Provado na fixture (`if (c != 0) return c == 1 ? 100 : 200;`).
+
+**Fixture** `surface_ternary.tk` (30/30 em exit 42): inicializador, argumento, encadeamento à
+direita, preguiça com contador provando UMA chamada só por lado, condição de `while`, braços de
+objeto teko (`rt_live()` prova que a escolha não aloca um objeto novo), `return` dentro de `if`
+sem chaves, ternário dentro de método. AST das **29 fixtures anteriores** byte-idêntica contra o
+compilador da base `a4736222`. `mc limits ngen` `ok`. Probes fora de `tests/`: braços de tipos
+diferentes (`i64`/`f64`) recusados com "the two arms of ?: have different types"; `?` sem `:`
+recusado com "expected ':' in a ternary"; `a ? b` sem `:` como statement solto, mesma recusa;
+ternário como lado esquerdo de atribuição recusado pelo NÚCLEO ("left side of assignment must be
+a name" -- o resultado do ternário nunca é um `N_IDENT`).
+
+**Limite conhecido (o próprio cabeçalho do arquivo documenta):** a avaliação de `c`/`a`/`b` é
+hoistada para ANTES do statement que os continha -- um `f(x++, c ? a : b)` teria a chamada rodando
+depois do hoist no MESMO statement (sem operador `++` de efeito em posição de expressão hoje, o
+risco é teórico, registrado por completude).

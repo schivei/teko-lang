@@ -780,6 +780,49 @@ do mc, `ngen/teko_const.mc` (novo).
   ANTES da decisão "achou member, tenta using", então a mensagem é "is private" em vez de resolver
   pelo `using`. Nenhum dos dois é tocado por este crumb.
 
+**Entrega 5 — TERNÁRIO LANDADO** (D228, plano §37; 30 fixtures): `c ? a : b`, associativo à
+direita, mesma precedência de `||` (`ngen/teko_ternary.mc`, novo).
+- **Mecanismo:** o núcleo não tem controle de fluxo em posição de expressão, então
+  `syntax_infix("?", TK_TERN_PREC, &tk_tern_infix)` só constrói um PLACEHOLDER — chamada a
+  `tk_ternary(c, a, b)`, o mesmo truque de `tk_defer_member` (se o passe não rodar, o núcleo
+  recusa `call to unknown function`, nunca miscompila). `TK_TERN_PREC` é **1**, não 0 —
+  `syntax_infix` recusa precedência fora de 1..100, e 1 já é a linha mais baixa da tabela
+  (empatada com `||`); ler `b` com `parse_expr(TK_TERN_PREC)` (o MESMO piso, não piso+1) é o
+  que dá a associatividade à direita.
+- **Posição do passe: logo DEPOIS de `tk_typeof_pass`, ANTES de `tk_ops_pass`** — não entre `ns`
+  e `params` como o crumb sugeria de partida. Motivo: `tk_ty_of` (o oráculo que tipa os braços)
+  só responde um `.` sobre receptor que o parser não tipou depois que `tk_typeof_pass` já
+  reescreveu o placeholder deferido no load/call que ele representa; rodar antes faria um braço
+  com `.` deferido responder "tipo desconhecido" em vez do tipo real do campo. `teko_rc.mc` roda
+  por último pelo MESMO motivo ("depois que o oráculo resolveu todo acesso deferido..."). `params`/
+  `typeof` não perdem nada rodando antes do ternário — nenhum dos dois olha a FORMA da árvore
+  (bloco/if/statement), só censo por nome e tipo — e `ops`/`default`/`over`/`rc`, todos DEPOIS do
+  ternário, passam a ver `if`/local comuns, nenhum precisa saber que um ternário existiu.
+- **Braços preguiçosos com aninhamento:** `tk_tern_lower` hoista `c` (junto do `if` que ele mesmo
+  dirige — roda sempre, então não custa nada) e reduz `a`/`b` cada um DENTRO do seu próprio ramo,
+  antes de tipar — um ternário aninhado num braço (`c ? (x?y:z) : w`, ou o encadeamento à direita
+  `c1 ? a : c2 ? b : d`, que vira exatamente `tk_ternary(c1, a, tk_ternary(c2, b, d))`) hoista de
+  dentro pra fora, mas o `if` interno cai DENTRO do ramo externo — preguiça sobrevive ao
+  aninhamento. Provado por probe (não fixture): `0!=0 ? side(1) : (1!=0 ? side(2) : side(3))`
+  chama `side` uma vez só.
+- **Condição de `while`/`for`:** cai dentro do bloco do corpo do loop (o `if (!c) break;` que
+  `teko_loop.mc` já constrói), reavaliada a cada volta — provado na fixture.
+- **`return`/`if` sem chaves:** `tk_tern_branch` embrulha o statement solto num bloco só quando ele
+  de fato hoistou algo, a mesma cerca que `teko_rc.mc`'s `tk_rc_branch` já usa para um temporário
+  parked.
+- **Tipo:** os dois braços do MESMO tipo pelo oráculo, senão `teko: the two arms of ?: have
+  different types`; objeto teko nos dois braços funciona igual (o temporário é uma local comum, o
+  passe de RC — que roda DEPOIS do ternário — trata como qualquer outra).
+- **Fixture** `surface_ternary.tk` (30/30 em exit 42): inicializador, argumento, encadeamento à
+  direita, preguiça com contador, condição de `while`, braços de objeto (`rt_live()` prova que
+  nenhum objeto novo nasce só para a escolha), `return` dentro de `if` sem chaves, dentro de
+  método. AST das **29 fixtures anteriores** byte-idêntica contra o compilador da base. `mc limits
+  ngen` `ok`. Probes fora de `tests/`: braços de tipos diferentes (`i64`/`f64`) → recusa; `?` sem
+  `:` → "expected ':' in a ternary"; `a ? b` sem `:` como statement solto → mesma recusa; ternário
+  como lado esquerdo de atribuição → recusa do núcleo ("left side of assignment must be a name").
+- **Dívida documental do `const` ainda aberta (registrada no §5, não fechada aqui):** o array LOCAL
+  comum sem `[i]=v;` (achado do crumb `const`) segue sem fechamento — fora do escopo do ternário.
+
 **Fila:** `switch` (D222) → closures/`ref`/`out` (D221, architect-first) →
 compilador teko de `<mc/core_min>` (plano §26). **Fora:** `var`, `type`, `match`, Variant,
 método parcial, nested, `foreach` (precisa de iteráveis), herança de interface, `using G = geo;`/

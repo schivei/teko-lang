@@ -143,6 +143,13 @@
 //   public const i64 MAX = 4;          a class/struct member, no slot
 //   Nome.MAX  /  MAX (bare, inside)    the same two forms a static member takes
 //
+// What entrega 5's ternary crumb adds -- C#'s `c ? a : b`, associative to the
+// right, hoisted at a pass() to the `if`/local the core already lowers to
+// (D228, teko_ternary.mc):
+//   c ? a : b                          an initializer, a return, an argument   syntax_infix
+//   c1 ? a : c2 ? b : d                 right-associative, lazy either way
+//   while (c ? 1 : 0) { ... }           the hoist lands inside the loop's own body
+//
 // Everything else in docs/design/port-teko-mc.md §3 (types/classes,
 // generics, error-union, `service`/DI, concurrency, the
 // rest of the stdlib) is a later entrega and is not stubbed here: it does
@@ -162,6 +169,7 @@
 #include "teko_this.mc"
 #include "teko_access.mc"
 #include "teko_typeof.mc"
+#include "teko_ternary.mc"
 #include "teko_stmt.mc"
 #include "teko_expr.mc"
 #include "teko_params.mc"
@@ -209,6 +217,7 @@ void user_init() {
     syntax_expr("false", &tk_false);
     syntax_infix(".", 12, &tk_dot);
     syntax_infix("[", 12, &tk_bracket);
+    syntax_infix("?", TK_TERN_PREC, &tk_tern_infix);
 
     on_stmt(&tk_on_stmt);
 
@@ -238,6 +247,15 @@ void user_init() {
 
     pass(&tk_params_pass);
     pass(&tk_typeof_pass);
+
+    // entrega 5, ternary crumb (D228): BEHIND the oracle, because `tk_ty_of`
+    // -- what this pass leans on to type an arm -- only answers a `.` on a
+    // receiver the parser could not type once teko_typeof.mc's own pass has
+    // rewritten the deferred placeholder into the load/call it stands for;
+    // ahead of every pass below, so none of them has to know a ternary was
+    // ever written (teko_ternary.mc's own header spells the whole ordering
+    // out, arm by arm).
+    pass(&tk_ternary_pass);
 
     // BEHIND the oracle, because it asks the oracle what the two operands of a
     // `+` are, and AHEAD of the overload mangling, because the call it puts in
