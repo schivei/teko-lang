@@ -1,8 +1,8 @@
-// teko_ns.mc -- `namespace A.B { ... }` / `namespace A.B;` (file-scoped, C# 10)
-// and `using A.B;` (entrega 5, crumb N1; plano-ngen-entrega4.md §31). `import`
-// (N3) and the mangling of a free function declared inside a namespace (N2)
-// stay out: a free function written inside a namespace here is left PLAIN,
-// registered under its bare name exactly as it always was.
+// teko_ns.mc -- `namespace A.B { ... }` / `namespace A.B;` (file-scoped, C# 10),
+// `using A.B;` and qualified type names (entrega 5, crumb N1; plano-ngen-
+// entrega4.md §31), and a free function declared inside a namespace, mangled
+// and resolved by `tk_ns_pass` (crumb N2, §31/§33). `import` (N3) is the one
+// piece still out.
 //
 // The precedent read whole is `mini_compiler/examples/lang/lang_class.mc:568-666`
 // (`lg_namespace`, `lg_using`, `lg_ns_path`, `lg_ns_register`) and
@@ -86,12 +86,33 @@
 //   - a namespaced type at the top level only opens a FUNCTION: `tk_ns_top`
 //     refuses a global of that type with a clear message rather than half
 //     rebuilding `parse_global`, which this module has no hook onto.
-//   - `main`/`extern`/a global inside a namespace BLOCK are refused where the
-//     block's own loop reads them; the same three inside a FILE-SCOPED
-//     namespace are not caught here, because nothing calls this module back
-//     once a file-scoped namespace has only set its state and returned --
-//     catching that needs a pass, and N1 adds none (N2's `tk_ns_pass` is
-//     where it belongs).
+//
+// ---- a free function inside a namespace (crumb N2) ----
+//
+// `namespace geo { i64 area(i64 r) { ... } } geo.area(x); area(x);` -- unlike
+// a type, whose full name is settled the instant it is declared, a free
+// function's own name is left BARE by the parser (`i64 area(...)` reads no
+// differently inside a namespace than outside one) and only `tk_ns_pass`, a
+// `pass()` registered right after `tk_partial_pass`, gives it its final,
+// `geo__area` symbol -- the core parses the declaration and every call to it
+// long before any pass exists to tell it apart from an unrelated `area`
+// elsewhere. Two sweeps: `tk_ns_scan_decls` mangles every namespaced free
+// function/prototype in the unit (block-form, noted at parse time in
+// `tk_ns_decl_note`'s own table since a file may open more than one block
+// namespace, or file-scoped, read straight off `nd_file`); `tk_ns_scan_calls`
+// then offers every bare call inside a namespaced function's body that same
+// function's own namespace (read back off its now-mangled name, `tk_ns_of_name`)
+// outward, and then the `using`s of the call's file, rewriting only when the
+// qualified candidate EXISTS (D31.10 -- a call to something that never
+// resolves is left exactly as written, and reaches the linker missing, same
+// as any other call this compiler never taught to guess). A QUALIFIED call
+// (`geo.area(x)`) is a different story again, resolved at PARSE time by
+// `tk_ns_qualified_call`, the same segment walk `geo.Circle.made` already
+// takes when the walk stops on a namespace rather than a type.
+// `main`/`extern`/a global inside a namespace, BLOCK or FILE-SCOPED, are both
+// refused -- the block's own loop for the first, `tk_ns_scan_decls`'s walk of
+// the whole unit for the second, since nothing calls this module back once a
+// file-scoped namespace has only set its state and returned.
 
 #define TK_MAXNS    16                 // namespaces declared in one source
 #define TK_MAXNSSEG 16                 // namespace segment words reserved
@@ -116,14 +137,32 @@ uptr nsf_file[TK_MAXNSF];              // a file with a file-scoped `namespace X
 uptr nsf_ns[TK_MAXNSF];                // ...and the namespace it named
 i64  tk_nnsf = 0;
 
+#define TK_MAXNSB   256                // free-function declarations read inside a BLOCK namespace
+
+i64  nsb_node[TK_MAXNSB];              // the N_FUNC/N_PROTO node `parse_top` returned
+uptr nsb_ns[TK_MAXNSB];                // ...and the namespace the block loop stood in
+i64  tk_nnsb = 0;
+
 uptr tk_cur_ns = 0;                    // the BLOCK-form namespace currently open, or 0
 i64  tk_ns_dot = 0;                    // the `.` token, interned once at startup
+uptr tk_ns_call_site = 0;              // the namespace of the function `tk_ns_pass`'s sweep 2 walks
 
 // teko_access.mc is included after this file: the short word and the segment
 // word both dispatch through its existing machinery
 i64 tk_type_stmt();
 i64 tk_type_expr();
 i64 tk_static_member(i64 si, i64 line, uptr fl);
+
+// teko_expr.mc is included after this file: a qualified free function's own
+// call (entrega 5, crumb N2) reads its argument list the same way a static
+// method call already does
+i64 tk_args(uptr pn);
+
+// teko_default.mc is included after this file too: the free-function default
+// table is keyed by the pointer a declaration's name was AT PARSE TIME, and a
+// namespace rename has to move that key along with `set_nd_name` (entrega 5,
+// crumb N2) or the default silently stops filling
+void tk_default_rename(uptr velho, uptr novo);
 
 void tk_ns_init() { tk_ns_dot = word_add("."); }
 
@@ -142,6 +181,10 @@ uptr nsf_file_at(i64 i) { return ld64(nsf_file + i * 8); }
 void set_nsf_file_at(i64 i, uptr v) { st64(nsf_file + i * 8, v); }
 uptr nsf_ns_at(i64 i)   { return ld64(nsf_ns + i * 8); }
 void set_nsf_ns_at(i64 i, uptr v)   { st64(nsf_ns + i * 8, v); }
+i64  nsb_node_at(i64 i) { return ld64(nsb_node + i * 8); }
+void set_nsb_node_at(i64 i, i64 v) { st64(nsb_node + i * 8, v); }
+uptr nsb_ns_at(i64 i)   { return ld64(nsb_ns + i * 8); }
+void set_nsb_ns_at(i64 i, uptr v)   { st64(nsb_ns + i * 8, v); }
 
 // ---- the namespaces known, the segment words and the short type words ----
 i64 tk_ns_find(uptr cheio) {
@@ -258,6 +301,52 @@ uptr tk_ns_qualify(uptr nome) {
     if (cur == 0) return nome;
     tk_ns_register(nome);
     return tk_join3(cur, "__", nome);
+}
+
+// 1 when `nome` starts with `pre` followed by "__" -- the one shape every
+// generated identity (§31 (c)) takes, never a coincidental substring
+i64 tk_ns_name_has_prefix(uptr nome, uptr pre) {
+    i64 plen = cstrlen(pre);
+    i64 i = 0;
+    loop {
+        if (i >= plen) break;
+        if (ld8(nome + i) != ld8(pre + i)) return 0;
+        i = i + 1;
+    }
+    return ld8(nome + plen) == '_' && ld8(nome + plen + 1) == '_';
+}
+
+// the namespace `nome` already carries as a prefix, or 0 -- the MOST SPECIFIC
+// one known, since a program may declare both `namespace A` and `namespace
+// A.B` (`A` a strict prefix of `A__B`). Used both as the D31.9 "already
+// qualified" guard (entrega 5, crumb N2) and, once every namespaced
+// declaration carries its full name, as the site a call inside it is
+// resolved from -- no separate bookkeeping needed for that second use.
+uptr tk_ns_of_name(uptr nome) {
+    i64 best = 0 - 1;
+    uptr best_ns = 0;
+    i64 i = 0;
+    loop {
+        if (i >= tk_nns) break;
+        uptr cand = nsq_name_at(i);
+        if (tk_ns_name_has_prefix(nome, cand)) {
+            i64 l = cstrlen(cand);
+            if (l > best) { best = l; best_ns = cand; }
+        }
+        i = i + 1;
+    }
+    return best_ns;
+}
+
+// `nome` with its namespace prefix stripped -- the SHORT spelling the source
+// actually wrote, for the one place a namespaced name is compared as a WORD
+// rather than looked up as a type or a declaration (a constructor/destructor
+// named after its own class, teko_class.mc). `nome` unchanged when it carries
+// no namespace at all, so a non-namespaced class keeps today's identity.
+uptr tk_ns_short_of(uptr nome) {
+    uptr ns = tk_ns_of_name(nome);
+    if (ns == 0) return nome;
+    return nome + cstrlen(ns) + 2;
 }
 
 // the index of the last "__" strictly before `len` in `s`, or -1 when there is
@@ -427,13 +516,34 @@ i64 tk_var_after_type(i64 ty, i64 line, uptr fl) {
     return tk_var(ty, vn, init);
 }
 
-// `geo.Circle c = ...;` / `geo.Circle.made = e;`, the statement forms a bare
-// namespace segment opens: a var-decl when the CURRENT token is not itself a
-// `.` (the whole qualified type name is already read and consumed by
-// `tk_ns_walk`, unlike `tk_type_stmt`'s single unconsumed word, so this asks
-// "is the parser standing ON a `.` right now", never `tk_dot_follows`, which
-// answers a different question -- does one follow the token still to come),
-// a static access otherwise
+// `geo.area(x)` -- a free function's own call, qualified (entrega 5, crumb
+// N2). `tk_ns_walk` has already consumed the `.` before giving up on `ns` as
+// a type (neither `ns` nor `ns.name` names one), so the parser stands
+// exactly on the function's own short name; the symbol built here is
+// trusted outright, with no `decl_find` to ask (a call may be written above
+// the declaration it targets, and this runs at PARSE time, long before
+// `tk_ns_pass` mangles that declaration to the same name) -- an `area` that
+// turns out not to exist reaches the linker as a missing symbol, same as
+// any other call this compiler never taught to guess.
+i64 tk_ns_qualified_call(uptr ns, i64 line, uptr fl) {
+    uptr fname = p_ident();
+    uptr full = tk_join3(ns, "__", fname);
+    if (p_id() != K_LPAR) err_at2(fl, line, "teko: unresolved qualified name", full);
+    i64 na = 0;
+    i64 args = tk_args(&na);
+    tk_line = line;
+    tk_file = fl;
+    return tk_call(full, args);
+}
+
+// `geo.Circle c = ...;` / `geo.Circle.made = e;` / `geo.area(x);`, the
+// statement forms a bare namespace segment opens: a var-decl when the
+// CURRENT token is not itself a `.` (the whole qualified type name is
+// already read and consumed by `tk_ns_walk`, unlike `tk_type_stmt`'s single
+// unconsumed word, so this asks "is the parser standing ON a `.` right now",
+// never `tk_dot_follows`, which answers a different question -- does one
+// follow the token still to come), a static access when `acc` IS a type, and
+// a free function's own call when it names a namespace instead
 i64 tk_ns_seg_stmt() {
     i64 line = p_line();
     uptr fl = p_file();
@@ -441,7 +551,14 @@ i64 tk_ns_seg_stmt() {
     p_next();
     uptr acc = tk_ns_walk(seg0);
     i64 si = tk_struct_find_exact(acc);
-    if (si < 0) err_at2(fl, line, "teko: unresolved qualified name", acc);
+    if (si < 0) {
+        if (tk_ns_find(acc) < 0) err_at2(fl, line, "teko: unresolved qualified name", acc);
+        i64 e = tk_ns_qualified_call(acc, line, fl);
+        p_expect(K_SEMI, "expected ; after the call");
+        tk_line = line;
+        tk_file = fl;
+        return tk_stmt(e);
+    }
     if (p_id() != tk_ns_dot) return tk_var_after_type(sr_ty_at(si), line, fl);
     i64 e = tk_static_member(si, line, fl);
     p_expect(K_SEMI, "expected ; after the static member");
@@ -450,7 +567,9 @@ i64 tk_ns_seg_stmt() {
     return tk_stmt(e);
 }
 
-// `geo.Circle.made` / `geo.Circle.tally()` in expression position
+// `geo.Circle.made` / `geo.Circle.tally()` / `geo.area(x)` in expression
+// position -- a static access when `acc` IS a type, a free function's own
+// call when it names a namespace instead
 i64 tk_ns_seg_expr() {
     i64 line = p_line();
     uptr fl = p_file();
@@ -458,23 +577,192 @@ i64 tk_ns_seg_expr() {
     p_next();
     uptr acc = tk_ns_walk(seg0);
     i64 si = tk_struct_find_exact(acc);
-    if (si < 0) err_at2(fl, line, "teko: unresolved qualified name", acc);
-    return tk_static_member(si, line, fl);
+    if (si >= 0) return tk_static_member(si, line, fl);
+    if (tk_ns_find(acc) < 0) err_at2(fl, line, "teko: unresolved qualified name", acc);
+    return tk_ns_qualified_call(acc, line, fl);
 }
 
-// a top-level declaration or a global inside a namespace BLOCK: `main` and a
-// global are refused here (§31 (a).8), where this module owns the loop that
-// reads them; `extern` is caught by the loop itself, before `parse_top` ever
-// sees it (the core reads `extern` outside `parse_top`, at `parse_unit`'s
-// own level)
+// a top-level declaration or a global inside a namespace: `main`, a global
+// and an `extern` are refused (§31 (a).8). A BLOCK's own loop below reaches
+// `extern` before `parse_top` ever sees it, so this three-way check never
+// actually fires on one there; a FILE-SCOPED namespace (entrega 5, crumb N2)
+// has no such loop, and `tk_ns_scan_decls` below reaches EVERY top-level
+// node of the unit instead, including one a class's own closing emits well
+// after the source that named it (a vtable, a `static` field's global) --
+// its name already carries the namespace prefix by then (`tk_ns_qualify`
+// gave it one the moment the class was declared), so the guard here is the
+// SAME "already qualified" one D31.9 gives a free function's own rename: a
+// global still short and bare is what the source itself wrote.
 void tk_ns_reject_topkind(i64 n) {
     if (n == 0) return;
-    if (nd_kind(n) == N_GLOBAL)
+    i64 k = nd_kind(n);
+    if (k == N_GLOBAL && tk_ns_of_name(nd_name(n)) == 0)
         err_at(nd_file(n), nd_line(n), "teko: a global is declared outside every namespace");
-    if (nd_kind(n) == N_PROTO && str_eq(nd_name(n), "main"))
+    if ((k == N_PROTO || k == N_FUNC) && str_eq(nd_name(n), "main"))
         err_at(nd_file(n), nd_line(n), "teko: main is declared outside every namespace");
-    if (nd_kind(n) == N_FUNC && str_eq(nd_name(n), "main"))
-        err_at(nd_file(n), nd_line(n), "teko: main is declared outside every namespace");
+    if (k == N_EXTERN)
+        err_at(nd_file(n), nd_line(n), "teko: an extern is declared outside every namespace");
+}
+
+// noted the moment a namespace BLOCK's own loop adds a free function or its
+// prototype (entrega 5, crumb N2): the only fact a later pass cannot recover
+// on its own, since a file may open more than one BLOCK namespace and `nd_file`
+// alone would not tell them apart. A class/struct/interface/trait is none of
+// this module's business here -- N1's `tk_ns_qualify` already gave it its
+// full name the moment it was declared.
+void tk_ns_decl_note(i64 n, uptr full) {
+    if (n == 0) return;
+    i64 k = nd_kind(n);
+    if (k != N_FUNC && k != N_PROTO) return;
+    if (tk_nnsb == TK_MAXNSB) err_at(nd_file(n), nd_line(n), "teko: too many namespaced free functions");
+    set_nsb_node_at(tk_nnsb, n);
+    set_nsb_ns_at(tk_nnsb, full);
+    tk_nnsb = tk_nnsb + 1;
+}
+
+// the namespace `n` was declared in: the BLOCK table above by exact node
+// identity, and a FILE-SCOPED one otherwise, by the file it was read from
+uptr tk_ns_decl_ns(i64 n) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nnsb) break;
+        if (nsb_node_at(i) == n) return nsb_ns_at(i);
+        i = i + 1;
+    }
+    return tk_ns_file_get(nd_file(n));
+}
+
+// mangles the free function/prototype `n` into `ns`, unless it already
+// carries a namespace prefix (D31.9: a class's own generated symbol, e.g.
+// `geo__Circle_new`, reaches every top-level node this walk sees too, and
+// re-qualifying it would double the prefix). The identity guard of §31 (c)
+// checks the TYPE table only, never `decl_find`: two declarations landing on
+// the SAME generated function name is exactly what an overload (C4) looks
+// like before `tk_over_pass` mangles it further, and is that pass's own
+// business to accept or refuse -- never this one's to pre-empt.
+void tk_ns_rename_decl(i64 n, uptr ns) {
+    i64 k = nd_kind(n);
+    if (k != N_FUNC && k != N_PROTO) return;
+    uptr old = nd_name(n);
+    if (tk_ns_of_name(old) != 0) return;
+    uptr novo = tk_join3(ns, "__", old);
+    if (tk_struct_find_exact(novo) >= 0)
+        err_at2(nd_file(n), nd_line(n), "teko: the generated name is already declared", novo);
+    set_nd_name(n, novo);
+    tk_default_rename(old, novo);
+}
+
+// sweep 1 (§31 (d), crumb N2): every namespaced free function or prototype
+// in the unit is mangled, block-form and file-scoped alike, before a single
+// call site is read
+void tk_ns_scan_decls(i64 root) {
+    i64 n = root;
+    loop {
+        if (n == 0) break;
+        uptr ns = tk_ns_decl_ns(n);
+        if (ns != 0) {
+            tk_ns_reject_topkind(n);
+            tk_ns_rename_decl(n, ns);
+        }
+        n = nd_next(n);
+    }
+}
+
+// prefix by prefix, outward from `ns` (`A.B` tries `A__B__name`, then
+// `A__name`) -- the call-site twin of `tk_ns_try_prefixes`, over declarations
+// rather than types. `ns` is the CALLING function's own namespace, read by
+// `tk_ns_scan_calls` below, never `tk_ns_current()`: the parser is long gone
+// by the time this pass runs.
+i64 tk_ns_call_try_prefixes(uptr name, uptr ns) {
+    if (ns == 0) return 0 - 1;
+    i64 len = cstrlen(ns);
+    loop {
+        uptr pre = xstrdup(ns, len);
+        i64 d = decl_find(tk_join3(pre, "__", name));
+        if (d >= 0) return d;
+        i64 cut = tk_ns_last_sep(ns, len);
+        if (cut < 0) break;
+        len = cut;
+    }
+    return 0 - 1;
+}
+
+// the `using`s of the file the call was written in (D31.6) -- the call-site
+// twin of `tk_ns_resolve`'s own using-loop, over declarations
+i64 tk_ns_call_try_usings(uptr name, uptr fl, i64 line) {
+    i64 found = 0 - 1;
+    uptr found_ns = 0;
+    i64 i = 0;
+    loop {
+        if (i >= tk_nusing) break;
+        if (str_eq(ug_file_at(i), fl)) {
+            i64 d = decl_find(tk_join3(ug_ns_at(i), "__", name));
+            if (d >= 0) {
+                if (found >= 0 && d != found)
+                    err_at(fl, line, tk_ns_ambig_msg(name, found_ns, ug_ns_at(i)));
+                found = d;
+                found_ns = ug_ns_at(i);
+            }
+        }
+        i = i + 1;
+    }
+    return found;
+}
+
+// the call `n`, rewritten to the symbol its own namespace or a `using` of
+// its file names, when and only when that qualified candidate EXISTS
+// (D31.10) -- a call to `rt_alloc` written inside `geo` is tried as
+// `geo__rt_alloc`, finds nothing, and is left exactly as it was
+i64 tk_ns_rewrite_call(i64 n, uptr ns, uptr fl) {
+    uptr name = nd_name(n);
+    i64 d = tk_ns_call_try_prefixes(name, ns);
+    if (d < 0) d = tk_ns_call_try_usings(name, fl, nd_line(n));
+    if (d < 0) return 0;
+    set_nd_name(n, nd_name(d));
+    return 1;
+}
+
+// every node of one function's body, in no particular scope order -- sweep 2
+// only ever reads a call's own name, never a local's, so it needs none of
+// `teko_typeof.mc`'s scope bookkeeping
+void tk_ns_walk_calls_in(i64 n) {
+    loop {
+        if (n == 0) break;
+        if (nd_kind(n) == N_CALL) tk_ns_rewrite_call(n, tk_ns_call_site, nd_file(n));
+        tk_ns_walk_calls_in(nd_a(n));
+        tk_ns_walk_calls_in(nd_b(n));
+        tk_ns_walk_calls_in(nd_c(n));
+        tk_ns_walk_calls_in(nd_d(n));
+        n = nd_next(n);
+    }
+}
+
+// sweep 2 (§31 (d), crumb N2): every top-level function's own namespace is
+// read straight off its (already renamed, by sweep 1) name -- `geo__area`
+// answers `geo` without a second table -- and every bare call inside its
+// body is offered that namespace's search order. A plain function's own
+// name carries no namespace, so `tk_ns_call_site` is 0 and only the
+// `using`s of the call's file are ever tried for it.
+void tk_ns_scan_calls(i64 root) {
+    i64 f = root;
+    loop {
+        if (f == 0) break;
+        if (nd_kind(f) == N_FUNC) {
+            tk_ns_call_site = tk_ns_of_name(nd_name(f));
+            tk_ns_walk_calls_in(nd_b(f));
+        }
+        f = nd_next(f);
+    }
+    tk_ns_call_site = 0;
+}
+
+// entrega 5, crumb N2: a unit that declares no namespace at all leaves
+// before a single node is read, the same no-op proof `tk_over_pass` gives
+i64 tk_ns_pass(i64 root) {
+    if (tk_nns == 0) return root;
+    tk_ns_scan_decls(root);
+    tk_ns_scan_calls(root);
+    return root;
 }
 
 // `namespace A.B { ... }` / `namespace A.B;` (D218, D226: C# 10's file-scoped
@@ -511,6 +799,7 @@ void tk_namespace() {
         }
         i64 n = parse_top();
         tk_ns_reject_topkind(n);
+        tk_ns_decl_note(n, full);                 // a free function/prototype: mangled by `tk_ns_pass` (N2)
         top_add(n);
     }
     p_next();                                    // }

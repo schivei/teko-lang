@@ -120,6 +120,14 @@
 //   Circle c = new Circle();  (the short name, inside or with a `using`)
 //   geo.Circle c = new geo.Circle();  geo.Circle.made           the segment
 //
+// What entrega 5's N2 crumb adds -- a free function declared inside a
+// namespace, mangled the same way a type already is (teko_ns.mc's own
+// `tk_ns_pass`):
+//   namespace geo { i64 area(i64 r) { ... } }                    geo__area
+//   geo.area(x)                              (qualified)         syntax_expr/
+//                                                                 syntax_stmt
+//   area(x)     (bare, from inside geo or through a `using geo;`) pass()
+//
 // Everything else in docs/design/port-teko-mc.md §3 (types/classes,
 // generics, error-union, `service`/DI, concurrency, the
 // rest of the stdlib) is a later entrega and is not stubbed here: it does
@@ -204,6 +212,12 @@ void user_init() {
     // and what that emits -- a constructor, a vtable initializer -- is an
     // ordinary declaration the passes below have to see like any other.
     pass(&tk_partial_pass);
+
+    // entrega 5, crumb N2: every namespaced free function/prototype is
+    // mangled and every bare call inside a namespace resolved before ANY
+    // pass that censuses by name -- `params`, the oracle, overload
+    // mangling and defaults all have to see the FINAL symbol.
+    pass(&tk_ns_pass);
 
     pass(&tk_params_pass);
     pass(&tk_typeof_pass);

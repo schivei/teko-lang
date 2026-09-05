@@ -620,10 +620,46 @@ sem `#include`.
   ambos furos abertos pelo verificador do N1, fechados — `tk_conf_name` e `tk_use` leem o nome
   por `p_name()`+`p_next()` (D31.3) em vez de um único `p_ident()`.
 
-**Fila:** funções livres em namespace + `import` (N2/N3) → `const` → `switch` (D222) →
-closures/`ref`/`out` (D221, architect-first) → compilador teko de `<mc/core_min>` (plano
-§26). **Fora:** `var`, `type`, `match`, Variant, método parcial, nested, `foreach` (precisa de
-iteráveis).
+**Entrega 5 — N2 LANDADO** (D218/D226, plano §31/§32/§33; 27 fixtures): função livre declarada
+dentro de um namespace, mangled e resolvida por um `pass()` (`teko_ns.mc`'s `tk_ns_pass`).
+- **Duas varreduras.** Sweep 1 mangla toda função livre/protótipo namespaced (bloco OU
+  file-scoped) para `geo__area`, ANTES de qualquer pass que censa por nome (`params`, oráculo,
+  operadores, defaults, sobrecarga); sweep 2 resolve o sítio não-qualificado pela lista de busca
+  (o namespace corrente do SÍTIO, prefixo a prefixo, e só então os `using` do arquivo — D31.6),
+  reescrevendo só quando o candidato qualificado EXISTE (`decl_find`, D31.10 — `rt_alloc`/uma
+  função plana chamada de dentro de um namespace fica achatada). O namespace de um bloco é
+  anotado no PARSE (`tk_ns_decl_note`, no laço de `tk_namespace`, por identidade do nó); o de um
+  sítio sai de graça do próprio nome, JÁ mangled pelo sweep 1 (`tk_ns_of_name`, novo, extrai
+  `geo` de volta por prefixo — o mais específico, para `A`/`A.B` coexistirem).
+- **`geo.area(x)` qualificado NÃO passa pelo pass:** `tk_ns_seg_expr`/`tk_ns_seg_stmt` do N1 só
+  resolviam tipo; ganharam `tk_ns_qualified_call` — quando o segmento não é um tipo mas É um
+  namespace conhecido, o nome cheio é montado DIRETO (sem `decl_find`, que não veria uma
+  declaração ainda não mangled nem uma escrita mais abaixo no arquivo).
+- **`teko_default.mc` ganhou `tk_default_rename`:** a tabela de defaults de função livre é
+  chaveada por PONTEIRO do nome no instante do parse (`fpd_name`); sem mover essa chave junto com
+  `set_nd_name`, o default de uma função namespaced sumia (`tk_default_row_of_name` nunca achava
+  a linha, e o `teko_over.mc`'s quarto round também não).
+- **Achados/correções:** um global SINTETIZADO por uma classe namespaced (o `_vt`, emitido bem
+  depois do parse por `tk_class_close`) caía na recusa "global fora de todo namespace" quando a
+  varredura de sweep 1 passou a alcançar TODO nó de topo — a guarda usa o MESMO `tk_ns_of_name`
+  (só recusa um global que ainda NÃO carrega prefixo); a guarda de colisão de identidade (§31 (c))
+  não vale contra `decl_find` para função — duas assinaturas de uma função namespaced (C4)
+  aterrissam de propósito no mesmo nome cheio, e só a tabela de TIPOS é checada. O **furo do
+  destrutor** que o verificador do N1 achou: `teko_class.mc`'s `tk_member_dtor` comparava o token
+  que a fonte escreveu (o nome CURTO, `Base`) contra o nome QUALIFICADO (`geo__Base`) — nunca
+  batia. Corrigido com `tk_ns_short_of` (novo, o inverso de `tk_ns_of_name`); o CONSTRUTOR já
+  estava correto (`tk_gen_ty` resolve por TIPO, não por palavra), mas a mesma classe de bug
+  também escondia o diagnóstico `void Name(...)` (C#'s own mistake) logo abaixo — corrigida junto.
+- **Fixture** `surface_namespace_fn.tk` (27/27 em exit 42): qualificado + sobrecarga C4, bare de
+  dentro e de fora (via `using`) do namespace, default C6 bare e qualificado, função namespaced
+  chamando uma plana (achatada), construtor E destrutor pelo nome curto com `: base(v)`. AST das
+  26 fixtures anteriores **byte-idêntico** (prova de no-op). Probes fora de `tests/`:
+  `main`/`extern`/global em namespace FILE-SCOPED; dois `using` ambíguos; chamada sem namespace
+  nem `using` (erro do core); `rt_live()` bare de dentro de um namespace; `void Name(...)`.
+
+**Fila:** `import` (N3) → `const` → `switch` (D222) → closures/`ref`/`out` (D221,
+architect-first) → compilador teko de `<mc/core_min>` (plano §26). **Fora:** `var`, `type`,
+`match`, Variant, método parcial, nested, `foreach` (precisa de iteráveis).
 
 **Dívida achada pelo verificador do C6 (registrada aqui, crumb futuro):** o `ngen` é um parser de
 UMA passada — um tipo/classe precisa estar declarado ANTES do primeiro uso no arquivo, o que C#

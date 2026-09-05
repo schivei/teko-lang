@@ -916,7 +916,8 @@ i64 tk_member_ctor(i64 ci, uptr name, i64 off, i64 ti, i64 vis, i64 stat, i64 ki
 i64 tk_member_dtor(i64 ci, uptr name, i64 off, i64 ti) {
     p_next();                                    // the `~`
     tk_ctor_gate(ci, ti, "destructor");
-    if (!tk_word(name)) err_at2(p_file(), p_line(), "teko: a destructor is named after its type", name);
+    uptr short_name = tk_ns_short_of(name);       // §31 N2: `name` is the QUALIFIED one; the source wrote the short
+    if (!tk_word(short_name)) err_at2(p_file(), p_line(), "teko: a destructor is named after its type", short_name);
     p_next();                                    // the type's own name
     p_expect(K_LPAR, "expected ( after the destructor name");
     if (p_id() != K_RPAR) err_at2(p_file(), p_line(), "teko: a destructor takes no parameter", name);
@@ -964,7 +965,7 @@ i64 tk_member(i64 ci, uptr name, i64 off, i64 ti) {
             err_at2(p_file(), p_line(), "teko: a member declaration needs a name", sr_name_at(ci));
         return tk_member_ctor(ci, name, off, ti, vis, stat, kind);
     }
-    if (tk_word(sr_name_at(ci)))                 // `void Name(...)`, C#'s own mistake
+    if (tk_word(tk_ns_short_of(sr_name_at(ci))))  // `void Name(...)`, C#'s own mistake
         err_at2(p_file(), p_line(), "teko: a constructor is written without a return type", sr_name_at(ci));
     i64 isop = 0;
     uptr m = tk_op_name(&isop);                  // `operator+` names the method `op_add`
