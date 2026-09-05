@@ -150,6 +150,14 @@ i64 tk_frame_enter(i64 proj) {
 
 void tk_frame_leave(i64 keep) { tk_frame_proj = keep; }
 
+// the origin of what is being read: the frame's when a replay is what is being
+// read, and the file's otherwise. A frame NAME is no path -- asking the question
+// of it answers "outside the project" for every declaration a replay produces.
+i64 tk_frame_or_file(uptr fl) {
+    if (tk_frame_proj >= 0) return tk_frame_proj;
+    return tk_origin_of_file(fl);
+}
+
 // ---- where the parser or the pass is standing ----
 // the type whose body the code being read belongs to, or -1. The two phases are
 // disjoint -- a body is parsed, and only then is the unit walked -- so one of
@@ -164,7 +172,7 @@ i64 tk_site_project() {
     i64 si = tk_site_class();
     if (si >= 0) return sr_proj_at(si);
     if (tk_pass_proj >= 0) return tk_pass_proj;
-    return tk_origin_of_file(p_file());
+    return tk_frame_or_file(p_file());
 }
 
 // ---- the checks ----
@@ -352,7 +360,7 @@ void tk_decl_head(i64 vis, i64 abst, i64 part) {
         if (tk_word("partial"))       { part = tk_head_part(part, l, fl);            continue; }
         break;
     }
-    tk_set_decl(vis, tk_origin_of_file(fl), abst);
+    tk_set_decl(vis, tk_frame_or_file(fl), abst);
     tk_decl_part = part;
     if (tk_word("class"))     { tk_class(); return; }
     tk_reject_class_only(abst, part, line, fl);
