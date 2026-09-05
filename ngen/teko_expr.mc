@@ -265,6 +265,10 @@ i64 tk_dot(i64 left) {
     tk_file = fl;
     if (tk_is_base(left)) return tk_base_call(line, fl);
     uptr m = p_ident();                          // the member name, on the right
+    if (nd_kind(left) == N_IDENT) {
+        i64 ai = tk_arr_find(nd_name(left));      // a LOCAL array (teko_array.mc): only `.Length`
+        if (ai >= 0) return tk_arr_length_of(ai, m, line, fl);
+    }
     i64 si = tk_struct_of_expr(left);
     if (si >= 0) return tk_member_of(left, si, m, line, fl);
     i64 ty = tk_xt_ty(left);                      // a scalar this module already typed:

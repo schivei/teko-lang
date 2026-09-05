@@ -169,6 +169,7 @@
 #include "teko_type.mc"
 #include "teko_float.mc"
 #include "teko_struct.mc"
+#include "teko_array.mc"
 #include "teko_const.mc"
 #include "teko_ns.mc"
 #include "teko_iface.mc"
@@ -233,6 +234,7 @@ void user_init() {
     syntax_infix("switch", TK_TERN_PREC, &tk_switch_infix);
 
     on_stmt(&tk_on_stmt);
+    on_stmt(&tk_arr_on_stmt);
 
     // C6: a default parameter value in a free function's own list. The only
     // `syntax_param` registration in this compiler, so registration order
@@ -257,6 +259,12 @@ void user_init() {
     // pass that censuses by name -- `params`, the oracle, overload
     // mangling and defaults all have to see the FINAL symbol.
     pass(&tk_ns_pass);
+
+    // ahead of tk_params_pass: a global array's own leftover N_INDEX has to
+    // be gone before that walk runs, unconditionally, over every N_INDEX in
+    // the unit the moment a `params` list exists anywhere in it
+    // (teko_array.mc's own header).
+    pass(&tk_array_pass);
 
     pass(&tk_params_pass);
     pass(&tk_typeof_pass);

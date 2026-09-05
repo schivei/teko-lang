@@ -1453,3 +1453,37 @@ dentro de `switch`, `switch` sem `{`.
 **Dívidas registradas:** `case`/braço com um const NAMESPACED não resolve (o `#define` do núcleo só
 dobra um nome bare no parse; um const qualificado só resolve num passe posterior); um `when` no
 braço `_` textualmente último de uma expression não é testado (é a base incondicional da dobra).
+
+## 39. Arrays fixos landados -- registro no parse (local) e num pass() (global), larguras, o que ficou fora (2026-09-05)
+
+`ngen/teko_array.mc` (novo). Um LOCAL é observável no parse (`on_stmt`, o mesmo mecanismo do
+campo-array de `teko_struct.mc`) e resolvido AO MESMO TEMPO que `[` é lido -- tabela própria
+(`av_*`/`tk_narr`), escopo por bloco (`tk_block` ganhou uma segunda marca/restauração). Um GLOBAL
+não é observável no parse (`on_stmt` não vê topo, e não há hook público sobre um) -- um LEITURA
+fica como o `N_INDEX` que o `[` de `params` também deixa (o fallback de sempre) e um `pass()`,
+registrado ANTES de `tk_params_pass`, varre `nnodes` procurando um global array e reescreve só os
+que acham dono; uma ESCRITA não pode esperar (o núcleo recusa `g[i] = e;` no próprio parse), então
+fica um placeholder (`tk_call("tk_unresolved_array", 0)`, o idioma do `.` deferido de
+`teko_typeof.mc`) resolvido pelo mesmo passe.
+
+**Larguras:** `ld8/16/32/64`/`st8/16/32/64` por `type_width` (já existiam). `ld32` é sempre
+zero-extending (`language.md` §2) -- um elemento `TK_SINT` mais estreito que a palavra (`i32`) é
+casteado pro próprio tipo depois do load, o idioma que a própria doc do núcleo documenta.
+
+**Bounds:** um índice literal fora de `[0, N)` é erro de compilação, nas duas rotas. Um índice
+dinâmico NÃO tem guard em runtime (precisaria de `panic` de superfície, que não existe ainda).
+
+**Fora do escopo, registrado:** array de tipo struct/classe (recusado, local e global -- sem nome
+próprio pro RC percorrer); `T[]` em heap com RC; `T[]` como parâmetro; `.Length` sobre um global;
+um `params xs[i]` dentro do corpo REPLAY de outro `params` que também usa um array global (o passe
+de arrays roda uma vez, antes da instanciação de `params` -- aresta rara, nenhuma fixture combina
+os dois).
+
+**Fix à parte, no mesmo lote:** `tk_switch_check_end` só olhava o último nó de TOPO do corpo do
+`case` -- um corpo escrito como bloco explícito (`case 1: { ...; break; }`) caía no "control cannot
+fall out of a case" mesmo terminando em `break`. Recursa em `N_BLOCK` agora, como
+`tk_switch_no_continue_stmt` já fazia ao lado.
+
+**Fixture** `surface_arrays.tk` (32/32 em exit 42). AST das 31 fixtures anteriores byte-idêntica
+contra `6cf49db1`, exceto `surface_switch.tk` (o fix acima) -- idêntica entre o commit do fix e
+este. `mc limits ngen` `ok`.
