@@ -39,6 +39,7 @@
 #define TK_MAXXT     256              // expressions whose type this module knows
 #define TK_MAXAX     128              // array-field addresses this module handed out
 #define TK_MAXOS     128              // stores into a slot of counted type
+#define TK_MAXSLV    512              // every local seen via on_stmt, any type (K4's `use`)
 
 // teko_generic.mc is included after this file, because a generic body is
 // re-parsed by the very machine below; these two are what the declaration of a
@@ -130,6 +131,10 @@ uptr lv_name[TK_MAXLOCAL];            // a local the CORE declared, seen via on_
 i64  lv_str[TK_MAXLOCAL];
 i64  tk_nlocal = 0;
 
+uptr slv_name[TK_MAXSLV];             // every local's NAME, whatever its type
+i64  slv_ty[TK_MAXSLV];               // ...and the type it was declared with
+i64  tk_nslv = 0;
+
 i64  xt_node[TK_MAXXT];               // a node this module built, and its type
 i64  xt_str[TK_MAXXT];                // the row of the type table, or -1 for a scalar
 i64  xt_ty[TK_MAXXT];                 // the type id itself, scalar ones included
@@ -175,6 +180,8 @@ i64  ax_nel_at(i64 i)   { return ld64(ax_nel + i * 8); }
 uptr ax_name_at(i64 i)  { return ld64(ax_name + i * 8); }
 uptr lv_name_at(i64 i)  { return ld64(lv_name + i * 8); }
 i64  lv_str_at(i64 i)   { return ld64(lv_str + i * 8); }
+uptr slv_name_at(i64 i) { return ld64(slv_name + i * 8); }
+i64  slv_ty_at(i64 i)   { return ld64(slv_ty + i * 8); }
 i64  xt_node_at(i64 i)  { return ld64(xt_node + i * 8); }
 i64  xt_str_at(i64 i)   { return ld64(xt_str + i * 8); }
 i64  xt_ty_at(i64 i)    { return ld64(xt_ty + i * 8); }
@@ -215,6 +222,8 @@ void set_ax_nel_at(i64 i, i64 v)    { st64(ax_nel + i * 8, v); }
 void set_ax_name_at(i64 i, uptr v)  { st64(ax_name + i * 8, v); }
 void set_lv_name_at(i64 i, uptr v)  { st64(lv_name + i * 8, v); }
 void set_lv_str_at(i64 i, i64 v)    { st64(lv_str + i * 8, v); }
+void set_slv_name_at(i64 i, uptr v) { st64(slv_name + i * 8, v); }
+void set_slv_ty_at(i64 i, i64 v)    { st64(slv_ty + i * 8, v); }
 void set_xt_node_at(i64 i, i64 v)   { st64(xt_node + i * 8, v); }
 void set_xt_str_at(i64 i, i64 v)    { st64(xt_str + i * 8, v); }
 void set_xt_ty_at(i64 i, i64 v)     { st64(xt_ty + i * 8, v); }
@@ -784,6 +793,28 @@ i64 tk_struct_of_expr(i64 n) {
     return 0 - 1;
 }
 
+// every local's (name, declared type), whatever the type -- K4's `use (a,
+// &b)` needs a capture's type at the exact point it reads the clause, and
+// only a struct/class local is tracked by `tk_local_add` below. Grown
+// ever-forward over the whole unit, like `tk_local_add` itself: the most
+// recent declaration of a name is the one a lookup right after it means.
+void tk_slv_add(uptr name, i64 ty) {
+    if (tk_nslv == TK_MAXSLV) err_at(tk_file, tk_line, "teko: too many locals in one unit");
+    set_slv_name_at(tk_nslv, name);
+    set_slv_ty_at(tk_nslv, ty);
+    tk_nslv = tk_nslv + 1;
+}
+
+i64 tk_slv_find(uptr name) {
+    i64 i = tk_nslv - 1;
+    loop {
+        if (i < 0) break;
+        if (str_eq(slv_name_at(i), name)) return slv_ty_at(i);
+        i = i - 1;
+    }
+    return 0 - 1;
+}
+
 // M21.5's statement hook: a local the CORE declared (`Point p = new Point;`)
 // is observable here as the N_VAR node, and its type id is the struct or class.
 // Nothing is rewritten -- the node that arrives is the node that leaves.
@@ -793,6 +824,7 @@ i64 tk_on_stmt(i64 n) {
     if (n == 0) return n;
     if (nd_kind(n) != N_VAR) return n;
     if (nd_val(n) != 0) return n;
+    tk_slv_add(nd_name(n), nd_type(n));
     i64 si = tk_struct_by_ty(nd_type(n));
     if (si >= 0) {
         tk_line = nd_line(n);

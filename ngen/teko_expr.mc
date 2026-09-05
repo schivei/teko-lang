@@ -132,6 +132,8 @@ i64 tk_field_use(i64 left, i64 fi, i64 line, uptr fl) {
         i64 v = parse_expr(0);
         tk_line = line;
         tk_file = fl;
+        if (tk_lam_escapes(v))
+            err_at(fl, line, "teko: a lambda that captures by reference cannot leave its scope");
         return tk_os_mark(tk_call2(tk_stn(fty), addr, v), fty);
     }
     i64 di = tk_deleg_row(fty);
