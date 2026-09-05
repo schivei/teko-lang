@@ -1157,6 +1157,15 @@ Verificador reproduziu o crash instrumentando com ASan+UBSan (as flags do CI pro
 - **CONSERTO (dispatch):** `cg_emit_self_addr` tem que PARAR de escapar o endereço de um temp cujo escopo é o próprio statement-expression — hoist do `_rcvN` pra um escopo que sobrevive à chamada externa inteira, OU passar receptor tipo-valor por valor (Region/Arena são structs de 8B, métodos leem self). Root-cause, não workaround; conserta a CLASSE (todo receptor não-endereçável), não só o sítio arena.
 - **LEI DE PROCESSO (endurece D163/D164):** o fixpoint no sandbox NÃO pega UB que só crasha sob certos toolchains — **o gate de verificador de compiler-core passa a incluir um build ASan+UBSan** (`-fsanitize=address,undefined -fno-omit-frame-pointer -g`) do gen0 compilando o tip, além do fixpoint. Barato, pega stack-use-after-scope/UAF/OOB que o build seco esconde. (A ser gravado na CLAUDE.md.)
 
+### D226 · DONO: modo AUTÔNOMO do coordenador do ngen — forks de superfície decididos pelo C#/mercado; impasse validado com a sessão do mc (dono 2026-09-05) 🔧 PROCESSO
+O dono deixa o coordenador em modo autônomo: **um agente por vez**; a sessão do mc comunica por
+arquivo (`mini_compiler/build/NOTICES-teko.md`); **impasse → validar com a sessão do mc** (ngen na
+superfície, mc no core); **via de regra, seguir o exemplo de linguagens de mercado, com sintaxe
+próxima ao C#**. Consequência: fork de superfície que o DECISION_LOG não resolva é decidido pelo
+C# (ou pelo mercado quando o C# não tem forma), registrado aqui como "decidido pelo coordenador
+sob D226" para o dono revisar, e o trabalho segue. HALT só para o que nem C#, nem mercado, nem o
+mc resolvem.
+
 ### D225 · DONO: o RUMO do port — extensibilidade e override por superfície do mc (M41/M40) são o caminho para a teko se AUTO-HOSPEDAR (dono 2026-09-05) 🔭 RUMO
 O que importa nas releases 0.10.1-0.12.0 não é o AVR: é que o mc passou a ser **re-arquitetável
 e recompilável por superfície** — `<mc/core>` é a soma de cinco partes (`core_min`, `core_machines`,
