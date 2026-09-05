@@ -2,6 +2,8 @@
 // §41): the explicit form `new Op((T a, T b) => body)`, over the same
 // object K1's plain-function wrap already builds. K4b adds a delegate
 // captured BY VALUE (item 11) and the contextual/short grafias (items 12/13).
+// K4c adds a clean `f` unrelated to `byref_check`'s own (item 14) and a
+// ternary of two function names coerced into a delegate (item 15).
 //
 // What each helper proves, in order:
 //
@@ -26,6 +28,11 @@
 //  11. `deleg_byval_check` -- a delegate itself captured BY VALUE (K4b).
 //  12. `contextual_check` -- `Op f = (i64 x) use (k) => x * k;`, no `new`.
 //  13. `short_check` -- `Op g = x => x + 1;`, the single-parameter grafia.
+//  14. `clean_f_returns_check` -- a CLEAN `f`, in a function of its own,
+//      returned as-is: `byref_check`'s own `f` captures by reference and
+//      must not taint this one just because the two share a name (K4c).
+//  15. `ternary_check` -- `flag ? add1 : double_it` coerced into `Op`, both
+//      as a `return` and as a plain initializer (K4c).
 //
 // expect-exit: 42
 
@@ -35,6 +42,14 @@ delegate i64 Op(i64 a);
 
 i64 apply(Op f, i64 x) {
     return f(x);
+}
+
+i64 add1(i64 x) {
+    return x + 1;
+}
+
+i64 double_it(i64 x) {
+    return x * 2;
 }
 
 class Holder {
@@ -164,6 +179,35 @@ i64 short_check() {
     return 0;
 }
 
+Op clean_f_returns() {
+    Op f = new Op((i64 x) => x * 2);
+    return f;
+}
+
+i64 clean_f_returns_check() {
+    Op g = clean_f_returns();
+    if (g(21) != 42) return 1;
+    return 0;
+}
+
+Op ternary_pick(i64 flag) {
+    return flag != 0 ? add1 : double_it;
+}
+
+i64 ternary_check() {
+    Op p = ternary_pick(1);
+    if (p(21) != 22) return 1;
+    Op q = ternary_pick(0);
+    if (q(21) != 42) return 2;
+    i64 flag = 1;
+    Op g = flag != 0 ? add1 : double_it;
+    if (g(21) != 22) return 3;
+    flag = 0;
+    Op h = flag != 0 ? add1 : double_it;
+    if (h(21) != 42) return 4;
+    return 0;
+}
+
 i64 main() {
     i64 bad = nocap_check();
     if (bad != 0) return 10 + bad;
@@ -215,6 +259,14 @@ i64 main() {
     bad = short_check();
     if (bad != 0) return 250 + bad;
     if (rt_live() != 0) return 260;
+
+    bad = clean_f_returns_check();
+    if (bad != 0) return 270 + bad;
+    if (rt_live() != 0) return 280;
+
+    bad = ternary_check();
+    if (bad != 0) return 290 + bad;
+    if (rt_live() != 0) return 300;
 
     return 42;
 }
