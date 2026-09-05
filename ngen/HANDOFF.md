@@ -374,8 +374,10 @@ membro completo que o reclaim (construtor/destrutor) e o C5b escrevem contra:
 - **Fixtures:** `surface_property.tk` e `surface_iface_default.tk` (20/20 em exit 42); a AST
   final das **18 anteriores é byte-idêntica** à de `5579c34b` — nenhuma usa propriedade nem
   default de interface.
-- **Limite conhecido:** um default de interface só alcança membros declarados ACIMA dele no
-  corpo da interface (a mesma ordem-de-declaração da armadilha 7).
+- **Limite conhecido (precisado pelo verificador):** num corpo default de interface, só o
+  acesso **`this.X()` explícito** é sensível à ordem (resolve no parse: membro declarado ABAIXO
+  dá `unknown member` claro). A chamada **nua** (`area()`) resolve no pass e é insensível à
+  ordem — funciona em qualquer posição.
 
 **Entrega 5 — a seguir:** crumb 1, **reclaim** pela "arena automática" do mc (plano §14):
 free lists + reference counting por escopo (`rc_dec` na saída do bloco e nas arestas de
