@@ -301,6 +301,7 @@ i64 tk_use(i64 ci, uptr cls, i64 off) {
         uptr fl = p_file();
         uptr seg0mem = xalloc(8);
         uptr nm = tk_ns_read_path(seg0mem);
+        uptr disp = tk_ns_dotted(nm);             // what a message shows: the dev's own `A.B` spelling
         i64 ti = 0 - 1;
         if (str_eq(nm, ld64(seg0mem))) {
             ti = tk_trait_find(nm);
@@ -308,11 +309,11 @@ i64 tk_use(i64 ci, uptr cls, i64 off) {
         } else {
             ti = tk_trait_find(nm);
         }
-        if (ti < 0) err_at2(fl, line, "teko: unknown trait", nm);
+        if (ti < 0) err_at2(fl, line, "teko: unknown trait", disp);
         if (tr_vis_at(ti) == TK_TINTERNAL && tr_proj_at(ti) != sr_proj_at(ci))
-            err_at(fl, line, tk_join3("teko: ", nm, " is internal to another project"));
-        if (tk_flat_has(ti)) err_at2(fl, line, "teko: trait cycle", nm);
-        if (tk_used_has(ti)) err_at2(fl, line, "teko: the class already uses this trait", nm);
+            err_at(fl, line, tk_join3("teko: ", disp, " is internal to another project"));
+        if (tk_flat_has(ti)) err_at2(fl, line, "teko: trait cycle", disp);
+        if (tk_used_has(ti)) err_at2(fl, line, "teko: the class already uses this trait", disp);
         tk_used_add(ti);
         tk_queue_add(ti);
         if (!p_accept(K_COMMA)) break;
