@@ -225,7 +225,7 @@ uptr tk_sig_of(i64 params, i64 recv) {
     if (recv) p = nd_next(params);               // past the receiver a static one does not take
     loop {
         if (p == 0) break;
-        s = tk_join3(s, "__", type_name(nd_type(p)));
+        s = tk_join3(s, "__", tk_ty_sfx(p));      // `ref_i64`/`out_Circle`, or the plain type (K2)
         p = nd_next(p);
     }
     return s;
@@ -566,13 +566,17 @@ i64 tk_params(uptr pnp, uptr pnreq, i64 extra, i64 recv) {
     loop {
         if (p_id() == K_RPAR) break;
         tk_reject_self(p_name());                // `(self, ...)`: the old form
-        i64 ty = tk_gen_ty();
+        i64 rk = tk_ref_kind();                  // K2 (§41): `ref`/`out` before the pointee type
+        i64 ty;
+        if (rk != TK_RP_NONE) { p_next(); ty = tk_ref_param(rk); } else ty = tk_gen_ty();
         if (ty == TY_VOID) err_at(p_file(), p_line(), "teko: parameter of type void");
         uptr pn = p_ident();
         tk_reject_self(pn);
-        head = list_append(head, param_new(ty, pn));
+        i64 pnode = param_new(ty, pn);
+        head = list_append(head, pnode);
         np = np + 1;
-        tk_param_default(mark);
+        if (rk != TK_RP_NONE) { tk_rp_add(pnode, rk, ty); tk_ref_deny_default(rk, p_line(), p_file()); }
+        else tk_param_default(mark);
         if (np + recv + extra > MAXPARAMS)
             err_at(p_file(), p_line(), "teko: method with too many parameters (the receiver counts, and so does the vtable pointer of a virtual call)");
         if (!p_accept(K_COMMA)) break;

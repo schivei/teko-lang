@@ -1876,3 +1876,67 @@ CONSTRUÍA, mas `tk_deleg_call` depois copiava esse nó para outra posição (`n
 entrada -- um `Cell c = f(7);` via delegate lia "emprestado" e ganhava um `rt_own` que nunca zera.
 Corrigido movendo o `tk_xt_put` para depois do `node_assign`, sobre o nó final (`tk_deleg_call`),
 com o mesmo split em `tk_field_deleg_call` (nó fresco, sem cópia).
+
+## 43. Item 0 e K2 landados — errata (2026-09-05)
+
+**Item 0.** `tk_deleg_var` só interceptava um inicializador `N_IDENT`; qualquer outra expressão
+(literal, aritmética) virava cópia de valor bruta num slot de delegate -- `Op f = 5;` compilava
+limpo e segfaultava na primeira chamada. `tk_deleg_coerce` (`ngen/teko_deleg.mc`) é agora o único
+validador que todo sítio de um slot de delegate usa: `null` passa, um valor já tipado (local/param/
+campo, retorno de função comum, ou uma chamada aninhada através de um delegate-local, espiada por
+`tk_deleg_expr_ty`) passa, um nome de função compatível é embrulhado no MESMO thunk que uma
+declaração já ganhava, e qualquer outra coisa é recusa estática (`teko: Op takes a function, another
+Op, or null`). Fiado nos quatro sítios: inicializador de var, atribuição de nome nu, `return` de uma
+função que devolve delegate, e argumento de uma chamada a nome declarado UMA vez (guarda de
+`tk_default_decl_count`, a mesma do C6 -- um nome sobrecarregado fica para o `tk_over_pass`). Zero
+mudança de fixture: `surface_delegate.tk`/`surface_panic_null.tk` saem com `--dump-ast`
+byte-idêntico; a atribuição ganhou de graça a mesma coerção de nome de função que a declaração já
+tinha (`f = mul;` depois de `Op f = add;` agora embrulha igual).
+
+**K2 -- `ref`/`out`, dois desvios medidos do §41(b)/(d):**
+
+1. **Tabela de apontado chaveada por NÓ DO PARÂMETRO, não por `(owner uptr, idx i64)`.** Uma
+   sobrecarga que difere só no TIPO apontado na mesma posição (`f(ref i64)` ao lado de `f(ref
+   Circle)`) colidiria num par (nome, índice); e o parâmetro de uma função LIVRE não tem nó de
+   declaração disponível em `syntax_param` (a função ainda não foi montada). `tk_rp_add(i64 pnode,
+   i64 kind, i64 ty)` / `tk_rp_kind(pnode)` / `tk_rp_pointee(pnode)` usam o próprio nó do PARÂMETRO
+   como chave -- já único, e disponível nos dois sítios (`teko_default.mc`, `teko_class.mc`) no
+   instante em que `param_new` devolve o nó. `tk_ty_sfx(i64 p)` (mangling) segue a mesma forma, e
+   `tk_ov_sig`/`tk_sig_of` passaram a caminhar os nós do parâmetro diretamente em vez de índice.
+2. **O apontado de um `ref`/`out` sobre uma variável LOCAL BARE não é conhecido em tempo de parse**
+   (só um local de tipo classe/struct é rastreado essa cedo, `teko_struct.mc`'s `tk_local_find`) --
+   a tag do argumento (`tk_rfarg_tag`) grava `-1` nesse caso, e `teko_over.mc`'s `tk_ov_arg_ty`
+   resolve preguiçosamente via `tk_ty_scope_find` quando o argumento é um `N_ADDR`, no instante em
+   que o PRÓPRIO `tk_ty_pass_walk` (que `tk_over_pass` reusa) já mantém o escopo populado. Campo e
+   elemento de array continuam conhecidos direto no parse (`fd_ty_at`/`av_ty_at`).
+
+**Achado que exigiu correção (medido, não previsto):** o guard de entrada do `tk_ref_pass` só
+olhava `tk_nrp` (parâmetros `ref`/`out` DECLARADOS) -- um programa que usa `ref`/`out` só no
+ARGUMENTO de uma chamada para um parâmetro POR VALOR (`bump(i64 x)` chamado como `bump(ref a)`)
+não registra nenhum parâmetro `ref`/`out` em lugar algum, e o pass saía sem tocar a árvore, então
+`bump(ref a)` compilava e ligava por engano. Corrigido: o guard também olha `tk_nrf` (argumentos
+`ref`/`out` ESCRITOS, em qualquer chamada). E o passe caminha TODA função (não só uma que
+DECLARA `ref`/`out`), porque quem CHAMA `bump`/`split` raramente é uma delas -- `tk_ref_check_call`
+tem que ver o sítio de chamada de qualquer função.
+
+Fixture: `ngen/tests/surface_refout.tk` (`expect-exit: 42`) -- `ref` escalar com sobrecarga por
+valor (`bump(i64)`/`bump(ref i64)`), `out` duplo (`split`), `ref` sobre campo (`bump(ref p.x)`) e
+elemento de array local (`bump(ref a[1])`), `ref` em método (`Doubler.twice`), e `ref` de pointee
+CONTADO (`replace(ref Cell c, ...)`) com `rt_live()`/destrutor provando a troca (a exceção única
+que `teko_rc.mc`'s `tk_rc_assign` ganhou -- `dest = tk_id(name)` em vez de `tk_addr(name)` quando o
+nome é um parâmetro `ref`/`out`).
+
+Gate: 35/35 em exit esperado (as 34 anteriores + a nova); `--dump-ast` das 34 anteriores
+**byte-idêntico** ao compilador da base `5e83bb3a`; `mc limits ngen` `ok`, `intrin` 8/16 (zero
+crescimento). Probes (fora de `tests/`): `f(a)` sem `ref` no sítio (`argument 1 needs \`ref\` at
+the call site`); `ref` num sítio de parâmetro por valor (`argument 1 is not passed by reference`,
+provado também para uma chamada de MÉTODO); `ref i64 x = 1` (`a \`ref\` parameter has no default`);
+`out` nunca atribuído (`the \`out\` parameter hi is never assigned`); `f(ref i64)` + `f(out i64)`
+(`two overloads differ only by \`ref\`/\`out\``); `ref x;` como declaração de local (`\`ref\`/\`out\`
+is only valid as a parameter type`).
+
+**Dívidas declaradas (nenhuma escondida):** atribuição-por-caminho para `out` (decisão 15 do §41,
+herdada); `f(out i64 a)` inline; `ref`/`out` sobre um campo/elemento alcançado por mais de um nível
+(`ref p.inner.x`); `ref`/`out` sobre um parâmetro de tipo classe como receptor de `.`/campo
+implícito (`this.x`) dentro do próprio corpo -- não testado, `tk_ref_addr` só resolve um local
+BARE, `p.campo` explícito ou `a[i]` local.

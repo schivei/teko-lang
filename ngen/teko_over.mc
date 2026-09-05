@@ -115,12 +115,11 @@ uptr tk_ov_num(i64 v) {
 // returned, so `Vec` really is `Vec` and not the `uptr` it is laid out as.
 uptr tk_ov_sig(i64 d) {
     uptr s = "";
-    i64 np = decl_nparams(d);
-    i64 i = 0;
+    i64 p = nd_a(d);
     loop {
-        if (i >= np) break;
-        s = tk_join3(s, "__", type_name(decl_param_type(d, i)));
-        i = i + 1;
+        if (p == 0) break;
+        s = tk_join3(s, "__", tk_ty_sfx(p));      // `ref_i64`/`out_Circle`, or the plain type (K2)
+        p = nd_next(p);
     }
     return s;
 }
@@ -236,6 +235,49 @@ i64 tk_ov_has_kind(uptr name, i64 kind) {
     return 0;
 }
 
+// K2 (§41 decision 16): two declarations of `name` whose parameter types are
+// otherwise identical and differ ONLY in `ref`-vs-`out` at some position
+// (never a plain value against either) -- the one combination C# itself
+// refuses, distinct from `f(i64)`/`f(ref i64)` (a different bare signature,
+// and legitimately two)
+i64 tk_ov_refout_pair_clash(i64 d1, i64 d2) {
+    i64 p1 = nd_a(d1);
+    i64 p2 = nd_a(d2);
+    i64 any = 0;
+    loop {
+        if (p1 == 0 || p2 == 0) break;
+        if (nd_type(p1) != nd_type(p2)) return 0;
+        i64 k1 = tk_rp_kind(p1);
+        i64 k2 = tk_rp_kind(p2);
+        if (k1 != k2) {
+            if (k1 == TK_RP_NONE || k2 == TK_RP_NONE) return 0;
+            any = 1;
+        }
+        p1 = nd_next(p1);
+        p2 = nd_next(p2);
+    }
+    if (p1 != 0 || p2 != 0) return 0;
+    return any;
+}
+
+i64 tk_ov_refout_clash(uptr name) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nodecl) break;
+        if (str_eq(od_name_at(i), name)) {
+            i64 j = i + 1;
+            loop {
+                if (j >= tk_nodecl) break;
+                if (str_eq(od_name_at(j), name) && tk_ov_refout_pair_clash(od_node_at(i), od_node_at(j)))
+                    return 1;
+                j = j + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 // the verdict on one name, taken once, at its first row. Two declarations of the
 // SAME signature are not this pass's business -- the core reports them where it
 // always did. A `params` list never reaches here: teko_params.mc instantiates it
@@ -248,6 +290,8 @@ void tk_ov_judge(i64 i) {
         err_at2(nd_file(d), nd_line(d), "teko: `main` takes one signature", name);
     if (tk_ov_has_kind(name, N_EXTERN))
         err_at2(nd_file(d), nd_line(d), "teko: an `extern` name owns its symbol and cannot be overloaded", name);
+    if (tk_ov_refout_clash(name))
+        err_at2(nd_file(d), nd_line(d), "teko: two overloads differ only by `ref`/`out`", name);
     tk_ov_mark(name, d);
 }
 
@@ -289,6 +333,13 @@ i64 tk_ov_resolve(i64 n);
 // resolved FIRST -- its own arguments decide which overload it is, and that
 // overload's return type is what the outer call sees.
 i64 tk_ov_arg_ty(i64 a) {
+    i64 rk = tk_rfarg_kind(a);
+    if (rk != TK_RP_NONE) {
+        i64 pty = tk_rfarg_pointee(a);
+        if (pty >= 0) return pty;
+        if (nd_kind(a) == N_ADDR) return tk_ty_scope_find(nd_name(a));   // a bare local: not typed until now
+        return 0 - 1;
+    }
     if (nd_kind(a) == N_CALL) {
         if (tk_ov_find(nd_name(a)) >= 0) return tk_ov_resolve(a);
     }
@@ -307,6 +358,7 @@ i64 tk_ov_args_fit(i64 d, i64 args, uptr tys, i64 loose) {
     loop {
         if (a == 0) break;
         i64 pt = decl_param_type(d, i);
+        if (tk_rp_kind(tk_decl_param_node(d, i)) != tk_rfarg_kind(a)) return 0;   // K2: `ref`/`out` kind must match too
         if (nd_kind(a) == N_INT) {
             if (loose) {
                 if (!tk_ov_int_ty(pt)) return 0;
