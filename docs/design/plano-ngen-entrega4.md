@@ -680,7 +680,10 @@ base). A 3ª é uma precisão do "casamento exato" do ruling, e não uma folga: 
 derivado JÁ é um da base (campos base-first), a conversão é de zero bits, C# faz o mesmo,
 e sem ela um operador herdado ficaria declarável e inalcançável. Como é a ÚLTIMA rodada, o
 tipo que declara o seu próprio sempre vence. Duas declarações na mesma rodada = ambiguidade
-recusada.
+recusada, **exceto na rodada base**, onde `tk_op_pick_best` aplica o desempate "ancestral
+mais próximo" do C# (§12.6.4): entre `GrandBase`/`MidA`/`Kid`, `Kid + 2` escolhe o operador
+de `MidA` por distância na cadeia de `base`; ambiguidade entre bases não-relacionadas segue
+recusada (branch `feat/ngen-ops-nearest`).
 
 **Pares obrigatórios** no `pass`, quando a unidade fecha — assim `partial class` escreve as
 duas metades em partes diferentes. **Visibilidade no sítio** (`tk_check_member`): era o

@@ -32,8 +32,11 @@
 // the reference already is one of the base, and an operator a base declares
 // answers for the classes derived from it exactly as C#'s does. The type that
 // declares its own always wins, because the rounds are tried in that order.
-// Two declarations matching one site in the same round is ambiguity, and it is
-// refused rather than guessed at.
+// Two declarations matching one site in the same round is ambiguity and is
+// refused -- except in the BASE round, where the one closer on every operand
+// (as C#'s "better function member" picks) wins over one it is derived from
+// only more distantly, and only a real tie between two unrelated bases stays
+// the ambiguity.
 //
 // THE PAIRS C# REQUIRES. `==`/`!=`, `<`/`>` and `<=`/`>=` are declared in
 // pairs, at the same parameter types and by the same type; one written without
@@ -381,7 +384,10 @@ i64 tk_op_reachable(i64 ci, i64 sa, i64 sb) {
 //                 the reference IS one of the base, and an operator a base
 //                 declares answers for the classes derived from it, as C#'s
 //                 does. It is last of the three, so a type that declares its
-//                 own always wins over the one it inherits.
+//                 own always wins over the one it inherits. More than one BASE
+//                 candidate is not ambiguity outright: `tk_op_pick_best` picks
+//                 the one closer on every operand and strictly closer on at
+//                 least one, the "better function member" C# picks too.
 i64 tk_op_slot_fits(i64 pt, i64 t, i64 x, i64 round) {
     if (nd_kind(x) == N_INT) {
         if (round == 0) return pt == TY_I64;
@@ -433,6 +439,78 @@ i64 tk_op_match(i64 tok, i64 np, i64 sa, i64 sb, i64 ta, i64 tb, i64 a, i64 b, i
     return found;
 }
 
+// hops from `si` up its base chain to `ci` -- 0 when they are the same row,
+// and -1 when `ci` is not an ancestor of `si` at all
+i64 tk_op_chain_dist(i64 ci, i64 si) {
+    i64 d = 0;
+    loop {
+        if (si < 0) return 0 - 1;
+        if (si == ci) return d;
+        si = sr_base_at(si);
+        d = d + 1;
+    }
+}
+
+// how far the BASE round's match is from the operand: 0 for an exact type (a
+// derived operand may still exact-match the OTHER slot) and for a literal,
+// which never picks among bases; otherwise the chain distance `tk_op_slot_fits`
+// already proved is not -1
+i64 tk_op_slot_dist(i64 pt, i64 t, i64 x) {
+    if (nd_kind(x) == N_INT) return 0;
+    if (pt == t) return 0;
+    return tk_op_chain_dist(tk_op_row(pt), tk_op_row(t));
+}
+
+// C#'s "better function member" (§12.6.4): 1 when `i` is at least as close as
+// `j` on every operand and strictly closer on at least one
+i64 tk_op_closer(i64 i, i64 j, i64 np, i64 ta, i64 tb, i64 a, i64 b) {
+    i64 d0i = tk_op_slot_dist(op_t0_at(i), ta, a);
+    i64 d0j = tk_op_slot_dist(op_t0_at(j), ta, a);
+    if (d0i > d0j) return 0;
+    i64 better = d0i < d0j;
+    if (np == 1) return better;
+    i64 d1i = tk_op_slot_dist(op_t1_at(i), tb, b);
+    i64 d1j = tk_op_slot_dist(op_t1_at(j), tb, b);
+    if (d1i > d1j) return 0;
+    if (d1i < d1j) return 1;
+    return better;
+}
+
+// 1 when no other BASE-round candidate at this site is as close or closer
+// than `i` on every operand -- the check that makes a winner unique, so
+// picking the first one found is enough
+i64 tk_op_beats_all(i64 i, i64 tok, i64 np, i64 sa, i64 sb, i64 ta, i64 tb, i64 a, i64 b) {
+    i64 j = 0;
+    loop {
+        if (j >= tk_nop) break;
+        if (j != i && op_tok_at(j) == tok && op_np_at(j) == np && tk_op_reachable(op_cls_at(j), sa, sb)) {
+            if (tk_op_fits(j, np, ta, tb, a, b, 2)) {
+                if (!tk_op_closer(i, j, np, ta, tb, a, b)) return 0;
+            }
+        }
+        j = j + 1;
+    }
+    return 1;
+}
+
+// the BASE round's own tie-break, same as C#'s overload resolution: among the
+// round's candidates, the one closer than every other on both operands and
+// strictly closer on at least one wins outright; two candidates each closer
+// on a different operand stay the ambiguity the round already refused
+i64 tk_op_pick_best(i64 tok, i64 np, i64 sa, i64 sb, i64 ta, i64 tb, i64 a, i64 b) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nop) break;
+        if (op_tok_at(i) == tok && op_np_at(i) == np && tk_op_reachable(op_cls_at(i), sa, sb)) {
+            if (tk_op_fits(i, np, ta, tb, a, b, 2)) {
+                if (tk_op_beats_all(i, tok, np, sa, sb, ta, tb, a, b)) return i;
+            }
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
 // ---- the diagnostics ----
 uptr tk_op_side_msg(uptr side, uptr sp) {
     return tk_join3(tk_join3("teko: the type of the ", side, " side of `"), sp, "` is not known here");
@@ -474,7 +552,16 @@ i64 tk_op_resolve(i64 tok, i64 np, i64 sa, i64 sb, i64 ta, i64 tb, i64 a, i64 b,
     i64 count = 0;
     i64 r = tk_op_match(tok, np, sa, sb, ta, tb, a, b, 0, &count);
     if (r < 0) r = tk_op_match(tok, np, sa, sb, ta, tb, a, b, 1, &count);
-    if (r < 0) r = tk_op_match(tok, np, sa, sb, ta, tb, a, b, 2, &count);
+    if (r < 0) {
+        r = tk_op_match(tok, np, sa, sb, ta, tb, a, b, 2, &count);
+        if (r >= 0 && count > 1) {
+            i64 best = tk_op_pick_best(tok, np, sa, sb, ta, tb, a, b);
+            if (best >= 0) {
+                r = best;
+                count = 1;
+            }
+        }
+    }
     if (r < 0)
         err_at(fl, line, tk_join3("teko: no operator `", sp, "` takes these operands"));
     if (count > 1)
