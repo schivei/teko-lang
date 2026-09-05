@@ -269,11 +269,11 @@ independente e revalidação pós-cherry-pick):
 - **CI com 5 pernas nativas** (linux x86_64/arm64, macos arm64, windows x86_64/arm64),
   agregador `mc build ngen && run`; sem filtro de `paths:`.
 
-- **C5** sobrecarga de OPERADORES por `pass()` sobre `N_BINARY` (`teko_ops.mc`):
-  `T operator+(U b)` contextual no corpo do tipo; despacho pelo tipo do operando
-  ESQUERDO; `N_BINARY` de endereço construído pelo próprio ngen (`ld64(p+OFF)`,
-  `items[i]`) é reconhecido e nunca tratado como operador; teko à esquerda sem operador
-  + core à direita → o pass não toca. **Nunca `syntax_infix`** (morre em silêncio).
+- **C5** sobrecarga de OPERADORES por `pass()` sobre `N_BINARY` (`teko_ops.mc`).
+  **SUPERSEDIDO pelo C5b da entrega 5** (D218: a forma com receptor implícito não é mais
+  aceita). O que sobreviveu inteiro: a **regra de endereço** — `N_BINARY` construído pelo
+  próprio ngen (`ld64(p+OFF)`, `items[i]`) é reconhecido e nunca tratado como operador — e
+  o **core+core não se toca**.
 
 **Entrega 4 FECHADA** (menos C6, bloqueado no hook do mc).
 
@@ -414,11 +414,41 @@ corrompe o layout; base só numa parte antes de membros; interfaces em união; m
   piso acima de zero em vez de uma resposta errada. Campo `static` de tipo classe guarda a
   referência corretamente, mas nunca é liberado (vive o programa inteiro).
 
-**Em voo:** **C5b** — operadores refeitos como C# (D218): `public static T operator+(A a, B b)`,
-reversed, unários, pares obrigatórios, resolução pelos dois operandos, visibilidade checada;
-a forma velha do C5 deixa de ser aceita. Fixture `surface_operator.tk` reescrita.
+**Entrega 5 — C5b LANDADO** (D218, plano §15/§27; 23 fixtures): operadores refeitos **como C#** —
+a forma velha do C5 (receptor implícito) deixa de ser aceita, com mensagem própria.
+- **Declaração** `public static T operator<op>(A a[, B b])` em `class` e em `struct`. O operador é
+  um membro **estático**: sem `this`, sem slot de vtable, e é a assinatura que diz tudo. Binários
+  `+ - * / % == != < <= > >= & | ^ << >>`, unários `- ! ~` (e `+`, aceito na declaração — o core
+  não tem prefixo `+`, então ainda não há sítio que o alcance; `mc/src/parse.mc` `ops_init`).
+- **Resolução pelos DOIS operandos** (`teko_ops.mc`, tabela `op_*`): candidatos = operadores
+  declarados pelo tipo de QUALQUER operando **e pelas bases dele**; pelo menos um parâmetro tem
+  de ser do tipo declarante. Três rodadas, nessa ordem — **exata**, **literal** (a do C4: um
+  `N_INT` cai em `i64` na 1ª e em qualquer inteiro do core na 2ª) e **base** (operando de tipo
+  DERIVADO num parâmetro da base — zero bits de conversão, o objeto derivado já é um da base).
+  Duas declarações na mesma rodada = ambiguidade recusada. `2 + v` (reversed) e `-a` (unário)
+  resolvem por essa mesma máquina.
+- **Pares obrigatórios** (`==`/`!=`, `<`/`>`, `<=`/`>=`) checados quando a unidade fecha (no
+  `pass`), então `partial class` pode escrever as duas metades em partes diferentes.
+- **Visibilidade checada NO SÍTIO** (`tk_check_member`, o achado 3 do crumb de membros que o C5
+  não fazia): `Vec.operator+ is private` de fora, aceito dentro do próprio tipo.
+- **Rota = `pass()` sobre `N_BINARY`/`N_UNARY`, não `syntax_infix`.** Desde o 0.10.3 o
+  `syntax_infix` sobre operador do core FUNCIONA (M41.5), mas continua sendo a rota errada aqui:
+  no parse o tipo de um operando que é parâmetro/`.` deferido não existe, e o handler não veria a
+  **regra de endereço** do §12 (o `ld64(p+OFF)` que o próprio ngen constrói). O cabeçalho do
+  `teko_ops.mc` registra os dois motivos.
+- **Posse:** o resultado de um operador que devolve classe é **possuído** — o `tk_xt_put` do pass
+  é o que diz isso ao `teko_rc.mc`. Medido com `rt_live()`: `(a+b)==c` não muda a contagem (o
+  temporário é parked/sweeped com a statement), `-a` e `2+a` sobem 1 cada (o local segura), e a
+  saída do bloco volta a **0**.
+- **Recusas próprias:** forma velha (`an operator is static and names both operands`); `==` sem
+  `!=`; ambiguidade; `private` de fora; operando sem tipo; `this` num operador; token unário com
+  dois parâmetros e vice-versa; 0 ou 3+ parâmetros; nenhum parâmetro do tipo declarante; default
+  em parâmetro; retorno `void`; `virtual`/`override`/`abstract`; token não sobrecarregável; e
+  `operator` em `interface` (a mensagem confusa que o plano §12 apontou como adjacente).
+- **Fixture** `surface_operator.tk` reescrita na forma nova; a AST final das **22 outras é
+  byte-idêntica** à de `05dc7181`.
 
-**Fila:** C5b (em voo) → **C6** default em função de topo (`syntax_param`) → `while`/`for` →
+**Fila:** **C6** default em função de topo (`syntax_param`) → `while`/`for` →
 `namespace`/`import`/`using` → `const` → `switch` (D222) → closures/`ref`/`out` (D221,
 architect-first) → compilador teko de `<mc/core_min>` (plano §26). **Fora:** `var`, `type`,
 `match`, Variant, método parcial, nested.
@@ -428,10 +458,12 @@ que só o oráculo do `pass()` resolve) não chega ao `[` de array — cai no `[
 e é recusado com `teko: \`[\` indexes a \`params\` list only`. Recusa clara, nunca
 miscompilação; fechar isso é trabalho no `teko_typeof.mc` (C3b, em voo em paralelo).
 
-**Dívidas conhecidas:** default em função de topo bloqueado (C6); `syntax_infix` sobre
-operador do core morre em silêncio (bug reportado ao mc; rota é `pass()`); `struct`,
-pacote de `params` e campo `static` de classe sem reclaim (acima). A dívida da arena
-bump sem reclaim está **fechada** (D218).
+**Dívidas conhecidas:** default em função de topo bloqueado (C6); **o core não tem prefixo
+`+`** (`ops_init` registra só `- ~ ! &`), então `operator+` unário é declarável e não tem
+sítio — não existe hook `syntax_prefix`, é pedido ao mc; `struct`, pacote de `params` e
+campo `static` de classe sem reclaim (acima). Fechadas: a arena bump sem reclaim (D218) e o
+`syntax_infix` sobre operador do core (mc 0.10.3/M41.5 — mas a rota do C5b segue sendo o
+`pass()`, pelos dois motivos do cabeçalho de `teko_ops.mc`).
 
 ### Por que o RC ficou no PASSE e não no parse (achado do crumb do reclaim)
 
