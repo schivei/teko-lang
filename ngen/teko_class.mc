@@ -80,10 +80,13 @@
 // `namespace`, `import` and `using` (docs/design/port-teko-mc.md §3).
 
 // teko_ops.mc is included after this file, because its pass reads the method
-// table built here; these two are what a member declaration has to ask it, the
-// name `operator+` resolves to and the shape such a declaration has to have
+// table built here; these four are what a member declaration has to ask it: the
+// name `operator+` resolves to, what such a declaration has to be before and
+// after its parameter list is read, and the record a site resolves against
 uptr tk_op_name(uptr pisop);
-void tk_op_decl_check(i64 np, i64 nreq, i64 fty);
+void tk_op_head_check(i64 stat, i64 kind, i64 fty);
+void tk_op_decl_check(i64 ci, i64 np, i64 nreq, i64 params);
+void tk_op_declare(i64 ci, i64 mi, i64 params);
 
 // teko_this.mc is included after this file for the same reason -- it reads the
 // method table too -- and these four are the receiver's side of a member
@@ -983,8 +986,9 @@ i64 tk_member(i64 ci, uptr name, i64 off, i64 ti) {
     i64 np = 0;
     i64 nreq = 0;
     i64 d0 = tk_ndflt;
+    if (isop) tk_op_head_check(stat, kind, fty);        // an operator names its operands itself
     i64 params = tk_params(&np, &nreq, extra, !stat);   // the signature decides every gate below
-    if (isop) tk_op_decl_check(np, nreq, fty);
+    if (isop) tk_op_decl_check(ci, np, nreq, params);
     uptr sig = tk_sig_of(params, !stat);
     kind = tk_member_gate(ci, m, sig, ti, kind);
     if (kind < 0) {
@@ -997,6 +1001,7 @@ i64 tk_member(i64 ci, uptr name, i64 off, i64 ti) {
     i64 mi = tk_method_add(m, ci, sig, fn, np, nreq, d0, fty, tk_slot_take(ci, kind, m, sig, fn));
     set_mt_vis_at(mi, vis);
     set_mt_static_at(mi, stat);
+    if (isop) tk_op_declare(ci, mi, params);
     if (kind == 3) {
         set_mt_abst_at(mi, 1);
         tk_abstract_end(m);

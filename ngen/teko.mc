@@ -46,10 +46,14 @@
 // instantiated per call site so the bound is a constant there too:
 //   i64 total(params xs) { ... xs_len ... xs[i] ... }          teko_params.mc
 //   total(1, 2)  ->  total__2(<two words>)                     one body per count
-// What entrega 4's C5 adds -- operator overloading, spelled as C++ and C# spell
-// it and dispatched by the LEFT operand's type (teko_ops.mc):
-//   T operator+(U b)  inside a class or struct body            a contextual word
-//   a + b  /  (a + b) == c                                     pass() over N_BINARY
+// What entrega 5's C5b adds -- operator overloading as C# writes it, a STATIC
+// member naming both operands and resolved over both of them (teko_ops.mc):
+//   public static Vec operator+(Vec a, Vec b)                  a contextual word
+//   public static Vec operator+(i64 k, Vec v)                  the reversed form
+//   public static Vec operator-(Vec a)                         the unary form
+//   public static i64 operator==  /  operator!=                declared in pairs
+//   a + b  /  (a + b) == c  /  2 + v  /  -a                    pass() over
+//                                                              N_BINARY, N_UNARY
 //
 // What entrega 5's member crumb adds (D220, teko_access.mc) -- C#'s modifiers,
 // with C#'s defaults (a type is `internal`, a member is `private`):
