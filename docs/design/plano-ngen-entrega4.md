@@ -1232,3 +1232,54 @@ dentro do projeto, forma qualificada e bare (via o `using` implícito), `&twice`
 `docs/design/port-teko-mc.md` + HANDOFF §5):** herança de interface, `using G = geo;`/`using
 static`, genérico qualificado (D31.14), namespace aninhado (D31.1), ordem-livre de
 tipo/declaração (§5.1 item 7). Próximo da fila: `const`, depois `switch` (D222).
+
+## 35. N3b — o bug do verificador do N3: um local/parâmetro nunca perde para um `using` (2026-09-05)
+
+`feat/ngen-namespace-shadow`, `teko_ns.mc` (`tk_ns_rewrite_call`, `tk_ns_walk_calls_in`,
+`tk_ns_scan_calls`), `teko_access.mc` (`tk_deny_member`, achado adjacente do N3). 28/28 em exit
+esperado; `--dump-ast` das 27 fixtures anteriores **byte-idêntico** contra `40814c22`; `mc limits
+ngen` `ok`.
+
+**O bug.** `tk_ns_walk_calls_in` (sweep 2) reescrevia todo `N_CALL`/`N_ADDR` cujo nome resolvesse
+por prefixo de namespace ou `using`, sem checar se o nome bare já resolvia para algo mais próximo:
+uma local/parâmetro do mesmo nome (`&f` virava o endereço da FUNÇÃO `geo.f`, não da local) e uma
+declaração plana de topo com o nome exato (um `f` de fora de qualquer namespace perdia, em
+silêncio, para o `geo.f` que um `using geo;` trazia).
+
+**A ordem final de resolução de um nome bare** (C#, com a ressalva que o "atenção" do crumb
+pediu confirmada): **(1)** local/parâmetro em escopo no sítio; **(2)** o namespace corrente do
+sítio e seus prefixos, de dentro para fora (D31.6, inalterado -- um `f` dentro de `namespace geo`
+que TAMBÉM declara `f` sempre vence, mesmo com uma `f` plana também visível); **(3)** SÓ quando
+(2) não achou nada -- nem o sítio está dentro de um namespace, nem nenhum prefixo dele declara o
+nome -- uma declaração plana de topo com o nome exato (`decl_find`); **(4)** os `using`s do
+arquivo do sítio. Um `using` nunca vence o que já era visível sem ele; o passo (3) é o que fecha
+essa fresta, sempre depois de (2), nunca antes -- se estivesse antes, o caso "namespace corrente
+TAMBÉM declara o nome" quebraria, e é exatamente o que o crumb pediu para confirmar que não quebra.
+
+**Onde vive o conjunto de nomes em escopo.** Reusada a MESMA tabela que `teko_typeof.mc` declara
+para o seu próprio passe posterior (`sc_name`/`sc_ty`/`tk_nscope`, `tk_ty_scope_add`/
+`tk_ty_scope_find`/`tk_ty_scope_var`/`tk_ty_scope_params`) -- a mesma que `teko_rc.mc` já reusa
+para o seu passe, ainda mais tardio. `tk_ns_pass` roda ANTES de `tk_typeof_pass` (`teko.mc`), então
+a tabela chega vazia; `tk_ns_scan_calls` a zera e a povoa do zero por função (parâmetros primeiro,
+via `tk_ty_scope_params`), e `tk_ns_walk_calls_in` marca/restaura em cada `N_BLOCK` e registra
+cada `N_VAR` só depois de caminhar seu próprio inicializador -- a MESMA disciplina de
+`tk_ty_walk_list`. Nenhuma tabela nova: a chamada cruzada entre módulos `.mc` sem prototype
+prévio já é o padrão do projeto (mc: "two top-level passes allow calling a function before it's
+defined", `docs/core-language.md` -- `teko_ns.mc`, incluído antes de `teko_typeof.mc`/
+`teko_access.mc` em `teko.mc`, já chamava símbolos dos dois antes desta mudança).
+
+**Adjacente, fechado junto:** `teko_access.mc`'s `tk_deny_member` (a mensagem `X.m is private`)
+usava `sr_name_at(owner)` cru -- o nome MANGLED (`geo__X`) -- em vez do pontilhado; agora
+`tk_ns_dotted(sr_name_at(owner))`, a mesma conversão que o N3 já usa para todo nome REFERENCIADO
+em mensagem.
+
+**Fixture** `surface_namespace_fn.tk` estendida (exit 42 recalculado, códigos 12-14 novos): uma
+local `f` sombreando `geo.f` sob `using geo;`, num bloco (`&f` é a local, provado por
+`ld64(&f)==123`); uma `f` plana top-level vencendo o `using geo;` fora de qualquer namespace;
+`geo.use_own_f` chamando `f(z)` de DENTRO de `geo`, resolvendo para o `geo.f` mesmo com a plana
+também visível (a exceção do passo (2), confirmada). **Probes fora de `ngen/tests/`:** parâmetro
+com o mesmo nome de uma função namespaced (`&f` do parâmetro, mesma prova por `ld64`); `f`
+declarada num bloco interno e usada fora dele (não sombreia -- resolve `geo.f`, `f(2)` dá `1002`
+mod 256 = `234`); a mensagem `geo.X.m is private` pontilhada.
+
+**Fila:** inalterada -- `const`, `switch` (D222), closures/`ref`/`out` (D221).

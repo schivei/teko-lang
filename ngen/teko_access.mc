@@ -193,7 +193,7 @@ void tk_check_type_use(i64 si, i64 line, uptr fl) {
 }
 
 void tk_deny_member(uptr what, i64 owner, uptr m, i64 line, uptr fl) {
-    err_at(fl, line, tk_join3("teko: ", tk_join3(sr_name_at(owner), ".", m), what));
+    err_at(fl, line, tk_join3("teko: ", tk_join3(tk_ns_dotted(sr_name_at(owner)), ".", m), what));
 }
 
 // one member of `owner`, reached from wherever the parser or the pass is: the

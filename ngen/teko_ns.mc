@@ -102,7 +102,9 @@
 // namespace, or file-scoped, read straight off `nd_file`); `tk_ns_scan_calls`
 // then offers every bare call inside a namespaced function's body that same
 // function's own namespace (read back off its now-mangled name, `tk_ns_of_name`)
-// outward, and then the `using`s of the call's file, rewriting only when the
+// outward, then a plain top-level declaration of the exact bare name, and
+// then the `using`s of the call's file -- the full order N3b settles is
+// `tk_ns_rewrite_call`'s own header, below -- rewriting only when the
 // qualified candidate EXISTS (D31.10 -- a call to something that never
 // resolves is left exactly as written, and reaches the linker missing, same
 // as any other call this compiler never taught to guess). A QUALIFIED call
@@ -756,36 +758,60 @@ i64 tk_ns_call_try_usings(uptr name, uptr fl, i64 line) {
     return found;
 }
 
-// the call `n`, rewritten to the symbol its own namespace or a `using` of
-// its file names, when and only when that qualified candidate EXISTS
-// (D31.10) -- a call to `rt_alloc` written inside `geo` is tried as
-// `geo__rt_alloc`, finds nothing, and is left exactly as it was
+// the call/address-of `n`, rewritten to the symbol its own namespace or a
+// `using` of its file names -- but only when nothing closer to the site
+// already answers for `name` (N3b, the resolution order §35 states in
+// full): a LOCAL or a PARAMETER in scope at the site always wins (never
+// rewritten -- `teko_typeof.mc`'s own scope table, `tk_ty_scope_find`,
+// reused exactly as `teko_rc.mc` reuses it for its own later pass); failing
+// that, the site's own namespace and its prefixes outward (D31.6, closest
+// namespace wins, unchanged); failing THAT, a plain top-level declaration
+// of the exact bare name (`decl_find`) -- a call to `f` written where no
+// enclosing namespace declares one of its own resolves to the flat `f`
+// even with a `using` that would otherwise supply one, so a `using` never
+// outranks what was already visible without it; only then the `using`s of
+// the call's file (D31.10 governs both: a candidate that does not exist is
+// left exactly as written). A call to `rt_alloc` written inside `geo` is
+// tried as `geo__rt_alloc`, finds nothing, finds the flat `rt_alloc`
+// itself, and is left exactly as it was.
 i64 tk_ns_rewrite_call(i64 n, uptr ns, uptr fl) {
     uptr name = nd_name(n);
+    if (tk_ty_scope_find(name) >= 0) return 0;
     i64 d = tk_ns_call_try_prefixes(name, ns);
+    if (d < 0 && decl_find(name) >= 0) return 0;
     if (d < 0) d = tk_ns_call_try_usings(name, fl, nd_line(n));
     if (d < 0) return 0;
     set_nd_name(n, nd_name(d));
     return 1;
 }
 
-// every node of one function's body, in no particular scope order -- sweep 2
-// only ever reads a call's or an address-of's own name, never a local's, so
-// it needs none of `teko_typeof.mc`'s scope bookkeeping. `N_ADDR` (entrega 5,
-// crumb N3, closing a debt the N2 verifier found) is `&f`'s own node, built
-// by the core with the bare name still on it because a namespaced `f` is
-// left BARE by the parser like any other free function (§31's own header) --
-// `tk_ns_rewrite_call` reads/writes `nd_name` either way, so the one rewrite
-// already proven for a call serves an address-of unchanged.
+// every node of one function's body, under the SAME block-scoped stack
+// `teko_typeof.mc` builds for its own later pass (`sc_name`/`tk_nscope`,
+// `tk_ty_scope_add`/`tk_ty_scope_var`) -- reused rather than a third table,
+// since a local shadowing a namespace/`using` candidate (N3b) needs exactly
+// the same "innermost first, cut back at the closing `}`" rule the oracle
+// already keeps. `N_ADDR` (entrega 5, crumb N3, closing a debt the N2
+// verifier found) is `&f`'s own node, built by the core with the bare name
+// still on it because a namespaced `f` is left BARE by the parser like any
+// other free function (§31's own header) -- `tk_ns_rewrite_call` reads/
+// writes `nd_name` either way, so the one rewrite already proven for a call
+// serves an address-of unchanged.
 void tk_ns_walk_calls_in(i64 n) {
     loop {
         if (n == 0) break;
         i64 k = nd_kind(n);
         if (k == N_CALL || k == N_ADDR) tk_ns_rewrite_call(n, tk_ns_call_site, nd_file(n));
-        tk_ns_walk_calls_in(nd_a(n));
-        tk_ns_walk_calls_in(nd_b(n));
-        tk_ns_walk_calls_in(nd_c(n));
-        tk_ns_walk_calls_in(nd_d(n));
+        if (k == N_BLOCK) {
+            i64 mark = tk_nscope;
+            tk_ns_walk_calls_in(nd_a(n));
+            tk_nscope = mark;
+        } else {
+            tk_ns_walk_calls_in(nd_a(n));
+            tk_ns_walk_calls_in(nd_b(n));
+            tk_ns_walk_calls_in(nd_c(n));
+            tk_ns_walk_calls_in(nd_d(n));
+            tk_ty_scope_var(n);
+        }
         n = nd_next(n);
     }
 }
@@ -795,14 +821,20 @@ void tk_ns_walk_calls_in(i64 n) {
 // answers `geo` without a second table -- and every bare call inside its
 // body is offered that namespace's search order. A plain function's own
 // name carries no namespace, so `tk_ns_call_site` is 0 and only the
-// `using`s of the call's file are ever tried for it.
+// `using`s of the call's file are ever tried for it. The scope table
+// (N3b) opens with the function's own parameters, the same first step
+// `teko_typeof.mc`'s own pass takes, and is dropped once the body is
+// walked -- a later function starts with none of an earlier one's locals.
 void tk_ns_scan_calls(i64 root) {
     i64 f = root;
     loop {
         if (f == 0) break;
         if (nd_kind(f) == N_FUNC) {
             tk_ns_call_site = tk_ns_of_name(nd_name(f));
+            tk_nscope = 0;
+            tk_ty_scope_params(nd_a(f));
             tk_ns_walk_calls_in(nd_b(f));
+            tk_nscope = 0;
         }
         f = nd_next(f);
     }

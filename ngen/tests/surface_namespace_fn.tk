@@ -1,6 +1,6 @@
 // surface_namespace_fn.tk -- a free function declared inside a namespace,
 // mangled and resolved by a pass (entrega 5, crumb N2; plano-ngen-
-// entrega4.md §31/§32). teko_ns.mc's `tk_ns_pass` is the module.
+// entrega4.md §31/§32/§35). teko_ns.mc's `tk_ns_pass` is the module.
 //
 // What each part of `main` proves, in order:
 //
@@ -16,7 +16,17 @@
 //   5. `Derived : Base`, both written with `public Base(i64 v)` / `~Base()`
 //      -- the SHORT name, inside the SAME namespace as the class -- proving
 //      the N1 verifier's finding (teko_class.mc compared a qualified name
-//      against the source's own short spelling) is fixed.
+//      against the source's own short spelling) is fixed;
+//   6. a LOCAL `f`, in its own block, shadowing `geo.f` under `using geo;`
+//      -- `&f` takes the local's own address, not the namespaced function's
+//      (N3b, the local/parameter step of the resolution order);
+//   7. `f(5)`, bare, after that block has closed -- a PLAIN top-level `f`
+//      wins over `using geo;`'s own `geo.f`, because a declaration this
+//      exact bare name already answers outranks a `using` (N3b);
+//   8. `geo.use_own_f(5)` -- a bare `f(z)` call written INSIDE `namespace
+//      geo` resolves to `geo`'s OWN `f`, even with the same plain `f` also
+//      visible -- the namespace-prefix step still wins over the plain one
+//      (N3b's own exception, §35).
 //
 // expect-exit: 42
 
@@ -47,6 +57,10 @@ namespace geo {
         return helper(x);                        // bare, a plain global: left flat (D31.10)
     }
 
+    i64 f(i64 x) {                                // N3b's own target: shadowed by a local,
+        return x + 1000;                          // and outranked by a plain top-level `f`
+    }
+
     class Base {
         public i64 n;
 
@@ -72,6 +86,19 @@ namespace geo {
     }
 }
 
+// a plain (non-namespaced) `f`: a bare call to `f` OUTSIDE `geo`, with
+// `using geo;` also in scope, resolves HERE -- a `using` never outranks a
+// declaration already visible without it (N3b)
+i64 f(i64 y) {
+    return y + 1;
+}
+
+namespace geo {
+    i64 use_own_f(i64 z) {                        // N3b's own exception: the CURRENT
+        return f(z);                              // namespace's `f` wins over the plain one
+    }
+}
+
 using geo;
 
 i64 main() {
@@ -90,6 +117,14 @@ i64 main() {
     }
     if (order != 21) return 10;                  // derived's destructor first, then the base's
     if (rt_live() != 0) return 11;
+
+    {
+        i64 f = 123;                              // a LOCAL named exactly like geo.f
+        uptr p = &f;
+        if (ld64(p) != 123) return 12;            // &f is the local's own address
+    }
+    if (f(5) != 6) return 13;                    // the block closed: bare `f` is the PLAIN one
+    if (geo.use_own_f(5) != 1005) return 14;      // inside geo, bare `f` is geo's OWN
 
     return 42;
 }

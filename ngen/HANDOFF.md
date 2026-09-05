@@ -702,6 +702,16 @@ mais um `using A.B;` implícito, e dois consertos de dívida do verificador do N
   .../nope/here.tk`, a mensagem crua do core); `import` dentro de `namespace { }` (recusa);
   `import` depois de um `namespace` no MESMO arquivo (recusa).
 
+**Entrega 5 — N3b LANDADO** (plano §35, correção de bug real do verificador do N3): a ordem de
+resolução de um nome bare era furada em dois pontos -- `&f` reescrevia para a função `geo.f`
+mesmo com uma LOCAL `f` em escopo, e uma chamada `f(...)` fora de qualquer namespace perdia, em
+silêncio, para o `geo.f` que um `using geo;` trazia mesmo com uma `f` PLANA de topo já visível.
+Ordem final: local/parâmetro → namespace corrente e prefixos (D31.6, inalterado) → SÓ se isso não
+achar nada, uma declaração plana de topo do nome exato → os `using`s do arquivo (um `using` nunca
+vence o que já era visível sem ele). `tk_ns_walk_calls_in` ganhou o mesmo escopo por bloco que
+`teko_typeof.mc` já mantém para seu próprio passe (`sc_name`/`tk_nscope`, reusado, não uma
+terceira tabela).
+
 **Fila:** `const` → `switch` (D222) → closures/`ref`/`out` (D221, architect-first) →
 compilador teko de `<mc/core_min>` (plano §26). **Fora:** `var`, `type`, `match`, Variant,
 método parcial, nested, `foreach` (precisa de iteráveis), herança de interface, `using G = geo;`/
