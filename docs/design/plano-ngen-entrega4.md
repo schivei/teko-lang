@@ -418,3 +418,15 @@ nem namespace; checagem no `.`, na chamada, no
 `Tipo.m()`); nested **não**. Fixtures ganham `public` onde acessam de fora.
 **Fila da entrega 5:** `this`/`base` (em voo) → **membros C#** → reclaim c/ ctor/dtor → C5b
 operadores estáticos → `while`/`for` → `namespace`/`import`/`using` → `const`.
+
+## 18. D221 — `loop` fica; closures sobre `&fn`/`callp` (architect-first) (2026-09-04, noite)
+
+`loop`/`break N`/`continue`/`if` do mc **ficam**; `while`/`for` do prelude são adição.
+**Closures:** crumb com desenho prévio (teko-architect): (1) função **local** (dentro de
+outra) hoisted para o topo com nome manglado; (2) **lambda** inline; (3) tipo de função na
+superfície e chamada `f(x)` açucarando `callp`; (4) passagem por `&fn` como `uptr`;
+(5) **captura** — o chão é `uptr` puro, então a forma provável é objeto gerado (classe
+anônima: capturados como campos, corpo como método) — decidir por valor/por referência,
+tempo de vida (RC do reclaim), e recusas claras. Precedentes: `mc/docs/core-language.md`
+(`&x` de função), `examples/desktop` (callbacks GTK bidirecionais), `examples/conc`
+(`spawn` com `&fn`). Entra na fila depois de `const`.

@@ -1157,6 +1157,17 @@ Verificador reproduziu o crash instrumentando com ASan+UBSan (as flags do CI pro
 - **CONSERTO (dispatch):** `cg_emit_self_addr` tem que PARAR de escapar o endereço de um temp cujo escopo é o próprio statement-expression — hoist do `_rcvN` pra um escopo que sobrevive à chamada externa inteira, OU passar receptor tipo-valor por valor (Region/Arena são structs de 8B, métodos leem self). Root-cause, não workaround; conserta a CLASSE (todo receptor não-endereçável), não só o sítio arena.
 - **LEI DE PROCESSO (endurece D163/D164):** o fixpoint no sandbox NÃO pega UB que só crasha sob certos toolchains — **o gate de verificador de compiler-core passa a incluir um build ASan+UBSan** (`-fsanitize=address,undefined -fno-omit-frame-pointer -g`) do gen0 compilando o tip, além do fixpoint. Barato, pega stack-use-after-scope/UAF/OOB que o build seco esconde. (A ser gravado na CLAUDE.md.)
 
+### D221 · DONO: manter `loop` e as estruturas nativas do mc; closures = função inline/aninhada + açúcar sobre `&fn`/`callp` (dono 2026-09-04) 🔧 SUPERFÍCIE
+- **Manter `loop`, `break N`, `continue`, `if` e o resto das estruturas nativas do mc.** `while`/`for`
+  (prelude) são ADIÇÕES, não substituições.
+- **Closures:** o mc já dá ponteiro de função por referência (`&fn` como `uptr`, chamado por
+  `callp`; `examples/desktop` e `examples/conc` usam para callbacks e `spawn`). Logo o teko-mc dá
+  suporte a **escrever uma função inline (lambda) ou dentro de outra função (função local)** e
+  constrói **açúcar sobre `&fn`/`callp`**: tipo de função na superfície, chamada de um valor-função
+  como `f(x)`, passagem como argumento. Captura de variáveis do escopo envolvente é design-open
+  (o chão do mc é um `uptr` puro): architect-first — provável forma = objeto gerado (classe
+  anônima com os capturados como campos + método) apontado por `uptr`, no espírito do D218/D219.
+
 ### D220 · DONO: `public`/`private`/`protected`/`static` como em C#; `internal` se o mc permitir restringir; SEM classes aninhadas (dono 2026-09-04) 🔧 SUPERFÍCIE
 - **Modificadores como em C#:** `public`, `private`, `protected`, `static` em membros; `public`/
   `internal` em tipos de topo. **Defaults do C#** (ratificados pelo dono 2026-09-04): tipo de topo sem modificador é
