@@ -109,8 +109,8 @@ fixtures do glob (`// expect-exit: N` como oráculo) — 18 programas no total.
 
 | runner | `[target]` os/arch | asset da release | `[linker]` |
 |---|---|---|---|
-| `ubuntu-latest` | `linux`/`x86_64` | `linux-x86_64` | `cc` |
-| `ubuntu-24.04-arm` | `linux`/`aarch64` | `linux-arm64` | `cc` |
+| `ubuntu-latest` | `linux`/`x86_64` | `linux-x86_64` | **nenhum** — ELF dinâmico do M42; `[target]` glibc (`interp`/`libc`) |
+| `ubuntu-24.04-arm` | `linux`/`aarch64` | `linux-arm64` | **nenhum** — ELF dinâmico do M42; `[target]` glibc (`interp`/`libc`) |
 | `macos-latest` | `macos`/`aarch64` | `macos-arm64` | **nenhum** (backend `macho-exe`) |
 | `windows-latest` | `windows`/`x86_64` | `windows-x86_64` | `lld-link` |
 | `windows-11-arm` | `windows`/`aarch64` | `windows-arm64` | `lld-link` |
