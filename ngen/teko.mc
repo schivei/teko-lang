@@ -96,6 +96,15 @@
 //   new Name(args)                                            picks by signature
 //   the reference counting itself, injected over every body   pass (teko_rc.mc)
 //
+// What entrega 5's `while`/`do`/`for` crumb adds (D218/D221/D226,
+// teko_loop.mc) -- C#'s three loops, lowered at parse time to the core's own
+// `loop`/`if`/`break N` (kept, D221):
+//   while (c) stmt                                              syntax_stmt
+//   do stmt while (c);                                          syntax_stmt
+//   for (init; cond; step) stmt                                 syntax_stmt
+//   x++;  x--;  x += e;  x -= e;   (also a `for` loop's step)   word_add +
+//                                                               a pushed #rule
+//
 // Everything else in docs/design/port-teko-mc.md §3 (types/classes,
 // generics, error-union, `service`/DI, concurrency, the
 // rest of the stdlib) is a later entrega and is not stubbed here: it does
@@ -120,11 +129,13 @@
 #include "teko_over.mc"
 #include "teko_ops.mc"
 #include "teko_rc.mc"
+#include "teko_loop.mc"
 
 void user_init() {
     tk_types_init();
     tk_float_init();
     tk_access_init();
+    tk_loop_init();
 
     syntax("public",    &tk_public);
     syntax("internal",  &tk_internal);
@@ -143,6 +154,9 @@ void user_init() {
     syntax_stmt("const", &tk_stop_const);
     syntax_stmt("match", &tk_stop_match);
     syntax_stmt("when",  &tk_stop_when);
+    syntax_stmt("while", &tk_while);
+    syntax_stmt("do",    &tk_do);
+    syntax_stmt("for",   &tk_for);
 
     syntax("struct", &tk_struct);
 

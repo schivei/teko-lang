@@ -498,9 +498,49 @@ parâmetro em FUNÇÃO DE TOPO, `i64 add(i64 a, i64 b = 10)` → `add(1)` comple
   sem-default vencendo, chamada dentro de método de classe); AST das outras 23 é
   byte-idêntica à base.
 
-**Fila:** `while`/`for` → `namespace`/`import`/`using` → `const` → `switch` (D222) →
+**Entrega 5 — LOOPS LANDADO** (D218/D221/D226, plano §29; 25 fixtures): `while`, `do ... while`
+e `for` como em C# (`ngen/teko_loop.mc`, novo), rebaixados no PARSE ao `loop`/`if`/`break N` do
+núcleo (mantidos, D221) — a mesma forma que `lib/prelude.mc` já mostra, só que via `syntax_stmt`
+em vez de `#rule`, para caber o rewrite de saltos abaixo e para um `.tk` cru ganhar as palavras
+sem `#include`.
+- **`while (c) stmt`** → `loop { if (!(c)) break; stmt }`. O corpo fica na MESMA profundidade que
+  o programador escreveu — nenhum `break`/`continue` dentro dele precisa de ajuste.
+- **`do stmt while (c);`** → `loop { loop { stmt break; } if (!(c)) break; }`; **`for (init; cond;
+  step) stmt`** → `{ init loop { if (!(cond)) break; loop { stmt break; } step; } }`. As duas
+  embrulham o corpo num loop-de-uma-volta extra, para que `continue` (que sempre reinicia o loop
+  MAIS INTERNO) caia no passo/condição em vez de voltar ao topo do corpo — e é esse loop invisível
+  que exige o rewrite: `tk_loop_rewrite_stmt` caminha o corpo ANTES de embrulhar, contando quantos
+  `N_LOOP` do PRÓPRIO corpo ficam entre ele e cada `break`/`continue`; um `break k` que já
+  ultrapassa o que o corpo abriu (`k > profundidade`) também precisa ultrapassar o embrulho novo
+  (`k+1`), e um `continue` na profundidade 0 vira `break 1` (cai onde o `break;` do embrulho
+  cairia). Compõe corretamente aninhado (para `for` dentro de `for`, o `break 2` do usuário sai
+  com o nível certo mesmo depois de cada camada aplicar seu próprio `+1`) — a fixture
+  `surface_loops.tk` prova o caso de dois `for`s com `break 2`.
+- **`x++;` `x--;` `x += e;` `x -= e;`**, como statement solto E como passo de `for`: os quatro
+  tokens são registrados direto por `word_add` (sem `#token`, evitando o dobro-registro), e a
+  forma solta usa a MESMA rota que `+=`/`++` de `lib/prelude.mc` — um `#rule` empurrado por
+  `p_push_source` a partir de `user_init()`, antes do primeiro token do programa real (o
+  `drv_parse` chama `lex_init` → `user_init()` → `parse_unit()`, nessa ordem, então o push cai
+  ANTES do primeiro `next()`). A rota é a mesma proposta como opção A no crumb, mas usando a forma
+  do prelúdio em vez de `st64`/`ld64` crus: `x += e;` vira `x = x + e;`, então herda de graça o
+  `operator+` que uma classe declarar (C5b) e o RC de `x`, coisa que sintetizar `st64(&x, ...)`
+  diretamente NÃO teria (perderia posse/overload). O passo do `for` lê os mesmos tokens
+  diretamente (sem passar pelo `#rule`, já que não há `;` de fechamento ali).
+- **Fixture** `surface_loops.tk` (25/25 em exit 42): `while` com bloco e com statement único,
+  `do...while` com `continue` provando que cai na condição, `for` clássico com `i++`, `for` com
+  `continue` que executa o passo, `for (;;)` com `break`, `for` aninhado com `break 2`, `for`
+  dentro de método de `class` (o passe de RC caminhando a árvore sintetizada) e `x += 3;`. AST das
+  24 fixtures anteriores **byte-idêntica**.
+
+**Fila:** `namespace`/`import`/`using` → `const` → `switch` (D222) →
 closures/`ref`/`out` (D221, architect-first) → compilador teko de `<mc/core_min>` (plano
-§26). **Fora:** `var`, `type`, `match`, Variant, método parcial, nested.
+§26). **Fora:** `var`, `type`, `match`, Variant, método parcial, nested, `foreach` (precisa de
+iteráveis).
+
+**Dívida achada pelo verificador do C6 (registrada aqui, crumb futuro):** o `ngen` é um parser de
+UMA passada — um tipo/classe precisa estar declarado ANTES do primeiro uso no arquivo, o que C#
+não exige (ordem livre). Mesma família da limitação de método do §5.1 item 7, mas para
+tipo/classe; fechar os dois junto exige record/replay de topo, não só de método.
 
 **Dívida do C8:** `p.items[i]` sobre um receptor que o parser NÃO tipa (um parâmetro,
 que só o oráculo do `pass()` resolve) não chega ao `[` de array — cai no `[` do `params`
