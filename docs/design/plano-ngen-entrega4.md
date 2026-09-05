@@ -444,3 +444,13 @@ volta com `if`/`else` encadeados e `break` ao fim de cada braço (assim `break`/
 do core atravessam como em C#); `default`; `case` com constante ou `when` guarda; expressão
 com `=>` e `_`, tipada pelo oráculo (todos os braços do mesmo tipo, senão erro).
 `match` sai da fila. Entra depois de `const`, antes das closures.
+
+**§16 — sweep `this`/`base` pronto (`feat/ngen-this-base` @ `c224ac5e`, em verificação):**
+módulo `teko_this.mc`; o receptor oculto chama-se **`this` também na AST** (`self` não
+existe mais no `ngen/`); `this` é palavra (`syntax_expr`) válida só em corpo de tipo;
+`base` é **contextual** (lido no `.`), rebaixado a chamada direta ao símbolo da base
+escolhido por assinatura — contextual porque `offset_total(i64 base, params rest)` existe;
+nome não-qualificado resolve no **pass** (o core entrega identificador cru; é onde locais/
+parâmetros são legíveis), local/parâmetro sombreia campo. Prova: AST nova byte-idêntica à
+velha em 16/18 módulo `name=self→this`; as 2 restantes divergem só pelo `base.m()`.
+**Limite honesto:** campo array inline (C8) só por `this.items[k]` — recusa clara.
