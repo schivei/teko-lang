@@ -1157,6 +1157,20 @@ Verificador reproduziu o crash instrumentando com ASan+UBSan (as flags do CI pro
 - **CONSERTO (dispatch):** `cg_emit_self_addr` tem que PARAR de escapar o endereço de um temp cujo escopo é o próprio statement-expression — hoist do `_rcvN` pra um escopo que sobrevive à chamada externa inteira, OU passar receptor tipo-valor por valor (Region/Arena são structs de 8B, métodos leem self). Root-cause, não workaround; conserta a CLASSE (todo receptor não-endereçável), não só o sítio arena.
 - **LEI DE PROCESSO (endurece D163/D164):** o fixpoint no sandbox NÃO pega UB que só crasha sob certos toolchains — **o gate de verificador de compiler-core passa a incluir um build ASan+UBSan** (`-fsanitize=address,undefined -fno-omit-frame-pointer -g`) do gen0 compilando o tip, além do fixpoint. Barato, pega stack-use-after-scope/UAF/OOB que o build seco esconde. (A ser gravado na CLAUDE.md.)
 
+### D228 · DONO: operador ternário `c ? a : b` entra na superfície; a `switch` expression é açúcar sobre ele (dono 2026-09-05) 🔧 SUPERFÍCIE
+- **Ternário `expr ? a : b`** é bem-vindo — "como está usando o mesmo construto de fluxo do mc"
+  (dono, ao ver o desenho do hoist para a `switch` expression). Mesma precedência/associação do C#
+  (à direita, abaixo de `||`).
+- **Mecanismo (coordenador, sob D226):** o núcleo do mc não tem controle de fluxo em posição de
+  expressão, então o ternário rebaixa por **hoist num `pass()`**: o handler infixo devolve um
+  placeholder; o pass insere antes do statement envolvente `T __tN; if (c) __tN = a; else __tN = b;`
+  e troca o placeholder por `__tN` (braços preguiçosos; `T` pelo oráculo, os dois braços do mesmo
+  tipo). Limite conhecido: a avaliação de `c`/`a`/`b` é hoistada para antes do statement.
+- **`switch` expression (D222) = açúcar sobre cadeia de ternários** (`x switch { 1 => a, _ => b }`
+  ≡ `x == 1 ? a : b`; `when` = `&&` na condição) — nenhuma máquina própria; o `switch` statement
+  segue o D222 (loop de uma volta + `if`/`else`).
+- Ordem na fila: ternário ANTES do `switch`.
+
 ### D227 · COORDENADOR (sob D226): reclaim — RC e posse resolvidos SÓ no pass; vtable com release na palavra 0; refcount@+8 de fato reservado (2026-09-05) 🔧 MEMÓRIA / decidido em modo autônomo
 Ao implementar o reclaim (free lists + RC por escopo, ctor/dtor — D218), o crumb mandava injetar
 no PARSE como o `lx` e parar se parse e pass divergissem. Mediu-se que não dá: (1) `on_jump` dá
