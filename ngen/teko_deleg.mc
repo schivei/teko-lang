@@ -654,16 +654,30 @@ void tk_lam_walk(i64 n) {
 // fall out of the ordinary scope machinery, teko_rc.mc, because this is a
 // real N_VAR the walk above sees like any other local); one local per
 // by-reference capture, holding the address `tk_lam_walk` derefs through.
+//
+// K4b: a by-value capture of DELEGATE type builds `Op inner = ld64(addr);`,
+// an `N_CALL` the later `tk_deleg_pass` walk (this same file) also visits as
+// an ordinary local initializer -- `tk_deleg_coerce` would refuse it outright
+// (a call to `ld64` matches none of the four shapes a delegate slot accepts).
+// The call node built here IS the final one (nothing copies over it before
+// that walk reads it, unlike `tk_deleg_call`'s own node -- K1b's own
+// lesson), so tagging it with the delegate's row right away, the same
+// `tk_field_use` (teko_expr.mc) tags a field LOAD of delegate type with,
+// makes the oracle answer the row's own type and the coercion a no-op.
 i64 tk_lambda_prologue(uptr envname) {
     i64 pre = 0;
     i64 i = 0;
     loop {
         if (i >= tk_nlc) break;
         i64 addr = tk_bin(K_ADD, tk_id(envname), tk_int(24 + 8 * i));
-        if (lc_byref_at(i))
+        if (lc_byref_at(i)) {
             pre = list_append(pre, tk_var(TY_UPTR, tk_lam_refaddr(i), tk_call("ld64", addr)));
-        else
-            pre = list_append(pre, tk_var(lc_ty_at(i), lc_name_at(i), tk_call(tk_ldn(lc_ty_at(i)), addr)));
+        } else {
+            i64 ld = tk_call(tk_ldn(lc_ty_at(i)), addr);
+            i64 dsi = tk_deleg_row(lc_ty_at(i));
+            if (dsi >= 0) tk_xt_put(ld, dsi, sr_ty_at(dsi), 1);
+            pre = list_append(pre, tk_var(lc_ty_at(i), lc_name_at(i), ld));
+        }
         i = i + 1;
     }
     return pre;
