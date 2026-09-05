@@ -343,26 +343,15 @@ reclaim (construtor/destrutor `public`) e o C5b (`public static … operator+`) 
   é **byte-idêntica** à da base `c9b8c596` — visibilidade é checagem, não muda a árvore —, e a
   única que diverge é `types_struct`, exatamente pelo `static` que entrou nela.
 
-**Entrega 5 — a seguir:** crumb 1, **reclaim** pela "arena automática" do mc (plano §14):
-free lists + reference counting por escopo (`rc_dec` na saída do bloco e nas arestas de
-`on_jump`; `return` com temporário; `rc_inc`/`rc_dec` em atribuição de local/campo
-classe; destrutor `~Nome()` no lugar do `dispose` do lx, D218); fixture
-`surface_reclaim.tk` com 1M `new` sem esgotar a arena.
+**Em voo:** crumb **D223** — propriedades (`get`/`set`/`value`, auto-propriedade, visibilidade
+por acessor, `virtual`/`override`/`static`) e interface v2 (corpo default apontado pelo itab;
+`static abstract` fornecido pelo tipo). Fixtures `surface_property.tk`, `surface_iface_default.tk`.
 
-**Fila:** entrega 5 (comportamento base): membros C# (feito) → reclaim c/ construtor+destrutor → C5b
-(operador estático, D218) → `while`/`for` (prelude do mc) → stops restantes
-(`namespace`/`import`/`using`/`const`/`match`/`when`) → stdlib mínima; **C6** quando o mc
-der o hook de declaração de função (`0.10.N`).
-
-**Dívida do C8:** `p.items[i]` sobre um receptor que o parser NÃO tipa (um parâmetro,
-que só o oráculo do `pass()` resolve) não chega ao `[` de array — cai no `[` do `params`
-e é recusado com `teko: \`[\` indexes a \`params\` list only`. Recusa clara, nunca
-miscompilação; fechar isso é trabalho no `teko_typeof.mc` (C3b, em voo em paralelo).
-
-**Dívidas conhecidas:** arena bump sem reclaim (`new` e `params` em loop quente
-esgotam 4 MiB ruidosamente — entrega de comportamento base); default em função de topo
-bloqueado (C6); `syntax_infix` sobre operador do core morre em silêncio (bug reportado
-ao mc; rota é `pass()`).
+**Fila (plano §14-§22):** D223 → `abstract` + `partial class` (D224) → reclaim com
+construtor/destrutor (D218) → C5b operadores estáticos (D218; C5 landado está errado) →
+**C6** default em função de topo (agora alcançável: `syntax_param`, mc 0.10.3) →
+`while`/`for` → `namespace`/`import`/`using` → `const` → `switch` (D222) → closures/`ref`/`out`
+(D221, architect-first). **Fora:** `var`, `type`, `match`, Variant, método parcial, nested.
 
 ## 5.1 Armadilhas já pagas (não repita)
 
