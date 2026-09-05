@@ -1,125 +1,305 @@
-// teko_ops.mc -- operator overloading (entrega 4, crumb C5), in one pass() over
-// N_BINARY.
+// teko_ops.mc -- operator overloading as C# writes it (D218, C5b), in one pass()
+// over N_BINARY and N_UNARY.
 //
-//   class Vec { i64 x; i64 y;
-//       Vec operator+(Vec b) { ... }
-//       i64 operator==(Vec b) { ... }
+//   class Vec { public i64 x; public i64 y;
+//       public static Vec operator+(Vec a, Vec b) { ... }
+//       public static Vec operator+(i64 k, Vec v) { ... }   // the reversed form
+//       public static Vec operator-(Vec a) { ... }          // the unary one
+//       public static i64 operator==(Vec a, Vec b) { ... }  // and its `!=` pair
 //   }
-//   (a + b) == c
+//   (a + b) == c        2 + v        -a
 //
-// `operator` is CONTEXTUAL inside the body of a type, exactly as `virtual` and
-// `override` are: nothing reserves the word, and the token after it -- `+`,
-// `==`, `<<` -- names the method (`op_add`, `op_eq`, `op_shl`). From there on it
-// is an ordinary method: teko_class.mc reads the parameter list, keys it by
-// signature, gives it the same `Vec_op_add__Vec` suffix an overload gets, and
-// the declaration lands in the method table like any other.
+// An operator is a STATIC member that names BOTH operands, so there is no
+// receiver and no `this` in it, and no vtable slot either: which declaration a
+// site lands on is decided by the static types of the two operands and by
+// nothing else. `operator` stays CONTEXTUAL inside the body of a type, as
+// `virtual` and `override` are: nothing reserves the word, and the token after
+// it -- `+`, `==`, `<<` -- names the method (`op_add`, `op_eq`, `op_shl`). From
+// there on it is an ordinary static method: teko_class.mc reads the parameter
+// list, keys it by signature, gives it the `Vec_op_add__Vec__Vec` suffix an
+// overload gets, and the declaration lands in the method table like any other.
 //
-// The rewrite is a pass, and it has to be. `syntax_infix("+", ...)` registers
-// without complaining and NEVER fires: parse_unit() calls ops_init() as its
-// first statement (mc src/parse.mc:2110 -> :293-306) and infix_set zeroes the
-// handler column (:279), so the core's own table is rebuilt on top of whatever
-// user_init() put there. Measured, with an unconditional err_at inside such a
-// handler: `1 + 2` compiled and answered 3. A pass over N_BINARY is the one
-// route, and passes run BEFORE fold(), so the node arrives in the shape the
+// RESOLUTION IS OVER BOTH OPERANDS. The candidates are the operators declared
+// by the type of EITHER operand (and by their bases), which is what makes
+// `2 + v` reach `operator+(i64, Vec)` -- a declaration whose first parameter is
+// not of the declaring type at all. At least one parameter has to be, so a type
+// cannot declare an operator over two types that are none of its business. The
+// match is EXACT first, and the two rounds after it are the only widenings
+// there are: the free overload's own tie-break for a literal (C4), where an
+// integer literal lands on any of the core's integers rather than on `i64`
+// alone; and a DERIVED operand on a parameter of its base, which is a widening
+// of no bits at all -- a derived object's fields are laid out base-first, so
+// the reference already is one of the base, and an operator a base declares
+// answers for the classes derived from it exactly as C#'s does. The type that
+// declares its own always wins, because the rounds are tried in that order.
+// Two declarations matching one site in the same round is ambiguity, and it is
+// refused rather than guessed at.
+//
+// THE PAIRS C# REQUIRES. `==`/`!=`, `<`/`>` and `<=`/`>=` are declared in
+// pairs, at the same parameter types and by the same type; one written without
+// the other is refused where it was written, at the end of parsing, so a
+// partial class may spell the two halves in two parts.
+//
+// WHY A PASS AND NOT `syntax_infix`. Since mc 0.10.3 (M41.5) `syntax_infix`
+// over an operator the core owns does fire -- `ops_init()` is lazy now, so the
+// module's handler survives -- and it would be the shorter route. It is still
+// the wrong one here for two reasons the pass answers and parse time cannot.
+// The handler runs where the source is being read, and the type of an operand
+// that is a parameter or a deferred `.` is not known there (teko_expr.mc's
+// tk_defer_member); and the handler sees only what it is handed, while the rule
+// below needs to tell an operand from an ADDRESS this project itself built. The
+// pass runs after the oracle (teko_typeof.mc), where the whole unit exists and
+// both operands answer, and before fold(), so the node arrives in the shape the
 // source wrote (hooks.md § pass()).
-//
-// Dispatch is by the LEFT operand, and only by it: the left has to be a teko
-// type declaring the operator, and the right has to land on one of that
-// declaration's signatures. A teko value on the right with a core type on the
-// left is refused rather than reversed. When NEITHER side is a teko type the
-// node is not touched at all -- which is what leaves the core's own arithmetic,
-// and every program that never declares an operator, byte for byte as it was.
-// Nor is it touched when the left type declares no such operator and the right
-// side is of a core type: a teko reference is one pointer word and `v + zero`
-// is the core's arithmetic over it, not an operator this pass lost.
 //
 // The one thing a walk over N_BINARY has to know is that this project BUILDS
 // N_BINARY of its own: `p.side` is `ld64(p + SIDE)`, and `p` there is a teko
-// value under a `+`. Those are addresses, not operators, and they are told
+// value under a `+`. Those are addresses, not operands, and they are told
 // apart structurally -- the first argument of a memory intrinsic this project
 // emits is an address, and so is the left spine of an array-element address
 // (`ADD(ADD(obj, off), MUL(i, w))`). The walk is top-down, so the intrinsic is
-// seen before its own argument and the mark is set in time.
+// seen before its own argument and the mark is set in time. Every such address
+// carries the teko value on the LEFT and an offset on the right, which is why
+// resolving over both operands does not widen what the marker has to catch.
+//
+// A node whose two operands are both of core types is not touched at all --
+// that is what leaves the core's own arithmetic, and every program that
+// declares no operator, byte for byte as it was. Nor is one touched when no
+// type in reach declares that operator and the other side is of a core type: a
+// teko reference is one pointer word and `v + zero` is the core's arithmetic
+// over it, not an operator this pass lost.
 //
 // Resolution is bottom-up inside one expression: an operand that is itself an
 // operator is rewritten first, so `(a + b) == c` asks the `==` about the RETURN
 // type of `operator+` rather than about the type of `a`. The rewritten node is
-// registered in the type table (tk_xt_put) for the same reason.
+// registered in the type table (tk_xt_put) for the same reason -- and that
+// registration is also what tells teko_rc.mc that a `+` answering with a class
+// hands out a reference of the caller's own, so `a + b` in an argument position
+// is parked and released with the statement that built it.
+//
+// The declaring type's own visibility is checked AT THE SITE, like every other
+// member (teko_access.mc's tk_check_member): a `private` operator answers only
+// inside the type that wrote it.
 
+// the number of operator declarations one program may hold
+#define TK_MAXOP 64
+
+i64  op_mi[TK_MAXOP];                 // its row in teko_class.mc's method table
+i64  op_cls[TK_MAXOP];                // the type that declares it
+i64  op_tok[TK_MAXOP];                // the operator's own token
+i64  op_np[TK_MAXOP];                 // 1 for a unary operator, 2 for a binary one
+i64  op_t0[TK_MAXOP];                 // the type of its first parameter
+i64  op_t1[TK_MAXOP];                 // ...and of its second, or -1 for a unary one
+i64  op_line[TK_MAXOP];
+uptr op_file[TK_MAXOP];
+i64  tk_nop = 0;
+
+i64  op_mi_at(i64 i)   { return ld64(op_mi + i * 8); }
+i64  op_cls_at(i64 i)  { return ld64(op_cls + i * 8); }
+i64  op_tok_at(i64 i)  { return ld64(op_tok + i * 8); }
+i64  op_np_at(i64 i)   { return ld64(op_np + i * 8); }
+i64  op_t0_at(i64 i)   { return ld64(op_t0 + i * 8); }
+i64  op_t1_at(i64 i)   { return ld64(op_t1 + i * 8); }
+i64  op_line_at(i64 i) { return ld64(op_line + i * 8); }
+uptr op_file_at(i64 i) { return ld64(op_file + i * 8); }
+
+// ---- the tokens a type may overload ----
 // the method name an operator token declares, or 0 when the token is not one a
 // type may overload
 uptr tk_op_method(i64 tok) {
-    if (tok == K_ADD) return "op_add";
-    if (tok == K_SUB) return "op_sub";
-    if (tok == K_MUL) return "op_mul";
-    if (tok == K_DIV) return "op_div";
-    if (tok == K_MOD) return "op_mod";
-    if (tok == K_EQ)  return "op_eq";
-    if (tok == K_NE)  return "op_ne";
-    if (tok == K_LT)  return "op_lt";
-    if (tok == K_LE)  return "op_le";
-    if (tok == K_GT)  return "op_gt";
-    if (tok == K_GE)  return "op_ge";
-    if (tok == K_AND) return "op_and";
-    if (tok == K_OR)  return "op_or";
-    if (tok == K_XOR) return "op_xor";
-    if (tok == K_SHL) return "op_shl";
-    if (tok == K_SHR) return "op_shr";
+    if (tok == K_ADD)   return "op_add";
+    if (tok == K_SUB)   return "op_sub";
+    if (tok == K_MUL)   return "op_mul";
+    if (tok == K_DIV)   return "op_div";
+    if (tok == K_MOD)   return "op_mod";
+    if (tok == K_EQ)    return "op_eq";
+    if (tok == K_NE)    return "op_ne";
+    if (tok == K_LT)    return "op_lt";
+    if (tok == K_LE)    return "op_le";
+    if (tok == K_GT)    return "op_gt";
+    if (tok == K_GE)    return "op_ge";
+    if (tok == K_AND)   return "op_and";
+    if (tok == K_OR)    return "op_or";
+    if (tok == K_XOR)   return "op_xor";
+    if (tok == K_SHL)   return "op_shl";
+    if (tok == K_SHR)   return "op_shr";
+    if (tok == K_BANG)  return "op_not";
+    if (tok == K_TILDE) return "op_bnot";
     return 0;
 }
 
 // how a diagnostic spells the operator back to whoever wrote it
 uptr tk_op_spell(i64 tok) {
-    if (tok == K_ADD) return "+";
-    if (tok == K_SUB) return "-";
-    if (tok == K_MUL) return "*";
-    if (tok == K_DIV) return "/";
-    if (tok == K_MOD) return "%";
-    if (tok == K_EQ)  return "==";
-    if (tok == K_NE)  return "!=";
-    if (tok == K_LT)  return "<";
-    if (tok == K_LE)  return "<=";
-    if (tok == K_GT)  return ">";
-    if (tok == K_GE)  return ">=";
-    if (tok == K_AND) return "&";
-    if (tok == K_OR)  return "|";
-    if (tok == K_XOR) return "^";
-    if (tok == K_SHL) return "<<";
-    if (tok == K_SHR) return ">>";
+    if (tok == K_ADD)   return "+";
+    if (tok == K_SUB)   return "-";
+    if (tok == K_MUL)   return "*";
+    if (tok == K_DIV)   return "/";
+    if (tok == K_MOD)   return "%";
+    if (tok == K_EQ)    return "==";
+    if (tok == K_NE)    return "!=";
+    if (tok == K_LT)    return "<";
+    if (tok == K_LE)    return "<=";
+    if (tok == K_GT)    return ">";
+    if (tok == K_GE)    return ">=";
+    if (tok == K_AND)   return "&";
+    if (tok == K_OR)    return "|";
+    if (tok == K_XOR)   return "^";
+    if (tok == K_SHL)   return "<<";
+    if (tok == K_SHR)   return ">>";
+    if (tok == K_BANG)  return "!";
+    if (tok == K_TILDE) return "~";
     return 0;
 }
 
-uptr tk_op_list() { return "+ - * / % == != < <= > >= & | ^ << >>"; }
+uptr tk_op_list() { return "+ - * / % == != < <= > >= & | ^ << >> ! ~"; }
+
+// 1 when the token names an operator a type may declare with ONE parameter.
+// `+` is one of them, and its site is the one thing the core does not spell:
+// its prefix table holds `- ~ ! &` and nothing else (mc src/parse.mc ops_init),
+// so a unary `+` declaration is accepted and simply has no site to reach it
+// until the core grows the prefix.
+i64 tk_op_unary_ok(i64 tok) {
+    if (tok == K_ADD)   return 1;
+    if (tok == K_SUB)   return 1;
+    if (tok == K_BANG)  return 1;
+    if (tok == K_TILDE) return 1;
+    return 0;
+}
+
+// ...and with TWO. `!` and `~` are the two the core reads only as prefixes.
+i64 tk_op_binary_ok(i64 tok) {
+    if (tok == K_BANG)  return 0;
+    if (tok == K_TILDE) return 0;
+    return 1;
+}
+
+// the operator C# makes a type declare together with this one, or 0 when it
+// stands alone: a comparison that answers one way has to answer the other
+i64 tk_op_pair(i64 tok) {
+    if (tok == K_EQ) return K_NE;
+    if (tok == K_NE) return K_EQ;
+    if (tok == K_LT) return K_GT;
+    if (tok == K_GT) return K_LT;
+    if (tok == K_LE) return K_GE;
+    if (tok == K_GE) return K_LE;
+    return 0;
+}
 
 // ---- the declaration side, called from teko_class.mc's tk_member ----
+// the token of the operator being declared, or 0 when the member is an ordinary
+// one. tk_op_name sets it and the three checks below read it; nothing is parsed
+// between them but the parameter list.
+i64 tk_op_tok_cur = 0;
+
 // `operator+` in the position of a method name. The word is not reserved, so a
 // body that does not open with it reads its name the way it always did; one
 // that does gets the operator's own token read here, and a token no type may
 // declare is refused with the list of the ones it may.
 uptr tk_op_name(uptr pisop) {
+    tk_op_tok_cur = 0;
     st64(pisop, 0);
     if (!tk_kw("operator")) return p_ident();
     i64 line = p_line();
     uptr fl = p_file();
     p_next();
     i64 tok = p_id();
-    if (tok == K_BANG || tok == K_TILDE)
-        err_at(fl, line, "teko: a unary operator is not taught yet");
     uptr m = tk_op_method(tok);
     if (m == 0)
         err_at(fl, line, tk_join("teko: `operator` is followed by one of ", tk_op_list()));
     p_next();
+    tk_op_tok_cur = tok;
     st64(pisop, 1);
     return m;
 }
 
-// what an operator declaration has to be for a site to reach it: one operand
-// besides the receiver, always passed, and a value to hand back
-void tk_op_decl_check(i64 np, i64 nreq, i64 fty) {
-    if (np == 0) err_at(tk_file, tk_line, "teko: a unary operator is not taught yet");
-    if (np > 1) err_at(tk_file, tk_line, "teko: an operator takes one parameter besides the receiver");
-    if (nreq != 1) err_at(tk_file, tk_line, "teko: an operator parameter has no default; a site always passes it");
-    if (fty == TY_VOID) err_at(tk_file, tk_line, "teko: an operator returns a value");
+// what an operator is before its parameter list is read: a static member with a
+// value to hand back and no vtable slot. The old form of C5 -- a receiver the
+// source did not write, one parameter beside it -- lands on the first of the
+// three, which is the message that tells whoever wrote it what changed.
+void tk_op_head_check(i64 stat, i64 kind, i64 fty) {
+    if (!stat)
+        err_at(p_file(), p_line(), "teko: an operator is static and names both operands");
+    if (kind)
+        err_at(p_file(), p_line(), "teko: an operator is static; it is not virtual, override or abstract");
+    if (fty == TY_VOID)
+        err_at(p_file(), p_line(), "teko: an operator returns a value");
+}
+
+// 1 when one of the parameters is of the type that declares the operator, which
+// is what keeps a type from declaring operators over types that are not its own
+i64 tk_op_owns_operand(i64 ci, i64 params, i64 np) {
+    i64 ty = sr_ty_at(ci);
+    if (nd_type(params) == ty) return 1;
+    if (np == 1) return 0;
+    return nd_type(nd_next(params)) == ty;
+}
+
+// ...and what it is once the list is read: one operand or two, of an arity the
+// token itself allows, all of them passed at every site, and one of them of the
+// declaring type
+void tk_op_decl_check(i64 ci, i64 np, i64 nreq, i64 params) {
+    uptr sp = tk_op_spell(tk_op_tok_cur);
+    if (np != 1 && np != 2)
+        err_at(tk_file, tk_line, tk_join3("teko: the operator `", sp, "` names one operand or two"));
+    if (np == 1 && !tk_op_unary_ok(tk_op_tok_cur))
+        err_at(tk_file, tk_line, tk_join3("teko: `", sp, "` is a binary operator; it names two operands"));
+    if (np == 2 && !tk_op_binary_ok(tk_op_tok_cur))
+        err_at(tk_file, tk_line, tk_join3("teko: `", sp, "` is a unary operator; it names one operand"));
+    if (nreq != np)
+        err_at(tk_file, tk_line, "teko: an operator parameter has no default; a site always passes it");
+    if (!tk_op_owns_operand(ci, params, np))
+        err_at2(tk_file, tk_line, "teko: an operator names an operand of the type that declares it",
+                sr_name_at(ci));
+}
+
+// the declaration, recorded so that a site may be resolved against it. The
+// parameter TYPES are what the site matches, and reading them from the node
+// list here is what saves the resolution from taking the signature string apart.
+void tk_op_declare(i64 ci, i64 mi, i64 params) {
+    if (tk_nop == TK_MAXOP) err_at(tk_file, tk_line, "teko: too many operators");
+    i64 t1 = 0 - 1;
+    if (nd_next(params)) t1 = nd_type(nd_next(params));
+    st64(op_mi + tk_nop * 8, mi);
+    st64(op_cls + tk_nop * 8, ci);
+    st64(op_tok + tk_nop * 8, tk_op_tok_cur);
+    st64(op_np + tk_nop * 8, mt_np_at(mi));
+    st64(op_t0 + tk_nop * 8, nd_type(params));
+    st64(op_t1 + tk_nop * 8, t1);
+    st64(op_line + tk_nop * 8, tk_line);
+    st64(op_file + tk_nop * 8, tk_file);
+    tk_nop = tk_nop + 1;
+}
+
+// the row that declares `pair` at the very same parameter types and in the very
+// same type, or -1: the half C# requires beside the one that was written
+i64 tk_op_twin(i64 i, i64 pair) {
+    i64 j = 0;
+    loop {
+        if (j >= tk_nop) break;
+        if (op_tok_at(j) == pair && op_cls_at(j) == op_cls_at(i) && op_np_at(j) == op_np_at(i)) {
+            if (op_t0_at(j) == op_t0_at(i) && op_t1_at(j) == op_t1_at(i)) return j;
+        }
+        j = j + 1;
+    }
+    return 0 - 1;
+}
+
+// every comparison declared with the half C# asks for beside it. It is checked
+// once, when the unit is whole, so the two halves of a partial class may be
+// written in two parts.
+void tk_op_check_pairs() {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nop) break;
+        i64 pair = tk_op_pair(op_tok_at(i));
+        if (pair) {
+            if (tk_op_twin(i, pair) < 0)
+                err_at(op_file_at(i), op_line_at(i),
+                       tk_join3(tk_join3("teko: the operator `", tk_op_spell(op_tok_at(i)), "` is declared with `"),
+                                tk_op_spell(pair), "` beside it"));
+        }
+        i = i + 1;
+    }
 }
 
 // ---- the address marker ----
@@ -153,46 +333,104 @@ void tk_ops_addr_step(i64 n) {
 }
 
 // ---- picking the declaration a site lands on ----
-uptr tk_op_sig1(i64 ty) { return tk_join("__", type_name(ty)); }
-
-// the core's integers, which is where an integer literal may land when the type
-// it carries -- i64 -- is not the one declared
-i64 tk_op_int_ty(i64 i) {
-    if (i == 0) return TY_U8;
-    if (i == 1) return TY_U16;
-    if (i == 2) return TY_U32;
-    if (i == 3) return TY_U64;
-    return TY_I64;
+// the type table's row for a type the oracle answered with, or -1 for a type of
+// the core (and for no answer at all)
+i64 tk_op_row(i64 ty) {
+    if (ty < 0) return 0 - 1;
+    return tk_struct_by_ty(ty);
 }
 
-// a literal against the integer signatures the type declares: exactly one is a
-// pick, more than one is ambiguous (-2), none is no pick at all (-1)
-i64 tk_op_pick_int(i64 si, uptr m) {
-    i64 found = 0 - 1;
+// the core's integers, which is where an integer literal may land. `uptr` is
+// not one of them: a pointer takes a pointer, and `str`/`ptr` are that same
+// `uptr` under teko's own spelling (teko_type.mc).
+i64 tk_op_int_ty(i64 t) {
+    if (t == TY_U8) return 1;
+    if (t == TY_U16) return 1;
+    if (t == TY_U32) return 1;
+    if (t == TY_U64) return 1;
+    if (t == TY_I64) return 1;
+    return 0;
+}
+
+// 1 when `ci` is one of the operand types or a base of one: the candidates of a
+// site are the operators declared by EITHER side, which is what a reversed
+// declaration needs to be found by
+i64 tk_op_in_chain(i64 ci, i64 si) {
+    loop {
+        if (si < 0) break;
+        if (si == ci) return 1;
+        si = sr_base_at(si);
+    }
+    return 0;
+}
+
+i64 tk_op_reachable(i64 ci, i64 sa, i64 sb) {
+    if (tk_op_in_chain(ci, sa)) return 1;
+    return tk_op_in_chain(ci, sb);
+}
+
+// 1 when the operand lands on a parameter of type `pt`, in one of the three
+// rounds a site is tried in -- and they are tried in order, so a round only
+// answers for a site the rounds before it left unmatched.
+//
+//   0  EXACT      the operand's own declared type, and `i64` for a literal
+//   1  LITERAL    an integer literal on any of the core's integers, which is
+//                 the free overload's own tie-break (teko_over.mc)
+//   2  BASE       an operand of a DERIVED type on a parameter of its base: the
+//                 object model lays a derived object's fields base-first, so
+//                 the reference IS one of the base, and an operator a base
+//                 declares answers for the classes derived from it, as C#'s
+//                 does. It is last of the three, so a type that declares its
+//                 own always wins over the one it inherits.
+i64 tk_op_slot_fits(i64 pt, i64 t, i64 x, i64 round) {
+    if (nd_kind(x) == N_INT) {
+        if (round == 0) return pt == TY_I64;
+        return tk_op_int_ty(pt);
+    }
+    if (pt == t) return 1;
+    if (round < 2) return 0;
+    return tk_op_in_chain(tk_op_row(pt), tk_op_row(t));
+}
+
+i64 tk_op_fits(i64 i, i64 np, i64 ta, i64 tb, i64 a, i64 b, i64 round) {
+    if (!tk_op_slot_fits(op_t0_at(i), ta, a, round)) return 0;
+    if (np == 1) return 1;
+    return tk_op_slot_fits(op_t1_at(i), tb, b, round);
+}
+
+// 1 when a type in reach of the site declares that operator at that arity at
+// all -- the question that comes before the operand types are even matched, and
+// the one whose "no" leaves the node to the core
+i64 tk_op_declared(i64 tok, i64 np, i64 sa, i64 sb) {
     i64 i = 0;
     loop {
-        if (i >= 5) break;
-        i64 mi = tk_method_sig_find(si, m, tk_op_sig1(tk_op_int_ty(i)));
-        if (mi >= 0) {
-            if (found >= 0) return 0 - 2;
-            found = mi;
+        if (i >= tk_nop) break;
+        if (op_tok_at(i) == tok && op_np_at(i) == np) {
+            if (tk_op_reachable(op_cls_at(i), sa, sb)) return 1;
         }
         i = i + 1;
     }
-    return found;
+    return 0;
 }
 
-// the declaration the right operand lands on. The declared type is tried first,
-// so `v + 1` reaches `operator+(i64)` where there is one; a literal falls
-// back to the other integers of the core, under the same tie-break the free
-// overload resolution uses.
-i64 tk_op_pick(i64 si, uptr m, i64 b, i64 tb) {
-    if (tb >= 0) {
-        i64 mi = tk_method_sig_find(si, m, tk_op_sig1(tb));
-        if (mi >= 0) return mi;
+// the row the operands land on, and through `pn` how many rows do -- more than
+// one is what makes the site ambiguous rather than resolved
+i64 tk_op_match(i64 tok, i64 np, i64 sa, i64 sb, i64 ta, i64 tb, i64 a, i64 b, i64 round, uptr pn) {
+    i64 found = 0 - 1;
+    i64 count = 0;
+    i64 i = 0;
+    loop {
+        if (i >= tk_nop) break;
+        if (op_tok_at(i) == tok && op_np_at(i) == np && tk_op_reachable(op_cls_at(i), sa, sb)) {
+            if (tk_op_fits(i, np, ta, tb, a, b, round)) {
+                if (found < 0) found = i;
+                count = count + 1;
+            }
+        }
+        i = i + 1;
     }
-    if (nd_kind(b) != N_INT) return 0 - 1;
-    return tk_op_pick_int(si, m);
+    st64(pn, count);
+    return found;
 }
 
 // ---- the diagnostics ----
@@ -204,89 +442,112 @@ uptr tk_op_none_msg(uptr tname, uptr sp) {
     return tk_join3(tk_join3("teko: ", tname, " declares no operator `"), sp, "`");
 }
 
-uptr tk_op_sig_msg(uptr tname, uptr sp, uptr rname) {
-    return tk_join3(tk_op_none_msg(tname, sp), " for ", tk_join(rname, " on the right"));
+// the type a "declares no operator" message names: the left operand's when it
+// is a teko type, and the right one's when the left is of a core type
+uptr tk_op_tname(i64 sa, i64 sb) {
+    if (sa >= 0) return sr_name_at(sa);
+    return sr_name_at(sb);
 }
 
-// what the right operand is called in a diagnostic: the type it declares, or
-// the shape of the node when nothing declares one
-uptr tk_op_rname(i64 b, i64 tb) {
-    if (tb >= 0) return type_name(tb);
-    return "an integer literal";
+// how a site names the member whose visibility is being checked: `operator+`,
+// the way the source spelled the declaration, and not the `op_add` the method
+// table keys it under
+uptr tk_op_member_name(i64 tok) {
+    return tk_join("operator", tk_op_spell(tok));
 }
 
 // ---- the rewrite ----
 void tk_ops_binary(i64 n);
+void tk_ops_unary(i64 n);
 
 // an operand that is itself an operator is resolved first, so the node above it
 // reads the RETURN type of the call it became instead of the type of its own
 // left operand
 void tk_ops_operand(i64 x) {
     if (nd_kind(x) == N_BINARY) tk_ops_binary(x);
+    if (nd_kind(x) == N_UNARY)  tk_ops_unary(x);
+}
+
+// the three rounds and the two refusals, over the candidates of both operands
+i64 tk_op_resolve(i64 tok, i64 np, i64 sa, i64 sb, i64 ta, i64 tb, i64 a, i64 b, i64 line, uptr fl) {
+    uptr sp = tk_op_spell(tok);
+    i64 count = 0;
+    i64 r = tk_op_match(tok, np, sa, sb, ta, tb, a, b, 0, &count);
+    if (r < 0) r = tk_op_match(tok, np, sa, sb, ta, tb, a, b, 1, &count);
+    if (r < 0) r = tk_op_match(tok, np, sa, sb, ta, tb, a, b, 2, &count);
+    if (r < 0)
+        err_at(fl, line, tk_join3("teko: no operator `", sp, "` takes these operands"));
+    if (count > 1)
+        err_at(fl, line, tk_join3("teko: more than one operator `", sp, "` takes these operands"));
+    return r;
 }
 
 // the call the site becomes, put in the node's own place so the parent keeps
 // pointing at it and the sibling list comes back untouched (hooks.md § pass()).
-// Its type is registered because an enclosing operator resolves against it.
-void tk_ops_emit(i64 n, i64 mi, i64 left, i64 right, i64 line, uptr fl) {
-    i64 r = tk_emit_call(left, mi, right, 1, line, fl);
+// Its type is registered because an enclosing operator resolves against it --
+// and because that is what tells the reclaim the value is the caller's own.
+void tk_ops_emit(i64 n, i64 r, i64 args, i64 line, uptr fl) {
+    i64 mi = op_mi_at(r);
+    tk_check_member(mt_cls_at(mi), mt_vis_at(mi), tk_op_member_name(op_tok_at(r)), line, fl);
+    tk_line = line;
+    tk_file = fl;
+    i64 call = tk_call(mt_fn_at(mi), args);
     i64 keep = nd_next(n);
-    node_assign(n, r);
+    node_assign(n, call);
     set_nd_next(n, keep);
     i64 ret = mt_ret_at(mi);
     tk_xt_put(n, tk_struct_by_ty(ret), ret, 0);
 }
 
-// the left operand has a teko type. Once that type declares the operator the
-// site has to resolve against one of its signatures, and nothing falls back:
-// what the source wrote is a call, and calling another signature than the one
-// written is what a guess would cost.
-//
-// A type that declares no such operator at all, with a core value on the right,
-// is a different node: a teko reference IS one pointer word, `v + zero` is the
-// core's own arithmetic over it, and this pass does not own it.
-void tk_ops_teko_left(i64 n, i64 si, i64 sb, i64 op, i64 line, uptr fl) {
-    uptr sp = tk_op_spell(op);
-    uptr m = tk_op_method(op);
-    if (tk_method_named_find(si, m) < 0) {
-        if (sb < 0) return;
-        err_at(fl, line, tk_op_none_msg(sr_name_at(si), sp));
-    }
-    i64 b = nd_b(n);
-    i64 tb = tk_ty_of(b);
-    if (tb < 0 && nd_kind(b) != N_INT) err_at(fl, line, tk_op_side_msg("right", sp));
-    i64 mi = tk_op_pick(si, m, b, tb);
-    if (mi == 0 - 2)
-        err_at(fl, line, tk_join3("teko: more than one operator `", sp, "` accepts this literal"));
-    if (mi < 0)
-        err_at(fl, line, tk_op_sig_msg(sr_name_at(si), sp, tk_op_rname(b, tb)));
-    tk_ops_emit(n, mi, nd_a(n), b, line, fl);
-}
-
 // One node of the walk. A binary whose two operands are both of core types is
 // left exactly as it is -- the core owns it -- and that is the whole of the
-// no-op guarantee for a program that declares no operator.
+// no-op guarantee for a program that declares no operator. So is one where no
+// type in reach declares that operator and the other side is of a core type: a
+// teko reference IS one pointer word, and `v + zero` is the core's own
+// arithmetic over it.
 void tk_ops_binary(i64 n) {
     tk_ops_operand(nd_a(n));
     tk_ops_operand(nd_b(n));
-    i64 lty = tk_ty_of(nd_a(n));
-    i64 sa = 0 - 1;
-    if (lty >= 0) sa = tk_struct_by_ty(lty);
-    i64 rty = tk_ty_of(nd_b(n));
-    i64 sb = 0 - 1;
-    if (rty >= 0) sb = tk_struct_by_ty(rty);
+    i64 a = nd_a(n);
+    i64 b = nd_b(n);
+    i64 ta = tk_ty_of(a);
+    i64 tb = tk_ty_of(b);
+    i64 sa = tk_op_row(ta);
+    i64 sb = tk_op_row(tb);
     if (sa < 0 && sb < 0) return;
-    i64 op = nd_op(n);
+    i64 tok = nd_op(n);
     i64 line = nd_line(n);
     uptr fl = nd_file(n);
-    uptr sp = tk_op_spell(op);
+    uptr sp = tk_op_spell(tok);
     if (sp == 0) err_at(fl, line, "teko: this operator cannot be overloaded");
-    if (sa >= 0) {
-        tk_ops_teko_left(n, sa, sb, op, line, fl);
-        return;
+    if (!tk_op_declared(tok, 2, sa, sb)) {
+        if (sa < 0 || sb < 0) return;
+        err_at(fl, line, tk_op_none_msg(tk_op_tname(sa, sb), sp));
     }
-    if (tk_ty_of(nd_a(n)) < 0) err_at(fl, line, tk_op_side_msg("left", sp));
-    err_at(fl, line, tk_join3("teko: `", sp, "` needs a teko type on the left; a reversed operator is not taught"));
+    if (ta < 0 && nd_kind(a) != N_INT) err_at(fl, line, tk_op_side_msg("left", sp));
+    if (tb < 0 && nd_kind(b) != N_INT) err_at(fl, line, tk_op_side_msg("right", sp));
+    i64 r = tk_op_resolve(tok, 2, sa, sb, ta, tb, a, b, line, fl);
+    tk_ops_emit(n, r, list_append(a, b), line, fl);
+}
+
+// `-v`, `!v`, `~v`: the same resolution over one operand. The core reads no
+// other prefix into an N_UNARY (`&x` is an N_ADDR), so a token this pass cannot
+// spell never reaches here.
+void tk_ops_unary(i64 n) {
+    tk_ops_operand(nd_a(n));
+    i64 a = nd_a(n);
+    i64 ta = tk_ty_of(a);
+    i64 sa = tk_op_row(ta);
+    if (sa < 0) return;
+    i64 tok = nd_op(n);
+    i64 line = nd_line(n);
+    uptr fl = nd_file(n);
+    uptr sp = tk_op_spell(tok);
+    if (sp == 0) err_at(fl, line, "teko: this operator cannot be overloaded");
+    if (!tk_op_declared(tok, 1, sa, 0 - 1))
+        err_at(fl, line, tk_op_none_msg(sr_name_at(sa), sp));
+    i64 r = tk_op_resolve(tok, 1, sa, 0 - 1, ta, 0 - 1, a, 0, line, fl);
+    tk_ops_emit(n, r, a, line, fl);
 }
 
 void tk_ops_visit(i64 n) {
@@ -299,11 +560,15 @@ void tk_ops_visit(i64 n) {
         if (tk_ops_is_mem(nd_name(n))) tk_ops_addr = nd_a(n);
         return;
     }
-    if (k != N_BINARY) return;
-    tk_ops_binary(n);
+    if (k == N_BINARY) {
+        tk_ops_binary(n);
+        return;
+    }
+    if (k == N_UNARY) tk_ops_unary(n);
 }
 
 i64 tk_ops_pass(i64 root) {
+    tk_op_check_pairs();
     tk_ty_pass_walk(root, &tk_ops_visit);
     return root;
 }
