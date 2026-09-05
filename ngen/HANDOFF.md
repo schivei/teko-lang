@@ -286,26 +286,17 @@ vem antes do reclaim e do C5b porque os dois escreveriam código na forma velha:
   `types_interface`, onde o `override` passou a usar `base.area()` (a diferença é
   exatamente a chamada direta no lugar do corpo antigo).
 
-**Entrega 5 — a seguir:** crumb 1, **reclaim** pela "arena automática" do mc (plano §14):
-free lists + reference counting por escopo (`rc_dec` na saída do bloco e nas arestas de
-`on_jump`; `return` com temporário; `rc_inc`/`rc_dec` em atribuição de local/campo
-classe; destrutor `~Nome()` no lugar do `dispose` do lx, D218); fixture
-`surface_reclaim.tk` com 1M `new` sem esgotar a arena.
+**Entrega 5 — em voo:** crumb **membros C#** (D220): `public`/`private`/`protected`/`static`
+em membros, `public`/`internal` em tipos, defaults do C# (tipo → `internal`, membro →
+`private`), **`internal` = código do projeto** (origem da declaração), **sem** classes
+aninhadas; fixtures ganham `public` onde acessam de fora.
 
-**Fila:** entrega 5 (comportamento base): reclaim c/ construtor+destrutor → C5b
-(operador estático, D218) → `while`/`for` (prelude do mc) → stops restantes
-(`namespace`/`import`/`using`/`const`/`match`/`when`) → stdlib mínima; **C6** quando o mc
-der o hook de declaração de função (`0.10.N`).
-
-**Dívida do C8:** `p.items[i]` sobre um receptor que o parser NÃO tipa (um parâmetro,
-que só o oráculo do `pass()` resolve) não chega ao `[` de array — cai no `[` do `params`
-e é recusado com `teko: \`[\` indexes a \`params\` list only`. Recusa clara, nunca
-miscompilação; fechar isso é trabalho no `teko_typeof.mc` (C3b, em voo em paralelo).
-
-**Dívidas conhecidas:** arena bump sem reclaim (`new` e `params` em loop quente
-esgotam 4 MiB ruidosamente — entrega de comportamento base); default em função de topo
-bloqueado (C6); `syntax_infix` sobre operador do core morre em silêncio (bug reportado
-ao mc; rota é `pass()`).
+**Fila (plano §14-§19):** membros C# → reclaim com **construtor/destrutor** (D218, "arena
+automática" do mc: free lists + RC por escopo) → **C5b** operadores estáticos como C# (o C5
+landado está errado) → `while`/`for` (prelude do mc) → `namespace`/`import`/`using` (lx) →
+`const` (açúcar sobre `#define`) → `switch` nas duas vertentes + `when` guarda (D222) →
+closures com `use (a, &b)` e ponteiro de função/`ref`/`out` como primitivas (D221,
+architect-first). **Fora:** `var`, `type`, `match`, Variant. **C6** espera o hook do mc.
 
 ## 5.1 Armadilhas já pagas (não repita)
 
