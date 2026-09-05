@@ -475,6 +475,19 @@ Dois crumbs, logo após "membros C#":
   Fixture `surface_iface_default.tk`. O crumb de membros em voo **recusa** `static` em
   interface com mensagem — este crumb substitui a recusa.
 
+**§20 — propriedades e interface v2 PRONTOS** (`feat/ngen-properties`, 3 commits): módulo
+`ngen/teko_prop.mc`; **acessor = método comum** da tabela do `teko_class.mc` (`get_X`/`set_X`),
+de onde saem slot de vtable por acessor, `static`, sobrecarga e visibilidade por acessor;
+auto-propriedade com campo de apoio `private` (`Nome__backing`); `set => ...` é STATEMENT
+(`=` não é infixo do core); `get`/`set` lidos **só** dentro das chaves da propriedade e `value`
+**só** no corpo de acessor — nenhuma palavra confiscada (`public T get()` de
+`surface_generics.tk` intacto). Interface: corpo default vira `iface_m(uptr this)` no itab de
+quem não redeclara, com `this` = receptor implementador e **todo** membro alcançado ali
+despachando pelo itab; `static abstract` conforma como método e **não ocupa slot** (o slot é a
+posição entre os de instância, `tk_ifslot`); propriedade de interface = assinaturas. 20/20 em
+exit 42, AST das 18 anteriores byte-idêntica a `5579c34b`, `mc limits` ok. Limite: um default
+só alcança membro declarado acima dele.
+
 ## 21. D224 — `abstract` (ruling) e `partial` (em avaliação) (2026-09-04, noite)
 
 - **`abstract`:** entra no crumb de membros/propriedades ou logo após: `abstract class`
