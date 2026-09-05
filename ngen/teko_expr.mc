@@ -54,6 +54,8 @@ i64 tk_new() {
     p_next();
     if (gi >= 0) name = sr_name_at(tk_gen_struct(gi));
     else         name = tk_ns_walk(name);
+    i64 di = tk_deleg_find(name);                 // `new Op(add)` (K1, D221 §41)
+    if (di >= 0) return tk_new_deleg(di, line, fl);
     i64 si = tk_struct_find(name);
     if (si < 0 && tk_trait_find(name) >= 0)
         err_at2(fl, line, "teko: a trait is not a type; `new` needs a struct or a class", name);
@@ -103,7 +105,18 @@ i64 tk_fill_defaults(i64 args, i64 na, i64 np, i64 nreq, i64 d0) {
     return args;
 }
 
-// `p.f` / `p.f = e`: the load or the store of the field's own width
+// `h.cb(2, 3)`: a field of delegate type, called where it is read (K1, D221
+// §41) -- the load feeds both `tk_deleg_code` and the call's own object
+// argument, `tk_deleg_build`'s own contract
+i64 tk_field_deleg_call(i64 addr, i64 fty, i64 di, i64 line, uptr fl) {
+    i64 obj = tk_call(tk_ldn(fty), addr);
+    i64 na = 0;
+    i64 args = tk_args(&na);
+    return tk_deleg_build(di, obj, args, na, line, fl);
+}
+
+// `p.f` / `p.f = e` / `p.f(args)` on a field of delegate type: the load or
+// the store of the field's own width, or the typed `callp` above
 i64 tk_field_use(i64 left, i64 fi, i64 line, uptr fl) {
     i64 fty = fd_ty_at(fi);
     i64 addr = tk_bin(K_ADD, left, tk_int(fd_off_at(fi)));
@@ -114,6 +127,8 @@ i64 tk_field_use(i64 left, i64 fi, i64 line, uptr fl) {
         tk_file = fl;
         return tk_os_mark(tk_call2(tk_stn(fty), addr, v), fty);
     }
+    i64 di = tk_deleg_row(fty);
+    if (di >= 0 && p_id() == K_LPAR) return tk_field_deleg_call(addr, fty, di, line, fl);
     i64 r = tk_call(tk_ldn(fty), addr);
     tk_xt_put(r, tk_struct_by_ty(fty), fty, 1);  // struct: `a.b.c`; scalar: its own type
     return r;

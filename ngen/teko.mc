@@ -160,6 +160,20 @@
 //   break; / break N;                    the switch counts as ONE loop level
 //   x switch { 1 => a, 2 or 3 => b, _ when c => d, _ => e }                    syntax_infix
 //
+// What entrega 5's K1 crumb adds -- a NAMED delegate (C#/D221 §41, not a
+// generic `Func<>`/`Action<>`), a typed pointer to a function, and `null`
+// (teko_deleg.mc):
+//   public delegate i64 Op(i64 a, i64 b);   the signature, at top level or in
+//                                            a namespace
+//   Op f = add;   Op g = new Op(add);       contextual and explicit wraps of a
+//                                            plain function, a thunk generated
+//                                            per (delegate, function) pair
+//   f(3, 4)                                 a typed `callp` through the
+//                                            object's own code pointer, a
+//                                            pass() over every N_CALL and
+//                                            teko_expr.mc's own field access
+//   Op f = null;   f == null                the null reference, an `N_INT` 0
+//
 // Everything else in docs/design/port-teko-mc.md §3 (types/classes,
 // generics, error-union, `service`/DI, concurrency, the
 // rest of the stdlib) is a later entrega and is not stubbed here: it does
@@ -181,6 +195,7 @@
 #include "teko_this.mc"
 #include "teko_access.mc"
 #include "teko_typeof.mc"
+#include "teko_deleg.mc"
 #include "teko_ternary.mc"
 #include "teko_stmt.mc"
 #include "teko_expr.mc"
@@ -211,6 +226,7 @@ void user_init() {
     syntax("import",    &tk_import);
     syntax("using",     &tk_using);
     syntax("const",     &tk_const_top);
+    syntax("delegate",  &tk_delegate);
 
     syntax_stmt("{",     &tk_block);
     syntax_stmt("var",   &tk_stop_var);
@@ -229,6 +245,7 @@ void user_init() {
     syntax_expr("+", &tk_unary_plus);
     syntax_expr("true", &tk_true);
     syntax_expr("false", &tk_false);
+    syntax_expr("null", &tk_null);
     syntax_infix(".", 12, &tk_dot);
     syntax_infix("[", 12, &tk_bracket);
     syntax_infix("?", TK_TERN_PREC, &tk_tern_infix);
@@ -269,6 +286,13 @@ void user_init() {
 
     pass(&tk_params_pass);
     pass(&tk_typeof_pass);
+
+    // K1 (D221 §41): BEHIND the oracle, whose scope walk (`tk_ty_pass_walk`)
+    // this pass reuses to tell a delegate-typed local/parameter from any
+    // other name -- and AHEAD of every pass below, so `f(3, 4)` is already
+    // the typed `callp` teko_deleg.mc built by the time ternary/ops/over/rc
+    // see the tree (teko_deleg.mc's own header).
+    pass(&tk_deleg_pass);
 
     // entrega 5, ternary crumb (D228): BEHIND the oracle, because `tk_ty_of`
     // -- what this pass leans on to type an arm -- only answers a `.` on a
