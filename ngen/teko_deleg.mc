@@ -368,6 +368,14 @@ uptr tk_deleg_mismatch_msg(i64 si) {
 i64 tk_deleg_coerce(i64 si, i64 e, i64 line, uptr fl) {
     if (e == 0) return e;
     if (nd_kind(e) == N_INT && nd_val(e) == 0) return e;             // `null`
+    if (nd_kind(e) == N_CALL && str_eq(nd_name(e), "tk_ternary")) {
+        i64 c = nd_a(e);                          // K4c item 3: `c ? a : b`, still the
+        i64 a = nd_next(c);                       // raw placeholder here (this pass runs
+        i64 b = nd_next(a);                       // ahead of teko_ternary.mc's own lowering)
+        set_nd_next(c, tk_deleg_coerce(si, a, line, fl));
+        set_nd_next(nd_next(c), tk_deleg_coerce(si, b, line, fl));
+        return e;
+    }
     if (nd_kind(e) == N_IDENT && tk_ty_scope_find(nd_name(e)) < 0)
         return tk_deleg_wrap(si, tk_deleg_resolve_fn(nd_name(e), line, fl), line, fl);
     if (tk_deleg_expr_ty(e) == sr_ty_at(si)) return e;
