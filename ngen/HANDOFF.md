@@ -489,7 +489,11 @@ ao mc; rota é `pass()`).
     não é lido pela varredura (só espaço em branco), e o caso cai na recusa clara
     do `parse_var`, nunca em silêncio.
 
-14. **mc ≥ 0.12.0 (M42): o `mc build` Linux escreve ELF dinâmico SEM `[linker]`, com loader
+14. **mc ≥ 0.12.1 (patch pós-M42): `[target].libc` vira FAMÍLIA (`"gnu"|"musl"`) e a grafia
+    soname (`"libc.so.6"`) é RECUSADA.** O workflow escolhe a grafia pela versão resolvida
+    (`sort -V` contra 0.12.1) — as pernas Linux carregam `libc_family: gnu` na matriz.
+    Também novo: `[target].link = "dynamic"|"static"`, flags `--libc=`/`--link=`/`--interp=`.
+15. **mc ≥ 0.12.0 (M42): o `mc build` Linux escreve ELF dinâmico SEM `[linker]`, com loader
     e soname **musl por default**.** Num runner glibc (ubuntu) o compilador ensinado sai com
     `interp` de musl e o `mc build` falha em `mc: cannot run: ngen/build/mc-teko`. As pernas
     Linux do CI nomeiam o par glibc no `[target]` (`interp = "/lib64/ld-linux-x86-64.so.2"` ou

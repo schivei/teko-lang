@@ -74,7 +74,7 @@ jobs:
             exe: ''
             target_tail: |
               interp = "/lib64/ld-linux-x86-64.so.2"
-              libc   = "libc.so.6"
+            libc_family: gnu
             config: ''
           - runner: ubuntu-24.04-arm
             os: linux
@@ -83,10 +83,11 @@ jobs:
             exe: ''
             target_tail: |
               interp = "/lib/ld-linux-aarch64.so.1"
-              libc   = "libc.so.6"
+            libc_family: gnu
             config: ''
           - runner: macos-latest
             target_tail: ''
+            libc_family: ''
             os: macos
             arch: aarch64
             asset: arm64
@@ -100,6 +101,7 @@ jobs:
           # against 8 MiB elsewhere, and the compiler is written for the latter.
           - runner: windows-latest
             target_tail: ''
+            libc_family: ''
             os: windows
             arch: x86_64
             asset: x86_64
@@ -115,6 +117,7 @@ jobs:
                       "{sysroot}/winstart.obj", "{sysroot}/mcrt.obj", "{sysroot}/kernel32.lib"]
           - runner: windows-11-arm
             target_tail: ''
+            libc_family: ''
             os: windows
             arch: aarch64
             asset: arm64
@@ -134,6 +137,7 @@ jobs:
       MC_ASSET: ${{ matrix.asset }}
       MC_CONFIG_TAIL: ${{ matrix.config }}
       MC_TARGET_TAIL: ${{ matrix.target_tail }}
+      MC_LIBC_FAMILY: ${{ matrix.libc_family }}
       EXE: ${{ matrix.exe }}
       # MSYS rewrites an argument that looks like a path, and every dash-form
       # lld-link option does (`schivei/mc` docs/guide/95-windows-host.md § 4).
@@ -314,6 +318,16 @@ jobs:
         run: |
           set -eu
           printf '%s' "$MC_TARGET_TAIL" >ngen/mc.target-tail
+          # `[target].libc` changed meaning in the post-M42 patch (mc >= 0.12.1):
+          # a soname ("libc.so.6") became a family ("gnu"|"musl"), and the old
+          # spelling is refused. The CI resolves `latest`, so pick by version.
+          if [ -n "$MC_LIBC_FAMILY" ]; then
+            if [ "$(printf '%s\n%s\n' 0.12.1 "$MC_VERSION" | sort -V | head -n1)" = "0.12.1" ]; then
+              printf 'libc   = "%s"\n' "$MC_LIBC_FAMILY" >>ngen/mc.target-tail
+            else
+              case "$MC_LIBC_FAMILY" in gnu) printf 'libc   = "libc.so.6"\n' >>ngen/mc.target-tail ;; musl) printf 'libc   = "libc.so"\n' >>ngen/mc.target-tail ;; esac
+            fi
+          fi
           awk '/^\[/ { skip = ($0 == "[linker]") } !skip' ngen/mc.toml \
             | sed -e "s#^os   = .*#os   = \"$MC_OS\"#" \
                   -e "s#^arch = .*#arch = \"$MC_ARCH\"#" \

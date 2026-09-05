@@ -653,3 +653,10 @@ reservado de fato (4 fixtures mudaram números de layout); ctor `public Nome(par
 para valor possuído sem dono; 3 bugs fechados nas probes (marca de store no nó descartado
 pelo `.` deferido → contagem negativa; possuído sem dono vazava; `decl_find` por nome errava
 posse com sobrecarga). 23/23; nodes +3%; 1M `new` em 0,03 s com `rt_peak() <= 4096`.
+
+**§26 — avisos do mc (2026-09-05, madrugada):** (1) patch pós-M42 pronto (release 0.12.x):
+`[target].libc` vira família `"gnu"|"musl"` e a grafia soname é **recusada** → o CI do ngen
+escolhe a grafia pela versão resolvida (`sort -V` vs 0.12.1); `[target].link`; flags. (2)
+`region crosses a file boundary` no fim de arquivo incluído: **falso positivo confirmado** —
+`p_skip_balanced` calcula `e` e só então chama `next()`, cujo lookahead fecha o arquivo; o fix
+(decidir pelo frame do token de fechamento) entra no lote do M45. O `;` segue como contorno.
