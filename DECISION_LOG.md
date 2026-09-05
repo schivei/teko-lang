@@ -1159,14 +1159,16 @@ Verificador reproduziu o crash instrumentando com ASan+UBSan (as flags do CI pro
 
 ### D220 · DONO: `public`/`private`/`protected`/`static` como em C#; `internal` se o mc permitir restringir; SEM classes aninhadas (dono 2026-09-04) 🔧 SUPERFÍCIE
 - **Modificadores como em C#:** `public`, `private`, `protected`, `static` em membros; `public`/
-  `internal` em tipos de topo. **Defaults do C#** (a ratificar): tipo de topo sem modificador é
+  `internal` em tipos de topo. **Defaults do C#** (ratificados pelo dono 2026-09-04): tipo de topo sem modificador é
   `internal`; membro sem modificador é `private`. Consequência: as fixtures que hoje leem `p.side`
   de fora passam a escrever `public i64 side;`.
 - **`internal`:** o mc **não tem unidade de compilação** (`core-language.md:422` — tudo entra por
   `#include` num arquivo só), então não há "assembly". Mas toda visibilidade é checagem do MÓDULO
   (o core nunca checa acesso; o `lx` faz por mangling) e o módulo conhece a origem de cada
-  declaração (`p_file()`/`nd_file`). **Logo `internal` é ensinável, com unidade = arquivo-fonte**
-  (o `import` é `#include`). Incluir, com essa unidade — a ratificar pelo dono.
+  declaração (`p_file()`/`nd_file`). **Logo `internal` é ensinável. Unidade (dono, ratificado):
+  o CÓDIGO DO PROJETO** — tudo que entra pelo `mc.toml` do próprio projeto — e não o namespace
+  nem o arquivo; código de outro projeto/pacote (bundle `<…>`, include externo) não vê. O módulo
+  decide pela origem da declaração (arquivo do projeto vs. fora).
 - **Regra do dono (par excludente, decidido pelo `internal`):** *se `internal` for possível →
   tem `internal` e NÃO tem nested; se não for → tem nested e NÃO tem `internal`.* Como `internal`
   é ensinável (unidade = arquivo-fonte via `nd_file`), fica: **`internal` sim, classes/structs

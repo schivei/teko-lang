@@ -409,8 +409,10 @@ forma nova; `grep -c "self" ngen/tests` = 0; `base.m()` numa fixture existente.
 ## 17. D220 — visibilidade e `static`; fila revista (2026-09-04, noite)
 
 Crumb **"membros C#"**: `public`/`private`/`protected`/`static` em membros, `public`/`internal`
-em tipos; defaults do C# (tipo → `internal`, membro → `private`) **a ratificar**; `internal` =
-mesmo arquivo-fonte (`nd_file`), porque o mc não tem TU; checagem no `.`, na chamada, no
+em tipos; defaults do C# (tipo → `internal`, membro → `private`) **ratificados**; `internal` =
+**código do projeto** (o que entra pelo `mc.toml` do próprio projeto; decidido pela origem da
+declaração via `nd_file` — arquivo do projeto vs. bundle `<…>`/include externo), nem arquivo
+nem namespace; checagem no `.`, na chamada, no
 `new` e no `base.` — nos dois caminhos (parse e pass); `protected` = próprio tipo e derivadas;
 `static` = sem receptor (é o que o operador do C5b usa; membro estático acessado por
 `Tipo.m()`); nested **não**. Fixtures ganham `public` onde acessam de fora.
