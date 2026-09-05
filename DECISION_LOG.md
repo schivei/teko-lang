@@ -1167,8 +1167,10 @@ Verificador reproduziu o crash instrumentando com ASan+UBSan (as flags do CI pro
   (o core nunca checa acesso; o `lx` faz por mangling) e o módulo conhece a origem de cada
   declaração (`p_file()`/`nd_file`). **Logo `internal` é ensinável, com unidade = arquivo-fonte**
   (o `import` é `#include`). Incluir, com essa unidade — a ratificar pelo dono.
-- **Classes/structs aninhadas: NÃO.** Regra do dono: só se o mc não conseguisse restringir
-  acesso como C#; como consegue (via ensino), não há nested.
+- **Regra do dono (par excludente, decidido pelo `internal`):** *se `internal` for possível →
+  tem `internal` e NÃO tem nested; se não for → tem nested e NÃO tem `internal`.* Como `internal`
+  é ensinável (unidade = arquivo-fonte via `nd_file`), fica: **`internal` sim, classes/structs
+  aninhadas não.**
 - **Ordem:** este crumb entra depois do `this`/`base` (D219) e **antes** do reclaim
   (construtor/destrutor `public`) e do C5b (`public static … operator+`).
 
