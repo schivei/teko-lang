@@ -497,14 +497,60 @@ i64 tk_lamref_has(uptr name) {
     return 0;
 }
 
-// `e` is a call to an allocator whose lambda captures at least one name by
-// reference: the one shape D221 decision 21's two escapes share, checked
-// where a slot of delegate type is written (`tk_deleg_return` above,
-// `teko_expr.mc`'s `tk_field_use`, `teko_access.mc`'s `tk_static_use`)
+// K4b (D221/§41, item 2 of the verifier's own ressalva): a NAME that holds
+// the value of an escaping lambda, not the allocator CALL itself -- `Op f =
+// new Op(...) use (&acc) => ...; return f;` is the same escape as `return
+// new Op(...) use (&acc) => ...;`, one indirection later. Flow-insensitive
+// by design: once a name is tainted it stays tainted for the rest of the
+// unit, which is a strict superset of the UB the two forms above already
+// refuse, never a false negative.
+uptr taint_name[TK_MAXLAMREF];
+i64  tk_ntaint = 0;
+
+i64 tk_taint_find(uptr name) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_ntaint) break;
+        if (str_eq(ld64(taint_name + i * 8), name)) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+void tk_taint_add(uptr name) {
+    if (tk_taint_find(name)) return;
+    if (tk_ntaint == TK_MAXLAMREF) err_at(tk_file, tk_line, "teko: too many tainted lambda locals");
+    st64(taint_name + tk_ntaint * 8, name);
+    tk_ntaint = tk_ntaint + 1;
+}
+
+// `e` escapes its scope: a call to an allocator whose lambda captures at
+// least one name by reference, or a NAME already tainted with one (the
+// propagation above). The one shape D221 decision 21's escapes share,
+// checked where a slot of delegate type is WRITTEN (`tk_deleg_return`
+// above, `teko_expr.mc`'s `tk_field_use`/`tk_call_method_args`,
+// `teko_access.mc`'s `tk_static_use`, `teko_heaparr.mc`'s `tk_ha_index`) --
+// everywhere BUT an argument of `new Op(...)`, which a callee only ever
+// reads, C-like, never stores.
 i64 tk_lam_escapes(i64 e) {
     if (e == 0) return 0;
-    if (nd_kind(e) != N_CALL) return 0;
-    return tk_lamref_has(nd_name(e));
+    i64 k = nd_kind(e);
+    if (k == N_CALL) return tk_lamref_has(nd_name(e));
+    if (k == N_IDENT) return tk_taint_find(nd_name(e));
+    return 0;
+}
+
+// M21.5's statement hook, K4b: `Op g = f;` and `g = f;` propagate the taint
+// of the right side onto the name written -- the one point every write of a
+// local runs through no matter how early its own module resolves the write
+// (field/array stores read the escape at PARSE time), since it fires the
+// instant the core finishes reading the statement.
+i64 tk_lam_taint_stmt(i64 n) {
+    if (n == 0) return n;
+    i64 k = nd_kind(n);
+    if (k != N_VAR && k != N_ASSIGN) return n;
+    if (tk_lam_escapes(nd_a(n))) tk_taint_add(nd_name(n));
+    return n;
 }
 
 // ---- `use (a, &b)`: the captures of the lambda being read right now ----

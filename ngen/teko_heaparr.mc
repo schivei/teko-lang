@@ -196,7 +196,11 @@ i64 tk_ha_index(i64 left, i64 si) {
         tk_line = line;
         tk_file = fl;
         i64 dsi = tk_deleg_row(ety);               // `ops[i] = add;`: the same coercion a
-        if (dsi >= 0) v = tk_deleg_coerce(dsi, v, line, fl);   // delegate LOCAL/field takes (K1)
+        if (dsi >= 0) {                                        // delegate LOCAL/field takes (K1)
+            if (tk_lam_escapes(v))                              // D221/§41 K4b
+                err_at(fl, line, "teko: a lambda that captures by reference cannot leave its scope");
+            v = tk_deleg_coerce(dsi, v, line, fl);
+        }
         return tk_ha_store(left, ety, idx, v);
     }
     if (p_id() == tk_pluseq_tok || p_id() == tk_minuseq_tok) {
