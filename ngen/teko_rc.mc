@@ -12,7 +12,7 @@
 //   x = e;              ->  rt_store(&x, e);        (rt_store_own when e is owned)
 //   p.f = e;            ->  rt_store(p + F, e);     (the parser marked the store)
 //   { ... }             ->  { ... rc_dec(x); }      (reverse declaration order)
-//   break N; continue;  ->  { rc_dec(x); break N; } (every scope inside the loop)
+//   break N; continue N; -> { rc_dec(x); break/continue N; } (every scope inside)
 //   return e;           ->  { T $t = e; rc_inc($t); rc_dec(x); return $t; }
 //   f();                ->  rt_drop(f());           (a reference nobody took)
 //   g(f())              ->  g(rt_park(f()))         (...and a fence around the
@@ -218,14 +218,14 @@ void tk_rc_return(i64 n, i64 p0) {
     tk_nparked = p0;
 }
 
-// `break N` / `continue` leave every scope opened inside the loop they jump out
-// of, and the block's own releases at the `}` are exactly what they skip. The
-// mark of the target loop is the scope top at its head, which is why the loop
-// stack is kept while the tree is walked.
+// `break N` / `continue N` leave every scope opened inside the loop they jump
+// out of, and the block's own releases at the `}` are exactly what they skip.
+// The mark of the target loop is the scope top at its head, which is why the
+// loop stack is kept while the tree is walked; `continue N` counts levels the
+// same way `break N` does (mc 0.14.1), `nd_val` 0 read as 1 for both.
 void tk_rc_jump(i64 n) {
     if (tk_nlp == 0) return;
-    i64 lvl = 1;
-    if (nd_kind(n) == N_BREAK) lvl = nd_val(n);
+    i64 lvl = nd_val(n);
     if (lvl < 1) lvl = 1;
     i64 idx = tk_nlp - lvl;
     if (idx < 0) return;

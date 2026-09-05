@@ -7,6 +7,11 @@
 // `break` in an infinite `for`, `break 2` leaving two nested `for`s at once,
 // a `for` inside a method (the reference-counting pass walking a synthesized
 // tree), and the four compound-assignment statements -- does what it says.
+// `nested_continue2`/`box_probe`, checked separately below with their own
+// non-42 codes, prove `continue N` (mc 0.14.1): a `for` nested in a `for`,
+// `continue 2` in the inner one running only the OUTER's own step (skipping
+// the rest of both bodies), and the reference-counting pass releasing an
+// object opened on either side of that jump (teko_rc.mc's `tk_rc_jump`).
 //
 // expect-exit: 42
 
@@ -20,6 +25,58 @@ class Counter {
         }
         return acc;
     }
+}
+
+// `for` nested in `for`, `continue 2` in the inner one: the inner loop is
+// abandoned at `bb == 1` (it never reaches `bb == 2`) and so is the rest of
+// the OUTER's own body (`outerTail` never grows) -- only the OUTER's step
+// runs, three times.
+i64 nested_continue2() {
+    i64 outerTop = 0;
+    i64 outerTail = 0;
+    i64 innerHits = 0;
+    for (i64 a = 0; a < 3; a++) {
+        outerTop = outerTop + 1;
+        for (i64 bb = 0; bb < 3; bb++) {
+            if (bb == 1) continue 2;
+            innerHits = innerHits + 1;
+        }
+        outerTail = outerTail + 1;
+    }
+    return outerTop * 100 + outerTail * 10 + innerHits;
+}
+
+class Box {
+    public i64 v;
+    public Box(i64 x) { v = x; }
+}
+
+// TWO `while`s, not `for`s: a `continue 2` that targets a plain `while`
+// directly is never rewritten to a `break` (teko_loop.mc only converts one
+// that fully escapes a `for`/`do`'s own two-loop wrapper) -- it reaches the
+// reference-counting pass as an actual `N_CONTINUE` carrying a level above 1,
+// exactly what `tk_rc_jump` has to read right. One `Box` opens in the OUTER
+// while's own body and one in the INNER's, on both sides of the jump: it has
+// to release both, not just the inner one, or `rt_live()` never comes back
+// down. Both counters advance BEFORE anything else in their own body, so the
+// jump landing straight on the outer condition (a `while`'s own `continue`,
+// unlike a `for`'s, never runs a separate step) still terminates.
+i64 box_probe() {
+    i64 total = 0;
+    i64 a = 0 - 1;
+    while (a < 1) {
+        a = a + 1;
+        Box outerB = new Box(a);
+        total = total + outerB.v;
+        i64 bb = 0 - 1;
+        while (bb < 1) {
+            bb = bb + 1;
+            Box innerB = new Box(bb);
+            total = total + innerB.v;
+            if (bb == 1) continue 2;
+        }
+    }
+    return total;
 }
 
 i64 main() {
@@ -106,6 +163,10 @@ i64 main() {
     z += 3;
     z -= 2;
     sum = sum + z;
+
+    if (nested_continue2() != 303) return 100;
+    if (box_probe() != 3) return 101;
+    if (rt_live() != 1) return 102;           // c, from above, is still live
 
     return sum;
 }
