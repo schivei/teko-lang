@@ -58,6 +58,13 @@ void rt_panic(uptr msg) {
     exit(70);
 }
 
+// the surface name `rt_panic` runs under (K1, D221 §41 decision 18): the same
+// abort, the same exit(70) the arena and `params` already use, so a program
+// that calls it and a program that trips a guard fail the same way
+void panic(str msg) {
+    rt_panic(msg);
+}
+
 uptr rt_fl_at(i64 i)             { return ld64(rt_fl + i * 8); }
 void set_rt_fl_at(i64 i, uptr v) { st64(rt_fl + i * 8, v); }
 
@@ -233,6 +240,14 @@ uptr tk_itab(uptr vt, i64 id) {
     }
     rt_panic("interface not implemented by this class");
     return 0;
+}
+
+// a delegate value's own code pointer (word 2 of its object, K1 D221 §41),
+// what `callp(tk_deleg_code(d), d, args...)` calls through -- a null one is a
+// panic, not a segfault
+uptr tk_deleg_code(uptr d) {
+    if (d == 0) panic("call through a null delegate");
+    return ld64(d + 16);
 }
 
 // length of a NUL-terminated `str`. teko's `str` names the same `uptr` mc

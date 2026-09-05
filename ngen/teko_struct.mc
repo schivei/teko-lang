@@ -66,11 +66,13 @@ i64 tk_take_decl_vis();
 i64 tk_take_decl_proj();
 i64 tk_type_word(uptr name);
 
-// what a row of the type table declares: the three share the table because a
-// value of any of them is one 8-byte reference, and `.` has to tell them apart
+// what a row of the type table declares: struct/class/interface/delegate share
+// the table because a value of any of them is one 8-byte reference, and `.`
+// (or `callp`, for a delegate) has to tell them apart
 #define TK_KSTRUCT 0
 #define TK_KCLASS  1
 #define TK_KIFACE  2
+#define TK_KDELEG  3
 
 // how much of a class has been read: one declared in one place is whole where
 // it stands, and a `partial` one stays OPEN until the first use of it closes
@@ -194,6 +196,7 @@ void set_sr_hfile_at(i64 i, uptr v) { st64(sr_hfile + i * 8, v); }
 
 i64 tk_is_class(i64 si) { return sr_kind_at(si) == TK_KCLASS; }
 i64 tk_is_iface(i64 si) { return sr_kind_at(si) == TK_KIFACE; }
+i64 tk_is_deleg(i64 si) { return sr_kind_at(si) == TK_KDELEG; }
 void set_fd_name_at(i64 i, uptr v)  { st64(fd_name + i * 8, v); }
 void set_fd_cls_at(i64 i, i64 v)    { st64(fd_cls + i * 8, v); }
 void set_fd_off_at(i64 i, i64 v)    { st64(fd_off + i * 8, v); }
@@ -467,14 +470,15 @@ i64 tk_struct_by_ty(i64 ty) {
     return 0 - 1;
 }
 
-// 1 when a value of type `ty` is a COUNTED reference: a class, or an interface,
-// whose object carries the vtable and the count the reclaim works through. A
-// struct is not one -- it has no vtable, hence no release to reach and no count
-// to keep, which ngen/lib/rt.mc declares as the debt of this slice.
+// 1 when a value of type `ty` is a COUNTED reference: a class, an interface or
+// a delegate, whose object carries the vtable and the count the reclaim works
+// through. A struct is not one -- it has no vtable, hence no release to reach
+// and no count to keep, which ngen/lib/rt.mc declares as the debt of this slice.
 i64 tk_is_counted(i64 ty) {
     i64 si = tk_struct_by_ty(ty);
     if (si < 0) return 0;
     if (tk_is_class(si)) return 1;
+    if (tk_is_deleg(si)) return 1;
     return tk_is_iface(si);
 }
 

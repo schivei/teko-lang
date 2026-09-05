@@ -462,13 +462,14 @@ void tk_rc_fn(i64 f) {
     tk_nscope = 0;
 }
 
-// 1 when the program declares something the reclaim has anything to do with
+// 1 when the program declares something the reclaim has anything to do with:
+// any row of teko_struct.mc's type table `tk_is_counted` answers for -- a
+// class, an interface, or (K1) a delegate
 i64 tk_rc_needed() {
     i64 i = 0;
     loop {
         if (i >= tk_nstruct) break;
-        if (tk_is_class(i)) return 1;
-        if (tk_is_iface(i)) return 1;
+        if (tk_is_counted(sr_ty_at(i))) return 1;
         i = i + 1;
     }
     return 0;
