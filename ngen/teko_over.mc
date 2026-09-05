@@ -173,25 +173,6 @@ void tk_ov_mark(uptr name, i64 n) {
 }
 
 // ---- the guards ----
-// the shape a lowered `params` list leaves behind: teko_params.mc rewrites
-// `i64 total(params xs)` into `i64 total(uptr xs, i64 xs_len)`, and that pair is
-// indistinguishable from a hand-written `(uptr, i64)` -- which IS the collision,
-// not an approximation of it: after the lowering the two occupy one ABI.
-i64 tk_ov_va_shape(i64 d) {
-    i64 np = decl_nparams(d);
-    if (np < 2) return 0;
-    if (decl_param_type(d, np - 2) != TY_UPTR) return 0;
-    if (decl_param_type(d, np - 1) != TY_I64) return 0;
-    i64 p = nd_a(d);
-    i64 i = 0;
-    loop {
-        if (i >= np - 2) break;
-        p = nd_next(p);
-        i = i + 1;
-    }
-    return str_eq(nd_name(nd_next(p)), tk_va_len_name(nd_name(p)));
-}
-
 // 1 when some signature of `name` is DEFINED twice -- a body, or an extern's
 // symbol. A prototype ahead of its own definition is not that: it declares the
 // signature, it does not occupy it.
@@ -246,37 +227,18 @@ i64 tk_ov_has_kind(uptr name, i64 kind) {
     return 0;
 }
 
-// 1 when some declaration of `name` came out of a `params` list
-i64 tk_ov_has_va(uptr name) {
-    i64 i = 0;
-    loop {
-        if (i >= tk_nodecl) break;
-        if (str_eq(od_name_at(i), name)) {
-            if (tk_ov_va_shape(od_node_at(i))) return 1;
-        }
-        i = i + 1;
-    }
-    return 0;
-}
-
 // the verdict on one name, taken once, at its first row. Two declarations of the
 // SAME signature are not this pass's business -- the core reports them where it
-// always did -- except when one of them is a lowered `params` list, which the
-// source did not write as `(uptr, i64)` and whose collision the core would
-// report against a shape the programmer cannot see.
+// always did. A `params` list never reaches here: teko_params.mc instantiates it
+// per call site under `name__k` and refuses its overloading itself.
 void tk_ov_judge(i64 i) {
     uptr name = od_name_at(i);
     i64 d = od_node_at(i);
-    if (tk_ov_dup_def(name) && tk_ov_has_va(name))
-        err_at2(nd_file(d), nd_line(d),
-                "teko: a `params` list is (uptr, i64), and that signature is declared twice", name);
     if (tk_ov_nsig(name) < 2) return;
     if (str_eq(name, "main"))
         err_at2(nd_file(d), nd_line(d), "teko: `main` takes one signature", name);
     if (tk_ov_has_kind(name, N_EXTERN))
         err_at2(nd_file(d), nd_line(d), "teko: an `extern` name owns its symbol and cannot be overloaded", name);
-    if (tk_ov_has_va(name))
-        err_at2(nd_file(d), nd_line(d), "teko: a `params` list cannot be overloaded", name);
     tk_ov_mark(name, d);
 }
 
