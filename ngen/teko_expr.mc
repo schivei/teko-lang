@@ -258,7 +258,12 @@ i64 tk_member_of(i64 left, i64 si, uptr m, i64 line, uptr fl) {
 // can be read. Resolving a member by its name alone survives only there, and
 // only after the oracle has answered that it does not know the type -- a global,
 // or an expression whose type nothing reports.
+//
+// `.` sinks through a leading `- ! ~` first (teko_prefix.mc): `-a.x` is not
+// `(-a).x`, it is `-(a.x)`.
 i64 tk_dot(i64 left) {
+    i64 base = tk_unary_base(left);
+    if (base != left) return tk_unary_rewrap(left, tk_dot(base));
     i64 line = p_line();
     uptr fl = p_file();
     tk_line = line;
