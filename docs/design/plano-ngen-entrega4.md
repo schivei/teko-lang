@@ -645,3 +645,11 @@ dispara** — a validação local fica cega. **Regra: validar sempre com config 
 no repo** (o laço do coordenador já é assim). O `region crosses a file boundary` é
 pré-existente: dispara quando a declaração gravada é a última coisa de um arquivo
 incluído (`nopen` antes/depois); contorno `;` — reportado ao mc.
+
+**§14/§15 — reclaim pronto (`feat/ngen-reclaim` @ `6212ab86`, em verificação; D227):** RC e
+posse **só no pass** (`teko_rc.mc`, `tk_rc_pass` por último); `TK_VT_FIXED 2`; `refcount@+8`
+reservado de fato (4 fixtures mudaram números de layout); ctor `public Nome(params)` com
+`: base(args)`, `~Nome()`; release derivada→base→campos→`rt_free`; `rt_park`/`mark`/`sweep`
+para valor possuído sem dono; 3 bugs fechados nas probes (marca de store no nó descartado
+pelo `.` deferido → contagem negativa; possuído sem dono vazava; `decl_find` por nome errava
+posse com sobrecarga). 23/23; nodes +3%; 1M `new` em 0,03 s com `rt_peak() <= 4096`.

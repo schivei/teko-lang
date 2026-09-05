@@ -80,24 +80,36 @@ mc-teko` directly (`--exe`, bypassing `mc.toml`'s single `[project]` entry) to
 compile and run each `ngen/tests/primitives_*.tk` and `ngen/tests/types_*.tk` fixture, one
 process per fixture — see § Fixtures below.
 
-## Fixtures (entregas 1-3)
+## Fixtures (entregas 1-5)
 
-One `.tk` file per group of primitives, each with its own `// expect-exit: N`
-header (the same convention `mc`'s own `tests/*.mc` use) — `mc.toml`'s single
-`[project]` only drives `tests/hello.tk`, so `ngen.yml` iterates the rest
-directly against the compiler `mc build ngen` already produced.
+Each fixture is a program the taught compiler builds and RUNS on the five CI legs; the
+`// expect-exit: N` header is the oracle. Generated from `ngen/tests/*.tk` at drain time.
 
-| fixture | primitives | exit |
-|---|---|---|
-| `tests/hello.tk` | `bool` (entrega 1, unchanged) | 42 |
-| `tests/primitives_scalar.tk` | `char` `byte` `isize` `usize` | 42 |
-| `tests/primitives_ptr.tk` | `ptr` (+ `uptr`, `ld64`/`st64`) | 42 |
-| `tests/primitives_str.tk` | `str` (+ `lib/rt.mc`'s `tk_str_len`/`tk_str_slice`) | 42 |
-| `tests/primitives_float.tk` | `f32`/`f64` (+ `lib/rt.mc`'s `tk_f64_bits`/`tk_f64_from_bits`) | 42 |
-| `tests/types_struct.tk` | `struct`, field layout, `new`, `.` (entrega 3) | 42 |
-| `tests/types_class.tk` | `class`, vtable, `virtual`/`override`, polymorphic dispatch | 42 |
-| `tests/types_interface.tk` | `interface`, itab, conformance checking | 42 |
-| `tests/types_trait.tk` | `trait` (PHP-style flattening), `use`, precedence | 42 |
+| fixture | exit |
+|---|---|
+| `tests/hello.tk` | 42 |
+| `tests/primitives_float.tk` | 42 |
+| `tests/primitives_ptr.tk` | 42 |
+| `tests/primitives_scalar.tk` | 42 |
+| `tests/primitives_str.tk` | 42 |
+| `tests/surface_abstract.tk` | 42 |
+| `tests/surface_default_method.tk` | 42 |
+| `tests/surface_generics.tk` | 42 |
+| `tests/surface_iface_default.tk` | 42 |
+| `tests/surface_operator.tk` | 42 |
+| `tests/surface_overload_free.tk` | 42 |
+| `tests/surface_overload_method.tk` | 42 |
+| `tests/surface_params.tk` | 42 |
+| `tests/surface_partial.tk` | 42 |
+| `tests/surface_property.tk` | 42 |
+| `tests/surface_scope.tk` | 42 |
+| `tests/surface_typeof_expr.tk` | 42 |
+| `tests/surface_typeof_param.tk` | 42 |
+| `tests/types_class.tk` | 42 |
+| `tests/types_interface.tk` | 42 |
+| `tests/types_struct.tk` | 42 |
+| `tests/types_trait.tk` | 42 |
+
 
 ## Why the CI is a separate workflow
 

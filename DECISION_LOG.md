@@ -1157,6 +1157,22 @@ Verificador reproduziu o crash instrumentando com ASan+UBSan (as flags do CI pro
 - **CONSERTO (dispatch):** `cg_emit_self_addr` tem que PARAR de escapar o endereço de um temp cujo escopo é o próprio statement-expression — hoist do `_rcvN` pra um escopo que sobrevive à chamada externa inteira, OU passar receptor tipo-valor por valor (Region/Arena são structs de 8B, métodos leem self). Root-cause, não workaround; conserta a CLASSE (todo receptor não-endereçável), não só o sítio arena.
 - **LEI DE PROCESSO (endurece D163/D164):** o fixpoint no sandbox NÃO pega UB que só crasha sob certos toolchains — **o gate de verificador de compiler-core passa a incluir um build ASan+UBSan** (`-fsanitize=address,undefined -fno-omit-frame-pointer -g`) do gen0 compilando o tip, além do fixpoint. Barato, pega stack-use-after-scope/UAF/OOB que o build seco esconde. (A ser gravado na CLAUDE.md.)
 
+### D227 · COORDENADOR (sob D226): reclaim — RC e posse resolvidos SÓ no pass; vtable com release na palavra 0; refcount@+8 de fato reservado (2026-09-05) 🔧 MEMÓRIA / decidido em modo autônomo
+Ao implementar o reclaim (free lists + RC por escopo, ctor/dtor — D218), o crumb mandava injetar
+no PARSE como o `lx` e parar se parse e pass divergissem. Mediu-se que não dá: (1) `on_jump` dá
+profundidade de BLOCO, não de laço — `loop` é keyword do core e `word_add` recusa sequestrá-la
+(`mc/src/hooks.mc:237-241`), então não há marca de laço para `break N`; (2) a POSSE (`own(e)`)
+depende do tipo estático, e o `.` deferido é placeholder sem tipo no parse — chutar seria UAF ou
+vazamento silencioso. **Decisão (a que a sessão do mc já recomendara, plano §23): escopo de RC e
+posse têm UM dono, o pass (`tk_rc_pass`, registrado por último, depois do mangling do C4); a pilha
+do parse só resolve `.`. Nada híbrido.** Store só marca no sítio; o pass decide `rt_store` vs
+`rt_store_own`; valor possuído em posição sem dono → `rt_park`/`rt_mark`/`rt_sweep`.
+Também: **`TK_VT_FIXED 2`** (`&Nome_release` na palavra 0 da vtable, itab na 1 — o layout do lx)
+e a **correção de fato**: o `refcount@+8` que o crumb do `class` dizia reservado não existia
+(campos começavam em 8); reservar moveu offsets e 4 fixtures mudaram os números de layout.
+`struct` sem RC, pacote de `params` e campo `static` de classe = dívida declarada em `rt.mc`.
+O dono revisa; se discordar, o ponto a reabrir é só "parse vs pass", que é local ao `teko_rc.mc`.
+
 ### D226 · DONO: modo AUTÔNOMO do coordenador do ngen — forks de superfície decididos pelo C#/mercado; impasse validado com a sessão do mc (dono 2026-09-05) 🔧 PROCESSO
 O dono deixa o coordenador em modo autônomo: **um agente por vez**; a sessão do mc comunica por
 arquivo (`mini_compiler/build/NOTICES-teko.md`); **impasse → validar com a sessão do mc** (ngen na
