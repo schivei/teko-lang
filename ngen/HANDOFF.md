@@ -388,6 +388,16 @@ concreta; `new` de abstrata é erro) e **`partial class`** (a mesma classe em ma
 arquivo, unida na compilação; método parcial NÃO). Fixtures `surface_abstract.tk`,
 `surface_partial.tk` (parte 2 em subpasta).
 
+**Entrega 5 — D224 LANDADO** (`b60e7dfe`, 22 fixtures): `abstract class`/membro/propriedade
+abstratos como C# (slot de vtable sem corpo; derivada concreta sem `override` é erro nomeando
+o acessor); **`partial class`** fecha no primeiro uso ou no fim da unidade (parte depois do uso
+é erro); tabelas por posse (`fd_cls`/`vs_cls`/`ci_cls`) — tipo declarado entre partes não
+corrompe o layout; base só numa parte antes de membros; interfaces em união; método parcial não.
+
+**Em voo:** **reclaim** pela "arena automática" do mc com **construtor/destrutor** (D218, plano
+§14/§15): free lists + RC por escopo no parse (`tk_block`, `on_jump`); `Nome(params)` por
+`new Nome(args)`, `~Nome()` no release; fixture `surface_reclaim.tk` com 1M `new`.
+
 **Fila:** entrega 5 (comportamento base): membros C# (feito) → propriedades + interface v2 (feito)
 → `abstract`/`partial class` (D224) → reclaim c/ construtor+destrutor → C5b
 (operador estático, D218) → `while`/`for` (prelude do mc) → stops restantes
