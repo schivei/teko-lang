@@ -246,19 +246,68 @@ i64 tk_flatten(i64 ci, uptr cls, i64 mark, i64 off) {
     return off;
 }
 
+// a trait name's own bare search order (D31.6, the trait table's answer to
+// `teko_ns.mc`'s `tk_ns_resolve`): the current namespace outward, then the
+// FILE's own `using`s -- a trait is never a row of `teko_struct.mc`'s type
+// table (rule 1 above), so it needs this table's own walk rather than the
+// one namespace machinery already owns for a type.
+i64 tk_trait_resolve(uptr curto) {
+    uptr cur = tk_ns_current();
+    if (cur != 0) {
+        i64 len = cstrlen(cur);
+        loop {
+            uptr pre = xstrdup(cur, len);
+            i64 ti = tk_trait_find(tk_join3(pre, "__", curto));
+            if (ti >= 0) return ti;
+            i64 cut = tk_ns_last_sep(cur, len);
+            if (cut < 0) break;
+            len = cut;
+        }
+    }
+    uptr fl = p_file();
+    i64 found = 0 - 1;
+    uptr found_ns = 0;
+    i64 i = 0;
+    loop {
+        if (i >= tk_nusing) break;
+        if (str_eq(ug_file_at(i), fl)) {
+            i64 cand = tk_trait_find(tk_join3(ug_ns_at(i), "__", curto));
+            if (cand >= 0) {
+                if (found >= 0 && cand != found)
+                    err_at(fl, p_line(), tk_ns_ambig_msg(curto, found_ns, ug_ns_at(i)));
+                found = cand;
+                found_ns = ug_ns_at(i);
+            }
+        }
+        i = i + 1;
+    }
+    return found;
+}
+
 // `use A;` / `use A, B;` -- inside a CLASS body the traits are only queued,
 // because the class's own members have to be known before a copy can lose to
 // one of them; inside a TRAIT body they are flattened at once, which is what
-// makes a trait using a trait recurse. `use` is read as an identifier and never
-// registered, so the word stays the program's everywhere else.
+// makes a trait using a trait recurse. A name is read with `tk_ns_read_path`'s
+// own `p_name()`+`p_next()` (D31.3), never `p_ident()`: the short name of a
+// trait declared inside a namespace is a reserved word by the time a `use`
+// reads it (`tk_ns_qualify`'s own `tk_ns_register`), so `p_ident()` would
+// refuse it outright. A bare name resolves through the search order
+// (`tk_trait_find`, then `tk_trait_resolve`); a qualified one only exact.
 i64 tk_use(i64 ci, uptr cls, i64 off) {
     i64 mark = tk_ntu;
     p_next();                                    // the `use` word
     loop {
         i64 line = p_line();
         uptr fl = p_file();
-        uptr nm = p_ident();
-        i64 ti = tk_trait_find(nm);
+        uptr seg0mem = xalloc(8);
+        uptr nm = tk_ns_read_path(seg0mem);
+        i64 ti = 0 - 1;
+        if (str_eq(nm, ld64(seg0mem))) {
+            ti = tk_trait_find(nm);
+            if (ti < 0) ti = tk_trait_resolve(nm);
+        } else {
+            ti = tk_trait_find(nm);
+        }
         if (ti < 0) err_at2(fl, line, "teko: unknown trait", nm);
         if (tr_vis_at(ti) == TK_TINTERNAL && tr_proj_at(ti) != sr_proj_at(ci))
             err_at(fl, line, tk_join3("teko: ", nm, " is internal to another project"));

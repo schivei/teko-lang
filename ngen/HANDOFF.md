@@ -616,6 +616,9 @@ sem `#include`.
   bloco de namespace; `partial` reaberto em outro namespace (confirmado: NÃO funde, cada um só
   enxerga seu próprio campo); `using` dentro de bloco (recusa natural do core, `using` só existe
   em posição de topo).
+- **N1b (errata, plano §32):** a lista `:` de base/interface e o `use` de trait namespaced,
+  ambos furos abertos pelo verificador do N1, fechados — `tk_conf_name` e `tk_use` leem o nome
+  por `p_name()`+`p_next()` (D31.3) em vez de um único `p_ident()`.
 
 **Fila:** funções livres em namespace + `import` (N2/N3) → `const` → `switch` (D222) →
 closures/`ref`/`out` (D221, architect-first) → compilador teko de `<mc/core_min>` (plano

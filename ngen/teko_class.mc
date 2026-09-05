@@ -1018,13 +1018,20 @@ void tk_close_open(i64 si);
 // one name of the `:` list, whose word is reserved by then (type_new), so the
 // raw lexeme is read and looked up in the type table. `proj` is the origin of
 // the class being declared -- the list is read before its row exists, and an
-// instance of a generic is read from a source that is no file at all.
+// instance of a generic is read from a source that is no file at all. A
+// namespace path (`geo.IShape`) is read whole with `tk_ns_read_path`'s own
+// `p_name()`+`p_next()` (D31.3: the first segment is a reserved word by
+// then, never `p_ident()`); a bare name resolves through the search order
+// (`tk_struct_find`), a qualified one only exact -- D31.6/D31.7 say a
+// written path names one row or none, never a candidate to keep guessing.
 i64 tk_conf_name(i64 base, i64 proj) {
-    uptr nm = p_name();
     i64 line = p_line();
     uptr fl = p_file();
-    p_next();
-    i64 si = tk_struct_find(nm);
+    uptr seg0mem = xalloc(8);
+    uptr nm = tk_ns_read_path(seg0mem);
+    i64 si = 0 - 1;
+    if (str_eq(nm, ld64(seg0mem))) si = tk_struct_find(nm);
+    else si = tk_struct_find_exact(nm);
     if (si < 0 && tk_trait_find(nm) >= 0)
         err_at2(fl, line, "teko: a trait is not a base class nor an interface; use `use`", nm);
     if (si < 0) err_at2(fl, line, "teko: unknown base class or interface", nm);
