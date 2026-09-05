@@ -42,7 +42,9 @@
 // itself is `public` or `internal`, and an `internal` one answers only to a
 // `use` written by code of its own project.
 //
-// Not taught, and refused by name rather than by surprise: `abstract` in a trait.
+// Not taught, and refused by name rather than by surprise: `abstract` in a
+// trait -- a trait has no vtable of its own, so there is no slot for a class
+// that copies the member to fill (teko_class.mc's tk_member).
 
 #define TK_MAXTRAIT 32                // traits declared in one source
 #define TK_MAXUSE   32                // `use` entries queued at any one time
@@ -203,13 +205,6 @@ void tk_skip_body() {
     i64 n = 0;
     if (p_id() != K_LBRACE) err_at(tk_file, tk_line, "teko: expected { in the trait method body");
     p_skip_balanced(K_LBRACE, K_RBRACE, &n);
-}
-
-// what a trait may not declare yet, said by name rather than left to fail
-// somewhere further in. Visibility and `static` ARE read: a copied member takes
-// them into the class exactly as a member the class wrote itself.
-void tk_trait_gate() {
-    if (tk_kw("abstract")) err_at(tk_file, tk_line, "teko: `abstract` in a trait not taught yet");
 }
 
 // one recorded body, `{` to `}`, with every member of it placed on the class

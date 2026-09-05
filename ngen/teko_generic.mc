@@ -52,6 +52,7 @@ i64  gn_p0[TK_MAXGEN];                // slice [p0, p0+np) of the parameter tabl
 i64  gn_np[TK_MAXGEN];
 i64  gn_vis[TK_MAXGEN];               // the modifier the declaration carried
 i64  gn_proj[TK_MAXGEN];              // ...and the origin of the file it was in
+i64  gn_abst[TK_MAXGEN];              // ...and whether it was declared `abstract`
 i64  tk_ngen = 0;
 
 uptr gp_name[TK_MAXGARG];
@@ -68,7 +69,7 @@ uptr tk_gen_targs(i64 gi);
 // pushed source, which is no file at all, so the modifier and the origin the
 // TEMPLATE was declared with are handed to the instance instead of being read
 // back from a frame name
-void tk_set_decl(i64 vis, i64 proj);
+void tk_set_decl(i64 vis, i64 proj, i64 abst);
 
 // ---- table accessors (no raw ld64/st64 outside this section) ----
 uptr gn_name_at(i64 i)  { return ld64(gn_name + i * 8); }
@@ -79,6 +80,7 @@ i64  gn_p0_at(i64 i)    { return ld64(gn_p0 + i * 8); }
 i64  gn_np_at(i64 i)    { return ld64(gn_np + i * 8); }
 i64  gn_vis_at(i64 i)   { return ld64(gn_vis + i * 8); }
 i64  gn_proj_at(i64 i)  { return ld64(gn_proj + i * 8); }
+i64  gn_abst_at(i64 i)  { return ld64(gn_abst + i * 8); }
 uptr gp_name_at(i64 i)  { return ld64(gp_name + i * 8); }
 i64  gp_const_at(i64 i) { return ld64(gp_const + i * 8); }
 uptr in_name_at(i64 i)  { return ld64(in_name + i * 8); }
@@ -91,6 +93,7 @@ void set_gn_p0_at(i64 i, i64 v)     { st64(gn_p0 + i * 8, v); }
 void set_gn_np_at(i64 i, i64 v)     { st64(gn_np + i * 8, v); }
 void set_gn_vis_at(i64 i, i64 v)    { st64(gn_vis + i * 8, v); }
 void set_gn_proj_at(i64 i, i64 v)   { st64(gn_proj + i * 8, v); }
+void set_gn_abst_at(i64 i, i64 v)   { st64(gn_abst + i * 8, v); }
 void set_gp_name_at(i64 i, uptr v)  { st64(gp_name + i * 8, v); }
 void set_gp_const_at(i64 i, i64 v)  { st64(gp_const + i * 8, v); }
 void set_in_name_at(i64 i, uptr v)  { st64(in_name + i * 8, v); }
@@ -174,7 +177,7 @@ void tk_gen_to_body(uptr name) {
 // `class Name<...> ...` / `struct Name<...> ...`: the parameter list is parsed,
 // everything after it is RECORDED, and no declaration is produced. The name
 // becomes a statement word, which is the position `Box<Circle, 4> b;` arrives in.
-void tk_gen_record(uptr name, i64 kind, i64 vis, i64 proj) {
+void tk_gen_record(uptr name, i64 kind, i64 vis, i64 proj, i64 abst) {
     if (tk_ngen == TK_MAXGEN) err_at2(tk_file, tk_line, "teko: too many generic declarations", name);
     if (tk_gen_find(name) >= 0) err_at2(tk_file, tk_line, "teko: duplicate generic", name);
     if (tk_struct_find(name) >= 0) err_at2(tk_file, tk_line, "teko: the name is already a type", name);
@@ -183,6 +186,7 @@ void tk_gen_record(uptr name, i64 kind, i64 vis, i64 proj) {
     set_gn_kind_at(gi, kind);
     set_gn_vis_at(gi, vis);
     set_gn_proj_at(gi, proj);
+    set_gn_abst_at(gi, abst);
     set_gn_p0_at(gi, tk_ngp);
     tk_gen_params(gi);
     uptr start = p_start();                      // the `:` or the `{`
@@ -277,7 +281,7 @@ void tk_gen_replay(i64 gi, uptr mang, uptr args, uptr vals, i64 n, uptr fl, i64 
     i64 len = 0;
     uptr text = tk_gen_text(gi, mang, &len);
     tk_gen_bind(gi, args, vals, n);
-    tk_set_decl(gn_vis_at(gi), gn_proj_at(gi));  // the instance is the template's own
+    tk_set_decl(gn_vis_at(gi), gn_proj_at(gi), gn_abst_at(gi));   // the instance is the template's own
     i64 d0 = p_depth();
     p_push_source(tk_gen_frame(mang, fl, line), text, len);
     p_next();                                    // spends the `>` the caller sat on

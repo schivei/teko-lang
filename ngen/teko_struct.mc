@@ -43,7 +43,7 @@
 // re-parsed by the very machine below; these two are what the declaration of a
 // type has to ask it before there is a type at all
 i64 tk_gen_find(uptr name);
-void tk_gen_record(uptr name, i64 kind, i64 vis, i64 proj);
+void tk_gen_record(uptr name, i64 kind, i64 vis, i64 proj, i64 abst);
 
 // teko_access.mc is included after this file too -- it reads the tables below --
 // and these three are what a type declaration has to ask it: the modifier that
@@ -87,6 +87,7 @@ i64  sr_i0[TK_MAXSTRUCT];             // a class's slice [i0, i0+ni) of the impl
 i64  sr_ni[TK_MAXSTRUCT];
 i64  sr_vis[TK_MAXSTRUCT];            // TK_TPUBLIC or TK_TINTERNAL
 i64  sr_proj[TK_MAXSTRUCT];           // 1 when the project itself declared it
+i64  sr_abst[TK_MAXSTRUCT];           // 1 for an `abstract` class: no object, no constructor
 i64  tk_nstruct = 0;
 
 uptr fd_name[TK_MAXFIELD];
@@ -133,6 +134,7 @@ i64  sr_i0_at(i64 i)    { return ld64(sr_i0 + i * 8); }
 i64  sr_ni_at(i64 i)    { return ld64(sr_ni + i * 8); }
 i64  sr_vis_at(i64 i)   { return ld64(sr_vis + i * 8); }
 i64  sr_proj_at(i64 i)  { return ld64(sr_proj + i * 8); }
+i64  sr_abst_at(i64 i)  { return ld64(sr_abst + i * 8); }
 uptr fd_name_at(i64 i)  { return ld64(fd_name + i * 8); }
 i64  fd_off_at(i64 i)   { return ld64(fd_off + i * 8); }
 i64  fd_ty_at(i64 i)    { return ld64(fd_ty + i * 8); }
@@ -165,6 +167,7 @@ void set_sr_i0_at(i64 i, i64 v)     { st64(sr_i0 + i * 8, v); }
 void set_sr_ni_at(i64 i, i64 v)     { st64(sr_ni + i * 8, v); }
 void set_sr_vis_at(i64 i, i64 v)    { st64(sr_vis + i * 8, v); }
 void set_sr_proj_at(i64 i, i64 v)   { st64(sr_proj + i * 8, v); }
+void set_sr_abst_at(i64 i, i64 v)   { st64(sr_abst + i * 8, v); }
 
 i64 tk_is_class(i64 si) { return sr_kind_at(si) == TK_KCLASS; }
 i64 tk_is_iface(i64 si) { return sr_kind_at(si) == TK_KIFACE; }
@@ -570,6 +573,7 @@ i64 tk_type_add(uptr name, i64 ty, i64 base, i64 kind, i64 vis, i64 proj) {
     set_sr_ni_at(tk_nstruct, 0);
     set_sr_vis_at(tk_nstruct, vis);
     set_sr_proj_at(tk_nstruct, proj);
+    set_sr_abst_at(tk_nstruct, 0);
     tk_nstruct = tk_nstruct + 1;
     return tk_nstruct - 1;
 }
@@ -799,7 +803,7 @@ void tk_struct() {
     i64 proj = tk_take_decl_proj();
     uptr name = tk_newname("struct");
     if (p_id() == K_LT) {                        // struct Name<T, const N: i64>
-        tk_gen_record(name, TK_KSTRUCT, vis, proj);   // recorded, not declared
+        tk_gen_record(name, TK_KSTRUCT, vis, proj, 0);   // recorded, not declared
         return;
     }
     i64 ty = tk_type_word(name);                 // a field of its own type parses

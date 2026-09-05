@@ -25,6 +25,10 @@
 // accessors are then the load and the store of that field. Either both
 // accessors are auto or neither is, as in C#.
 //
+// An ABSTRACT property writes its accessors the same way and gets NO backing
+// field: each accessor is a vtable slot with nothing in it, which the first
+// concrete class down the chain answers with an `override` of its own.
+//
 // `value` is the `set`'s parameter and nothing more: an ordinary name, so a
 // local called `value` shadows it exactly as C# says it does, and the word stays
 // the program's everywhere else. `get` and `set` are read INSIDE the property's
@@ -300,6 +304,11 @@ i64 tk_prop_accessor(i64 ci, uptr name, uptr m, i64 fty, i64 off, i64 ti, i64 vi
     set_mt_vis_at(mi, avis);
     set_mt_static_at(mi, stat);
     set_mt_prop_at(mi, 1);
+    if (kind2 == 3) {
+        set_mt_abst_at(mi, 1);
+        tk_abstract_end(m);                      // `get;` and no backing field at all
+        return off;
+    }
     return tk_prop_body(ci, name, m, fty, off, fn, rty, params, stat, wantset);
 }
 

@@ -24,11 +24,18 @@
 // reach it (teko_access.mc holds the checks), and `static` says it takes no
 // receiver at all. `private` is what a member with no modifier is.
 //
+//   abstract class Shape {            no vtable, no constructor, no `new Shape`
+//       public abstract i64 area();   a slot with NOTHING in it
+//   }
+//   class Square : Shape {            the first concrete class of the chain is
+//       public override i64 area()    the one that has to fill every such slot
+//   }
+//
 // `virtual`, `override`, `private`, `protected` and `static` are CONTEXTUAL:
 // this module does not reserve them (lang's `lg_kw`), so they stay usable as
-// ordinary names everywhere else. `public` is the one exception, because it also
-// opens a top-level declaration and so is a word of the language. A
-// plain method is called directly, a virtual one through
+// ordinary names everywhere else. `public` and `abstract` are the exceptions,
+// because they also open a top-level declaration and so are words of the
+// language. A plain method is called directly, a virtual one through
 // `callp(ld64(ld64(obj) + (1 + slot) * 8), obj, ...)` -- teko_expr.mc, which is
 // also where `p.field` and `p.method(...)` are resolved.
 //
@@ -83,6 +90,7 @@ i64 tk_prop_member(i64 ci, uptr name, uptr m, i64 fty, i64 off, i64 ti, i64 vis,
 // makes -- naming a base class or an interface is reaching for a type
 i64 tk_take_decl_vis();
 i64 tk_take_decl_proj();
+i64 tk_take_decl_abst();
 i64 tk_type_word(uptr name);
 void tk_check_type_use_from(i64 si, i64 proj, i64 line, uptr fl);
 
@@ -103,6 +111,7 @@ i64  mt_slot[TK_MAXMETHOD];           // its vtable slot, or -1 when not virtual
 i64  mt_vis[TK_MAXMETHOD];            // TK_VPRIVATE, TK_VPROTECTED or TK_VPUBLIC
 i64  mt_static[TK_MAXMETHOD];         // 1 when it takes no receiver
 i64  mt_prop[TK_MAXMETHOD];           // 1 when it is a property's accessor (teko_prop.mc)
+i64  mt_abst[TK_MAXMETHOD];           // 1 when it is `abstract`: a slot, and no body at all
 i64  tk_nmethod = 0;
 
 i64  df_node[TK_MAXDFLT];             // the folded constant a missing argument becomes
@@ -125,6 +134,7 @@ i64  mt_slot_at(i64 i) { return ld64(mt_slot + i * 8); }
 i64  mt_vis_at(i64 i)  { return ld64(mt_vis + i * 8); }
 i64  mt_static_at(i64 i) { return ld64(mt_static + i * 8); }
 i64  mt_prop_at(i64 i)   { return ld64(mt_prop + i * 8); }
+i64  mt_abst_at(i64 i)   { return ld64(mt_abst + i * 8); }
 uptr vs_m_at(i64 i)    { return ld64(vs_m + i * 8); }
 uptr vs_sig_at(i64 i)  { return ld64(vs_sig + i * 8); }
 uptr vs_fn_at(i64 i)   { return ld64(vs_fn + i * 8); }
@@ -142,6 +152,7 @@ void set_mt_slot_at(i64 i, i64 v)  { st64(mt_slot + i * 8, v); }
 void set_mt_vis_at(i64 i, i64 v)   { st64(mt_vis + i * 8, v); }
 void set_mt_static_at(i64 i, i64 v) { st64(mt_static + i * 8, v); }
 void set_mt_prop_at(i64 i, i64 v)  { st64(mt_prop + i * 8, v); }
+void set_mt_abst_at(i64 i, i64 v)  { st64(mt_abst + i * 8, v); }
 void set_vs_m_at(i64 i, uptr v)    { st64(vs_m + i * 8, v); }
 void set_vs_sig_at(i64 i, uptr v)  { st64(vs_sig + i * 8, v); }
 void set_vs_fn_at(i64 i, uptr v)   { st64(vs_fn + i * 8, v); }
@@ -342,12 +353,21 @@ i64 tk_word(uptr w) {
     return str_eq(p_name(), w);
 }
 
+// the vtable kind one word of the `virtual`/`override`/`abstract` family names:
+// a new slot, an inherited one, and a new slot with nothing in it yet
+i64 tk_member_kind(i64 kind) {
+    if (kind) err_at(p_file(), p_line(), "teko: the member is already virtual, override or abstract");
+    if (tk_word("override")) return 2;
+    if (tk_word("abstract")) return 3;
+    return 1;
+}
+
 // the modifiers of one member, in any order, as C# writes them: at most one of
-// `public`/`private`/`protected`, at most one of `virtual`/`override`, and
-// `static` at most once. `pvis` answers with the visibility (`private` when the
-// member names none), `pstat` with 1 for a member that takes no receiver, and
-// the result is the vtable kind teko_class already speaks: 0 plain, 1 virtual,
-// 2 override.
+// `public`/`private`/`protected`, at most one of `virtual`/`override`/
+// `abstract`, and `static` at most once. `pvis` answers with the visibility
+// (`private` when the member names none), `pstat` with 1 for a member that
+// takes no receiver, and the result is the vtable kind teko_class already
+// speaks: 0 plain, 1 virtual, 2 override, 3 abstract.
 i64 tk_member_mods(uptr pvis, uptr pstat) {
     i64 vis = 0 - 1;
     i64 stat = 0;
@@ -363,10 +383,10 @@ i64 tk_member_mods(uptr pvis, uptr pstat) {
         } else if (tk_word("static")) {
             if (stat) err_at(p_file(), p_line(), "teko: the member is already static");
             stat = 1;
-        } else if (tk_word("virtual") || tk_word("override")) {
-            if (kind) err_at(p_file(), p_line(), "teko: the member is already virtual or override");
-            kind = 1;
-            if (tk_word("override")) kind = 2;
+        } else if (tk_word("partial")) {
+            err_at(p_file(), p_line(), "teko: a partial method is not taught; only a partial class");
+        } else if (tk_word("virtual") || tk_word("override") || tk_word("abstract")) {
+            kind = tk_member_kind(kind);
         } else break;
         p_next();
     }
@@ -413,18 +433,21 @@ i64 tk_slot_find(i64 ci, uptr name, uptr sig) {
     return 0 - 1;
 }
 
-// `override` fills an inherited slot, `virtual` takes a new one, and a plain
-// method that collides with an inherited slot is refused rather than silently
-// hiding it. Returns the method's slot, or -1 when it is not virtual.
+// `override` fills an inherited slot, `virtual` takes a new one, `abstract`
+// takes a new one and leaves it EMPTY -- which is what the first class derived
+// from it that is not abstract has to fill -- and a plain method that collides
+// with an inherited slot is refused rather than silently hiding it. Returns the
+// method's slot, or -1 when it is not virtual.
 i64 tk_slot_take(i64 ci, i64 kind, uptr m, uptr sig, uptr fn) {
     i64 slot = tk_slot_find(ci, m, sig);
+    if (kind == 3) fn = 0;                       // nothing implements it here
     if (kind == 2) {
         if (slot < 0) err_at2(tk_file, tk_line, "teko: override of a method the base does not declare", m);
         set_vs_fn_at(sr_v0_at(ci) + slot, fn);
         return slot;
     }
-    if (kind == 1) {
-        if (slot >= 0) err_at2(tk_file, tk_line, "teko: virtual redeclares an inherited slot; use override", m);
+    if (kind == 1 || kind == 3) {
+        if (slot >= 0) err_at2(tk_file, tk_line, "teko: the slot is inherited; use override", m);
         if (tk_nvslot == TK_MAXVSLOT) err_at(tk_file, tk_line, "teko: too many virtual slots");
         set_vs_m_at(tk_nvslot, m);
         set_vs_sig_at(tk_nvslot, sig);
@@ -655,6 +678,15 @@ i64 tk_member_field(i64 ci, uptr name, uptr m, i64 fty, i64 off, i64 ti, i64 vis
     return off;
 }
 
+// an `abstract` member declares a signature and stops there: the body belongs to
+// the class that overrides it, and writing one here would be a body nothing
+// could ever reach -- the slot is filled by the override, not by this
+void tk_abstract_end(uptr m) {
+    if (p_id() == K_LBRACE || p_id() == K_ARROW)
+        err_at2(p_file(), p_line(), "teko: an abstract member has no body", m);
+    p_expect(K_SEMI, "expected ; after the abstract member");
+}
+
 // the body of one method, parsed by the CORE with the parameter list built here
 void tk_member_body(i64 ci, i64 fty, uptr fn, i64 params, i64 stat) {
     i64 mark = tk_nlocal;                        // the receiver belongs to this body alone
@@ -690,13 +722,18 @@ i64 tk_member(i64 ci, uptr name, i64 off, i64 ti) {
         if (!tk_is_class(ci)) err_at(tk_file, tk_line, "teko: only a class uses a trait");
         return tk_use(ci, name, off);
     }
-    if (ti >= 0) tk_trait_gate();
     i64 vis = 0;
     i64 stat = 0;
     i64 kind = tk_member_mods(&vis, &stat);
     tk_reject_nested();                          // `public class B { }` reaches here too
+    if (ti >= 0 && kind == 3)
+        err_at(tk_file, tk_line, "teko: `abstract` in a trait not taught yet");
+    if (kind == 3 && !sr_abst_at(ci))
+        err_at(tk_file, tk_line, "teko: an abstract member needs an abstract class");
     if (kind && !tk_is_class(ci))
         err_at(tk_file, tk_line, "teko: a struct has no vtable; `virtual`/`override` needs a class");
+    if (kind == 3 && stat)
+        err_at(tk_file, tk_line, "teko: a static member is not abstract");
     if (kind && stat)
         err_at(tk_file, tk_line, "teko: a static member has no vtable slot; it is not virtual");
     i64 fty = tk_gen_ty();
@@ -734,6 +771,11 @@ i64 tk_member(i64 ci, uptr name, i64 off, i64 ti) {
     i64 mi = tk_method_add(m, ci, sig, fn, np, nreq, d0, fty, tk_slot_take(ci, kind, m, sig, fn));
     set_mt_vis_at(mi, vis);
     set_mt_static_at(mi, stat);
+    if (kind == 3) {
+        set_mt_abst_at(mi, 1);
+        tk_abstract_end(m);
+        return off;
+    }
     tk_member_body(ci, fty, fn, params, stat);
     return off;
 }
@@ -775,6 +817,31 @@ i64 tk_class_conf(i64 proj) {
     return base;
 }
 
+// the member the class left abstract, named the way the SOURCE named it: an
+// accessor is one half of a property, so the message says which half of which
+// property is missing rather than the `get_X` nothing was written as
+void tk_missing_override(i64 ci, uptr m, uptr sig) {
+    i64 mi = tk_method_sig_find(ci, m, sig);
+    if (mi < 0 || mt_prop_at(mi) == 0)
+        err_at2(tk_file, tk_line, "teko: abstract method not overridden", m);
+    uptr half = "teko: the `get` of an abstract property not overridden";
+    if (ld8(m) == 's') half = "teko: the `set` of an abstract property not overridden";
+    err_at2(tk_file, tk_line, half, xstrdup(m + 4, cstrlen(m) - 4));
+}
+
+// every slot of a class that IS instantiated has a function in it: a slot left
+// empty is an `abstract` member of some base that this class, being the first
+// concrete one of the chain, was the one that had to answer
+void tk_check_overridden(i64 ci) {
+    i64 i = 0;
+    loop {
+        if (i >= sr_nv_at(ci)) break;
+        i64 k = sr_v0_at(ci) + i;
+        if (vs_fn_at(k) == 0) tk_missing_override(ci, vs_m_at(k), vs_sig_at(k));
+        i = i + 1;
+    }
+}
+
 // ---- class Name [: Base] { fields and methods } ----
 void tk_class() {
     tk_line = p_line();
@@ -784,9 +851,10 @@ void tk_class() {
     p_next();                                    // the `class` word
     i64 vis = tk_take_decl_vis();                // the `public`/`internal` before the word
     i64 proj = tk_take_decl_proj();
+    i64 abst = tk_take_decl_abst();
     uptr name = tk_newname("class");
     if (p_id() == K_LT) {                        // class Name<T, const N: i64>
-        tk_gen_record(name, TK_KCLASS, vis, proj);    // recorded, not declared
+        tk_gen_record(name, TK_KCLASS, vis, proj, abst);   // recorded, not declared
         return;
     }
     i64 base = 0 - 1;
@@ -794,6 +862,7 @@ void tk_class() {
     if (p_accept(K_COLON)) base = tk_class_conf(proj);
     i64 ty = tk_type_word(name);
     i64 ci = tk_type_add(name, ty, base, TK_KCLASS, vis, proj);
+    set_sr_abst_at(ci, abst);
     tk_slots_inherit(ci, base);
     tk_impls_inherit(ci, base);                  // the base's interfaces are the derived class's
     i64 c = 0;
@@ -822,6 +891,8 @@ void tk_class() {
     i64 size = tk_size_of(off);
     set_sr_size_at(ci, size);
     def_add(tk_join(tk_case(name, 1), "_SIZE"), size, tk_line, tk_file);
+    if (abst) return;                            // no object: no vtable and no constructor
+    tk_check_overridden(ci);
     uptr vt = tk_join(tk_case(name, 0), "_vt");
     top_add(tk_glb(TY_U8, vt, (TK_VT_FIXED + sr_nv_at(ci)) * 8));
     top_add(tk_vt_init(ci, name, vt));
