@@ -660,3 +660,46 @@ escolhe a grafia pela versão resolvida (`sort -V` vs 0.12.1); `[target].link`; 
 `region crosses a file boundary` no fim de arquivo incluído: **falso positivo confirmado** —
 `p_skip_balanced` calcula `e` e só então chama `next()`, cujo lookahead fecha o arquivo; o fix
 (decidir pelo frame do token de fechamento) entra no lote do M45. O `;` segue como contorno.
+
+## 27. C5b landado — operadores como C#, resolvidos pelos dois operandos (2026-09-05)
+
+Fecha o "C5 está ERRADO e vai ser refeito" do §15 (D218). Branch `feat/ngen-operators-cs`.
+
+**Declaração.** `public static T operator<op>(A a[, B b])` em `class` e em `struct`:
+membro **estático**, sem `this`, sem slot de vtable. Binários `+ - * / % == != < <= > >=
+& | ^ << >>`; unários `- ! ~` — e `+`, aceito na declaração, mas **sem sítio**: o core
+registra só `- ~ ! &` como prefixo (`mc/src/parse.mc` `ops_init`) e não há hook
+`syntax_prefix`, logo `+v` é `expression expected`. Dívida do lado do mc, registrada.
+
+**Resolução pelos DOIS operandos** (`teko_ops.mc`, tabela `op_mi/op_cls/op_tok/op_np/
+op_t0/op_t1`): os candidatos são os operadores declarados pelo tipo de **qualquer**
+operando e pelas **bases** dele; pelo menos um parâmetro tem de ser do tipo declarante.
+Três rodadas, nessa ordem — **exata**; **literal** (a do C4: `N_INT` cai em `i64` na 1ª e
+em qualquer inteiro do core na 2ª); **base** (operando de tipo DERIVADO num parâmetro da
+base). A 3ª é uma precisão do "casamento exato" do ruling, e não uma folga: um objeto
+derivado JÁ é um da base (campos base-first), a conversão é de zero bits, C# faz o mesmo,
+e sem ela um operador herdado ficaria declarável e inalcançável. Como é a ÚLTIMA rodada, o
+tipo que declara o seu próprio sempre vence. Duas declarações na mesma rodada = ambiguidade
+recusada.
+
+**Pares obrigatórios** no `pass`, quando a unidade fecha — assim `partial class` escreve as
+duas metades em partes diferentes. **Visibilidade no sítio** (`tk_check_member`): era o
+achado 3 do crumb de membros, que o C5 não checava.
+
+**A rota continua sendo o `pass()`**, apesar de o `syntax_infix` sobre operador do core ter
+passado a funcionar no 0.10.3 (M41.5, §22): no parse o tipo de um operando que é parâmetro
+ou `.` deferido não existe, e o handler não veria a regra de endereço do §12. Os dois
+motivos ficam no cabeçalho do `teko_ops.mc`.
+
+**Posse (D227):** o `tk_xt_put` do pass é o que diz ao `teko_rc.mc` que um operador com
+retorno de classe entrega referência do caller. Medido com `rt_live()`: `(a+b)==c` não muda
+a contagem (o temporário é parked/sweeped com a statement), `-a` e `2+a` sobem 1 cada, e a
+saída do bloco volta a 0.
+
+**Adjacente medido:** `p.side + 1` (campo `i64` de receptor teko) NÃO colide com a resolução
+por dois operandos — todo endereço que o ngen constrói tem o valor teko à ESQUERDA e um
+deslocamento à direita, e o marcador de endereço o pega antes de `tk_ops_binary`. O caso
+novo (core à esquerda, teko à direita) não existe entre os nós que o projeto emite.
+
+23/23; a AST das 22 fixtures que não usam operador é byte-idêntica à de `05dc7181`;
+`mc limits` verdict `ok`.
