@@ -5,7 +5,7 @@ Escrito pela sessão remota coordenadora; leia inteiro antes do primeiro commit.
 
 ## 1. O que é o `ngen/`
 
-O **port do teko para o `mc`** (minicompiler.dev, `schivei/mc`), morando dentro
+O **port do teko para o `mc`** (minicompiler.dev, `minicompiler/mc`), morando dentro
 deste repositório. O teko passa a ser uma **linguagem ensinada ao `mc`** por
 módulos `.mc` (hooks), em vez de um compilador próprio.
 
@@ -129,8 +129,15 @@ antes o sysroot que o link precisa, tudo com o próprio `mc` + LLVM da imagem:
 `winstart.obj` (`#include <sys_windows_start>`) e `mcrt.obj`
 (`#include <sys_windows_host>`) compilados com `--backend=coff-obj-{arm64,x86_64}`, e
 `kernel32.lib` gerado por `llvm-dlltool` a partir da lista de 15 exports (a mesma de
-`schivei/mc` `scripts/sysroot-windows.sh`). A linha de link é a do próprio `mc`
+`minicompiler/mc` `scripts/sysroot-windows.sh`). A linha de link é a do próprio `mc`
 (`src/mc.windows-*.toml`): `-entry:mc_start -nodefaultlib -stack:8388608`.
+
+## 3.1a Repositórios do mc migraram para a organização `minicompiler` (2026-09-05)
+
+`schivei/mc` → **`minicompiler/mc`** (e os privados `mc-registry`/`mc-ops`). O GitHub redireciona os
+nomes antigos, mas o CI (`ngen.yml`: API de releases e base de download) e a receita do §4 já apontam
+para `minicompiler/mc`. Tags, releases e checksums não mudam. A org é a casa dos pacotes oficiais e a
+identidade admin do registro.
 
 ## 3.2 O mc que o CI usa hoje: 0.14.1 (2026-09-05)
 
@@ -173,7 +180,7 @@ walker (`gen_walk.mc`), o parser não sabe o que é laço (`while`/`for` são `#
 **`syntax_infix` sobre operador do core funciona** (`ops_init` lazy). **0.11.0 = M40** (AVR).
 **0.12.0 = M42**: `--exe` em Linux sem `[linker]`/sysroot. Baseline 18/18 no 0.12.0. Plano §22.
 Os avisos de release da sessão do mc **não chegam** por mensagem — o dono repassa; conferir
-`gh api repos/schivei/mc/releases/latest` ao começar o dia.
+`gh api repos/minicompiler/mc/releases/latest` ao começar o dia.
 
 (Registro anterior, 0.10.2:)
 
@@ -194,12 +201,12 @@ lá só se valida estaticamente e o CI é o gate. **Localmente roda-se o `mc` de
 verdade**, e é onde esta sessão rende mais — o ciclo fecha em ~1 s.
 
 **Instalação (uma vez, e a cada release nova).** Baixa-se o EXECUTÁVEL das releases
-de `schivei/mc` — **nada de submodule**, e **não se usa binário de dentro do clone do
+de `minicompiler/mc` — **nada de submodule**, e **não se usa binário de dentro do clone do
 mc** (pode estar à frente do que o CI usa). Troque `macos-arm64` pelo seu alvo:
 
 ```sh
-tag=$(gh api repos/schivei/mc/releases/latest --jq .tag_name); ver=${tag#v}
-gh release download "$tag" --repo schivei/mc --pattern "mc-$ver-macos-arm64.tar.gz*"
+tag=$(gh api repos/minicompiler/mc/releases/latest --jq .tag_name); ver=${tag#v}
+gh release download "$tag" --repo minicompiler/mc --pattern "mc-$ver-macos-arm64.tar.gz*"
 shasum -a 256 -c "mc-$ver-macos-arm64.tar.gz.sha256"
 mkdir -p ~/.local/mc && tar xzf "mc-$ver-macos-arm64.tar.gz" -C ~/.local/mc
 ln -sf ~/.local/mc/mc-$ver-macos-arm64/mc ~/.local/bin/mc
@@ -1293,7 +1300,7 @@ dívida do §41(e) está fechada na prática -- `apply(new Op((i64 x) => x - 1),
 
 ## 5.1 Armadilhas já pagas (não repita)
 
-1. **`mc --exe` emite Mach-O SEMPRE.** `schivei/mc` `src/main.mc:227` faz
+1. **`mc --exe` emite Mach-O SEMPRE.** `minicompiler/mc` `src/main.mc:227` faz
    `--exe → bname = "macho-exe"`, ignorando host e `[target]`. Num runner/host
    Linux isso gera `Exec format error` (ENOEXEC, exit 126). **Compile sempre
    pelo caminho `mc build DIR --config FILE`**, que honra `[target] os/arch` e

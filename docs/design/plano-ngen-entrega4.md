@@ -616,7 +616,7 @@ correções; **1.0.0 = decisão do dono conosco**.
 tag `vX.Y.Z`; `[deps]` = mínimo (MVS do Go); `#include <pack/lib.mc>`/`<pack>` resolvido por
 lock → bundle → pacote `mc` (nunca o cwd); `mc.lock` com hash de conteúdo (dirhash sobre
 `mc.toml` + `[package].files`; a lista é a fronteira — arquivo lido fora dela é erro); registro
-`schivei/mc-registry` por PR; fetch por tarball da tag (`curl`/`wget`), `deps/` vendoring,
+`minicompiler/mc-registry` por PR; fetch por tarball da tag (`curl`/`wget`), `deps/` vendoring,
 `[replace]`; comandos `mc pkg sync|add|list|vendor|verify|hash|check`, `mc install|update|
 upgrade` (com `--yes`); binário `mc-slim`; `mc --version`. **O que é da teko:** o sistema de
 pacotes da PRÓPRIA teko (imports/namespaces da linguagem), a forma do `teko_init()`, o
