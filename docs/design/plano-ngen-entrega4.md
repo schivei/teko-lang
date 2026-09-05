@@ -1283,3 +1283,50 @@ declarada num bloco interno e usada fora dele (não sombreia -- resolve `geo.f`,
 mod 256 = `234`); a mensagem `geo.X.m is private` pontilhada.
 
 **Fila:** inalterada -- `const`, `switch` (D222), closures/`ref`/`out` (D221).
+
+### N3c -- o bug do verificador do N3b: um membro do tipo nunca perde para um `using` (2026-09-05)
+
+`feat/ngen-namespace-member`, `teko_ns.mc` (`tk_ns_rewrite_call`, `tk_ns_scan_calls`,
+`tk_ns_walk_calls_in`). 28/28 em exit esperado; `--dump-ast` das 27 fixtures anteriores
+**byte-idêntico** contra `6ec5f55a`; `mc limits ngen` `ok`.
+
+**O bug.** `tk_ns_pass` roda ANTES de `tk_typeof_pass` (`teko.mc`), então uma chamada bare dentro
+de um MÉTODO já chegava reescrita para `geo__f` quando `tk_this_call` (`teko_this.mc`, "um nome que
+o tipo declara como método vence uma função de mesmo nome de topo, igual em C#") sequer via o nome
+-- `class Circle { public i64 f(i64 x) { ... } public i64 test(i64 x) { return f(x); } }` sob
+`using geo;` chamava `geo.f`, não o próprio `Circle.f`, porque a reescrita do namespace já tinha
+acontecido.
+
+**A ordem final de resolução de um nome bare** (C#, a que o N3b já enunciava, com um degrau novo):
+**(1)** local/parâmetro em escopo no sítio; **(2)** um MEMBRO (método, inclusive um herdado de uma
+base, inclusive estático) do tipo/classe a que a função caminhada pertence -- o mesmo passo que um
+`this.f()` escrito por extenso já dava, agora também para a forma bare; **(3)** o namespace
+corrente do sítio e seus prefixos, de dentro para fora (D31.6, inalterado); **(4)** SÓ quando (2) e
+(3) não acharam nada, uma declaração plana de topo com o nome exato (`decl_find`); **(5)** os
+`using`s do arquivo do sítio.
+
+**Onde vive a classe/struct do método corrente.** `tk_ns_call_cls` (novo, ao lado de
+`tk_ns_call_site`), lido em `tk_ns_scan_calls` de `teko_class.mc`'s própria tabela de métodos via
+`tk_method_of_fn` (a mesma função que `teko_this.mc`'s `tk_this_enter_fn` já usa para o seu passe
+posterior -- cobre método, construtor, destrutor e acessor de propriedade, todos `N_FUNC` de
+membro, sem tabela nova); a checagem em si é `tk_method_named_find(cls, name)` (`teko_class.mc`, já
+caminha a cadeia de bases via `sr_base_at`). Duas declarações antecipadas (`teko_class.mc` e
+`teko_this.mc` são incluídos DEPOIS de `teko_ns.mc` em `teko.mc`) -- o mesmo padrão de prototype
+que este arquivo já usa para `teko_access.mc`/`teko_expr.mc`/`teko_default.mc`.
+
+**Fixture** `surface_namespace_fn.tk` estendida (exit 42 recalculado, códigos 15-17 novos):
+`Circle.test` chamando `f(x)` bare, resolvendo para o método da própria classe (não `geo.f`);
+`Square : Shape` chamando `f(x)` bare dentro de um método que a DERIVADA não redeclara, resolvendo
+para o método HERDADO da base (não `geo.f`); `Util.test_static` chamando `f(x)` bare dentro de um
+método `static`, resolvendo para o membro estático (não `geo.f`). **Probes fora de `ngen/tests/`:**
+um campo `f` (não um método) mais `&f` bare dentro de um método sem `this.` -- confirmado, no seed
+`6ec5f55a` E nesta branch igualmente (não é regressão desta correção), que a superfície NÃO resolve
+`&campo` bare para o endereço do campo: `teko_this.mc`'s `tk_this_fix` nunca trata `N_ADDR`, então
+o nome cai na reescrita de namespace/`using` como qualquer outra chamada e o `&f` vira o endereço da
+FUNÇÃO `geo__f` (exit 254, um crash, com um campo `i64 f` de valor 7 gravado antes) -- achado
+adjacente, registrado, fora do escopo desta correção (que é só método); de FORA de `Circle`, `f(x)`
+bare com `using geo;` em escopo e Circle.f existente (mas não chamado por `this`/um receptor)
+resolve para `geo.f` (`f(5)` dá `1005 mod 256 = 237`) -- o membro de `Circle` não vaza para fora
+da própria classe.
+
+**Fila:** inalterada -- `const`, `switch` (D222), closures/`ref`/`out` (D221).
