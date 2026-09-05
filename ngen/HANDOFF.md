@@ -414,17 +414,14 @@ corrompe o layout; base só numa parte antes de membros; interfaces em união; m
   piso acima de zero em vez de uma resposta errada. Campo `static` de tipo classe guarda a
   referência corretamente, mas nunca é liberado (vive o programa inteiro).
 
-**Fila:** reclaim c/ construtor+destrutor (em voo) → **C5b** operadores `public static` como
-C# (o C5 landado está errado) → **C6** default em função de topo (`syntax_param`, mc ≥ 0.10.3)
-→ `while`/`for` (prelude do mc) → `namespace`/`import`/`using` (lx) → `const` (açúcar sobre
-`#define`) → `switch` nas duas vertentes + `when` guarda (D222) → closures `use (a, &b)` +
-ponteiro de função/`ref`/`out` como primitivas (D221, architect-first) → compilador teko de
-`<mc/core_min>` (plano §26). **Fora:** `var`, `type`, `match`, Variant, método parcial, nested.
-**Fila:** entrega 5 (comportamento base): membros C# (feito) → propriedades + interface v2 (feito)
-→ `abstract`/`partial class` (D224, feito) → reclaim c/ construtor+destrutor (feito) → C5b
-(operador estático, D218) → `while`/`for` (prelude do mc) → stops restantes
-(`namespace`/`import`/`using`/`const`/`match`/`when`) → stdlib mínima; **C6** quando o mc
-der o hook de declaração de função (`0.10.N`).
+**Em voo:** **C5b** — operadores refeitos como C# (D218): `public static T operator+(A a, B b)`,
+reversed, unários, pares obrigatórios, resolução pelos dois operandos, visibilidade checada;
+a forma velha do C5 deixa de ser aceita. Fixture `surface_operator.tk` reescrita.
+
+**Fila:** C5b (em voo) → **C6** default em função de topo (`syntax_param`) → `while`/`for` →
+`namespace`/`import`/`using` → `const` → `switch` (D222) → closures/`ref`/`out` (D221,
+architect-first) → compilador teko de `<mc/core_min>` (plano §26). **Fora:** `var`, `type`,
+`match`, Variant, método parcial, nested.
 
 **Dívida do C8:** `p.items[i]` sobre um receptor que o parser NÃO tipa (um parâmetro,
 que só o oráculo do `pass()` resolve) não chega ao `[` de array — cai no `[` do `params`
