@@ -1503,3 +1503,294 @@ cadeia sinkada nunca virar alvo do deferral de array GLOBAL.
 **Fixture** `surface_operator.tk` estendida (32/32 em exit 42, sem fixture nova): `!b[1]`, `-a[0]`,
 `!f.on`, `-p.x`, `~g[2]`, `!c.flag()`, `-(-a[1])`. AST das 31 fixtures não tocadas byte-idêntica
 contra `e2d4d936`. `mc limits ngen` `ok` (`intrin` 8/8).
+
+## 41. Closures, ponteiro de função, `ref`/`out` e `T[]` de heap — desenho (architect-first, 2026-09-05)
+
+Escopo: D221 (closures = lambda/função local + `use (a, &b)`; ponteiro de função, `ref T` e `out T`
+como primitivas `type_new` Tier 4), D226 (C#/mercado, autonomia), D227 (RC só no pass), D217,
+D218/D219/D220. Lido: `mc/docs/guide/96-a-new-primitive.md`, `hooks.md` §3/§4, `language.md`
+§5/§6/§7, `mc/src/hooks.mc:236` (`word_add`), `mc/src/parse.mc:1119` (`parse_var`), e os módulos do
+`ngen/` citados abaixo. Estilo `.mc` (cabeçalho `//`), como os outros 26.
+
+### (a) Decisões
+
+1. **Tipo de função = `delegate` NOMEADO (C# 1.0), não `Func<>`/`Action<>`.** `public delegate i64
+   Op(i64 a, i64 b);` no topo ou em `namespace`. `Func<>`/`Action<>` são delegates GENÉRICOS: o
+   `teko_generic.mc` faz record/replay de CORPO de `class`/`struct`, não de assinatura, e a BCL usa
+   17 aridades — máquina nova por zero ganho. Um `type_new` por `delegate`, assinatura na tabela do
+   módulo. `Func<>` como prelúdio de delegates nomeados = dívida barata, depois.
+2. **O delegate É um objeto contado, com layout de CLASSE.** Fork técnico central do briefing,
+   opção (a), refinada: `callp` leva UM `uptr`, então o valor-função é o PONTEIRO DO OBJETO e o
+   código mora dentro dele (`+16`). Chamada = `callp(tk_deleg_code(d), d, args…)` — o objeto é o 1º
+   argumento oculto, como `this` (D219). Trampolim gerado em runtime: recusado (o mc não emite
+   código em runtime, e W^X).
+3. **ABI UNIFORME: toda função alcançada por delegate recebe o objeto como 1º parâmetro.** Uma
+   função livre sem captura ganha um **thunk** gerado, memoizado por (função, delegate):
+   `i64 Op__thunk_add(uptr __env, i64 a, i64 b) { return add(a, b); }`, `code = &Op__thunk_add`. Sem
+   isso, dois valores do MESMO tipo (um com captura, um sem) exigiriam formas de chamada diferentes
+   no sítio, que só conhece o tipo — impossível.
+4. **A identidade do TIPO é o delegate; o LAYOUT é por lambda.** Cada lambda/thunk emite vtable +
+   release + alocador PRÓPRIOS (`TK_VT_FIXED 2`, release na palavra 0 — D227), e o release sabe o
+   tamanho e quais capturas são contadas. Assim `rc_dec` libera um delegate cuja lambda ele não
+   conhece, pelo mesmo caminho que já libera uma classe: zero linha nova em `teko_rc.mc`.
+5. **Reuso de `sr_*` em vez de máquina nova.** Delegate e `T[]` entram na tabela de tipos do
+   `teko_struct.mc` como formas novas (`TK_KDELEG`, `TK_KARRAY`) e `tk_is_counted` passa a
+   respondê-las. Medido no código: `tk_on_stmt` (`teko_struct.mc:694`) já registra o local,
+   `tk_struct_of_expr` já o tipa, `tk_ty_of` já o responde, o RC já o conta — é o que dispensa
+   "estender o RC para tipos `type_new`" que o briefing previa.
+6. **`f(x)` sobre valor-delegate rebaixa num `pass()`, não no parse.** Não há hook na posição de
+   identificador (§5.1 item 6); `tk_deleg_pass` reescreve todo `N_CALL` cujo nome é local/parâmetro
+   de tipo delegate em `callp`, com o retorno tipado pela assinatura (`tk_xt_put(n, si, dg_ret, 0)` —
+   `pure=0` é o que faz `tk_rc_own` tratar o resultado como POSSUÍDO, o protocolo do `return` do
+   `teko_rc.mc`). O que o pass não reescrever morre em `call to unknown function`, nunca em silêncio
+   — o idioma do `.` deferido. Um local sombreia o `using` (N3b, já resolvido).
+7. **Retorno estreito:** `callp` devolve `i64` cru por decisão do núcleo (`language.md` §7); um
+   delegate que declara `i32`/`u8` recebe `CAST` no sítio, o idioma que `teko_array.mc` já usa.
+8. **Aridade do delegate ≤ 10:** `callp` aceita 1..12 contando o ponteiro e o objeto gasta um —
+   recusa na DECLARAÇÃO, com a frase do teto de método.
+9. **`null` entra na superfície** (`syntax_expr("null")`, `N_INT 0` tipado `TY_UPTR`): `Op f = null;`
+   / `Circle c = null;`; `rc_dec(0)`/`rt_own(0)` já são no-op. Chamar um delegate nulo é PÂNICO, não
+   segfault: `tk_deleg_code(uptr d)` (nova, `lib/rt.mc`) checa e chama `rt_panic`.
+10. **`ref`/`out` = DOIS `type_new`, mais tabela de apontado.** `type_new("ref", 8, 8, TK_INT)` e
+    `type_new("out", …)` dão a identidade que o oráculo distingue de `uptr` (D221) e reservam as duas
+    palavras do C#; um id por `ref T` explodiria a tabela de palavras, então o tipo APONTADO mora
+    numa tabela do módulo, chaveada por (declaração, índice). **Medido, não presumido:** `word_add`
+    (`mc/src/hooks.mc:236`) é `tok_add` + recusa de keyword do núcleo, sem recusa de duplicata —
+    logo `type_new("ref")` + `syntax_expr("ref")` na MESMA palavra convivem.
+11. **Sítio `f(ref a)`/`f(out a)` obrigatório, como em C#, por `syntax_expr`.** O argumento de uma
+    chamada livre é parseado pelo NÚCLEO, sem hook — mas `syntax_expr` dispara dentro de
+    `parse_primary`, que é exatamente onde o argumento aterrissa. O handler devolve o ENDEREÇO: `&a`
+    para um local, e para `ref p.x`/`ref a[i]` o mesmo nó de endereço que o store de `.`/`[` já
+    constrói (`teko_expr.mc` `tk_field_use`, `teko_array.mc` `tk_arr_addr`).
+12. **Deref implícito num `pass()`, e o oráculo vê T desde já.** `tk_ty_scope_params` registra o
+    parâmetro `ref T`/`out T` com o tipo APONTADO, então `tk_ty_of`, sobrecarga e operadores acertam
+    sem esperar; só o rebaixamento (`x` → `ldW(x)`, `x = e` → `stW(x, e)`) é do pass, antes de
+    `tk_ops_pass` e de `tk_rc_pass`. D227: escopo e posse têm UM dono, o pass.
+13. **`ref T` de tipo contado escreve pelo SLOT do caller.** `x = e` no corpo vira `rt_store(x, e)`
+    (o valor do parâmetro JÁ é o endereço do slot), não `rt_store(&x, e)`; a recusa "a parameter of
+    class type is borrowed" (`teko_rc.mc` `tk_rc_assign`) ganha essa exceção, e só ela. O argumento
+    `ref c` é `N_ADDR`, não contado — o RC não o parka nem o incrementa, correto por construção.
+14. **`out` = DPS: o callee inicializa.** Um `out T` CONTADO recebe `st64(x, 0);` como primeiro
+    statement do corpo (o frame do mc não é zerado — `parse_var` só reserva), e daí toda atribuição é
+    `rt_store`, que libera o que estava lá. Sem isso o primeiro `rt_store` daria `rc_dec` em lixo.
+15. **`out` checável: só a forma BARATA** — "o corpo não atribui NUNCA ao parâmetro" → recusa
+    (`teko: the \`out\` parameter x is never assigned`). Atribuição definida por CAMINHO é cara e
+    fica como **dívida declarada, não silêncio**: o slot foi zerado (14), o caller lê 0, não lixo.
+    `f(out i64 a)` (declaração inline do C#) = dívida.
+16. **Mangling `f__ref_i64` / `f__out_Circle`.** `teko_over.mc:122` e `tk_sig_of`
+    (`teko_class.mc:222`) usam `type_name(ty)`, que responderia `ref` para todo apontado — colisão.
+    Um helper único `tk_ty_sfx(d, i)` consulta a tabela de (10) e serve os dois. Regra do C#:
+    `f(i64)` e `f(ref i64)` são sobrecargas distintas; `f(ref i64)` e `f(out i64)` NÃO — recusa
+    (`teko: two overloads differ only by \`ref\`/\`out\``).
+17. **`T[]` de heap é um objeto contado com vtable própria por T** (§(c)): `xs.Length` lê o
+    cabeçalho, `xs[i]` tem guard de runtime, e o release percorre os slots com `rt_release_array`,
+    que `lib/rt.mc` JÁ tem (hoje só serve campo-array inline). Fecha a recusa "array de tipo
+    struct/classe" do §39.
+18. **`panic` = a `rt_panic` que já existe, com nome de superfície.** `void panic(str msg)` em
+    `lib/rt.mc` chama `rt_panic` (write(2) + `exit(70)`). **Divergência registrada do briefing** (que
+    pedia `teko_panic` novo com `exit(134)`): um segundo abortador com outro código daria DOIS
+    significados à mesma falha, e os guards landados (`params`, arena exausta) usam 70. Trocar
+    70→134 é uma linha, se o dono preferir a convenção do `abort`.
+19. **Lambda com tipos EXPLÍCITOS nos parâmetros e tipo ALVO conhecido.** `(i64 a, i64 b) => a + b`
+    e `x => x * 2` (esta só quando o alvo dá o tipo); o retorno vem do delegate alvo — o C# também
+    exige alvo. Duas grafias, ambas do C#: **contextual** (inicializador de local/campo de tipo
+    delegate, `return` de função que devolve delegate, argumento de MÉTODO, que é o `tk_args` nosso)
+    e **explícita** `new Op((i64 a, i64 b) => a + b)` / `new Op(add)` — a forma do
+    `new EventHandler(...)` do C# 1.0, válida em qualquer posição, inclusive argumento de FUNÇÃO
+    LIVRE (que o núcleo parseia sem hook). Alvo-tipagem nessa última posição = dívida.
+20. **Captura só por `use (a, &b)`** (D221/PHP). Por VALOR = campo do objeto com cópia; contado ganha
+    `rc_inc` na construção e `rc_dec` no release (`tk_release_fields`, reusado). Por REFERÊNCIA `&b`
+    = o `&b` do mc, o ENDEREÇO do local do declarante, campo `uptr` NÃO contado (o declarante segue
+    dono e libera no seu próprio escopo).
+21. **Tempo de vida de `&`-captura: C-like, com DUAS recusas sintáticas baratas.** Sem escape
+    analysis (lei do repo: UAF é do dev). Mas os dois pés-de-cabra do briefing são visíveis onde a
+    lambda é rebaixada e são recusados: `&`-captura como operando de `return`, e como valor
+    armazenado em campo/`static`/global. Qualquer outro escape é do dev, dito no cabeçalho do módulo.
+22. **Função LOCAL nomeada = a mesma máquina**, lambda com nome: mesmo objeto gerado, e o nome vira
+    um local de tipo delegate (`Op twice = (i64 x) => …;` é a forma canônica).
+23. **`foreach (T x in xs)` = açúcar sobre `for` com índice** (dívida do §39 fechada), sobre `T[]` de
+    heap, array fixo local e campo-array inline — as três fontes com `Length` conhecido. `in`
+    contextual.
+24. **`params T[]` fica FORA**, registrado: embalar o `params` (instanciado por contagem, §13/§28)
+    num `T[]` de heap fecharia a dívida "o pacote nunca é devolvido" de `lib/rt.mc`, mas reescreve um
+    crumb landado e mata a constante `xs_len`. Próximo natural depois do K3.
+25. **Zero `intrinsic` novo nos cinco crumbs.** `mc limits ngen` mostra `intrin` 8/8 (os do
+    `<float>`); um nono registro dispara um evento de `grow` e o veredito `grew` (exit 3,
+    `mc/src/limits.mc`). Tudo aqui é função comum de `lib/rt.mc` ou `callp`, intrínseco do NÚCLEO,
+    que não ocupa linha.
+
+### (b) Hook → uso
+
+| hook / API | uso |
+|---|---|
+| `type_new("Op", 8, 8, TK_INT)` | identidade do delegate; um por declaração (K1) |
+| `type_new("ref"/"out", 8, 8, TK_INT)` | as duas primitivas de endereço (K2) |
+| `type_new("arr__i64"/"arr__Circle", …)` | uma linha por tipo de elemento, preguiçosa (K3) |
+| `syntax("delegate", &tk_delegate)` | a declaração de topo; `top_add` do thunk e do protótipo |
+| `syntax_expr("null"/"ref"/"out")` | `null`; `f(ref a)`/`f(out a)` em `parse_primary` |
+| `syntax_expr("new")` (o `tk_new` de hoje) | ramos novos `new T[n]` e `new Op(expr)` |
+| `syntax_infix(".")` (`tk_dot`) | `xs.Length`; campo de tipo delegate seguido de `(` |
+| `syntax_infix("[")` (`tk_bracket`) | `xs[i]` de heap, antes do fallback de `params` |
+| `syntax_param(&tk_default_param)` — **o mesmo, estendido** | `ref`/`out`/`T[]`/delegate em parâmetro de função livre. NÃO uma segunda registração: a tabela de defaults é posicional por `mark` (`teko_class.mc:536`) e um handler que engolisse parâmetros furaria o `nreq` |
+| `tk_gen_ty()` (`teko_generic.mc:520`) | as mesmas formas em parâmetro/campo/retorno de MEMBRO |
+| `p_skip_balanced` + `p_push_source` + `p_subst_*` | corpo da lambda gravado e replayado (o record/replay do C8) |
+| `parse_function`/`param_new`/`top_add`/`p_set_decl_name` | a função gerada da lambda e o thunk |
+| `syntax_stmt("foreach")` + `tk_loop_rewrite_stmt` | K5, a rota do `for` do §29 |
+| `pass(&tk_ref_pass)` / `pass(&tk_deleg_pass)` | ordem: `typeof` → **ref** → **deleg** → `ternary` → `ops` → `default` → `over` → `rc` |
+| `decl_find`/`decl_param_type`/`decl_ret`/`decl_valid` | assinatura do callee nos dois passes |
+| `type_name`/`type_width` | mangling e largura de `ldW`/`stW` |
+
+### (c) Layouts, e o que o RC faz com eles
+
+**Delegate / closure** (todo objeto de delegate, thunk ou lambda):
+
+```
+ vtable Op__lam3_vt        objeto (rt_alloc)
+ +0  &Op__lam3_release     +0   vtable          <- rc_dec chega ao release por aqui
+ +8  0 (sem itab)          +8   contagem
+                           +16  code = &Op__lam3      (o corpo gerado)
+                           +24  captura 0        (valor: contado -> rc_inc/rc_dec)
+                           +32  captura 1        (`&b`: endereco cru, NAO contado)
+```
+
+`Op__lam3(uptr __env, <params>)` lê cada captura em `ld64(__env + off)`; chamada
+`callp(tk_deleg_code(d), d, a1, …)`. RC: nada novo — linha `sr_` de forma `TK_KDELEG`, contada, com
+campos em `fd_*`, então `tk_rc_var`/`tk_rc_assign`/`tk_rc_releases`/`tk_release_fields` já servem;
+`Op__lam3_release` roda `rc_dec` em cada captura contada e `rt_free(p, 24 + 8*ncap)`.
+
+**`T[]` de heap** (`new i64[n]`):
+
+```
+ vtable tkarr_vt_i64       objeto (rt_alloc(24 + n*W))
+ +0  &tkarr_release_i64    +0   vtable
+ +8  0                     +8   contagem
+                           +16  len = n
+                           +24  elementos, W = type_width(T)
+```
+
+`xs.Length` = `ld64(xs + 16)`; `xs[i]` = `ldW(tk_arr_at(xs, i, W))`, com `uptr tk_arr_at(uptr a,
+i64 i, i64 w)` (`lib/rt.mc`) checando `0 <= i < ld64(a+16)` e chamando `panic`. `tkarr_release_i64` =
+`rt_free(p, 24 + ld64(p+16)*8)`; `tkarr_release_<classe>` chama antes `rt_release_array(p + 24,
+ld64(p + 16))`. O tamanho é lido do próprio objeto, então o TIPO não precisa carregá-lo.
+
+**`ref T`/`out T`**: nenhum objeto — o valor do parâmetro É o endereço do slot do caller (local,
+campo `p + OFF`, elemento `a + i*W`); não é contado, nunca é parkado, e o caller segue o único dono.
+
+### (d) Sequência de crumbs
+
+**K1 — delegate, ponteiro de função tipado, `callp` tipado, `null`.**
+Arquivos: `ngen/teko_deleg.mc` (novo), `teko.mc` (include, `syntax("delegate")`,
+`syntax_expr("null")`, `pass(&tk_deleg_pass)` logo depois de `tk_typeof_pass`), `teko_struct.mc`
+(`TK_KDELEG`, `tk_is_counted`), `teko_expr.mc` (`tk_new` ganha `new Op(e)`; `tk_dot` chama campo de
+tipo delegate), `teko_over.mc`/`teko_class.mc` (sufixo pelo nome do delegate — sai de graça de
+`type_name`), `lib/rt.mc` (`tk_deleg_code`, `panic`).
+Assinaturas novas: `void tk_delegate();` `i64 tk_deleg_find(uptr name);` `i64 tk_deleg_row(i64 ty);`
+`uptr tk_deleg_thunk(i64 di, uptr fn);` `i64 tk_deleg_call(i64 n, i64 di);` `i64 tk_deleg_pass(i64
+root);` `i64 tk_null();` — e em `lib/rt.mc` `uptr tk_deleg_code(uptr d)` / `void panic(str msg)`.
+Fixture: `surface_delegate.tk` (`expect-exit: 42`) — declaração no topo e em `namespace`, `Op f =
+add;` contextual e `new Op(add)`, `f(3,4)`, delegate como parâmetro e como retorno, campo de classe
+de tipo delegate chamado (`h.cb(2)`), `null` guardado por `if`, sobrecarga `apply(Op)` vs
+`apply(i64)`, `rt_live()` de volta ao piso. Mais `surface_panic_null.tk` (`expect-exit: 70`).
+Gate: 5 pernas verdes; AST das 32 fixtures anteriores byte-idêntica; `mc limits ngen` `ok` com
+`intrin` 8/8; probes fora de `tests/`: delegate com 11 parâmetros; `Op` sem alvo; atribuir função de
+assinatura errada; `delegate` dentro de corpo de função.
+
+**K2 — `ref` e `out`.**
+Arquivos: `ngen/teko_ref.mc` (novo), `teko.mc` (`syntax_expr("ref"/"out")`, `pass(&tk_ref_pass)`
+ANTES do `tk_deleg_pass`), `teko_default.mc` (ramo no `tk_default_param`), `teko_class.mc`
+(`tk_params`/`tk_gen_ty` e `tk_sig_of`), `teko_over.mc` (`tk_ty_sfx`), `teko_typeof.mc`
+(`tk_ty_scope_params` registra o apontado), `teko_rc.mc` (a exceção da decisão 13).
+Assinaturas: `i64 tk_ref_param(i64 kind);` `void tk_rp_add(uptr owner, i64 idx, i64 kind, i64 ty);`
+`i64 tk_rp_pointee(uptr owner, i64 idx);` `uptr tk_ty_sfx(i64 d, i64 i);` `i64 tk_ref_arg();`
+`i64 tk_out_arg();` `i64 tk_ref_pass(i64 root);` `void tk_out_prologue(i64 f);`
+Fixture: `surface_refout.tk` — `void bump(ref i64 x)`, `void split(i64 v, out i64 hi, out i64 lo)`,
+`ref` sobre campo (`bump(ref p.x)`) e elemento (`bump(ref a[i])`), `ref Circle` reatribuído com
+`rt_live()` provando a troca, `f(i64)` vs `f(ref i64)` resolvendo por sobrecarga, `ref` em método.
+Gate: como K1 + probes: `f(a)` sem `ref` no sítio; `ref` num sítio de parâmetro por valor;
+`ref i64 x = 1` (default proibido); `out` nunca atribuído; `f(ref i64)` + `f(out i64)`; `ref x;` como
+declaração de local.
+
+**K3 — `T[]` de heap, `Length`, RC dos elementos, `panic`.** (parcialmente BLOQUEADO, ver (e))
+Arquivos: `ngen/teko_heaparr.mc` (novo), `teko_expr.mc` (`tk_new` → `new T[n]`; `tk_dot` → `Length`),
+`teko_params.mc` (`tk_bracket` → ramo de heap antes do fallback), `teko_array.mc` (o deferral `gd_*`
+passa a resolver também um `T[]` de parâmetro por `decl_param_type`), `teko_struct.mc` (`TK_KARRAY`,
+`tk_is_counted`), `teko_default.mc`/`teko_class.mc` (a forma `T[]` em parâmetro/campo/retorno de
+membro), `lib/rt.mc` (`tk_arr_new`, `tk_arr_at`).
+Assinaturas: `i64 tk_ha_row(i64 ety);` `i64 tk_ha_new(i64 ety, i64 nexpr);` `i64 tk_ha_index(i64
+base, i64 ety);` `i64 tk_ha_length(i64 base);` `void tk_ha_emit(i64 ai);` — e em `lib/rt.mc`
+`uptr tk_arr_new(i64 n, i64 w, uptr vt)` / `uptr tk_arr_at(uptr a, i64 i, i64 w)`.
+Fixtures: `surface_array_heap.tk` (n de runtime, leitura/escrita por índice, `.Length` num `for`,
+`u8`/`i32` provando largura e sinal, `T[]` como parâmetro e como campo, `Circle[]` com `rt_live()`
+voltando ao piso) e `surface_panic.tk` (`expect-exit: 70`, índice além do fim).
+Gate: como K1; probes: `new i64[-1]`; `xs.Length = 3`; `xs[i]` sobre um `uptr` cru.
+
+**K4 — lambda, função local e `use`.**
+Arquivos: `teko_deleg.mc` (estendido), `teko_stmt.mc` (a função local dentro de corpo),
+`teko_expr.mc` (`new Op(<lambda>)`), `teko_ns.mc` (o símbolo gerado nasce já qualificado).
+Assinaturas: `i64 tk_lambda(i64 di);` `i64 tk_use_list(uptr pn);` `uptr tk_lam_emit(i64 di, i64
+params, uptr body, i64 blen, i64 caps);` `i64 tk_cap_add(uptr name, i64 byref);`
+`void tk_lam_deny_escape(i64 n);` `i64 tk_localfn();`
+Fixture: `surface_lambda.tk` — lambda sem captura, `use (a)` por valor (o valor congelado não muda
+quando `a` muda depois), `use (&b)` mutando o local do declarante, duas lambdas do mesmo tipo com
+capturas diferentes, função local nomeada, lambda passada a método e chamada lá dentro, captura de
+objeto contado com `rt_live()` provando que o release do closure a solta.
+Gate: como K1 + probes: `use` de nome que não é local; lambda sem alvo; lambda com `&`-captura em
+`return` e em campo (as duas recusas da decisão 21); aridade > 10; `use` duplicado.
+
+**K5 — `foreach`.**
+Arquivos: `ngen/teko_loop.mc` (`tk_foreach`, ao lado de `tk_for`), `teko.mc`
+(`syntax_stmt("foreach")`).
+Assinaturas: `i64 tk_foreach();` `i64 tk_fe_source(uptr pkind, uptr plen, uptr pety);`
+Fixture: `surface_foreach.tk` — sobre `T[]` de heap, array fixo local e campo-array inline;
+`break`/`continue` dentro; `foreach` aninhado com `break 2`; elemento de tipo classe com `rt_live()`.
+Gate: como K1; probes: `foreach` sobre escalar; `in` faltando.
+
+### (e) Fora do escopo (dívida) e o pedido ao mc
+
+**BLOQUEADO no K3 — precisa de hook do mc.** `i64[] xs = …;` como LOCAL, como GLOBAL e como RETORNO
+de função livre é lido pelo núcleo antes de qualquer hook: `parse_stmt` chama `type_of_token` sobre
+`i64` (keyword do núcleo, `word_add` recusa sequestrá-la) e `parse_var` (`mc/src/parse.mc:1119`)
+exige nome ou `[constante]` — `i64[] xs` morre em `variable name expected`, `i64 xs[]` em `array size
+must be a positive constant`. **NÃO depende do hook e entra no K3:** `new T[n]`, `xs[i]`, `xs.Length`,
+`foreach`, `T[]` como campo, como parâmetro (de membro por `tk_gen_ty`, de função livre por
+`syntax_param`) e como local/retorno quando o ELEMENTO é tipo teko (`Circle[] cs = …`, cuja primeira
+palavra é nossa). Texto pronto para `NOTICES-teko.md`:
+
+> **Pedido (ngen → mc): `syntax_type(&fn)`, um hook na posição de TIPO.** Hoje um módulo não alcança
+> a posição de tipo quando a palavra é do núcleo: `i64[] xs = …;` (array de heap, C#) e um futuro
+> `i64? x` morrem em `parse_var` antes de qualquer registro. `syntax_param` (M41.5) resolveu
+> exatamente esse problema um nível abaixo, na posição de PARÂMETRO — o pedido é o irmão dele:
+> `void syntax_type(uptr fn)`, handler `i64 f(i64 ty)`, consultado logo DEPOIS de o núcleo ler uma
+> palavra de tipo em `p_type()`/`parse_var`/`parse_top`/`parse_params`/cast/campo, recebendo o id
+> lido e podendo consumir um SUFIXO (`[]`, `?`, `*`) para devolver outro id, ou 0 para "não é meu".
+> Mesmas três guardas do `syntax_param` (consumiu-e-declinou, não-consumiu, devolveu id inválido).
+> Com ele o `T[]` do C# fica uniforme nas sete posições de tipo, sem uma linha de `src/` por parte
+> do ngen.
+
+**Dívidas declaradas** (nenhuma escondida): `Func<>`/`Action<>` (prelúdio de delegates nomeados);
+`op.Invoke(x)`; alvo-tipagem de lambda em argumento de função LIVRE (use `new Op(…)`); atribuição
+definida por caminho para `out` (decisão 15); `f(out i64 a)` inline; `params T[]` (decisão 24);
+`p.items[i]` sobre receptor que só o oráculo tipa (dívida do C8, herdada); array de heap como
+elemento de outro array; `delegate` genérico; covariância/contravariância; `+=`/`-=` de delegate
+(multicast — exige lista de invocação); `T[]` multidimensional e `T[][]`.
+
+### (f) Riscos
+
+1. **`tk_bracket` está sobrecarregado** (campo-array, array local fixo, `params`, global deferido,
+   agora heap). O K3 entra pela mesma porta, na ordem "o que o parser JÁ sabe primeiro"; se a cadeia
+   de `if` passar de cinco ramos, extrair um despachante nomeado é parte do crumb.
+2. **Ordem dos passes.** `ref` antes de `deleg` antes de `ternary` é o que faz `op(x) ? a : b` e
+   `x + 1` (com `x` sendo `ref i64`) tiparem certo. Um pass fora de ordem produz erro CLARO (tipo
+   desconhecido / `call to unknown function`), nunca miscompilação — a propriedade que o
+   `tk_defer_member` já garante. Cada crumb reconfirma a ordem no cabeçalho.
+3. **`type_new` por delegate e por `T[]`** consome ids e RESERVA a palavra (`arr__i64`) — mesmo preço
+   que `teko_ns.mc` já paga por `geo__Circle`, e nenhuma dessas grafias é escrevível por engano.
+   `mc limits ngen` mede: tabela crescendo vira veredito `grew` e o crumb ajusta `[limits] tolerance`.
+4. **`&`-captura é UAF por desenho** (decisão 21): as duas recusas cobrem os pés-de-cabra nomeados, o
+   resto é do dev, dito em uma frase, sem prometer análise.
+5. **Thunk por (função, delegate)** multiplica símbolos se a mesma função vira muitos delegates.
+   Memoizado por par; o teto é o número de pares ESCRITOS na fonte — a ordem de grandeza das
+   instâncias de `params`/genérico que já existem.
+6. **O `mc` anda rápido** (0.14.1, `continue N` novo). Todo crumb relê `NOTICES-teko.md` antes de
+   começar (§5.2), e o K5 lê `nd_val` do `N_CONTINUE` como já lê do `N_BREAK` — o aviso explícito da
+   0.14.1 para quem faz limpeza por nível de laço.
