@@ -45,6 +45,8 @@
 i64 tk_decl_vis  = 0 - 1;
 i64 tk_decl_proj = 0 - 1;
 i64 tk_decl_abst = 0;                 // the `abstract` a class declaration carried
+i64 tk_decl_part = 0;                 // ...and the `partial`
+i64 tk_frame_proj = 0 - 1;            // the origin of a source that is no file: a replay
 
 uptr tk_proj_dir = 0;                 // the project's directory, no trailing '/'
 i64  tk_proj_len = 0;
@@ -103,7 +105,12 @@ void tk_set_decl(i64 vis, i64 proj, i64 abst) {
     tk_decl_vis = vis;
     tk_decl_proj = proj;
     tk_decl_abst = abst;
+    tk_decl_part = 0;
 }
+
+// what the declaration WROTE, -1 for a part that said nothing: the parts of a
+// partial class have to agree on the modifier, and omitting it is agreeing
+i64 tk_decl_vis_written() { return tk_decl_vis; }
 
 i64 tk_take_decl_vis() {
     i64 v = tk_decl_vis;
@@ -115,8 +122,9 @@ i64 tk_take_decl_vis() {
 i64 tk_take_decl_proj() {
     i64 p = tk_decl_proj;
     tk_decl_proj = 0 - 1;
-    if (p < 0) return tk_origin_of_file(p_file());
-    return p;
+    if (p >= 0) return p;
+    if (tk_frame_proj >= 0) return tk_frame_proj;
+    return tk_origin_of_file(p_file());
 }
 
 i64 tk_take_decl_abst() {
@@ -124,6 +132,23 @@ i64 tk_take_decl_abst() {
     tk_decl_abst = 0;
     return a;
 }
+
+i64 tk_take_decl_part() {
+    i64 p = tk_decl_part;
+    tk_decl_part = 0;
+    return p;
+}
+
+// a source that is no file at all -- the replay of a generic -- carries the
+// origin of the TEMPLATE, so every declaration it produces belongs where the
+// template was written and not to the frame's own name
+i64 tk_frame_enter(i64 proj) {
+    i64 keep = tk_frame_proj;
+    tk_frame_proj = proj;
+    return keep;
+}
+
+void tk_frame_leave(i64 keep) { tk_frame_proj = keep; }
 
 // ---- where the parser or the pass is standing ----
 // the type whose body the code being read belongs to, or -1. The two phases are
@@ -302,12 +327,20 @@ i64 tk_head_abst(i64 abst, i64 line, uptr fl) {
     return 1;
 }
 
-void tk_reject_class_only(i64 abst, i64 line, uptr fl) {
+// `partial` says this declaration is one PART of a class the source writes in
+// more than one place, here or in another file
+i64 tk_head_part(i64 part, i64 line, uptr fl) {
+    if (part) err_at(fl, line, "teko: the declaration is already partial");
+    return 1;
+}
+
+void tk_reject_class_only(i64 abst, i64 part, i64 line, uptr fl) {
     if (abst) err_at2(fl, line, "teko: only a class is abstract", p_name());
+    if (part) err_at2(fl, line, "teko: only a class is partial", p_name());
 }
 
 // the modifiers of one top-level declaration, entered ON the first of them
-void tk_decl_head(i64 vis, i64 abst) {
+void tk_decl_head(i64 vis, i64 abst, i64 part) {
     i64 line = p_line();
     uptr fl = p_file();
     loop {
@@ -316,20 +349,23 @@ void tk_decl_head(i64 vis, i64 abst) {
         if (tk_word("public"))        { vis = tk_head_vis(vis, TK_TPUBLIC, l, fl);   continue; }
         if (tk_word("internal"))      { vis = tk_head_vis(vis, TK_TINTERNAL, l, fl); continue; }
         if (tk_word("abstract"))      { abst = tk_head_abst(abst, l, fl);            continue; }
+        if (tk_word("partial"))       { part = tk_head_part(part, l, fl);            continue; }
         break;
     }
     tk_set_decl(vis, tk_origin_of_file(fl), abst);
+    tk_decl_part = part;
     if (tk_word("class"))     { tk_class(); return; }
-    tk_reject_class_only(abst, line, fl);
+    tk_reject_class_only(abst, part, line, fl);
     if (tk_word("struct"))    { tk_struct();    return; }
     if (tk_word("interface")) { tk_interface(); return; }
     if (tk_word("trait"))     { tk_trait();     return; }
     err_at2(fl, line, "teko: the modifier opens a class, a struct, an interface or a trait", p_name());
 }
 
-void tk_public()   { tk_decl_head(TK_TPUBLIC, 0); }
-void tk_internal() { tk_decl_head(TK_TINTERNAL, 0); }
-void tk_abstract() { tk_decl_head(0 - 1, 1); }
+void tk_public()   { tk_decl_head(TK_TPUBLIC, 0, 0); }
+void tk_internal() { tk_decl_head(TK_TINTERNAL, 0, 0); }
+void tk_abstract() { tk_decl_head(0 - 1, 1, 0); }
+void tk_partial()  { tk_decl_head(0 - 1, 0, 1); }
 
 // a type's name is a word of the language in three positions at once
 i64 tk_type_word(uptr name) {

@@ -27,6 +27,15 @@
 //      (teko_struct.mc's tk_ax_index) -- no analysis, no run-time guard, because
 //      by then the bound is a literal.
 //
+// A generic is PARTIAL by the same rule a plain class is (D224): one recorded
+// region per part, in the file that declared it -- the mc records a region of
+// ONE source, and a part is written where it stands, so nothing ever asks for a
+// region that crosses a file boundary. The instance is then written as the very
+// parts the template was written as (`partial class Box__i64__4 ...;` once per
+// part) and closed as soon as the replay has read them all, which is how the
+// partial machinery of teko_class.mc, and not a second one, unites them. A part
+// declared after an instance of the generic exists is refused.
+//
 // An instance is keyed by (name, arguments) and generated ONCE: the mangled name
 // `Box__Circle__4` follows the same suffix convention overloading already uses,
 // and the instance is registered by the very `type_new` a plain `class` goes
@@ -43,17 +52,23 @@
 #define TK_MAXGP    4                 // parameters of one generic
 #define TK_MAXGARG  64                // parameters, summed across all of them
 #define TK_MAXINST  32                // instances generated in one source
+#define TK_MAXGPART 32                // recorded parts, summed across all generics
 
 uptr gn_name[TK_MAXGEN];
 i64  gn_kind[TK_MAXGEN];              // TK_KSTRUCT or TK_KCLASS
-uptr gn_text[TK_MAXGEN];              // the recorded declaration, `>` to `}`
-i64  gn_len[TK_MAXGEN];
 i64  gn_p0[TK_MAXGEN];                // slice [p0, p0+np) of the parameter table
 i64  gn_np[TK_MAXGEN];
 i64  gn_vis[TK_MAXGEN];               // the modifier the declaration carried
 i64  gn_proj[TK_MAXGEN];              // ...and the origin of the file it was in
 i64  gn_abst[TK_MAXGEN];              // ...and whether it was declared `abstract`
+i64  gn_part[TK_MAXGEN];              // ...and whether it is written in more than one part
+i64  gn_used[TK_MAXGEN];              // 1 once an instance of it exists: no part may follow
 i64  tk_ngen = 0;
+
+uptr gt_text[TK_MAXGPART];            // one recorded part, `>` to `}`, in ITS OWN file
+i64  gt_len[TK_MAXGPART];
+i64  gt_gen[TK_MAXGPART];             // the generic it is a part of
+i64  tk_ngpart = 0;
 
 uptr gp_name[TK_MAXGARG];
 i64  gp_const[TK_MAXGARG];            // 1 for `const N: i64`, 0 for a type parameter
@@ -65,35 +80,47 @@ i64  tk_ninst = 0;
 i64 tk_gen_declstmt();
 uptr tk_gen_targs(i64 gi);
 
+// teko_class.mc is included after this file: an instance of a partial generic
+// is written as its parts and closed as soon as the replay has read them all
+void tk_close_open(i64 si);
+
 // teko_access.mc is included after this file: an instance is parsed from a
 // pushed source, which is no file at all, so the modifier and the origin the
 // TEMPLATE was declared with are handed to the instance instead of being read
 // back from a frame name
 void tk_set_decl(i64 vis, i64 proj, i64 abst);
+i64 tk_frame_enter(i64 proj);
+void tk_frame_leave(i64 keep);
 
 // ---- table accessors (no raw ld64/st64 outside this section) ----
 uptr gn_name_at(i64 i)  { return ld64(gn_name + i * 8); }
 i64  gn_kind_at(i64 i)  { return ld64(gn_kind + i * 8); }
-uptr gn_text_at(i64 i)  { return ld64(gn_text + i * 8); }
-i64  gn_len_at(i64 i)   { return ld64(gn_len + i * 8); }
 i64  gn_p0_at(i64 i)    { return ld64(gn_p0 + i * 8); }
 i64  gn_np_at(i64 i)    { return ld64(gn_np + i * 8); }
 i64  gn_vis_at(i64 i)   { return ld64(gn_vis + i * 8); }
 i64  gn_proj_at(i64 i)  { return ld64(gn_proj + i * 8); }
 i64  gn_abst_at(i64 i)  { return ld64(gn_abst + i * 8); }
+i64  gn_part_at(i64 i)  { return ld64(gn_part + i * 8); }
+i64  gn_used_at(i64 i)  { return ld64(gn_used + i * 8); }
+uptr gt_text_at(i64 i)  { return ld64(gt_text + i * 8); }
+i64  gt_len_at(i64 i)   { return ld64(gt_len + i * 8); }
+i64  gt_gen_at(i64 i)   { return ld64(gt_gen + i * 8); }
 uptr gp_name_at(i64 i)  { return ld64(gp_name + i * 8); }
 i64  gp_const_at(i64 i) { return ld64(gp_const + i * 8); }
 uptr in_name_at(i64 i)  { return ld64(in_name + i * 8); }
 
 void set_gn_name_at(i64 i, uptr v)  { st64(gn_name + i * 8, v); }
 void set_gn_kind_at(i64 i, i64 v)   { st64(gn_kind + i * 8, v); }
-void set_gn_text_at(i64 i, uptr v)  { st64(gn_text + i * 8, v); }
-void set_gn_len_at(i64 i, i64 v)    { st64(gn_len + i * 8, v); }
 void set_gn_p0_at(i64 i, i64 v)     { st64(gn_p0 + i * 8, v); }
 void set_gn_np_at(i64 i, i64 v)     { st64(gn_np + i * 8, v); }
 void set_gn_vis_at(i64 i, i64 v)    { st64(gn_vis + i * 8, v); }
 void set_gn_proj_at(i64 i, i64 v)   { st64(gn_proj + i * 8, v); }
 void set_gn_abst_at(i64 i, i64 v)   { st64(gn_abst + i * 8, v); }
+void set_gn_part_at(i64 i, i64 v)   { st64(gn_part + i * 8, v); }
+void set_gn_used_at(i64 i, i64 v)   { st64(gn_used + i * 8, v); }
+void set_gt_text_at(i64 i, uptr v)  { st64(gt_text + i * 8, v); }
+void set_gt_len_at(i64 i, i64 v)    { st64(gt_len + i * 8, v); }
+void set_gt_gen_at(i64 i, i64 v)    { st64(gt_gen + i * 8, v); }
 void set_gp_name_at(i64 i, uptr v)  { st64(gp_name + i * 8, v); }
 void set_gp_const_at(i64 i, i64 v)  { st64(gp_const + i * 8, v); }
 void set_in_name_at(i64 i, uptr v)  { st64(in_name + i * 8, v); }
@@ -139,8 +166,10 @@ void tk_gen_gt(uptr msg) {
 // ---- recording a declaration ----
 
 // `<T, const N: i64>`: the names the replay substitutes, and which of them
-// carries an integer instead of a type
-void tk_gen_params(i64 gi) {
+// carries an integer instead of a type. They are APPENDED to the parameter
+// table, and how many there are is the answer -- a part of a partial generic
+// writes the list again, and what it wrote is compared with the first part's.
+i64 tk_gen_params() {
     p_expect(K_LT, "expected < in the generic parameter list");
     i64 n = 0;
     loop {
@@ -159,9 +188,25 @@ void tk_gen_params(i64 gi) {
         }
         if (!p_accept(K_COMMA)) break;
     }
-    set_gn_np_at(gi, n);
     tk_gen_gt("expected > to close the generic parameter list");
     p_next();                                    // the `>`
+    return n;
+}
+
+// the parameters a later part wrote, at [mark, mark+n), against the ones the
+// first part did: C# asks for the same names in the same order, and so does this
+void tk_gen_params_same(i64 gi, i64 mark, i64 n, uptr name) {
+    if (n != gn_np_at(gi))
+        err_at2(tk_file, tk_line, "teko: the parts disagree on the generic parameters", name);
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 a = gn_p0_at(gi) + i;
+        i64 b = mark + i;
+        if (gp_const_at(a) != gp_const_at(b) || !str_eq(gp_name_at(a), gp_name_at(b)))
+            err_at2(tk_file, tk_line, "teko: the parts disagree on the generic parameters", name);
+        i = i + 1;
+    }
 }
 
 // from the `>` to the body's `{`: the `: Base, Iface` list travels inside the
@@ -174,29 +219,59 @@ void tk_gen_to_body(uptr name) {
     }
 }
 
+// one part's declaration, from the `>` to the `}`, recorded in the file that
+// wrote it: a region of ONE source, which is what the mc records -- a region
+// that crossed a file boundary would be refused, and a part of a partial
+// generic never asks for one, because each of them is recorded where it stands
+void tk_gen_part_add(i64 gi, uptr name) {
+    if (tk_ngpart == TK_MAXGPART) err_at2(tk_file, tk_line, "teko: too many parts of a generic", name);
+    uptr start = p_start();                      // the `:` or the `{`
+    tk_gen_to_body(name);
+    i64 blen = 0;
+    uptr body = p_skip_balanced(K_LBRACE, K_RBRACE, &blen);
+    set_gt_gen_at(tk_ngpart, gi);
+    set_gt_text_at(tk_ngpart, start);
+    set_gt_len_at(tk_ngpart, body + blen - start);
+    tk_ngpart = tk_ngpart + 1;
+    p_accept(K_SEMI);                            // a C programmer's trailing ;
+}
+
+// a declaration of a name that is a generic already: one more PART of it, under
+// the same rules a partial class follows, or the duplicate it would otherwise be
+void tk_gen_reopen(i64 gi, uptr name, i64 kind, i64 part) {
+    if (!part) err_at2(tk_file, tk_line, "teko: duplicate generic", name);
+    if (!gn_part_at(gi)) err_at2(tk_file, tk_line, "teko: the type is declared without `partial`", name);
+    if (gn_kind_at(gi) != kind) err_at2(tk_file, tk_line, "teko: only a class is partial", name);
+    if (gn_used_at(gi)) err_at2(tk_file, tk_line, "teko: this part comes after the type was used", name);
+    i64 mark = tk_ngp;
+    tk_gen_params_same(gi, mark, tk_gen_params(), name);
+    tk_ngp = mark;                               // the first part's list is the one kept
+}
+
 // `class Name<...> ...` / `struct Name<...> ...`: the parameter list is parsed,
 // everything after it is RECORDED, and no declaration is produced. The name
 // becomes a statement word, which is the position `Box<Circle, 4> b;` arrives in.
-void tk_gen_record(uptr name, i64 kind, i64 vis, i64 proj, i64 abst) {
+void tk_gen_record(uptr name, i64 kind, i64 vis, i64 proj, i64 abst, i64 part) {
+    i64 gi = tk_gen_find(name);
+    if (gi >= 0) {
+        tk_gen_reopen(gi, name, kind, part);
+        tk_gen_part_add(gi, name);
+        return;
+    }
     if (tk_ngen == TK_MAXGEN) err_at2(tk_file, tk_line, "teko: too many generic declarations", name);
-    if (tk_gen_find(name) >= 0) err_at2(tk_file, tk_line, "teko: duplicate generic", name);
     if (tk_struct_find(name) >= 0) err_at2(tk_file, tk_line, "teko: the name is already a type", name);
-    i64 gi = tk_ngen;
+    gi = tk_ngen;
     set_gn_name_at(gi, name);
     set_gn_kind_at(gi, kind);
     set_gn_vis_at(gi, vis);
     set_gn_proj_at(gi, proj);
     set_gn_abst_at(gi, abst);
+    set_gn_part_at(gi, part);
+    set_gn_used_at(gi, 0);
     set_gn_p0_at(gi, tk_ngp);
-    tk_gen_params(gi);
-    uptr start = p_start();                      // the `:` or the `{`
-    tk_gen_to_body(name);
-    i64 blen = 0;
-    uptr body = p_skip_balanced(K_LBRACE, K_RBRACE, &blen);
-    set_gn_text_at(gi, start);
-    set_gn_len_at(gi, body + blen - start);
+    set_gn_np_at(gi, tk_gen_params());
     tk_ngen = tk_ngen + 1;
-    p_accept(K_SEMI);                            // a C programmer's trailing ;
+    tk_gen_part_add(gi, name);
     syntax_stmt(name, &tk_gen_declstmt);
 }
 
@@ -221,20 +296,46 @@ uptr tk_gen_frame(uptr mang, uptr fl, i64 line) {
     return tk_join3(mang, " instantiated from ", tk_join3(fl, ":", tk_num(line)));
 }
 
-// `class Box__Circle__4 ` + the recorded declaration + `;`. The trailing `;` is
-// the instance's own: without it the p_accept(K_SEMI) that closes a type body
-// would reach past the end of the pushed source and eat the caller's.
-uptr tk_gen_text(i64 gi, uptr mang, uptr plen) {
+// `class Box__Circle__4 ` + the recorded declaration + `;`, once per recorded
+// part -- a partial generic is instantiated as the very parts it was written
+// as, and the machinery a partial class already has is what unites them. The
+// trailing `;` is the instance's own: without it the p_accept(K_SEMI) that
+// closes a type body would reach past the end of the pushed source and eat the
+// caller's.
+uptr tk_gen_head(i64 gi, uptr mang) {
     uptr head = tk_join3("struct ", mang, " ");
     if (gn_kind_at(gi) == TK_KCLASS) head = tk_join3("class ", mang, " ");
+    if (gn_part_at(gi)) head = tk_join("partial ", head);
+    return head;
+}
+
+uptr tk_gen_text(i64 gi, uptr mang, uptr plen) {
+    uptr head = tk_gen_head(gi, mang);
     i64 hl = cstrlen(head);
-    i64 bl = gn_len_at(gi);
-    uptr d = xalloc(hl + bl + 2);
-    mem_copy(d, head, hl);
-    mem_copy(d + hl, gn_text_at(gi), bl);
-    st8(d + hl + bl, ';');
-    st8(d + hl + bl + 1, 0);
-    st64(plen, hl + bl + 1);
+    i64 total = 0;
+    i64 i = 0;
+    loop {
+        if (i >= tk_ngpart) break;
+        if (gt_gen_at(i) == gi) total = total + hl + gt_len_at(i) + 1;
+        i = i + 1;
+    }
+    uptr d = xalloc(total + 1);
+    i64 at = 0;
+    i = 0;
+    loop {
+        if (i >= tk_ngpart) break;
+        if (gt_gen_at(i) == gi) {
+            mem_copy(d + at, head, hl);
+            at = at + hl;
+            mem_copy(d + at, gt_text_at(i), gt_len_at(i));
+            at = at + gt_len_at(i);
+            st8(d + at, ';');
+            at = at + 1;
+        }
+        i = i + 1;
+    }
+    st8(d + total, 0);
+    st64(plen, total);
     return d;
 }
 
@@ -282,6 +383,7 @@ void tk_gen_replay(i64 gi, uptr mang, uptr args, uptr vals, i64 n, uptr fl, i64 
     uptr text = tk_gen_text(gi, mang, &len);
     tk_gen_bind(gi, args, vals, n);
     tk_set_decl(gn_vis_at(gi), gn_proj_at(gi), gn_abst_at(gi));   // the instance is the template's own
+    i64 s_frame = tk_frame_enter(gn_proj_at(gi));
     i64 d0 = p_depth();
     p_push_source(tk_gen_frame(mang, fl, line), text, len);
     p_next();                                    // spends the `>` the caller sat on
@@ -289,6 +391,7 @@ void tk_gen_replay(i64 gi, uptr mang, uptr args, uptr vals, i64 n, uptr fl, i64 
         if (p_depth() == d0) break;
         top_add(parse_top());
     }
+    tk_frame_leave(s_frame);
     tk_line = s_line;
     tk_file = s_file;
     tk_own_methods = s_own;
@@ -354,12 +457,21 @@ uptr tk_gen_targs(i64 gi) {
     if (p_id() == K_COMMA) err_at(p_file(), p_line(), tk_gen_arity(gi));
     tk_gen_gt(tk_gen_arity(gi));
     uptr mang = tk_gen_mangle(gn_name_at(gi), args, n);
+    set_gn_used_at(gi, 1);                       // no part of it may follow
     if (tk_inst_find(mang) >= 0) {
         p_next();                                // memoized: nothing to generate
         return mang;
     }
     tk_gen_replay(gi, mang, args, vals, n, fl, line);
+    tk_gen_close(mang);
     return mang;
+}
+
+// an instance written as PARTS is closed as soon as the replay has read them
+// all: every part was recorded before the instantiation asked for one
+void tk_gen_close(uptr mang) {
+    i64 si = tk_struct_find(mang);
+    if (si >= 0) tk_close_open(si);
 }
 
 // the type table row of `Name<args>`, instantiating it on first use
