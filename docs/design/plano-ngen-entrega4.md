@@ -2297,3 +2297,77 @@ tipo CONTADO (K4); captura de um PARÂMETRO da função declarante (K4); `op.Inv
 `Action<>`/`params T[]` embalando lambda (§41(e)); a grafia contextual como argumento de uma função
 LIVRE ou de um método SOBRECARREGADO (a forma explícita `new Op(...)` já cobre as duas posições, na
 prática).
+
+## 48. K4c landado -- taint por (função, nome), coerção de ternário; o achado do §47 não reproduz (2026-09-05)
+
+Três itens, três commits.
+
+**Item 1 -- taint chaveado por (owner, nome), não por nome global.** `taint_name`/`tk_taint_find`
+(`teko_deleg.mc`, K4b) era uma tabela de NOMES da unidade inteira, nunca resetada: um `f` com
+`&`-captura numa função contaminava `return f;` de uma lambda LIMPA chamada `f` em OUTRA função.
+Corrigido com uma segunda coluna, `taint_owner`, e um resolvedor único, `tk_taint_owner()`: durante
+o PARSE (o `on_stmt` `tk_lam_taint_stmt`, e os três sítios que checam no próprio `parse_expr` --
+`tk_field_use`, `tk_static_use`, `tk_ha_index`), `p_decl_name()` já é a função/método corrente
+(`docs/reference/hooks.md`: setado por `parse_function` pela duração do corpo); depois que o parse
+termina e o resto do `tk_lam_escapes` roda numa PASS (`tk_this_assign` via `tk_typeof_pass`,
+`tk_deleg_return` via `tk_deleg_pass`), `p_decl_name()` responde 0 -- o resolvedor cai para
+`tk_cur_fn_name` (novo global, `teko_typeof.mc`), setado pelos DOIS loops que andam por `N_FUNC`
+numa pass (`tk_ty_pass_walk` e o próprio loop de `tk_deleg_pass`), o mesmo padrão de
+`tk_pass_proj`/`tk_deleg_cur_ns`.
+
+No caminho, uma causa-raiz de SIGSEGV latente (nunca disparado até este crumb precisar ler
+`p_decl_name()` DEPOIS de uma lambda construída no mesmo corpo): `top_add()` limpa `p_decl_name()`
+como efeito colateral (documentado), e `tk_lambda_finish` restaurava o nome salvo ANTES do seu
+PRÓPRIO `top_add(f)` (e dos de vtable/release/allocator logo atrás) -- cada um desses re-zerava o
+que acabara de ser restaurado, deixando o resto do corpo da função ENVOLVENTE com `p_decl_name()==0`
+pelo resto daquela declaração. Corrigido movendo o `p_set_decl_name(saved)` para o fim de
+`tk_lambda_finish`, depois de todo `top_add`.
+
+Flow-insensitivo DENTRO da função continua (reatribuição pra uma lambda limpa ainda é tainted --
+limite documentado, mantido). Os cinco casos de escape do K4b (return direto/indireto, campo
+explícito/implícito, elemento de `T[]`) seguem recusados; verificado por probe fora de `tests/`.
+
+**Item 2 -- o achado adjacente do §47 NÃO reproduz.** `apply(Op f, i64 x) { return f(x); }` +
+`Op g = add; apply(g, 41);` compila e roda limpo (42) tanto no compilador desta branch quanto no
+compilador da base `a11623ca`, sem tocar em código algum -- a dívida já não existe (fechada por
+alguma correção landada entre o `68b38174` que a viu e o `a11623ca` que abre este crumb; nenhum
+commit isolado aponta o culpado, e não vale caçar). Variações tentadas, todas verdes (42), a partir
+do CONTEXTO de `surface_lambda.tk` (classes, delegates, `namespace`, várias funções, não um arquivo
+minúsculo à parte):
+  1. o mínimo do §47 isolado (`apply`/`add` livres, sem mais nada no arquivo).
+  2. o mesmo, colado dentro de `surface_lambda.tk` inteiro (uma função nova, `free_arg_var_check`).
+  3. via MÉTODO (`Holder.relay(h, 43)`, `h` uma variável já existente).
+  4. o mesmo método, com o `Op` construído por uma lambda COM captura por valor.
+  5. um NOME DE FUNÇÃO (não lambda) atribuído à variável antes de passá-la (`Op g = add1;`).
+  6. dentro de um `namespace`, chamando uma função LIVRE sobrecarregada (`apply` com duas
+     assinaturas, 2 e 3 parâmetros) com uma variável já existente.
+  7. o mesmo de (6) mas testado junto com (1)-(5) no MESMO arquivo, todas as combinações vivas ao
+     mesmo tempo.
+Dívida fechada por não-reprodução -- não há regressão a corrigir, nem fixture a escrever (a lei do
+handoff não pede oráculo para o que já funciona).
+
+**Item 3 -- coerção de ternário num delegate.** `Op g = flag ? add : mul;` morria em
+`teko: Op takes a function, another Op, or null` -- a hipótese do crumb (`__tN` do hoist do
+ternário chegando como `i64` em `tk_deleg_coerce`) estava invertida: `tk_deleg_pass` roda ANTES de
+`tk_ternary_pass` (a própria ordem do arquivo, `teko.mc`), então `tk_deleg_coerce` vê o placeholder
+CRU (`tk_ternary(c, a, b)`, o `N_CALL` de nome `"tk_ternary"` que `tk_tern_infix` constrói) -- nenhuma
+das quatro formas que ele reconhecia batia com isso. Ensinado UM shape a mais: um `tk_ternary` faz
+`tk_deleg_coerce` recursar em cada braço (`a`/`b`), religando a mesma lista de irmãos com os braços
+já coeridos, e devolve o MESMO placeholder. `tk_ternary_pass`, rodando depois, enxerga dali em
+diante dois braços já do tipo do delegate (um nome de função virou `tk_deleg_wrap`, já tipado `si`
+via `tk_xt_put`) -- o check de "os dois braços têm tipos diferentes" fecha sozinho, sem outra
+mudança. Cobre as três chamadas de `tk_deleg_coerce` (`Op g = <ternário>;`, `g = <ternário>;`,
+`return <ternário>;`) e ternário ANINHADO de graça (a recursão desce nos dois braços de cada nível).
+9 linhas.
+
+**Fixture:** `surface_lambda.tk` ganha `clean_f_returns_check` (item 14, item 1) e `ternary_check`
+(item 15, item 3) -- zero fixture nova. Nada para o item 2 (não reproduziu).
+
+**Gate:** 38/38 (`--entry-only`); `--dump-ast` das 37 fixtures não tocadas byte-idêntico ao
+compilador da base `a11623ca` (`same=37 diff=0`); `mc limits ngen` `verdict ok`, zero linha `grew`
+(crescimento aditivo pequeno: +2 funcs/lowered, +1 global — `tk_taint_owner`/`tk_cur_fn_name` —, e
+as ~8 linhas do item 3, todos dentro da reserva). Probes fora de `tests/`, descartadas: as cinco
+recusas de escape do K4b (ainda recusadas, mesma frase); reatribuição pra lambda limpa (ainda
+tainted, limite mantido); as sete variações do item 2 acima; ternário direto, parentetizado, via
+`return`, via atribuição, e aninhado (item 3), todos corretos em RUNTIME (não só compilam -- o
+braço certo roda).

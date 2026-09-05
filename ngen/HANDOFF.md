@@ -1338,6 +1338,39 @@ probes fora de `tests/`. Gate: 38/38; `--dump-ast` das 37 anteriores byte-idênt
 tipo CONTADO (herdada do K4); captura de um PARÂMETRO da função declarante (herdada do K4);
 `op.Invoke(x)`/`Func<>`/`Action<>`/`params T[]` embalando lambda (herdadas do §41(e)).
 
+**K4c LANDADO** (entrega 5, D221/§41, 2026-09-05): três correções pequenas sobre o K4b.
+
+1. **Taint chaveado por (função, nome), não por nome global.** `taint_name` era uma tabela de NOMES
+   da unidade inteira, nunca resetada — um `f` com `&`-captura numa função contaminava `return f;`
+   de uma lambda LIMPA chamada `f` em outra função. Corrigido com uma coluna `taint_owner` e um
+   resolvedor `tk_taint_owner()`: `p_decl_name()` durante o parse (a função corrente, per
+   `docs/reference/hooks.md`), `tk_cur_fn_name` (novo, `teko_typeof.mc`) uma vez o parse termina e
+   o resto do check roda numa pass (`tk_this_assign`/`tk_deleg_return`) — setado pelos dois loops
+   que andam por `N_FUNC` numa pass (`tk_ty_pass_walk`, o próprio loop de `tk_deleg_pass`). No
+   caminho, achado e corrigido um SIGSEGV latente: `top_add()` limpa `p_decl_name()` como efeito
+   colateral, e `tk_lambda_finish` restaurava o nome salvo ANTES do seu PRÓPRIO `top_add(f)` (e dos
+   de vtable/release/allocator) — o restauro foi movido para o FIM, depois de todo `top_add`.
+   Flow-insensitivo dentro da função continua (reatribuição pra lambda limpa ainda é tainted).
+2. **O achado adjacente do §47 não reproduz.** `apply(Op f, i64 x) { return f(x); }` +
+   `Op g = add; apply(g, 41);` compila e roda limpo (42) tanto nesta branch quanto no compilador da
+   base `a11623ca` — a dívida já não existe (fechada por alguma correção entre o `68b38174` que a
+   viu e o `a11623ca` que abre este crumb). Sete variações tentadas a partir do CONTEXTO de
+   `surface_lambda.tk` (função livre, método, com/sem captura, nome-de-função puro, dentro de
+   `namespace`, com overload) — todas verdes. Dívida fechada por não-reprodução, sem fixture.
+3. **Coerção de ternário num delegate.** `Op g = flag ? add : mul;` morria em "Op takes a function,
+   another Op, or null" — `tk_deleg_pass` roda ANTES de `tk_ternary_pass`, então `tk_deleg_coerce`
+   via o placeholder CRU (`tk_ternary(c, a, b)`), não um `if`/temporário já rebaixado. Ensinado um
+   shape a mais: um `tk_ternary` faz `tk_deleg_coerce` recursar em cada braço, religando a mesma
+   lista de irmãos com os braços coeridos — `tk_ternary_pass`, rodando depois, já vê os dois braços
+   do tipo do delegate, e o check de tipos-diferentes fecha sozinho. Cobre `Op g = <ternário>;`,
+   `g = <ternário>;`, `return <ternário>;` e ternário aninhado.
+
+Fixture: `surface_lambda.tk` ganha `clean_f_returns_check` (item 14, item 1) e `ternary_check`
+(item 15, item 3) — zero fixture nova; item 2 sem fixture (não reproduziu). Gate: 38/38;
+`--dump-ast` das 37 anteriores byte-idêntico à base `a11623ca` (`same=37 diff=0`); `mc limits ngen`
+`verdict ok`, zero linha `grew`. Detalhe completo, incluindo as sete variações do item 2 e as
+probes de runtime do item 3, em `docs/design/plano-ngen-entrega4.md` §48.
+
 ## 5.1 Armadilhas já pagas (não repita)
 
 1. **`mc --exe` emite Mach-O SEMPRE.** `minicompiler/mc` `src/main.mc:227` faz
@@ -1452,6 +1485,19 @@ tipo CONTADO (herdada do K4); captura de um PARÂMETRO da função declarante (h
     ele cai em `parse_primary` como um token comum. A correção é do lado do PÓS-fixo, não
     do prefixo: `tk_dot`/`tk_bracket` sinkam pela cadeia de `- ! ~` que RECEBERAM como
     `left`, resolvem contra o operando de verdade, e reembrulham (`ngen/teko_prefix.mc`).
+
+18. **`top_add()` limpa `p_decl_name()` como efeito colateral -- um `top_add` ANINHADO (chamado
+    de DENTRO do corpo de uma declaração ainda sendo lida) apaga o nome da declaração
+    ENVOLVENTE, e nada restaura sozinho.** `tk_lambda_finish` (`teko_deleg.mc`, K4) constrói a
+    função da lambda e chama `top_add(f)` (e mais três: vtable/release/allocator) ENQUANTO ainda
+    está no meio de parsear a instrução do CALLER (`Op f = new Op(...) => ...;`). Restaurar
+    `p_decl_name()` para o nome salvo ANTES desses `top_add` (como o código fazia) é inútil: cada
+    `top_add` seguinte zera de novo, e o resto da instrução -- e de TUDO que vem depois dela no
+    mesmo corpo -- passa a ler `p_decl_name()==0` pelo resto daquela declaração. Ficou invisível
+    até o K4c precisar ler `p_decl_name()` DEPOIS de uma lambda construída no mesmo corpo (o taint
+    por função, item 1). Regra: **quem chama `top_add` para uma declaração GERADA dentro de outra
+    ainda em curso restaura `p_decl_name()` por ÚLTIMO, depois de TODO `top_add` que fizer** --
+    não no meio.
 
 ## 5.2 Canal com a sessão do mc
 
