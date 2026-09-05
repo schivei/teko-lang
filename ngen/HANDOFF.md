@@ -565,7 +565,59 @@ sem `#include`.
   realmente não tocadas (todas menos essas duas e `surface_overload_free.tk`) **byte-idêntica**
   contra o compilador da base em `545b26b5`, os dois no mc 0.13.0.
 
-**Fila:** `namespace`/`import`/`using` → `const` → `switch` (D222) →
+**Entrega 5 — N1 LANDADO** (D218/D226, plano §31/§32; 26 fixtures): `namespace A.B { ... }` e
+`namespace A.B;` (file-scoped, C# 10), `using A.B;` e tipos qualificados, `teko_ns.mc` (novo).
+- **Nome real = `A__B__Circle`** (`type_new`, sem alias); o nome CURTO nunca é `type_alias`
+  (`alias_find` responde só o último registrado em silêncio — colidiria entre namespaces). É
+  registrado como palavra própria (`syntax`/`syntax_stmt`/`syntax_expr`, as mesmas duas últimas
+  que `tk_type_word` já usa) e a identidade sai da lista de busca **no sítio de uso**: namespace
+  corrente para fora, prefixo a prefixo, e só então os `using` do ARQUIVO — nunca memoizada.
+- **Declaração nunca busca:** qualifica com o namespace corrente e procura EXATO
+  (`tk_ns_qualify`, chamado uma vez por construto que declara tipo — `class`/`struct`/
+  `interface`/`trait`); fora de um namespace é a identidade, então nenhum programa sem
+  `namespace` muda de forma. O reopen check de `partial` (`teko_class.mc`) precisou da mesma
+  qualificação (read-only, `tk_ns_qualified_name`) para não fundir dois `partial class Foo` de
+  namespaces diferentes.
+- **Qualificado (`geo.Circle`, `geo.Circle.made`, `new geo.Circle()`)** resolve pelo 1º SEGMENTO
+  (`geo`), lido com `p_name()`+`p_next()` — nunca `p_ident()`, pois o segmento é palavra reservada
+  a partir do 2º uso. `tk_ns_walk` cresce o nome acumulado por `.` enquanto o que já foi lido é um
+  namespace conhecido, e para no instante em que vira um tipo declarado — `tk_static_member`
+  (já existente) consome o resto (`.made`, `.tally()`).
+- **`tk_struct_find` ganhou um fallback** (namespace corrente + `using`s do arquivo,
+  `tk_ns_resolve`) que responde -1 sem custo quando o programa não usa namespace nenhum — mas o
+  scan original teve de virar `tk_struct_find_exact`, chamado por todo sítio que testa uma
+  string que ELE MESMO construiu (dentro de `teko_ns.mc`, e o reopen check/`tk_gen_close`), pois
+  `tk_struct_find` chamando de volta `tk_ns_resolve` sobre seu próprio candidato recursa sem
+  convergir (medido: estouro de pilha via `lldb bt`, ver plano §32 item 1).
+- **`tk_newname` (teko_struct.mc) aceita uma palavra namespaced curta já reservada** por OUTRO
+  namespace (`mesh { class Circle }` depois de `geo { class Circle }`), checando o exato
+  qualificado antes de aceitar — o mesmo texto reservado por dois namespaces diferentes não é
+  duplicata; pelo mesmo texto no MESMO namespace, ainda é.
+- **`tk_ns_top`** é a única posição de tipo que o core lê sem hook nenhum (`Circle f(Circle c)`
+  no topo, `syntax(curto, ...)`); `tk_gen_ty` (teko_generic.mc) e `tk_default_param`
+  (teko_default.mc) ganharam o mesmo ramo namespaced ANTES de `p_type()`/`type_of_token` para o
+  campo/parâmetro/retorno de membro e o parâmetro de função livre, respectivamente.
+- **Achados/correções do próprio crumb** (plano §32): `tk_type_stmt`/`tk_type_expr` precisaram
+  de um `if (si < 0) err_at2(...)` explícito (liam lixo fora da tabela sem); `tk_ns_seg_stmt` usa
+  `p_id() != tk_ns_dot` (não `tk_dot_follows`, que responde outra pergunta depois que o nome
+  qualificado inteiro já foi consumido); `tk_new` precisou reler `name = sr_name_at(si)` antes de
+  montar o símbolo do alocador (senão `new Circle()` bare, resolvido via `using`, chamava
+  `circle_new` em vez de `geo__circle_new`); `tk_gen_declstmt` cedeu seu próprio rabo
+  (`tk_var_after_type`, agora em `teko_ns.mc`) para `tk_ns_seg_stmt` reusar — nenhum dos dois pode
+  entregar o tipo já resolvido ao `parse_var` do core, que insiste em consumir a palavra-tipo ele
+  mesmo, e os dois já consumiram mais de um token antes de saber o tipo.
+- **Dívidas registradas (não escondidas):** cast de nome curto namespaced; `global`/`extern`/
+  `main` dentro de namespace FILE-SCOPED (só o BLOCO é pego, pelo laço que este módulo controla);
+  generic declarado dentro de namespace continua com nome CURTO simples (D31.14); instanciação de
+  genérico qualificada; `using`/namespace fora do topo do arquivo sem checagem de ordem.
+- **Probes de recusa** (fora de `ngen/tests/`): dois `using` ambíguos
+  (`teko: ambiguous name Circle (geo, mesh)`); `namespace` sem `{` nem `;`; tipo curto sem
+  `using` nem qualificação (`teko: unresolved name: Circle`); `extern`/global/`main` dentro de
+  bloco de namespace; `partial` reaberto em outro namespace (confirmado: NÃO funde, cada um só
+  enxerga seu próprio campo); `using` dentro de bloco (recusa natural do core, `using` só existe
+  em posição de topo).
+
+**Fila:** funções livres em namespace + `import` (N2/N3) → `const` → `switch` (D222) →
 closures/`ref`/`out` (D221, architect-first) → compilador teko de `<mc/core_min>` (plano
 §26). **Fora:** `var`, `type`, `match`, Variant, método parcial, nested, `foreach` (precisa de
 iteráveis).
@@ -700,6 +752,18 @@ sempre fez, resolver `.`. **Nada ficou híbrido.**
     `"/lib/ld-linux-aarch64.so.1"`, `libc = "libc.so.6"` — mc `docs/build.md` §`[target]`) e
     não têm mais `[linker]`. `ngen/mc.toml` versionado (linux/x86_64 + `[linker] cc`) segue
     intacto; o CI deriva o config por perna.
+
+16. **Um lookup com fallback nunca chama a si mesmo (mesma função) sobre uma string que ELE
+    PRÓPRIO construiu.** `tk_struct_find` (namespace, entrega 5 N1) ganhou um fallback
+    (`tk_ns_resolve`) que tenta candidatos qualificados; um candidato que falha chama de volta a
+    função "exact + fallback" original — e o próximo candidato é sempre MAIOR que o anterior
+    (mais um prefixo), nunca repete o argumento, então a recursão nunca bate uma base e nunca
+    converge. Sintoma: `EXC_BAD_ACCESS`/`SIGSEGV` no meio do parse, sem mensagem — só visível com
+    `lldb bt` (a pilha mostra as duas funções alternando centenas de vezes). Correção: separar o
+    scan puro (`tk_struct_find_exact`, sem fallback) e fazer todo sítio que testa uma string
+    CONSTRUÍDA internamente (o próprio `tk_ns_resolve`, o reopen check de `partial`, uma busca por
+    nome já manglado) chamar a versão exata — só o sítio que lê o que a FONTE escreveu chama a
+    versão com fallback.
 
 ## 5.2 Canal com a sessão do mc
 

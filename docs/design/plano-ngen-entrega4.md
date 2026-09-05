@@ -1058,3 +1058,55 @@ os nomeia — sem tensão. C# escopa nome por arquivo e o mc reserva palavra pro
 por D31.5 (o ngen é dono da resolução do nome curto), com o cast como única fresta, declarada. D217
 (sem Variant): namespace é resolvido a NOME no parse, nada dinâmico. D227: o pass novo corre antes
 do `tk_rc_pass`, que continua sendo o último.
+
+## 32. N1 landado — `namespace`/`using` + tipos qualificados (2026-09-05, errata)
+
+`feat/ngen-namespace`, módulo `teko_ns.mc` (novo). 26/26 em exit esperado; `--dump-ast` das 25
+fixtures anteriores **byte-idêntico**; `mc limits` verdict `ok` (heap 520352→577696 B, dentro da
+tolerância 1.00). Fixture `surface_namespace.tk` + `ngen/tests/parts/ns_file.tk` (file-scoped,
+`#include`, fora do glob), cobrindo os 14 itens de (a) e as formas do (d).
+
+**Desvios do desenho, medidos:**
+
+1. **`tk_struct_find` não pôde virar diretamente "exact + fallback"** — um `tk_ns_resolve`
+   chamando de volta `tk_struct_find` sobre uma string que ELE MESMO construiu (o prefixo de
+   namespace, o candidato de `using`) recursa sem convergir: cada tentativa falha e o próximo
+   candidato é maior, nunca repete o argumento anterior, então nunca bate a base da recursão —
+   medido como `EXC_BAD_ACCESS` no topo da pilha (estouro de pilha) num `lldb bt`. Correção: o
+   scan original vira `tk_struct_find_exact` (sem fallback), `tk_struct_find` passa a ser
+   `exact-scan; se falhar, tk_ns_resolve`, e todo sítio INTERNO de `teko_ns.mc` que testa uma
+   string que ele próprio montou (`tk_ns_try_prefixes`, o laço de `using` de `tk_ns_resolve`,
+   `tk_ns_walk`) chama a versão exata. O mesmo troca em `teko_class.mc` (reopen check e
+   `tk_class_reopen`) e `teko_generic.mc` (`tk_gen_close`/`tk_gen_struct`, que buscam por um
+   nome já manglado) — nenhum desses precisa da lista de busca, só da resposta exata.
+2. **`tk_type_stmt`/`tk_type_expr` (teko_access.mc) precisaram de um `if (si < 0) err_at2(...)`
+   explícito**, não ficaram "unmodified" como a primeira leitura do (b) sugeria: com `Circle`
+   um nome namespaced sem `using` nem qualificação, `tk_struct_find` agora PODE devolver -1, e
+   sem o guard `sr_ty_at(-1)`/`tk_static_member(-1,...)` lia lixo fora da tabela em vez de
+   reportar `teko: unresolved name` — é o que fecha a mensagem clara do probe "curto sem
+   `using` nem qualificação".
+3. **`tk_ns_seg_stmt` não podia reusar `tk_dot_follows`** (a peça que `tk_type_stmt` usa): essa
+   função responde "um `.` segue o token ATUAL, ainda não lido" — certo quando o handler está
+   sentado no PRÓPRIO nome do tipo, errado depois de `tk_ns_walk` já ter consumido `geo.Circle`
+   inteiro, quando o token atual É o `.` ou já é o que vem depois dele. A checagem virou
+   `p_id() != tk_ns_dot` (o parser está OU NÃO sobre um `.` agora). Sem essa correção o `.made`
+   de `geo.Circle.made` era perdido silenciosamente e a leitura seguinte (`Circle` como se fosse
+   o nome de uma variável) por acidente às vezes até compilava errado.
+4. **`tk_new` precisou de uma segunda correção depois do `tk_ns_walk`**: o nome usado para
+   montar o símbolo do alocador (`tk_new_pick`/`tk_ctor_name`) ficava o CURTO não-qualificado
+   (`circle_new` em vez de `geo__circle_new`) quando a resolução vinha do fallback de
+   `tk_struct_find` (namespace corrente ou `using`) em vez do `tk_ns_walk` explícito — o `si`
+   resolvia certo, o texto do símbolo não. Corrigido lendo `name = sr_name_at(si)` assim que
+   `si` é validado, antes de `tk_new_pick`. Invisível em código sem namespace (ali `name` já era
+   `sr_name_at(si)` por construção).
+5. **`teko_generic.mc:254` (`tk_gen_record`) NÃO ganhou `tk_ns_qualify`**, ao contrário do que a
+   lista de toques do (d) sugeria: `tk_gen_find`/`tk_gen_declstmt` comparam pelo nome CURTO que o
+   `syntax_stmt` carrega, e qualificar `gn_name` sem também reescrever essa busca quebraria o uso
+   comum (não-namespaced) de generics. Como D31.14 já aceita "genérico qualificado é recusado"
+   como dívida, um generic declarado dentro de um namespace continua registrado pelo nome CURTO
+   simples, colidindo com o "duplicate generic" de hoje se outro namespace repetir o nome — dívida
+   estreita, sem fixture que a exercite, registrada no cabeçalho de `tk_gen_record`.
+6. **`main`/`extern`/global dentro de um namespace FILE-SCOPED não é pego** (só o BLOCO `{ }` é,
+   via o laço que este módulo já possui): não há hook de "todo `parse_top` top-level" fora de um
+   laço que o módulo mesmo controla, e ganhar um não é escopo do N1 (não registra `pass()`
+   nenhum). Os probes usam a forma de bloco, que é pega. Fica para o `tk_ns_pass` do N2.

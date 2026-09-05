@@ -465,7 +465,7 @@ void tk_interface() {
     p_next();                                    // the `interface` word
     i64 vis = tk_take_decl_vis();                // the `public`/`internal` before the word
     i64 proj = tk_take_decl_proj();
-    uptr name = tk_newname("interface");
+    uptr name = tk_ns_qualify(tk_newname("interface"));   // the current namespace, if any
     i64 ty = tk_type_word(name);                 // a name of its own type parses
     i64 si = tk_type_add(name, ty, 0 - 1, TK_KIFACE, vis, proj);
     set_sr_m0_at(si, tk_nifmeth);
