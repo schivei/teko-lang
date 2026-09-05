@@ -110,10 +110,16 @@ void set_vi_name_at(i64 i, uptr v)  { st64(vi_name + i * 8, v); }
 i64 tk_bracket(i64 left) {
     i64 x = tk_ax_find(left);                    // an ARRAY FIELD, whose length is known
     if (x >= 0) return tk_array_index(left, x);  // here: teko_struct.mc lowers it now
+    if (nd_kind(left) == N_IDENT) {
+        i64 li = tk_arr_find(nd_name(left));      // a LOCAL array (teko_array.mc), known too
+        if (li >= 0) return tk_arr_index_of(left, av_ty_at(li), av_nel_at(li), av_name_at(li));
+    }
     i64 line = p_line();
     uptr fl = p_file();
     i64 idx = parse_expr(0);
     p_expect(K_RBRACK, "expected ] after the index");
+    if (nd_kind(left) == N_IDENT && tk_arr_write_follows())
+        return tk_arr_defer_write(left, idx, line, fl);   // maybe a GLOBAL array; the pass decides
     i64 n = node_new(N_INDEX, line, fl);
     set_nd_a(n, left);
     set_nd_b(n, idx);

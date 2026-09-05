@@ -44,6 +44,7 @@ i64 tk_block() {
     uptr fl = p_file();
     p_expect(K_LBRACE, "expected {");
     i64 mark = tk_nlocal;
+    i64 amark = tk_narr;                         // teko_array.mc's own local-array scope
     i64 head = 0;
     loop {
         if (p_id() == K_RBRACE) break;
@@ -52,6 +53,7 @@ i64 tk_block() {
     }
     p_next();                                    // }
     tk_nlocal = mark;                            // the block's locals die here
+    tk_narr = amark;                             // ...and its arrays too
     i64 b = node_new(N_BLOCK, line, fl);
     set_nd_a(b, head);
     return b;

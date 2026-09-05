@@ -879,6 +879,70 @@ direita, mesma precedência de `||` (`ngen/teko_ternary.mc`, novo).
   incondicional da dobra) — escrever a guarda no último braço é ignorado; documentado, não
   fechado (o núcleo não tem exceção em runtime para cobrir o caso sem match).
 
+**Entrega 5 — ARRAYS FIXOS LANDADO** (plano §39; 32 fixtures): `T a[N];` local e global, `a[i]`,
+`a[i] = e`, `a[i] += e`/`-=`/`++`/`--` e `a.Length` — o núcleo já lê a DECLARAÇÃO (`N_VAR`/
+`N_GLOBAL` com `nd_val` = a contagem, `language.md` § Locals/§ Globals); o `[`/`.` são só deste
+crumb (`ngen/teko_array.mc`, novo). Um fix pequeno do `switch` num commit separado (abaixo).
+- **LOCAL, resolvido no parse** — a mesma máquina do campo-array de `teko_struct.mc`. O `N_VAR` de
+  um array é observado por um SEGUNDO `on_stmt` (`tk_arr_on_stmt`, ao lado do `tk_on_stmt` que já
+  existia) e registrado numa tabela própria (`av_*`/`tk_narr`), com escopo por bloco: `tk_block`
+  (`teko_stmt.mc`) ganhou uma SEGUNDA marca/restauração (`amark`/`tk_narr`), ao lado da que já
+  cuidava de `tk_nlocal`. `tk_bracket` (`teko_params.mc`, o mesmo dono do `[` desde o C7) checa a
+  tabela ANTES do fallback de `params`; achando, resolve tudo ali — leitura, `=`, `+=`/`-=`/`++`/
+  `--` (`tk_arr_index_of`) — sem deixar nó pendente.
+- **GLOBAL, resolvido num `pass()`** — `on_stmt` não vê declaração de topo (`hooks.md` § on_stmt) e
+  não existe hook público sobre uma; um `pass(&tk_array_pass)`, registrado ANTES de
+  `tk_params_pass`, varre `nnodes` por `N_GLOBAL` com `nd_val != 0` (`tk_garr_collect`). Uma
+  LEITURA que o parser não resolveu já é o `N_INDEX` que o `[` de `params` também deixa (o mesmo
+  fallback de sempre, `teko_params.mc`'s próprio cabeçalho) — o passe acha só os que nomeiam um
+  array global e reescreve em `node_assign`, deixando os outros (o `xs[i]` de um `params`) intactos
+  para o `tk_params_pass` de sempre. Uma ESCRITA não pode esperar o passe — o núcleo recusa
+  `g[i] = e;` no PRÓPRIO parse (`left side of assignment must be a name`) — então `tk_bracket` lê
+  `=`/`+=`/`-=`/`++`/`--` também no fallback, e devolve um placeholder (`tk_call("tk_unresolved_
+  array", 0)`, o MESMO idioma do `.` deferido de `teko_typeof.mc`) que o passe resolve ou recusa
+  (`teko: not a known array`, uma recusa estritamente NOVA — antes disso o núcleo já recusava
+  qualquer escrita não resolvida, então não há regressão).
+- **Largura e sinal:** `ld8`/`ld16`/`ld32`/`ld64`/`st8`/`st16`/`st32`/`st64` por `type_width`
+  (`tk_ldn`/`tk_stn`, já de `teko_struct.mc`). `ld32` é sempre zero-extending (`language.md` §2 —
+  "the signed read of raw memory... spelled `(i32) ld32(p)`"); um elemento `TK_SINT` mais estreito
+  que a palavra — só `i32`, hoje — é envolvido num `CAST` pro próprio tipo depois do load
+  (`tk_arr_load`), o MESMO idioma documentado. `i64` não precisa (já é a palavra inteira).
+- **Bounds:** um índice LITERAL fora de `[0, N)` é erro de compilação, nas duas rotas
+  (`tk_arr_bounds`, mensagem `teko: index K is out of range for NAME[N]`, o formato do próprio
+  crumb). Um índice não-literal NÃO tem guard em runtime nesta fatia — dívida abaixo.
+- **`a.Length`** — só para um array LOCAL (o `[` já sabe; um global exigiria a mesma deferência da
+  leitura, fora do escopo desta fatia). `tk_dot` (`teko_expr.mc`) checa a tabela `av_` ANTES de
+  `tk_struct_of_expr`; achando, devolve a constante `N` e recusa qualquer outro membro. `a.Length =
+  e` cai na recusa do próprio núcleo (`tk_int` não é um nome).
+- **Recusado, não contornado:** um array de tipo struct/classe (`Circle cs[2];`), local OU global —
+  o elemento seria um slot de objeto sem nome próprio para `teko_rc.mc` percorrer, vazando a cada
+  sobrescrita; mensagem própria nas duas rotas (`tk_arr_on_stmt`/`tk_garr_collect`).
+- **Fixture** `surface_arrays.tk` (32/32 em exit 42): array local com leitura/escrita por índice
+  variável num `for`, `a.Length` no laço, `a[i] += e`/`-=`, um global sem inicializador (`u8 g[8]`)
+  e um com (`i64 t[] = {…}`), as três larguras (`u8`/`u16`/`i32`, a última provando o sinal — um
+  valor negativo que voltaria positivo se `ld32` não fosse casteado), e um array local ao corpo de
+  um MÉTODO (`Grid.product3`, a mesma prova de que o passe de RC caminha por uma árvore sintetizada
+  sem se importar com arrays escalares no meio dela). AST das **31 fixtures anteriores**
+  byte-idêntica ao compilador da base `6cf49db1` — EXCETO `surface_switch.tk` (tocada pelo commit
+  do fix abaixo; idêntica entre o commit do fix e este). `mc limits ngen` `ok` (`intrin` segue 8/8
+  — nada de novo registrado). Probes fora de `tests/`: índice constante fora do range → recusa;
+  `Circle cs[2]` → recusa; `a[1] = e` sobre um `i64` escalar → recusa (`teko: not a known array`);
+  `a.Length = 3` → recusa do núcleo.
+- **Fix do `switch` (commit separado, ANTES deste):** `tk_switch_check_end` só olhava o último nó
+  de TOPO do corpo do `case` — um corpo escrito como bloco explícito (`case 1: { …; break; }`, C#
+  comum) caía direto no "control cannot fall out of a case" mesmo terminando em `break`. Recursa em
+  `N_BLOCK` agora, olhando o último statement DENTRO do bloco — a mesma recursão que
+  `tk_switch_no_continue_stmt` já fazia, ao lado. `surface_switch.tk` ganhou um `case` de bloco
+  explícito (`case 20: { r = 55; break; }`) provando o conserto.
+- **Dívidas registradas:** índice DINÂMICO sem guard em runtime (precisa de `panic` de superfície,
+  que este crumb não tem); array de objeto/struct (local ou global) — o pacote inteiro de `T[]` em
+  heap com RC próprio, fora de escopo; `T[]` como parâmetro (o nome de um array decai pro endereço,
+  como em C, mas `void f(i64 xs[])` na ASSINATURA não foi ensinado); `.Length` sobre um array
+  GLOBAL (só o local resolve); um `params xs[i]` dentro do corpo replay-instanciado de outra
+  `params` que TAMBÉM usa um array global — o passe de arrays roda uma vez, antes da instanciação
+  de `params`, então um global usado só dentro do corpo REPLAYED de um `params` cairia no `[` de
+  `params` sem chance de resolver; nenhuma fixture combina os dois, registrado como aresta rara.
+
 **Fila:** closures/`ref`/`out` (D221, architect-first) →
 compilador teko de `<mc/core_min>` (plano §26). **Fora:** `var`, `type`, `match`, Variant,
 método parcial, nested, `foreach` (precisa de iteráveis), herança de interface, `using G = geo;`/
