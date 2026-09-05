@@ -229,6 +229,7 @@ i64 tk_static_member(i64 si, i64 line, uptr fl) {
     tk_check_type_use(si, line, fl);
     uptr m = p_ident();
     if (p_id() == K_LPAR) return tk_static_call(si, m, line, fl);
+    if (tk_prop_find(si, m) >= 0) return tk_prop_static_use(si, m, line, fl);
     i64 fi = tk_static_field_of(si, m, line, fl);
     if (fi < 0) err_at2(fl, line, tk_join("teko: unknown static member of ", sr_name_at(si)), m);
     return tk_static_use(fi, line, fl);

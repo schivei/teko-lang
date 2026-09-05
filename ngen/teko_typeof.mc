@@ -321,9 +321,9 @@ i64 tk_pend_field(i64 pi, i64 fi, uptr pty, uptr ppure) {
 // carries the overload suffix, the arguments the site left out come from that
 // declaration's defaults, and a virtual one goes through the object's vtable --
 // the shapes teko_expr.mc's tk_emit_call produces for a receiver it could type
-i64 tk_pend_emit_method(i64 pi, i64 mi, uptr pty, uptr ppure) {
+i64 tk_pend_emit_call(i64 pi, i64 mi, i64 args, i64 na, uptr pty, uptr ppure) {
     uptr m = pd_name_at(pi);
-    i64 args = tk_fill_defaults(pd_arg_at(pi), pd_na_at(pi), mt_np_at(mi), mt_nreq_at(mi), mt_d0_at(mi));
+    args = tk_fill_defaults(args, na, mt_np_at(mi), mt_nreq_at(mi), mt_d0_at(mi));
     st64(pty, mt_ret_at(mi));
     st64(ppure, 0);
     i64 left = pd_recv_at(pi);
@@ -334,6 +334,29 @@ i64 tk_pend_emit_method(i64 pi, i64 mi, uptr pty, uptr ppure) {
     i64 vt = tk_call("ld64", tk_clone(left));
     i64 fnp = tk_call("ld64", tk_bin(K_ADD, vt, tk_int((TK_VT_FIXED + slot) * 8)));
     return tk_call("callp", list_append(list_append(fnp, left), args));
+}
+
+i64 tk_pend_emit_method(i64 pi, i64 mi, uptr pty, uptr ppure) {
+    return tk_pend_emit_call(pi, mi, pd_arg_at(pi), pd_na_at(pi), pty, ppure);
+}
+
+// `p.X` / `p.X = e` on a receiver only the oracle could type: the accessor the
+// property resolves to, and the very call teko_expr.mc's tk_prop_use emits
+i64 tk_pend_prop(i64 pi, i64 si, uptr pty, uptr ppure) {
+    uptr m = pd_name_at(pi);
+    if (pd_form_at(pi) == TK_PCALL)
+        err_at2(tk_file, tk_line, "teko: the member is a property; it is not called", m);
+    i64 wantset = 0;
+    i64 args = 0;
+    i64 na = 0;
+    if (pd_form_at(pi) == TK_PSTORE) {
+        wantset = 1;
+        args = pd_arg_at(pi);
+        na = 1;
+    }
+    i64 mi = tk_prop_accessor_of(si, m, wantset, tk_line, tk_file);
+    if (mt_static_at(mi)) tk_reject_static_member(si, m, tk_line, tk_file);
+    return tk_pend_emit_call(pi, mi, args, na, pty, ppure);
 }
 
 // The arguments the site wrote decide WHICH signature of the name is called,
@@ -382,6 +405,7 @@ i64 tk_pend_emit(i64 pi, i64 si, uptr pty, uptr ppure) {
         if (fd_sym_at(fi)) tk_reject_static_member(si, m, tk_line, tk_file);
         return tk_pend_field(pi, fi, pty, ppure);
     }
+    if (tk_prop_find(si, m) >= 0) return tk_pend_prop(pi, si, pty, ppure);
     if (tk_method_named_find(si, m) >= 0) return tk_pend_method(pi, si, pty, ppure);
     err_at2(tk_file, tk_line, tk_join("teko: unknown member of ", sr_name_at(si)), m);
     return 0;
@@ -404,6 +428,10 @@ i64 tk_pend_by_name(i64 pi, uptr pty, uptr ppure) {
         if (fd_sym_at(fi)) tk_reject_static_member(owner, m, tk_line, tk_file);
         return tk_pend_field(pi, fi, pty, ppure);
     }
+    i64 pj = tk_prop_by_name(m);
+    if (pj == 0 - 2)
+        err_at2(tk_file, tk_line, "teko: the type of the left side of `.` is not known here", m);
+    if (pj >= 0) return tk_pend_prop(pi, pr_cls_at(pj), pty, ppure);
     i64 si = tk_ifmeth_by_name(m);
     if (si == 0 - 2)
         err_at2(tk_file, tk_line, "teko: the type of the left side of `.` is not known here", m);

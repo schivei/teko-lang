@@ -58,6 +58,12 @@
 //   Name.field, Name.field = e, Name.m(...)                    syntax_expr (M21)
 //   the statement either of those two opens                    syntax_stmt (M21.5)
 //
+// What entrega 5's property crumb adds (D223, teko_prop.mc) -- C#'s properties
+// and the interface C# 8 and C# 11 grew, both read by the machinery above:
+//   T Name { get; set; }  /  { get => e; set => s; }  /  { get { } }
+//   `value` inside a `set`, visibility per accessor, virtual/override/static
+//   p.Name, p.Name = e, Name (inside the type), Type.Name for a static one
+//
 // Everything else in docs/design/port-teko-mc.md §3 (types/classes,
 // generics, error-union, `service`/DI, concurrency, the
 // rest of the stdlib) is a later entrega and is not stubbed here: it does
@@ -71,6 +77,7 @@
 #include "teko_trait.mc"
 #include "teko_generic.mc"
 #include "teko_class.mc"
+#include "teko_prop.mc"
 #include "teko_this.mc"
 #include "teko_access.mc"
 #include "teko_typeof.mc"

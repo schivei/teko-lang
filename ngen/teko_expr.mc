@@ -189,7 +189,8 @@ void tk_reject_static_member(i64 si, uptr m, i64 line, uptr fl) {
                               " is static; reach it through its type"));
 }
 
-// the member of a receiver whose type IS known: a field, then a method
+// the member of a receiver whose type IS known: a field, then a property, then
+// a method
 i64 tk_member_of(i64 left, i64 si, uptr m, i64 line, uptr fl) {
     if (tk_is_iface(si)) return tk_iface_call(left, si, m, line, fl);
     i64 fi = tk_field_find(si, m);
@@ -198,6 +199,7 @@ i64 tk_member_of(i64 left, i64 si, uptr m, i64 line, uptr fl) {
         if (fd_sym_at(fi)) tk_reject_static_member(si, m, line, fl);
         return tk_field_use(left, fi, line, fl);
     }
+    if (tk_prop_find(si, m) >= 0) return tk_prop_use(left, si, m, line, fl);
     if (tk_method_named_find(si, m) >= 0) return tk_call_method(left, si, m, line, fl);
     err_at2(fl, line, tk_join("teko: unknown member of ", sr_name_at(si)), m);
     return 0;

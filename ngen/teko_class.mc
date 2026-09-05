@@ -72,6 +72,11 @@ void tk_reject_self(uptr name);
 i64 tk_this_enter_body(i64 ci, i64 stat, uptr pkeepstat);
 void tk_this_leave_body(i64 keep, i64 keepstat);
 
+// teko_prop.mc is included after this file too -- it declares its accessors
+// through the tables above -- and this is the member shape it owns, `T Name
+// { get; set; }`, with the modifiers and the type already read
+i64 tk_prop_member(i64 ci, uptr name, uptr m, i64 fty, i64 off, i64 ti, i64 vis, i64 stat, i64 kind);
+
 // teko_access.mc is included after this file as well; a class asks it for the
 // modifier the declaration carried, for the origin of the file it is written in,
 // for the word registration of the name, and for the one check a declaration
@@ -97,6 +102,7 @@ i64  mt_ret[TK_MAXMETHOD];
 i64  mt_slot[TK_MAXMETHOD];           // its vtable slot, or -1 when not virtual
 i64  mt_vis[TK_MAXMETHOD];            // TK_VPRIVATE, TK_VPROTECTED or TK_VPUBLIC
 i64  mt_static[TK_MAXMETHOD];         // 1 when it takes no receiver
+i64  mt_prop[TK_MAXMETHOD];           // 1 when it is a property's accessor (teko_prop.mc)
 i64  tk_nmethod = 0;
 
 i64  df_node[TK_MAXDFLT];             // the folded constant a missing argument becomes
@@ -118,6 +124,7 @@ i64  mt_ret_at(i64 i)  { return ld64(mt_ret + i * 8); }
 i64  mt_slot_at(i64 i) { return ld64(mt_slot + i * 8); }
 i64  mt_vis_at(i64 i)  { return ld64(mt_vis + i * 8); }
 i64  mt_static_at(i64 i) { return ld64(mt_static + i * 8); }
+i64  mt_prop_at(i64 i)   { return ld64(mt_prop + i * 8); }
 uptr vs_m_at(i64 i)    { return ld64(vs_m + i * 8); }
 uptr vs_sig_at(i64 i)  { return ld64(vs_sig + i * 8); }
 uptr vs_fn_at(i64 i)   { return ld64(vs_fn + i * 8); }
@@ -134,6 +141,7 @@ void set_mt_ret_at(i64 i, i64 v)   { st64(mt_ret + i * 8, v); }
 void set_mt_slot_at(i64 i, i64 v)  { st64(mt_slot + i * 8, v); }
 void set_mt_vis_at(i64 i, i64 v)   { st64(mt_vis + i * 8, v); }
 void set_mt_static_at(i64 i, i64 v) { st64(mt_static + i * 8, v); }
+void set_mt_prop_at(i64 i, i64 v)  { st64(mt_prop + i * 8, v); }
 void set_vs_m_at(i64 i, uptr v)    { st64(vs_m + i * 8, v); }
 void set_vs_sig_at(i64 i, uptr v)  { st64(vs_sig + i * 8, v); }
 void set_vs_fn_at(i64 i, uptr v)   { st64(vs_fn + i * 8, v); }
@@ -668,6 +676,10 @@ i64 tk_member(i64 ci, uptr name, i64 off, i64 ti) {
     i64 fty = tk_gen_ty();
     i64 isop = 0;
     uptr m = tk_op_name(&isop);                  // `operator+` names the method `op_add`
+    if (p_id() == K_LBRACE) {                    // `T Name { get; set; }`: a property
+        if (isop) err_at(tk_file, tk_line, "teko: an operator is a method; it takes a parameter list");
+        return tk_prop_member(ci, name, m, fty, off, ti, vis, stat, kind);
+    }
     if (p_id() != K_LPAR) {
         if (isop) err_at(tk_file, tk_line, "teko: an operator is a method; it takes a parameter list");
         if (kind) err_at2(tk_file, tk_line, "teko: virtual/override on a field", m);
