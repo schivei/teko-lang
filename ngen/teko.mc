@@ -98,6 +98,7 @@
 #include "teko_params.mc"
 #include "teko_over.mc"
 #include "teko_ops.mc"
+#include "teko_rc.mc"
 
 void user_init() {
     tk_types_init();
@@ -152,6 +153,14 @@ void user_init() {
     // the tree already names the method's own symbol -- the one teko_class.mc
     // gave the declaration -- and has nothing left for a mangling pass to pick.
     pass(&tk_ops_pass);
+
+    // BEHIND the oracle, because ownership is a question about a value's static
+    // TYPE and the oracle is what answers it -- a deferred `.` is a placeholder
+    // until that pass rewrites it. BEHIND the operators too, because an operator
+    // that answers with an object hands out a reference like any other call. And
+    // AHEAD of the overload mangling, because it asks `decl_find` what a callee
+    // returns, and that table answers to the name the declaration was READ with.
+    pass(&tk_rc_pass);
 
     // LAST, and behind both of the above: the overload mangling reads ordinary
     // parameter lists (a `params` list is gone by now, replaced by its

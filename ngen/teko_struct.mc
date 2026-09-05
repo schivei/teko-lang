@@ -38,6 +38,7 @@
 #define TK_MAXLOCAL  256              // locals of struct/class type seen so far
 #define TK_MAXXT     256              // expressions whose type this module knows
 #define TK_MAXAX     128              // array-field addresses this module handed out
+#define TK_MAXOS     128              // stores into a slot of counted type
 
 // teko_generic.mc is included after this file, because a generic body is
 // re-parsed by the very machine below; these two are what the declaration of a
@@ -121,6 +122,9 @@ i64  xt_ty[TK_MAXXT];                 // the type id itself, scalar ones include
 i64  xt_pure[TK_MAXXT];               // 1 when re-evaluating the node is free of effects
 i64  tk_nxt = 0;
 
+i64  os_node[TK_MAXOS];               // a store into a slot of counted type
+i64  tk_nos = 0;
+
 // position used on generated nodes and on declaration-level errors
 i64  tk_line = 0;
 uptr tk_file = 0;
@@ -159,6 +163,7 @@ i64  xt_node_at(i64 i)  { return ld64(xt_node + i * 8); }
 i64  xt_str_at(i64 i)   { return ld64(xt_str + i * 8); }
 i64  xt_ty_at(i64 i)    { return ld64(xt_ty + i * 8); }
 i64  xt_pure_at(i64 i)  { return ld64(xt_pure + i * 8); }
+i64  os_node_at(i64 i)  { return ld64(os_node + i * 8); }
 
 void set_sr_name_at(i64 i, uptr v)  { st64(sr_name + i * 8, v); }
 void set_sr_ty_at(i64 i, i64 v)     { st64(sr_ty + i * 8, v); }
@@ -196,6 +201,7 @@ void set_xt_node_at(i64 i, i64 v)   { st64(xt_node + i * 8, v); }
 void set_xt_str_at(i64 i, i64 v)    { st64(xt_str + i * 8, v); }
 void set_xt_ty_at(i64 i, i64 v)     { st64(xt_ty + i * 8, v); }
 void set_xt_pure_at(i64 i, i64 v)   { st64(xt_pure + i * 8, v); }
+void set_os_node_at(i64 i, i64 v)   { st64(os_node + i * 8, v); }
 
 // ---- derived names ----
 i64 tk_lower_ch(i64 c) { if (c >= 'A' && c <= 'Z') return c + 32; return c; }
@@ -247,8 +253,22 @@ uptr tk_num(i64 v) {
     return xstrdup(tmp + i, 24 - i);
 }
 
-// Point         ->  point_new       (the generated constructor)
+// Point         ->  point_new       (the generated allocator)
 uptr tk_ctor_name(uptr name) { return tk_join(tk_case(name, 0), "_new"); }
+// Point         ->  point_release   (word 0 of the vtable, what rc_dec calls)
+uptr tk_release_name(uptr name) { return tk_join(tk_case(name, 0), "_release"); }
+// Point + __i64 ->  point_ctor__i64 (the body of `public Point(i64 x) { ... }`)
+uptr tk_ctor_sym(uptr name, uptr sig) { return tk_join3(tk_case(name, 0), "_ctor", sig); }
+// ...and the allocator that calls it: point_new__i64
+uptr tk_new_sym(uptr name, uptr sig) { return tk_join(tk_ctor_name(name), sig); }
+// Point         ->  point_dtor      (the body of `~Point() { ... }`)
+uptr tk_dtor_sym(uptr name) { return tk_join(tk_case(name, 0), "_dtor"); }
+
+// the two names the method table files a constructor and a destructor under.
+// Neither is an identifier, so no member the source writes can collide with
+// them and no `.` can ever reach one -- C#'s own spelling for the same reason.
+uptr tk_ctor_key() { return ".ctor"; }
+uptr tk_dtor_key() { return ".dtor"; }
 // Point + area  ->  point_area      (a method, with an implicit receiver)
 uptr tk_fname(uptr name, uptr m) { return tk_join3(tk_case(name, 0), "_", m); }
 // Point + x     ->  POINT_X         (the #define of the field's offset)
@@ -420,6 +440,45 @@ i64 tk_struct_by_ty(i64 ty) {
         i = i + 1;
     }
     return 0 - 1;
+}
+
+// 1 when a value of type `ty` is a COUNTED reference: a class, or an interface,
+// whose object carries the vtable and the count the reclaim works through. A
+// struct is not one -- it has no vtable, hence no release to reach and no count
+// to keep, which ngen/lib/rt.mc declares as the debt of this slice.
+i64 tk_is_counted(i64 ty) {
+    i64 si = tk_struct_by_ty(ty);
+    if (si < 0) return 0;
+    if (tk_is_class(si)) return 1;
+    return tk_is_iface(si);
+}
+
+// a store this module emitted into a slot of counted type -- a field, an
+// element of an inline array, an auto-property's backing. The node is recorded
+// where it is BUILT, which is the only place the slot's declared type is at
+// hand, and the reclaim pass (teko_rc.mc) turns it into the store that keeps
+// both counts straight: it is the pass, not the parser, that can tell whether
+// the value being stored is already owned.
+void tk_os_add(i64 n) {
+    if (tk_nos == TK_MAXOS) err_at(tk_file, tk_line, "teko: too many stores into a slot of class type");
+    set_os_node_at(tk_nos, n);
+    tk_nos = tk_nos + 1;
+}
+
+// records the store only when the slot really is a counted one
+i64 tk_os_mark(i64 n, i64 ty) {
+    if (tk_is_counted(ty)) tk_os_add(n);
+    return n;
+}
+
+i64 tk_os_has(i64 n) {
+    i64 i = tk_nos - 1;
+    loop {
+        if (i < 0) break;
+        if (os_node_at(i) == n) return 1;
+        i = i - 1;
+    }
+    return 0;
 }
 
 // index into the field table of `name` in `si` or in one of its bases -- the
@@ -781,7 +840,7 @@ i64 tk_array_index(i64 addr, i64 x) {
         i64 v = parse_expr(0);
         tk_line = line;
         tk_file = fl;
-        return tk_call2(tk_stn(ety), at, v);
+        return tk_os_mark(tk_call2(tk_stn(ety), at, v), ety);
     }
     i64 r = tk_call(tk_ldn(ety), at);
     i64 es = tk_struct_by_ty(ety);

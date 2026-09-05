@@ -5,9 +5,34 @@
 // needs. Program code, not compiler code: `#include`d from the `.tk` source
 // itself, so it compiles under the SAME taught vocabulary as that source
 // (`str`/`char`/`f64`/... are already reserved program-wide by the time any
-// file is parsed, teko.mc's `user_init`, docs/surface.md § Tier 3). Reference
-// counting arrives with the class system (a later entrega); until then there
-// is nothing to free, only to bump-allocate.
+// file is parsed, teko.mc's `user_init`, docs/surface.md § Tier 3).
+//
+// Since the reclaim crumb (D218) the arena is the one `examples/lang` proves:
+// a FIXED 4 MiB block with a free list per size class, and reference counting
+// per scope on top of it, so a program that churns objects inside a loop hands
+// every block back and never grows. The object layout the class system writes
+// against (ngen/teko_class.mc) is
+//
+//     +0   vtable pointer   (word 0)
+//     +8   reference count  (word 1)
+//     +16  fields, the base class's first
+//
+// and the vtable's own layout is
+//
+//     +0   &Name_release
+//     +8   Name_itab, or 0 when the class implements no interface
+//     +16  virtual slot 0, +24 slot 1, ...
+//
+// which is why `rc_dec` frees an object it knows nothing about: word 0 of the
+// vtable is always that class's release function, and the release runs the
+// destructor, releases the class-typed fields and gives the block back.
+//
+// What is NOT counted in this slice, and is declared debt rather than silence:
+// a `struct` (no vtable, hence no release to reach and no count to keep -- its
+// allocation is live for the run) and the argument block of a `params` call
+// (allocated at the call site, read by the callee, and never handed back).
+// `rt_live()` counts both, so a program that mixes them with classes sees a
+// floor above zero rather than a wrong answer.
 //
 // tests/hello.tk does not call any of this yet -- list/collections are
 // staged for a later entrega (docs/design/port-teko-mc.md §6 step A5).
@@ -15,9 +40,15 @@
 #include <sys>
 
 #define RT_ARENA 4194304   // 4 MiB, in __bss -- the same floor examples/lang uses
+#define RT_ALIGN 16
+#define RT_NCLASS 16       // free lists: 16, 32, ... 256 bytes
+#define RT_MAXSMALL 256
 
-u8  rt_heap[RT_ARENA];
-i64 rt_hp = 0;
+u8   rt_heap[RT_ARENA];
+i64  rt_hp = 0;
+uptr rt_fl[RT_NCLASS];     // head of each size class's free list
+i64  rt_nlive = 0;         // blocks handed out and not yet given back
+i64  rt_npeak = 0;         // high-water mark of the bump pointer
 
 // aborts with a message on stderr; there is no recovery
 void rt_panic(uptr msg) {
@@ -27,25 +58,136 @@ void rt_panic(uptr msg) {
     exit(70);
 }
 
-// bump-allocates `n` bytes, 16-byte aligned; panics on exhaustion instead of
-// growing -- a fixed static heap, like the core's own arena.mc
+uptr rt_fl_at(i64 i)             { return ld64(rt_fl + i * 8); }
+void set_rt_fl_at(i64 i, uptr v) { st64(rt_fl + i * 8, v); }
+
+void rt_zero(uptr p, i64 n) {
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        st8(p + i, 0);
+        i = i + 1;
+    }
+}
+
+// the size class of a block of `sz` bytes (`sz` already a multiple of 16), or
+// -1 when the block is too big for any list to recycle it
+i64 rt_class(i64 sz) {
+    if (sz > RT_MAXSMALL) return 0 - 1;
+    return sz / RT_ALIGN - 1;
+}
+
+// `n` zeroed bytes, 16-byte aligned. The free list of the size class answers
+// first; only when it is empty does the bump pointer move, and only then can
+// the arena run out. Never returns 0.
 uptr rt_alloc(i64 n) {
-    i64 sz = (n + 15) & ~15;
+    if (n < 0) rt_panic("allocation of a negative size");
+    i64 sz = (n + (RT_ALIGN - 1)) & ~(RT_ALIGN - 1);
+    if (sz == 0) sz = RT_ALIGN;
+    i64 c = rt_class(sz);
+    if (c >= 0) {
+        uptr h = rt_fl_at(c);
+        if (h != 0) {
+            set_rt_fl_at(c, ld64(h));            // word 0 of a free block is the link
+            rt_zero(h, sz);
+            rt_nlive = rt_nlive + 1;
+            return h;
+        }
+    }
     if (rt_hp + sz > RT_ARENA) rt_panic("arena exhausted");
     uptr p = rt_heap + rt_hp;
     rt_hp = rt_hp + sz;
+    if (rt_hp > rt_npeak) rt_npeak = rt_hp;
+    rt_zero(p, sz);
+    rt_nlive = rt_nlive + 1;
     return p;
 }
 
+// gives the `n` bytes at `p` back to their size class. A block bigger than
+// RT_MAXSMALL is dropped: no list holds it, so the arena never reuses it.
+void rt_free(uptr p, i64 n) {
+    if (p == 0) return;
+    rt_nlive = rt_nlive - 1;
+    i64 sz = (n + (RT_ALIGN - 1)) & ~(RT_ALIGN - 1);
+    if (sz == 0) sz = RT_ALIGN;
+    i64 c = rt_class(sz);
+    if (c < 0) return;
+    st64(p, rt_fl_at(c));
+    set_rt_fl_at(c, p);
+}
+
+i64 rt_used() { return rt_hp; }
+i64 rt_live() { return rt_nlive; }
+i64 rt_peak() { return rt_npeak; }
+
+// ---- reference counting ----
+
+void rc_inc(uptr p) {
+    if (p == 0) return;
+    st64(p + 8, ld64(p + 8) + 1);
+}
+
+// at zero, the class's release runs through word 0 of the vtable: the
+// destructor, then the class-typed fields, then rt_free
+void rc_dec(uptr p) {
+    if (p == 0) return;
+    i64 n = ld64(p + 8) - 1;
+    st64(p + 8, n);
+    if (n > 0) return;
+    if (n < 0) rt_panic("reference count below zero");
+    callp(ld64(ld64(p)), p);
+}
+
+// borrowed -> owned: an owning slot initialized from a value it does not own
+uptr rt_own(uptr p) {
+    rc_inc(p);
+    return p;
+}
+
+// a value of class type produced and thrown away, `f();` on its own line: the
+// reference the callee handed out has no owner, so it is released here
+void rt_drop(uptr p) {
+    rc_dec(p);
+}
+
+// *slot = v, with both counts kept straight. The increment comes first so that
+// `x = x` cannot free the object between the two steps.
+void rt_store(uptr slot, uptr v) {
+    rc_inc(v);
+    uptr old = ld64(slot);
+    st64(slot, v);
+    rc_dec(old);
+}
+
+// the same store when `v` is already owned -- it came from `new`, or from a
+// function that returned a reference of its own: the reference moves in
+void rt_store_own(uptr slot, uptr v) {
+    uptr old = ld64(slot);
+    st64(slot, v);
+    rc_dec(old);
+}
+
+// releases `n` object slots starting at `base`: an inline array field whose
+// element type is a class or an interface
+void rt_release_array(uptr base, i64 n) {
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        rc_dec(ld64(base + i * 8));
+        st64(base + i * 8, 0);
+        i = i + 1;
+    }
+}
+
 // the method table of interface `id` inside the class whose vtable is `vt`.
-// The vtable's word 0 is the class's interface table, `{ count, (id, methods)* }`
+// The vtable's word 1 is the class's interface table, `{ count, (id, methods)* }`
 // in declaration order (ngen/teko_iface.mc), and an interface call is
 // `callp(ld64(tk_itab(ld64(obj), ID) + j * 8), obj, ...)` -- a linear walk over
 // a table with one row per interface the class declares, so a class implements
 // an interface at any vtable slot and two unrelated classes answer the same
 // interface.
 uptr tk_itab(uptr vt, i64 id) {
-    uptr t = ld64(vt);
+    uptr t = ld64(vt + 8);
     if (t == 0) rt_panic("interface dispatch on a class with no interface table");
     i64 n = ld64(t);
     i64 i = 0;
@@ -105,6 +247,11 @@ f64 tk_f64_from_bits(u64 bits) {
 // and each list is its own block. The chain is what carries a write inside an
 // expression -- the core has no comma operator and `st64` is a statement, so
 // every put hands the block back to the next one.
+//
+// DECLARED DEBT: the block is never given back. Freeing it at the end of the
+// call site's scope needs a name to hold it, and there is no name -- the block
+// is born and read inside one expression. So a `params` call in a hot loop
+// still walks the bump pointer forward; `new` in one no longer does.
 uptr tk_va_new(i64 n) {
     return rt_alloc(n * 8);
 }

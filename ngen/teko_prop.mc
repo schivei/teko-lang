@@ -213,7 +213,7 @@ i64 tk_prop_addr(i64 fi) {
 void tk_prop_auto_body(uptr fn, i64 rty, i64 params, i64 fty, i64 wantset) {
     i64 addr = tk_prop_addr(pp_backing);
     i64 body = tk_ret(tk_call(tk_ldn(fty), addr));
-    if (wantset) body = tk_stmt(tk_call2(tk_stn(fty), addr, tk_id(tk_value_name())));
+    if (wantset) body = tk_stmt(tk_os_mark(tk_call2(tk_stn(fty), addr, tk_id(tk_value_name())), fty));
     top_add(tk_func(rty, fn, params, tk_blk(body)));
 }
 

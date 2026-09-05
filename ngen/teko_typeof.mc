@@ -311,7 +311,8 @@ i64 tk_pend_field(i64 pi, i64 fi, uptr pty, uptr ppure) {
         err_at2(tk_file, tk_line, "teko: the member is a field, not a method", m);
     i64 fty = fd_ty_at(fi);
     i64 addr = tk_bin(K_ADD, pd_recv_at(pi), tk_int(fd_off_at(fi)));
-    if (pd_form_at(pi) == TK_PSTORE) return tk_call2(tk_stn(fty), addr, pd_arg_at(pi));
+    if (pd_form_at(pi) == TK_PSTORE)
+        return tk_os_mark(tk_call2(tk_stn(fty), addr, pd_arg_at(pi)), fty);
     st64(pty, fty);
     st64(ppure, 1);
     return tk_call(tk_ldn(fty), addr);

@@ -299,7 +299,8 @@ void tk_this_assign(i64 n) {
     }
     tk_this_at(n);
     tk_this_check(fi);
-    i64 st = tk_call2(tk_stn(fd_ty_at(fi)), tk_this_field_addr(fi), nd_a(n));
+    i64 fty = fd_ty_at(fi);
+    i64 st = tk_os_mark(tk_call2(tk_stn(fty), tk_this_field_addr(fi), nd_a(n)), fty);
     tk_node_replace(n, tk_stmt(st));
 }
 
