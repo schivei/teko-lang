@@ -241,13 +241,20 @@ independente e revalidação pós-cherry-pick):
   `tk_unresolved_member` — sem o pass, o `res_call` do core recusa `call to unknown
   function` com `arquivo:linha` (antes: `INT 0` e binário errado em silêncio).
 
-**Em voo:** **C3c** (`.` sobre receptor ESCALAR hoje compila e dá SIGSEGV — recusar com
-`<tipo> has no members`), **C5** operadores por `pass()` (`operator+` contextual em
-`tk_member`; despacho sobre `N_BINARY` — **nunca** `syntax_infix`, que morre em
-silêncio), **C7c** `params` genérico em `N` (instância por sítio; `xs[lit]` fora do
-range é erro de compilação).
+- **C3c** `.` sobre receptor ESCALAR (`b.side.x` com `side: i64`) era SIGSEGV em
+  runtime; agora `teko: i64 has no members: x` em compile-time. `tk_ty_struct_of`
+  saiu do oráculo — "sem tipo" (−1, deferível) ≠ "tem tipo e não tem membros".
+- **C7c** `params` instanciado por `N` constante (cópia de AST, `total__k` por sítio;
+  o record TEXTUAL de função é inalcançável — medido, `cannot redefine core keyword:
+  i64`): `xs[lit]` fora de `[0, N)` é erro de compilação; não-literal mantém guard.
+  Guard de forma `(uptr, i64)` do C4 removido (obsoleto).
+- **CI com 5 pernas nativas** (linux x86_64/arm64, macos arm64, windows x86_64/arm64),
+  agregador `mc build ngen && run`; sem filtro de `paths:`.
 
-**Fila:** C3c ∥ C5 ∥ C7c → **C6** quando o mc der o hook de declaração de função
+**Em voo:** **C5** operadores por `pass()` (`feat/ngen-operators-v2`, costurado à API
+do C3c; 18/18 local) — em verificação.
+
+**Fila:** C5 → **C6** quando o mc der o hook de declaração de função
 (pedido feito à sessão do mc, sai como `0.10.N`).
 
 **Dívida do C8:** `p.items[i]` sobre um receptor que o parser NÃO tipa (um parâmetro,
