@@ -279,6 +279,16 @@ void user_init() {
     // out, arm by arm).
     pass(&tk_ternary_pass);
 
+    // entrega 5, switch crumb's own bug fix: the level a bare `continue`
+    // bumped past a switch's own loop can only be checked once every
+    // `N_LOOP` -- a bare `loop { }` included -- is in the tree, which parse
+    // time never has (teko_switch.mc's own header explains the mc core gap).
+    // AHEAD of `tk_rc_pass`: that pass relocates a `break`/`continue` it
+    // wraps in a release block to a FRESH node index (`teko_rc.mc`'s own
+    // `tk_rc_jump`), so this has to run before it does, while the node index
+    // this pass looks up is still the one it was recorded under.
+    pass(&tk_switch_guard_pass);
+
     // BEHIND the oracle, because it asks the oracle what the two operands of a
     // `+` are, and AHEAD of the overload mangling, because the call it puts in
     // the tree already names the method's own symbol -- the one teko_class.mc

@@ -1475,6 +1475,51 @@ index_of` (`teko_array.mc`, array LOCAL) e `tk_array_index` (`teko_struct.mc`, c
 Os dois agora consultam a guarda e recusam com mensagem própria (`teko: the left side of = is not a
 place`).
 
+**Errata (crumb "guarda do continue sem laço", 2026-09-05):** a checagem "`switch` sem laço
+envolvente" acima (`sawContinue && tk_realloop_depth == 0`) corria no PARSE contra
+`tk_realloop_depth`, um contador que só `while`/`do`/`for` incrementam — um `loop { }` cru, palavra
+do NÚCLEO, não passa por nenhum `syntax_stmt` de módulo, então o parser não tem como avisar
+`teko_switch.mc` de que está dentro de um. Resultado: um `switch` com `continue` bare dentro de um
+`loop { }` cru envolvente (superfície válida) era recusado à toa. Correção: a checagem virou um
+`pass()` (`tk_switch_guard_pass`, registrado logo depois de `tk_ternary_pass`, ANTES de
+`tk_rc_pass`) que caminha a árvore JÁ PRONTA, onde um `loop { }` bare é só mais um `N_LOOP` —
+mesma composição que `tk_loop_rewrite_stmt`/`tk_switch_rewrite_continue_stmt` já usam para
+`do`/`for`/`switch` aninhados. Só um `continue` BARE (`nd_val` original 0) que o rewrite do switch
+empurrou pra além do próprio loop entra no radar — um `continue N;` explícito que passa do que
+existe é problema do próprio número escrito, e o "continue out of range" cru do núcleo (levantado
+bem mais tarde, no lowering) já é claro o bastante pra esse caso.
+
+Marcação: nem o `continue` nem o `N_LOOP` do switch podiam ganhar um flag cru num campo comum
+(`nd_a`/`nd_b`/`nd_c`/`nd_d`) — `--dump-ast` e `tk_clone` (`teko_struct.mc`) tratam os quatro como
+índice de nó filho sempre, então gravar `1` ali faria os dois caminharem pro nó arbitrário de
+índice 1. O `N_LOOP` do switch marca a si mesmo em `nd_val` (`TK_SWITCH_LOOP_MARK`, campo escalar
+que nenhum walk recursa); o `continue` bare-e-empurrado é registrado por ÍNDICE DE NÓ numa tabela
+à parte (`sw_bare[]`, `tk_nbaresw` como contagem e curto-circuito, o mesmo papel que `tk_ntern` já
+tem pro `tk_ternary_pass`). Consequência: o `defaultBody = tk_clone_list(body)` (`case`+`default`
+no MESMO grupo) precisou passar a clonar o corpo CRU e reescrever CADA cópia com o seu próprio
+`tk_switch_rewrite_continue_list` — clonar um corpo JÁ reescrito copiaria o nível certo mas
+NENHUMA marca (índices novos, tabela velha). O pass roda ANTES de `tk_rc_pass` porque esse último
+relocaliza todo `break`/`continue` que envolve em release pra um ÍNDICE DE NÓ NOVO
+(`tk_rc_jump`, `teko_rc.mc`), órfão de qualquer registro pela chave antiga.
+
+`tk_realloop_depth` ficou sem leitor (só escrita) — removido de `teko_loop.mc`, junto dos três
+incrementos/decrementos em `tk_while`/`tk_do`/`tk_for`.
+
+**Fixture:** `surface_switch.tk` ganhou `sum_skip_even_loop` (o caso do bug: `continue` num case
+dentro de um `loop { }` cru) e `sum_once_per_i` (`for` → `loop { }` cru → `switch`, provando que o
+`continue` alcança só o laço mais interno). Probes fora de `tests/`: `switch` sem laço nenhum +
+`continue` bare → mensagem própria; `continue 2` num case com só UM laço real → "continue out of
+range" cru do núcleo (o número é do programador); as recusas (a)-(e) do crumb anterior seguem
+idênticas. AST das 31 fixtures não tocadas byte-idêntica contra o compilador da base `6dcf771b`.
+
+**Dívida adjacente, registrada, não perseguida:** `tk_switch_rewrite_continue_stmt` (este arquivo) e
+`tk_loop_rewrite_stmt` (`teko_loop.mc`) caminham a MESMA forma (`N_BLOCK`/`N_LOOP`/`N_IF`) três
+vezes agora — a marcação acima soma um TERCEIRO walk quase idêntico (`tk_switch_guard_stmt`).
+Parametrizar os três por um único walker com callback/flag é cogitável, mas cada um faz algo
+distinto o bastante (reescreve nível, converte `continue`→`break`, só lê e classifica) que a fusão
+arrisca comportamento por um ganho de clareza incerto — fora do escopo desta correção pequena;
+registrado para quem pegar o próximo crumb de faxina do `teko_loop.mc`/`teko_switch.mc`.
+
 ## 39. Arrays fixos landados -- registro no parse (local) e num pass() (global), larguras, o que ficou fora (2026-09-05)
 
 `ngen/teko_array.mc` (novo). Um LOCAL é observável no parse (`on_stmt`, o mesmo mecanismo do

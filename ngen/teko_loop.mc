@@ -58,13 +58,6 @@ i64 tk_minuseq_tok = 0;
 i64 tk_plus_tok = 0;
 i64 tk_minus_tok = 0;
 
-// how many REAL loops (`while`/`do`/`for`) the parser is lexically inside of
-// right now -- what `switch`'s own `continue` rewrite (teko_switch.mc) reads
-// to tell "no enclosing loop at all" from "some real loop, maybe reached
-// through the core's own out-of-range check". `switch` does not bump it: its
-// own one-lap loop is never a valid `continue` target from outside itself.
-i64 tk_realloop_depth = 0;
-
 // registers the four compound-assignment tokens and pushes the `#rule` text
 // that lowers the free-standing statement form; called once, from
 // user_init(), before parse_unit() reads its first token.
@@ -180,9 +173,7 @@ i64 tk_while() {
     p_expect(K_LPAR, "expected ( after while");
     i64 cond = parse_expr(0);
     p_expect(K_RPAR, "expected ) after while condition");
-    tk_realloop_depth = tk_realloop_depth + 1;
     i64 body = parse_stmt();
-    tk_realloop_depth = tk_realloop_depth - 1;
     tk_line = line;
     tk_file = fl;
     return tk_loop_of(tk_blk(list_append(tk_loop_guard(cond), body)));
@@ -193,9 +184,7 @@ i64 tk_do() {
     i64 line = p_line();
     uptr fl = p_file();
     p_next();                                    // `do`
-    tk_realloop_depth = tk_realloop_depth + 1;
     i64 body = parse_stmt();
-    tk_realloop_depth = tk_realloop_depth - 1;
     i64 wtok = word_add("while");
     p_expect(wtok, "expected while after do body");
     p_expect(K_LPAR, "expected ( after do-while");
@@ -276,9 +265,7 @@ i64 tk_for() {
     i64 step = 0;
     if (p_id() != K_RPAR) step = tk_for_step();
     p_expect(K_RPAR, "expected ) after for clauses");
-    tk_realloop_depth = tk_realloop_depth + 1;
     i64 body = parse_stmt();
-    tk_realloop_depth = tk_realloop_depth - 1;
     tk_loop_rewrite_stmt(body, 0);
     tk_line = line;
     tk_file = fl;

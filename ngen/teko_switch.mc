@@ -21,17 +21,43 @@
 // loops.
 //
 // `continue`/`continue N` (mc 0.14.1, level-counted the same way `break N`
-// is) get the SAME `+1` treatment, reusing `tk_loop_rewrite_stmt`'s own walk
-// (`tk_switch_rewrite_continue_stmt`, below): at case-body depth 0, a
-// `continue k` becomes `continue k + 1`, reaching past the switch's own loop
-// to the enclosing real loop the source meant. Unlike `do`/`for`'s own
-// wrapper, the switch's single lap is safe to CONTINUE directly (there is no
-// step to skip), so this pass never converts the node's kind, only its
-// level -- one opened by the case body ITSELF composes exactly as `break`
-// does, untouched. A switch with no enclosing loop at all -- the bumped
-// level has nowhere to land -- is caught here too, with a message of its
-// own rather than the core's raw "continue out of range" (which would name
-// a level the source never wrote).
+// is) get the SAME `+1` treatment, in the same shape `tk_loop_rewrite_stmt`
+// walks a `do`/`for` body with (`tk_switch_rewrite_continue_stmt`, below): at
+// case-body depth 0, a `continue k` becomes `continue k + 1`, reaching past
+// the switch's own loop to the enclosing real loop the source meant. Unlike
+// `do`/`for`'s own wrapper, the switch's single lap is safe to CONTINUE
+// directly (there is no step to skip), so this rewrite never converts the
+// node's kind, only its level -- one opened by the case body ITSELF composes
+// exactly as `break` does, untouched.
+//
+// A switch with no real enclosing loop -- the bumped level has nowhere to
+// land -- is NOT caught here: at parse time the mc core gives a module no
+// way to ask "is a bare `loop { }` open right now" (only `while`/`do`/`for`
+// are its own words), so a switch sitting inside one looked, wrongly, like
+// it had no loop around it at all. What catches it instead is
+// `tk_switch_guard_pass`, far below, which walks the FINISHED tree, where a
+// bare `loop { }` is just another `N_LOOP` like any other.
+//
+// The pass only has to look at a `continue` that was WRITTEN BARE (no `N`)
+// and got bumped past this switch's own loop: an explicit `continue N;`
+// that overshoots is the programmer's own number, and the core's plain
+// "continue out of range", raised later while lowering, already names it
+// well enough. A bare one gives the core no number to point back at, so
+// `tk_switch_rewrite_continue_stmt` records its node index in `sw_bare`
+// (below) the moment it bumps one -- an `N_CONTINUE` has no field free for a
+// raw flag (`nd_a`/`nd_b`/`nd_c`/`nd_d` are always read as child node
+// indices, by `--dump-ast` and by `tk_clone` alike, so writing 1 into one
+// would send either walking into whatever node happens to sit at index 1).
+// The switch's own generated `N_LOOP` marks itself instead on
+// `nd_val` (unused by an `N_LOOP` otherwise, `TK_SWITCH_LOOP_MARK`, a plain
+// scalar no walk recurses through) so the pass can tell "landed on a real
+// loop" from "landed on another switch's own lap". `sw_bare` has to survive
+// to the pass with the SAME node indices it recorded, which is why the pass
+// runs AHEAD of `tk_rc_pass`: that pass relocates every `break`/`continue`
+// it wraps in a release block to a FRESH node index (`teko_rc.mc`'s own
+// `tk_rc_jump`), orphaning any record keyed by the original one -- running
+// after it would look for a mark on an index that is an `N_BLOCK` now, and
+// find nothing there.
 //
 // THE EXPRESSION (`x switch { 1 => a, 2 or 3 => b, _ when c => d, _ => e }`)
 // builds NO machinery of its own (D228): the handler reads the arms and
@@ -48,6 +74,9 @@
 
 #define TK_SWITCH_MAXVAL 128
 #define TK_SWITCH_MAXARM 64
+#define TK_SWITCH_LOOP_MARK 1
+#define TK_SWITCH_GUARD_MAXLOOP 32
+#define TK_SWITCH_MAXBARE 128
 
 // a `case`/switch-expression-arm label: folded exactly as `teko_const.mc`
 // folds a `const`'s own value (a `#define`'s bare name is already an `N_INT`
@@ -91,39 +120,57 @@ void tk_switch_check_end(i64 body) {
     err_at(nd_file(last), nd_line(last), "teko: control cannot fall out of a case; end it with break");
 }
 
+// the node index of every bare `continue;` bumped past a switch's own loop,
+// tree-wide -- what `tk_switch_guard_pass` reads instead of a per-node flag
+// (this file's own header explains why); `tk_nbaresw` is both the count and
+// the same short-circuit `tk_ternary_pass` (teko_ternary.mc) takes on
+// `tk_ntern` for a unit that marked none at all.
+i64 sw_bare[TK_SWITCH_MAXBARE];
+i64 tk_nbaresw = 0;
+
+void tk_switch_mark_bare(i64 n) {
+    if (tk_nbaresw == TK_SWITCH_MAXBARE)
+        err_at(nd_file(n), nd_line(n), "teko: too many bare continues inside a switch");
+    st64(sw_bare + tk_nbaresw * 8, n);
+    tk_nbaresw = tk_nbaresw + 1;
+}
+
 // a `continue k` sitting directly in a case body -- not inside a loop the
 // body itself opens -- becomes `continue k + 1`, `tk_loop_rewrite_stmt`'s own
 // `break` rule (teko_loop.mc), never converted to a `break`: the switch's
-// single lap is always safe to continue directly. `saw` is set whenever this
-// happens, so the caller can tell "this switch bumped a level" from "every
-// continue stayed inside a loop the case opened itself" once the walk is
-// done. One opened by the body composes normally and is left alone.
-void tk_switch_rewrite_continue_stmt(i64 n, i64 depth, uptr saw);
+// single lap is always safe to continue directly. A bumped one that was
+// WRITTEN BARE (`orig == 0`, before the `lvl == 0 -> 1` reading below) is
+// recorded (`tk_switch_mark_bare`) for `tk_switch_guard_pass` to check once
+// the tree is finished; an explicit `continue N;` that overshoots is left
+// for the core's own later check to name. One opened by the body composes
+// normally and is left alone.
+void tk_switch_rewrite_continue_stmt(i64 n, i64 depth);
 
-void tk_switch_rewrite_continue_list(i64 n, i64 depth, uptr saw) {
+void tk_switch_rewrite_continue_list(i64 n, i64 depth) {
     loop {
         if (n == 0) break;
-        tk_switch_rewrite_continue_stmt(n, depth, saw);
+        tk_switch_rewrite_continue_stmt(n, depth);
         n = nd_next(n);
     }
 }
 
-void tk_switch_rewrite_continue_stmt(i64 n, i64 depth, uptr saw) {
+void tk_switch_rewrite_continue_stmt(i64 n, i64 depth) {
     if (n == 0) return;
     i64 k = nd_kind(n);
-    if (k == N_BLOCK) { tk_switch_rewrite_continue_list(nd_a(n), depth, saw); return; }
-    if (k == N_LOOP) { tk_switch_rewrite_continue_stmt(nd_a(n), depth + 1, saw); return; }
+    if (k == N_BLOCK) { tk_switch_rewrite_continue_list(nd_a(n), depth); return; }
+    if (k == N_LOOP) { tk_switch_rewrite_continue_stmt(nd_a(n), depth + 1); return; }
     if (k == N_IF) {
-        tk_switch_rewrite_continue_stmt(nd_b(n), depth, saw);
-        tk_switch_rewrite_continue_stmt(nd_c(n), depth, saw);
+        tk_switch_rewrite_continue_stmt(nd_b(n), depth);
+        tk_switch_rewrite_continue_stmt(nd_c(n), depth);
         return;
     }
     if (k == N_CONTINUE) {
-        i64 lvl = nd_val(n);
+        i64 orig = nd_val(n);
+        i64 lvl = orig;
         if (lvl == 0) lvl = 1;
         if (lvl > depth) {
+            if (orig == 0) tk_switch_mark_bare(n);
             set_nd_val(n, lvl + 1);
-            st64(saw, 1);
         }
     }
 }
@@ -155,7 +202,6 @@ i64 tk_switch_stmt() {
 
     i64 pendingCond = 0;
     i64 pendingHasDefault = 0;
-    i64 sawContinue = 0;
 
     loop {
         if (p_id() == K_RBRACE) break;
@@ -204,15 +250,24 @@ i64 tk_switch_stmt() {
         }
         if (body == 0) continue;                  // empty labels fall through to the next group
 
-        tk_switch_rewrite_continue_list(body, 0, &sawContinue);
+        // cloned from the RAW body, ahead of the rewrite below: a clone
+        // shares no node with the original (`tk_clone`, teko_struct.mc), so
+        // each copy needs its OWN rewrite pass to mark its OWN bare
+        // `continue`s by their OWN node index -- cloning an ALREADY-rewritten
+        // body would carry matching levels but no mark at all.
+        i64 defaultClone = 0;
+        if (pendingHasDefault && pendingCond != 0) defaultClone = tk_clone_list(body);
+
+        tk_switch_rewrite_continue_list(body, 0);
         tk_switch_check_end(body);
+        if (defaultClone != 0) tk_switch_rewrite_continue_list(defaultClone, 0);
 
         if (pendingHasDefault) {
             if (defaultSeen) err_at(fl, line, "teko: duplicate default label");
             defaultSeen = 1;
             if (pendingCond != 0) {
                 casesHead = list_append(casesHead, tk_if(pendingCond, tk_blk(body)));
-                defaultBody = tk_clone_list(body);
+                defaultBody = defaultClone;
             } else {
                 defaultBody = body;
             }
@@ -225,8 +280,6 @@ i64 tk_switch_stmt() {
     p_next();                                     // }
     if (pendingCond != 0 || pendingHasDefault)
         err_at(fl, line, "teko: control cannot fall out of a case; end it with break");
-    if (sawContinue && tk_realloop_depth == 0)
-        err_at(fl, line, "teko: continue inside a switch needs an enclosing loop");
 
     i64 outerBody = list_append(0, pre);
     outerBody = list_append(outerBody, casesHead);
@@ -234,7 +287,9 @@ i64 tk_switch_stmt() {
     outerBody = list_append(outerBody, tk_break_lvl(1));
     tk_line = line;
     tk_file = fl;
-    return tk_loop_of(tk_blk(outerBody));
+    i64 lp = tk_loop_of(tk_blk(outerBody));
+    set_nd_val(lp, TK_SWITCH_LOOP_MARK);
+    return lp;
 }
 
 // the left side of one label's `==`: the FIRST time `x` is needed and it is
@@ -326,4 +381,88 @@ i64 tk_switch_infix(i64 x) {
         i = i - 1;
     }
     return chain;
+}
+
+// the loop stack `tk_switch_guard_stmt` keeps while it walks one function --
+// `sg_lp_at(i)` is `TK_SWITCH_LOOP_MARK` for the loop entered i-th if that
+// loop is a switch's own, 0 for a real one -- and how many are open.
+i64 sg_lp[TK_SWITCH_GUARD_MAXLOOP];
+i64 tk_sg_nlp = 0;
+
+i64 sg_lp_at(i64 i)             { return ld64(sg_lp + i * 8); }
+void set_sg_lp_at(i64 i, i64 v) { st64(sg_lp + i * 8, v); }
+
+// whether `n` is one of the node indices `tk_switch_rewrite_continue_stmt`
+// recorded in `sw_bare` -- `tk_nbaresw` is small (a compilation unit rarely
+// writes many bare, switch-skipping `continue`s), so a linear scan costs
+// nothing next to the parse it runs after.
+i64 tk_switch_guard_marked(i64 n) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nbaresw) return 0;
+        if (ld64(sw_bare + i * 8) == n) return 1;
+        i = i + 1;
+    }
+}
+
+// a marked `N_CONTINUE`'s final level, counted from the innermost open loop
+// (`tk_sg_nlp`): past every loop open right now, or landing exactly on one
+// that is a switch's own, are the two ways a bumped-but-bare `continue` was
+// asking for a real loop that the source never had.
+void tk_switch_guard_check(i64 n) {
+    i64 lvl = nd_val(n);
+    if (lvl == 0) lvl = 1;
+    if (lvl > tk_sg_nlp) {
+        err_at(nd_file(n), nd_line(n), "teko: continue inside a switch needs an enclosing loop");
+        return;
+    }
+    if (sg_lp_at(tk_sg_nlp - lvl) != 0)
+        err_at(nd_file(n), nd_line(n), "teko: continue inside a switch needs an enclosing loop");
+}
+
+void tk_switch_guard_stmt(i64 n);
+
+void tk_switch_guard_list(i64 n) {
+    loop {
+        if (n == 0) break;
+        tk_switch_guard_stmt(n);
+        n = nd_next(n);
+    }
+}
+
+void tk_switch_guard_stmt(i64 n) {
+    if (n == 0) return;
+    i64 k = nd_kind(n);
+    if (k == N_BLOCK) { tk_switch_guard_list(nd_a(n)); return; }
+    if (k == N_LOOP) {
+        if (tk_sg_nlp == TK_SWITCH_GUARD_MAXLOOP) err_at(nd_file(n), nd_line(n), "teko: loops nested too deep");
+        set_sg_lp_at(tk_sg_nlp, nd_val(n));
+        tk_sg_nlp = tk_sg_nlp + 1;
+        tk_switch_guard_stmt(nd_a(n));
+        tk_sg_nlp = tk_sg_nlp - 1;
+        return;
+    }
+    if (k == N_IF) {
+        tk_switch_guard_stmt(nd_b(n));
+        tk_switch_guard_stmt(nd_c(n));
+        return;
+    }
+    if (k == N_CONTINUE && tk_switch_guard_marked(n)) tk_switch_guard_check(n);
+}
+
+// a unit that never bumped a bare `continue` past a switch's own loop leaves
+// untouched -- `tk_nbaresw` counts what `tk_switch_rewrite_continue_stmt`
+// marked, and nothing here runs without at least one.
+i64 tk_switch_guard_pass(i64 root) {
+    if (tk_nbaresw == 0) return root;
+    i64 f = root;
+    loop {
+        if (f == 0) break;
+        if (nd_kind(f) == N_FUNC) {
+            tk_sg_nlp = 0;
+            tk_switch_guard_stmt(nd_b(f));
+        }
+        f = nd_next(f);
+    }
+    return root;
 }
