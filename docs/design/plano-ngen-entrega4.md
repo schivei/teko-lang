@@ -2048,3 +2048,102 @@ ENDEREÇO do slot do caller, não o objeto).
 Dívidas: `T[]` como GLOBAL -- o TIPO é aceito em toda posição, mas leitura/escrita/`.Length` sobre
 a GLOBAL não resolvem; `ref`/`out T[]`; `params T[]` (já era dívida); `T[][]`/multidimensional;
 `p.items[i]` sem `this.` explícito (herdada do D219); array de heap como elemento de outro.
+
+## 46. K4 landado -- lambda só na grafia EXPLÍCITA, `(` de expressão nunca hookado (2026-09-05)
+
+**K4 LANDADO** (entrega 5, D221/§41): lambda, função local nomeada e `use (a, &b)`, sobre
+`new Op((T a, T b) [use (...)] => corpo)` -- a MESMA máquina de objeto do K1 (§41(c)), com um
+allocator/release/vtable/corpo GERADOS POR LAMBDA (nunca memoizados por par, ao contrário do thunk
+do K1: cada ocorrência pode capturar valores diferentes).
+
+**Desvio medido, e por quê -- não é preguiça, é o risco que o §41(f) item 1 já antecipava para
+`[`, agora medido para `(`.** O §41(a) decisão 19 pedia DUAS grafias: contextual (`Op f = (a,b) =>
+e;`, sem `new`) e explícita (`new Op((a,b) => e)`). Só a explícita foi ensinada. `parse_primary`'s
+próprio ramo de `(` (`mc/src/parse.mc:873`) decide cast-ou-agrupamento pelo TOKEN que vem logo
+depois: `(i64 a, i64 b) => ...` começa EXATAMENTE como um cast `(i64)` começaria, então
+`parse_expr(0)` sozinho morre em `expected ) in cast` antes de qualquer hook rodar -- medido, não
+hipotético (probe abaixo). A única rota pra grafia contextual seria `syntax_expr("(", &f)`, que
+INTERCEPTARIA TODO `(` de posição de expressão do programa inteiro (cast E agrupamento), e
+`docs/reference/hooks.md` § 3 é explícito: essa posição NÃO TEM fallback ao núcleo ("an expression
+position has no empty node to fall back on: 0 is an error") -- um handler aceito ali é EXCLUSIVO, e
+teria que reimplementar cast+agrupamento byte-a-byte pra não quebrar as 37 fixtures que já usam
+`(` livremente. A forma explícita evita isso por inteiro: `tk_new_deleg` (K1) já tem seu PRÓPRIO
+ponto de parse logo depois de `new Op(`, então o `(` de um parâmetro de lambda NUNCA passa por
+`parse_primary`. Cobre todo o fixture, inclusive "função local nomeada" (decisão 22), que vira
+`Op twice = new Op((i64 x) => x*2);` em vez do `Op twice = (i64 x) => x*2;` que a decisão citava
+como "forma canônica" -- registrado aqui como o motivo de não seguir a citação ao pé da letra. A
+grafia contextual bare e a forma curta `x => e` (decisão 19, "só quando o alvo dá o tipo") ficam
+DÍVIDA, não código morto: as duas são recusadas HOJE pelo próprio núcleo (`expected ) in cast` /
+`expected ; after declaration`), nunca em silêncio.
+
+**Como o corpo é lido -- nem record/replay, nem `parse_function` puro; os DOIS, por grafia.** A
+lista de parâmetros da lambda é `parse_params()` (o MESMO leitor público de `delegate`/função
+livre -- dá de graça `ref`/`out`/`T[]`/defaults num parâmetro de lambda, não exigido pelo §41 mas
+sem custo extra). `use (...)` é lido a seguir, ANTES do `=>` (a posição sem ambiguidade: depois dos
+parâmetros, antes do corpo). O corpo: `=> { ... }` chama `parse_function(ret, nome, params)` (o
+reset de block-depth de M31 é dela); `=> expr` monta `tk_ret(parse_expr(0))`/`tk_stmt(...)` à mão,
+no estilo do `tk_deleg_thunk_fn` do K1. `p_set_decl_name`/`p_decl_name` são salvos e restaurados ao
+redor de tudo -- a lambda é uma declaração nova por IDENTIDADE (gensym `Op__lam0`, `Op__lam1`, ...,
+`tk_ns_qualify`da como um `delegate`), então a tabela de defaults (`owner != tk_dflt_owner`,
+teko_default.mc) e o `tk_hp_reset` do K3 disparam de graça, sem uma linha nova.
+
+**Captura -- o allocator recebe UM PARÂMETRO POR CAPTURA**, o valor pra uma por-valor, o ENDEREÇO
+cru pra uma por-referência -- o call site (`new Op(...)`) fornece `tk_id(nome)`/`tk_addr(nome)` NO
+INSTANTE da construção, o "congelamento" que a decisão 20 pede: uma cópia por-valor muda de dono na
+hora (`rc_inc` antes de gravar, se contada -- desfeito por `rc_dec`, um por captura por-valor
+contada, no release). Dentro do corpo gerado, uma por-valor vira um LOCAL DE VERDADE (`T nome =
+ld<W>(__env+off);`) -- o reclaim comum (`teko_rc.mc`) já borrow-to-own e libera no fim da chamada,
+ZERO código de RC novo. Uma por-referência vira um `uptr` interno (`__lamrefN`) com o ENDEREÇO, e
+toda leitura/escrita do nome original no corpo é reescrita pra `ld`/`st` através dele
+(`teko_array.mc`'s `tk_arr_load`/`tk_arr_store`, os MESMOS dois helpers que `teko_ref.mc`'s
+`tk_ref_walk` já usa pra dereferenciar `ref`/`out` -- zero máquina nova). Capturar por referência um
+tipo CONTADO é recusado (dívida honesta: o slot seria o endereço do PONTEIRO do declarante, e um
+`rt_store` correto ali pediria a MESMA exceção que `teko_rc.mc` já dá a um parâmetro `ref` contado
+-- generalizar essa exceção pra uma captura ficou fora do K4).
+
+**O nome capturado tem que já ser um local que a função contém:** `teko_struct.mc`'s `tk_on_stmt`
+ganhou `tk_slv_add`/`tk_slv_find` -- toda declaração `N_VAR`, de QUALQUER tipo (não só struct/class,
+que é tudo que `tk_local_add` já sabia), grava (nome, tipo); `use (nome)` consulta na hora que lê a
+cláusula. **Dívida:** um PARÂMETRO da função declarante não é capturável hoje -- nenhuma tabela
+existente (K2's `rp_*`, K3's `tk_hp_*`) rastreia parâmetro por NOME de forma genérica; generalizar
+`tk_slv_add` pro site de `parse_params`/`teko_class.mc`'s `tk_params` fica pra quem pegar essa dívida.
+
+**"não capturado" e as duas recusas de escape (decisão 21) reusam o QUE JÁ EXISTE, não inventam
+tabela nova.** O corpo é percorrido por `tk_lam_walk`, o MESMO desenho de escopo em pilha de
+`teko_typeof.mc`'s `tk_ty_scope_*` (`tk_nscope`/`tk_ty_scope_var`/`tk_ty_scope_find`), usado
+DIRETO -- todo `N_IDENT` que não é parâmetro/local/captura E não é `decl_find`/`tk_struct_find`
+(função ou tipo global) morre em `teko: X is not captured; add it to use (...)`, a frase exata do
+§41. As duas recusas de `&`-captura escapando (por `return`, por campo) são UMA função,
+`tk_lam_escapes(e)` -- "`e` é uma chamada ao allocator de uma lambda com captura por referência" --
+chamada nos TRÊS pontos onde um slot de delegate é ESCRITO: `tk_deleg_return` (K1), `teko_expr.mc`'s
+`tk_field_use` (campo de instância) e `teko_access.mc`'s `tk_static_use` (campo estático, forward-
+declarada lá porque esse arquivo é incluído ANTES de `teko_deleg.mc`). GLOBAL não precisou de
+checagem: `parse_global`'s próprio `global initializer must be constant` já recusa qualquer
+inicializador não-literal antes que a pergunta exista pra fazer.
+
+Fixture: `surface_lambda.tk` (`expect-exit: 42`) -- sem captura; `use (k)` por valor congelado
+(mutar `k` depois não muda o que a closure leu); `use (&acc)` mutando o local do declarante entre
+duas chamadas; duas lambdas do MESMO delegate com capturas diferentes; `Op twice = new Op(...)`
+(função local nomeada); lambda guardada num campo e chamada via `this.cb(x)` + lambda passada como
+argumento de MÉTODO e chamada lá dentro; captura de um objeto contado (`Box`) com `rt_live()`
+provando que o release do closure solta o objeto só depois que a ÚLTIMA referência cai; a mesma
+máquina dentro de um `namespace`; corpo em BLOCO; `new Op(...)` como argumento de função LIVRE.
+
+Gate: 38/38 (37 anteriores + a nova); `--dump-ast` das 37 anteriores **byte-idêntico** ao
+compilador da base `6ddae6a3` (`same=37 diff=0`, comparado via `mc-teko --dump-ast` dos dois
+binários sobre os mesmos 37 arquivos); `mc limits ngen` `verdict ok`, zero linha `grew` (`intrin`
+idêntico entre base e K4). Probes (fora de `tests/`): `use` de um nome de FUNÇÃO (recusado, não é
+local); nome livre no corpo sem `use` (a frase exata, `k is not captured; add it to use (...)`);
+`(i64 x) => e` sem `new Op(...)` (recusado pelo núcleo, `expected ) in cast`); `x => e` sem
+parênteses (recusado, `expected ; after declaration`); 11 parâmetros de lambda contra um delegate
+de 2 (`the lambda does not match the delegate`); `use (k, k)` duplicado; `&`-captura devolvida por
+`return` de uma função que retorna o delegate; `&`-captura atribuída a um campo de instância dentro
+de um método -- as duas últimas com a MESMA frase, "a lambda that captures by reference cannot
+leave its scope".
+
+Dívidas: a grafia CONTEXTUAL e a forma curta `x => e` (ambas pedem hookar `(` de expressão --
+risco medido acima, fora de escopo); captura de um PARÂMETRO da função declarante; captura por
+referência de tipo CONTADO; `op.Invoke(x)`/`Func<>`/`Action<>`/`params T[]` embalando lambda
+(herdadas do §41(e)); alvo-tipagem de lambda em argumento de função LIVRE sem `new Op(...)` --
+NA PRÁTICA fechada, já que a forma explícita já cobre essa posição
+(`apply(new Op((i64 x) => x - 1), 43)` funciona, testado no fixture).
