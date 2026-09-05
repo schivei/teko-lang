@@ -460,3 +460,17 @@ velha em 16/18 módulo `name=self→this`; as 2 restantes divergem só pelo `bas
 `uptr` cru: o oráculo os distingue, `f(x)` sobre valor-função rebaixa a `callp` com o retorno
 tipado pela assinatura; `ref`/`out` levam `&` no sítio e deref implícito no uso; `out` é o
 DPS. Vai junto para o architect das closures — mesmo crumb de desenho.
+
+## 20. D223 — propriedades, corpo default e `static` em `interface` (2026-09-04, noite)
+
+Dois crumbs, logo após "membros C#":
+- **Propriedades:** `get`/`set`/`value` contextuais em corpo de tipo; auto-propriedade gera
+  campo de apoio (`private`); `p.X` → `get`, `p.X = e` → `set` nos dois caminhos (`tk_dot`
+  no parse e `tk_pend_*` no pass); `virtual`/`override`/`static` e visibilidade por
+  acessor; em `interface`, `i64 X { get; set; }` = assinaturas. Fixture
+  `surface_property.tk`.
+- **Interface v2:** corpo default (símbolo `Iface_m` no itab quando a classe não redefine;
+  `this` dentro do default é o receptor implementador) e `static abstract` (o tipo
+  implementador fornece `static`; `Tipo.m()`; conformidade checada como os métodos).
+  Fixture `surface_iface_default.tk`. O crumb de membros em voo **recusa** `static` em
+  interface com mensagem — este crumb substitui a recusa.

@@ -1157,6 +1157,20 @@ Verificador reproduziu o crash instrumentando com ASan+UBSan (as flags do CI pro
 - **CONSERTO (dispatch):** `cg_emit_self_addr` tem que PARAR de escapar o endereço de um temp cujo escopo é o próprio statement-expression — hoist do `_rcvN` pra um escopo que sobrevive à chamada externa inteira, OU passar receptor tipo-valor por valor (Region/Arena são structs de 8B, métodos leem self). Root-cause, não workaround; conserta a CLASSE (todo receptor não-endereçável), não só o sítio arena.
 - **LEI DE PROCESSO (endurece D163/D164):** o fixpoint no sandbox NÃO pega UB que só crasha sob certos toolchains — **o gate de verificador de compiler-core passa a incluir um build ASan+UBSan** (`-fsanitize=address,undefined -fno-omit-frame-pointer -g`) do gen0 compilando o tip, além do fixpoint. Barato, pega stack-use-after-scope/UAF/OOB que o build seco esconde. (A ser gravado na CLAUDE.md.)
 
+### D223 · DONO: propriedades (`get`/`set`), corpo default em `interface` e assinatura estática em `interface` — como em C# (dono 2026-09-04) 🔧 SUPERFÍCIE
+- **Propriedades como C#:** `public i64 Side { get; set; }` (auto-propriedade: campo de apoio
+  gerado), `{ get => side; set => side = value; }` e a forma com blocos; `value` contextual no
+  `set`; `get` só = leitura; `p.Side = 3` rebaixa ao `set`, `p.Side` ao `get`; podem ser
+  `virtual`/`override`/`static` e ter visibilidade por acessor (`{ get; private set; }`).
+- **Corpo default em `interface`** (C# 8): método de interface com corpo; a classe que não o
+  redefine usa o default (o itab aponta para o símbolo da interface).
+- **Assinatura estática em `interface`** (C# 11 `static abstract`): a interface declara membro
+  estático que o tipo implementador tem de fornecer; resolvido em compile-time pelo tipo (sem
+  itab — não há receptor).
+- Ordem: propriedades e interface v2 entram logo depois do crumb de membros (D220), antes do
+  reclaim, porque construtor/destrutor e operadores (D218) escrevem contra o modelo de membros
+  completo.
+
 ### D222 · DONO: `switch` nas DUAS vertentes do C# (statement e expression); `break N` atravessa o `switch`; `match` eliminado; `when` = guarda de `case` (dono 2026-09-04) 🔧 SUPERFÍCIE
 - **`switch` statement** (`switch (x) { case 1: … break; case 2: … break; default: … }`) e
   **`switch` expression** (`x switch { 1 => a, 2 => b, _ => c }`, C# 8) — as duas vertentes.
