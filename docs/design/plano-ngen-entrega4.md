@@ -1860,3 +1860,13 @@ elemento de outro array; `delegate` genérico; covariância/contravariância; `+
 6. **O `mc` anda rápido** (0.14.1, `continue N` novo). Todo crumb relê `NOTICES-teko.md` antes de
    começar (§5.2), e o K5 lê `nd_val` do `N_CONTINUE` como já lê do `N_BREAK` — o aviso explícito da
    0.14.1 para quem faz limpeza por nível de laço.
+
+## 42. K1 landado — errata curta (2026-09-05)
+
+`tk_ns_pass` só reescreve `N_CALL`/`N_ADDR`/um `N_IDENT` de `const`; um `N_IDENT` de FUNÇÃO usado
+como VALOR (`GOp f = gadd;` dentro de `namespace geo`) não é seu -- não previsto no §41(b)/(d).
+`tk_deleg_pass` ganhou walk próprio (não o `tk_ty_pass_walk` genérico) para rastrear a namespace de
+cada função e reusar `tk_ns_call_try_prefixes`/`tk_ns_call_try_usings` na coerção
+(`tk_deleg_resolve_fn`, `ngen/teko_deleg.mc`). `new Op(fn)`, em tempo de parse, resolve antes da
+renomeação e não precisou do mesmo tratamento. Resto do crumb saiu como desenhado; ver
+`ngen/HANDOFF.md` § K1 LANDADO para o gate completo.

@@ -1033,6 +1033,51 @@ guarda antes de aceitar uma escrita e recusam com mensagem própria (`teko: the 
 not a place`); a declaração de `tk_bracket_no_write` mudou de `teko_params.mc` para
 `teko_prefix.mc`, seu dono lógico.
 
+**K1 LANDADO (entrega 5, D221/§41, 2026-09-05):** `delegate` nomeado, ponteiro de função tipado,
+`callp` tipado, `null`. Arquivos: `ngen/teko_deleg.mc` (novo — a tabela de assinatura `dg_*`,
+`tk_delegate`, o wrap `Op f = fn;`/`new Op(fn)` via thunk memoizado por (delegate, função), a
+chamada `f(a, b)` rebaixada num `pass()`), `teko_struct.mc` (`TK_KDELEG`, `tk_is_deleg`,
+`tk_is_counted` — zero linha nova em `teko_rc.mc` além de generalizar `tk_rc_needed` para
+`tk_is_counted` em vez de `tk_is_class`/`tk_is_iface` hardcoded, o que também é o que faz um
+programa SÓ com delegate, sem classe, disparar o reclaim), `teko_type.mc` (`tk_null`), `teko_access.mc`
+(`public`/`internal delegate` reaproveita `tk_decl_head`, `tk_delegate` só forward-declarado — ele é
+definido depois de `teko_typeof.mc`, de quem `tk_deleg_pass` precisa), `teko_expr.mc` (`tk_new`
+ganha `new Op(fn)`; `tk_field_use` ganha a chamada de campo de tipo delegate, `h.cb(2, 3)`),
+`lib/rt.mc` (`tk_deleg_code`, `panic` — o `panic` de superfície É o `tk_deleg_code` chamando
+`rt_panic`, então a fixture de pânico exercita as duas funções novas juntas, não uma morta).
+
+**Desvio do §41, medido e necessário:** `gadd`, referenciado BARE (não numa chamada) dentro de
+`namespace geo { GOp f = gadd; }`, não é tocado por `tk_ns_pass` (esse só reescreve `N_CALL`/
+`N_ADDR`/um `N_IDENT` de `const` — nunca um `N_IDENT` de FUNÇÃO usado como valor), então
+`decl_find("gadd")` falhava depois da renomeação para `geo__gadd`. `tk_deleg_pass` ganhou seu
+PRÓPRIO walk (não o `tk_ty_pass_walk` de `teko_typeof.mc`, que não expõe "em que função estou"),
+rastreando o namespace de cada função (`tk_ns_of_name`) e reusando os MESMOS `tk_ns_call_try_prefixes`/
+`tk_ns_call_try_usings` que `tk_ns_pass` já usa para uma chamada — `tk_deleg_resolve_fn`. `new
+Op(fn)` (tempo de parse, antes da renomeação) não precisou do mesmo tratamento.
+
+Fixtures: `surface_delegate.tk` (`expect-exit: 42` — declaração no topo e em `namespace`, `Op f =
+add;` contextual e `new Op(mul)` explícita, `f(3, 4)`, delegate como parâmetro (`apply(Op)`) e como
+retorno (`choose`), sobrecarga `apply(Op)` vs `apply(i64)`, campo de classe de tipo delegate chamado
+(`h.cb(2, 3)`), `null` guardado por `if`, `rt_live()` de volta ao piso depois de cada bloco) e
+`surface_panic_null.tk` (`expect-exit: 70`, delegate nulo chamado).
+
+Gate: 34/34 (32 anteriores + as 2 novas); AST das 32 fixtures anteriores **aditiva apenas** —
+`diff` mostra SÓ as duas funções novas de `lib/rt.mc` (`panic`/`tk_deleg_code`, herdadas por TODA
+fixture via `#include "../lib/rt.mc"`), ZERO linha removida ou alterada nas 29 que incluem `rt.mc`
+(as outras 3 — `hello`, `primitives_ptr`, `primitives_scalar` — não incluem `rt.mc` e saem
+byte-idênticas); `mc limits ngen` `ok`, `intrin` 8/16 (crescimento 0, nenhum intrínseco novo).
+Probes (fora de `tests/`): delegate de 11 parâmetros recusado (`method with too many parameters`);
+`new Op()`/`new Op` (sem alvo) recusados (`expression expected`/`expected ( after the delegate
+name`); atribuir `add3` (3 parâmetros) a `Op` (2) recusado (`add3 does not match the delegate
+Op(i64, i64)`); `delegate` dentro de corpo de função recusado pelo núcleo (`expression expected`,
+a palavra não abre declaração de topo ali).
+
+Fila K2→K5 (§41(d)): **K2** `ref`/`out` (dois `type_new`, tabela de apontado, `syntax_expr`,
+`tk_ref_pass` ANTES de `tk_deleg_pass`); **K3** `T[]` de heap (parcialmente bloqueado — pede
+`syntax_type` ao mc, dívida registrada em §41(e); `new T[n]`/`xs[i]`/`.Length`/`T[]` como campo e
+parâmetro não dependem dele); **K4** lambda/função local/`use` (estende `teko_deleg.mc`); **K5**
+`foreach` (`teko_loop.mc`).
+
 ## 5.1 Armadilhas já pagas (não repita)
 
 1. **`mc --exe` emite Mach-O SEMPRE.** `schivei/mc` `src/main.mc:227` faz
