@@ -487,3 +487,15 @@ Dois crumbs, logo após "membros C#":
   antes do uso. Sem método parcial. Fixture `surface_partial.tk`: a mesma classe em dois arquivos
   (`#include` do segundo), campos e métodos de ambas as partes, `new` depois das partes. Precedente do
   mc para "reabrir": `namespace` mergeando por prefixo (`examples/lang/README.md:265`).
+
+**§17 — membros C# pronto (`feat/ngen-members` @ `0d3044a9`, em verificação):** módulo
+`teko_access.mc`; **`internal`** = declaração lida de arquivo **dentro do diretório do
+`mc.toml`** da build (sem config: o do arquivo de entrada); absoluto, `../` e `<bundle>` são
+externos — decidido por prefixo de caminho normalizado, sem syscall. Duas origens apenas
+(projeto / resto); instância de genérico herda a origem do template; membro de trait
+copiado é da classe. `static`: campo → global mangled, método sem receptor, `Tipo.m()`.
+AST 17/18 idêntica; `types_struct` diverge só pelo `static`.
+**Achados:** (1) `p_start()` mente em token substituído (`subst_apply` troca `tok_start` pelo
+lexema na arena) — usou `cp`; candidato a `p_cp()` público no mc; (2) `operator+` privado
+ainda funciona de fora — o pass de `N_BINARY` não checa visibilidade; fica para o **C5b**
+(operadores estáticos); (3) HANDOFF §5.1 item 8 estava obsoleto quanto a `base.m()`.

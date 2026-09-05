@@ -335,7 +335,7 @@ architect-first). **Fora:** `var`, `type`, `match`, Variant. **C6** espera o hoo
 7. **Ordem de declaração:** método só chama métodos ACIMA dele (mesma limitação
    do `examples/lang`); consertar exige record/replay. Planejado pra release
    seguinte do mc.
-8. **Sem construtor com argumentos** (`new Nome` apenas) e sem `base.m()` —
+8. **Sem construtor com argumentos** (`new Nome` apenas) (`base.m()` existe desde a entrega 5, crumb 0 — D219) —
    ainda não ensinados. Fila de D215.
 9. **Achado no repo do mc (não confirmado):** `examples/lang/lang_expr.mc:42-44`
    reutiliza nó do receptor em `ld64` vtable e na lista de args; método virtual
