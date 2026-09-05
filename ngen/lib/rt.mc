@@ -167,6 +167,41 @@ void rt_store_own(uptr slot, uptr v) {
     rc_dec(old);
 }
 
+// ---- the temporaries of one statement ----
+//
+// A value of class type handed to a CALL is borrowed by the callee: a parameter
+// carries no count of its own. So `f(new Cell(1))` -- and `p.X = new Cell(1)`,
+// whose `set` accessor is one such call -- produces a reference nothing owns.
+// It is PARKED here and released when the statement that built it ends, which
+// is the same rule C# and C++ give a temporary.
+//
+// A mark, not a count: `a && f(new Cell(1))` may not evaluate its right side at
+// all, so what is released is whatever the statement actually parked. The marks
+// nest with the calls -- a callee's own statements park above the caller's and
+// sweep back down to it.
+
+#define RT_MAXTMP 64
+
+uptr rt_tmp[RT_MAXTMP];
+i64  rt_ntmp = 0;
+
+i64 rt_mark() { return rt_ntmp; }
+
+uptr rt_park(uptr p) {
+    if (rt_ntmp == RT_MAXTMP) rt_panic("too many temporaries of class type in one statement");
+    st64(rt_tmp + rt_ntmp * 8, p);
+    rt_ntmp = rt_ntmp + 1;
+    return p;
+}
+
+void rt_sweep(i64 mark) {
+    loop {
+        if (rt_ntmp <= mark) break;
+        rt_ntmp = rt_ntmp - 1;
+        rc_dec(ld64(rt_tmp + rt_ntmp * 8));
+    }
+}
+
 // releases `n` object slots starting at `base`: an inline array field whose
 // element type is a class or an interface
 void rt_release_array(uptr base, i64 n) {
