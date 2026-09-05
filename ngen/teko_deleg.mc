@@ -501,27 +501,43 @@ i64 tk_lamref_has(uptr name) {
 // the value of an escaping lambda, not the allocator CALL itself -- `Op f =
 // new Op(...) use (&acc) => ...; return f;` is the same escape as `return
 // new Op(...) use (&acc) => ...;`, one indirection later. Flow-insensitive
-// by design: once a name is tainted it stays tainted for the rest of the
-// unit, which is a strict superset of the UB the two forms above already
-// refuse, never a false negative.
+// WITHIN one function by design: once a name is tainted it stays tainted for
+// the rest of the function, a strict superset of the UB the two forms above
+// already refuse, never a false negative. K4c (D221/§41): keyed by (owner,
+// name), owner the enclosing function/method -- a clean lambda named `f` in
+// one function no longer inherits the taint of an unrelated `f` elsewhere.
+uptr taint_owner[TK_MAXLAMREF];
 uptr taint_name[TK_MAXLAMREF];
 i64  tk_ntaint = 0;
 
-i64 tk_taint_find(uptr name) {
+i64 tk_taint_find(uptr owner, uptr name) {
     i64 i = 0;
     loop {
         if (i >= tk_ntaint) break;
-        if (str_eq(ld64(taint_name + i * 8), name)) return 1;
+        if (str_eq(ld64(taint_owner + i * 8), owner) && str_eq(ld64(taint_name + i * 8), name))
+            return 1;
         i = i + 1;
     }
     return 0;
 }
 
-void tk_taint_add(uptr name) {
-    if (tk_taint_find(name)) return;
+void tk_taint_add(uptr owner, uptr name) {
+    if (tk_taint_find(owner, name)) return;
     if (tk_ntaint == TK_MAXLAMREF) err_at(tk_file, tk_line, "teko: too many tainted lambda locals");
+    st64(taint_owner + tk_ntaint * 8, owner);
     st64(taint_name + tk_ntaint * 8, name);
     tk_ntaint = tk_ntaint + 1;
+}
+
+// K4c: the enclosing declaration's own name -- `p_decl_name()` while parsing
+// is reading it (the on_stmt hook below, and the three call sites that check
+// an assignment right where `parse_expr` reads it), `tk_cur_fn_name`
+// (teko_typeof.mc) once parsing is over and a pass() walk stands on the
+// N_FUNC instead (this file's own loop, and `tk_this_assign`'s).
+uptr tk_taint_owner() {
+    uptr d = p_decl_name();
+    if (d != 0) return d;
+    return tk_cur_fn_name;
 }
 
 // `e` escapes its scope: a call to an allocator whose lambda captures at
@@ -536,7 +552,7 @@ i64 tk_lam_escapes(i64 e) {
     if (e == 0) return 0;
     i64 k = nd_kind(e);
     if (k == N_CALL) return tk_lamref_has(nd_name(e));
-    if (k == N_IDENT) return tk_taint_find(nd_name(e));
+    if (k == N_IDENT) return tk_taint_find(tk_taint_owner(), nd_name(e));
     return 0;
 }
 
@@ -549,7 +565,7 @@ i64 tk_lam_taint_stmt(i64 n) {
     if (n == 0) return n;
     i64 k = nd_kind(n);
     if (k != N_VAR && k != N_ASSIGN) return n;
-    if (tk_lam_escapes(nd_a(n))) tk_taint_add(nd_name(n));
+    if (tk_lam_escapes(nd_a(n))) tk_taint_add(tk_taint_owner(), nd_name(n));
     return n;
 }
 
@@ -814,6 +830,12 @@ uptr tk_lambda_gensym(uptr base) {
 // a caller that reads its own parameter list, the short grafia below, opens
 // them BEFORE reading it too, exactly as `tk_lambda_build` always has,
 // since `p_decl_name` has to be the lambda's own for `parse_params` itself).
+// K4c: `saved` is restored only at the very END, after every `top_add` this
+// function makes -- `top_add` clears `p_decl_name()` as a side effect (mc
+// docs/reference/hooks.md § Asking about the parse), so restoring it BEFORE
+// the lambda's own `top_add(f)` (and the vtable/release/allocator ones right
+// behind it) left the ENCLOSING statement's own on_stmt hooks reading 0 for
+// the rest of that declaration's body -- `tk_taint_owner()`'s own bug.
 i64 tk_lambda_finish(i64 si, uptr name, uptr saved, i64 params, i64 line, uptr fl) {
     tk_lambda_check_params(si, params, line, fl);
     tk_nlc = 0;
@@ -832,7 +854,6 @@ i64 tk_lambda_finish(i64 si, uptr name, uptr saved, i64 params, i64 line, uptr f
         else                body = tk_blk(tk_ret(e));
         f = tk_func(ret, name, allparams, body);
     }
-    p_set_decl_name(saved);
     set_nd_a(nd_b(f), list_append(tk_lambda_prologue(envname), nd_a(nd_b(f))));
     tk_nscope = 0;
     tk_ty_scope_params(allparams);
@@ -859,6 +880,7 @@ i64 tk_lambda_finish(i64 si, uptr name, uptr saved, i64 params, i64 line, uptr f
     i64 call = tk_call(allocname, args);
     tk_xt_add(call, si, 0);
     tk_nlc = 0;
+    p_set_decl_name(saved);
     return call;
 }
 
@@ -1000,6 +1022,7 @@ i64 tk_deleg_pass(i64 root) {
         if (f == 0) break;
         if (nd_kind(f) == N_FUNC) {
             tk_nscope = 0;
+            tk_cur_fn_name = nd_name(f);          // K4c: this function's own taint bucket
             tk_deleg_cur_ns = tk_ns_of_name(nd_name(f));
             tk_deleg_cur_ret = nd_type(f);
             tk_ty_scope_params(nd_a(f));
@@ -1010,5 +1033,6 @@ i64 tk_deleg_pass(i64 root) {
     }
     tk_deleg_cur_ns = 0;
     tk_deleg_cur_ret = 0 - 1;
+    tk_cur_fn_name = 0;
     return root;
 }

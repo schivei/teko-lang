@@ -69,6 +69,11 @@ uptr sc_name[TK_MAXSCOPE];            // the names in scope, innermost last
 i64  sc_ty[TK_MAXSCOPE];              // the type each was declared with
 i64  tk_nscope = 0;
 
+// K4c (D221/§41): the N_FUNC this walk (or teko_deleg.mc's own, same shape)
+// is standing on, read by `p_decl_name()`'s fallback once parsing is over --
+// `tk_taint_owner()`, teko_deleg.mc's own header.
+uptr tk_cur_fn_name = 0;
+
 i64  pd_node[TK_MAXPEND];             // the placeholder the pass rewrites in place
 i64  pd_recv[TK_MAXPEND];             // the receiver, parsed and typed later
 uptr pd_name[TK_MAXPEND];             // the member on the right of the `.`
@@ -228,6 +233,7 @@ void tk_ty_pass_walk(i64 root, uptr visit) {
         if (f == 0) break;
         if (nd_kind(f) == N_FUNC) {
             tk_nscope = 0;
+            tk_cur_fn_name = nd_name(f);         // K4c: this function's own taint bucket
             tk_this_enter_fn(nd_name(f));        // the type an unqualified name belongs to
             tk_pass_proj = tk_origin_of_file(nd_file(f));   // ...and where its code came from
             tk_ty_scope_params(nd_a(f));
@@ -237,6 +243,7 @@ void tk_ty_pass_walk(i64 root, uptr visit) {
     }
     tk_nscope = 0;
     tk_pass_proj = 0 - 1;
+    tk_cur_fn_name = 0;
     tk_this_leave_fn();
 }
 
