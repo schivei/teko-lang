@@ -47,6 +47,10 @@ void tk_pick_refuse(i64 mi, uptr m, i64 line, uptr fl);
 // member reached from here has to pass
 void tk_check_member(i64 owner, i64 vis, uptr m, i64 line, uptr fl);
 
+// teko_deleg.mc is included after this file: D221/§41 K4b's own escape
+// check, read here where an implicit `this.field = e;` writes a field
+i64 tk_lam_escapes(i64 e);
+
 i64 tk_body_class = 0 - 1;            // the type whose body is being PARSED, or -1
 i64 tk_body_static = 0;               // ...and 1 when that member takes no receiver
 i64 tk_pass_class = 0 - 1;            // the type whose method the PASS is walking, or -1
@@ -305,7 +309,8 @@ void tk_this_ident(i64 n) {
 }
 
 // `side = e;`  ->  stW(this + OFF, e). The core parses an assignment to a name
-// as N_ASSIGN, so this is the statement form of the load above.
+// as N_ASSIGN, so this is the statement form of the load above. D221/§41
+// K4b: the implicit form of `x.cb = e;`, the same escape refused there.
 void tk_this_assign(i64 n) {
     i64 fi = tk_this_field(nd_name(n));
     if (fi < 0) {
@@ -314,6 +319,8 @@ void tk_this_assign(i64 n) {
     }
     tk_this_at(n);
     tk_this_check(fi);
+    if (tk_lam_escapes(nd_a(n)))
+        err_at(tk_file, tk_line, "teko: a lambda that captures by reference cannot leave its scope");
     i64 fty = fd_ty_at(fi);
     i64 st = tk_os_mark(tk_call2(tk_stn(fty), tk_this_field_addr(fi), nd_a(n)), fty);
     tk_node_replace(n, tk_stmt(st));

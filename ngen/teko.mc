@@ -260,6 +260,7 @@ void user_init() {
     on_stmt(&tk_on_stmt);
     on_stmt(&tk_arr_on_stmt);
     on_stmt(&tk_ref_on_stmt);
+    on_stmt(&tk_lam_taint_stmt);
 
     // C6: a default parameter value in a free function's own list. The only
     // `syntax_param` registration in this compiler, so registration order
