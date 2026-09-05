@@ -1,7 +1,7 @@
 // teko_access.mc -- who may reach what (D220, dono 2026-09-04), spelled the way
 // C# spells it and with C#'s own defaults:
 //
-//   public class Shape {              a type with no modifier is `internal`
+//   public abstract class Shape {     a type with no modifier is `internal`
 //       public i64 side;              a member with no modifier is `private`
 //       protected i64 seed;           the type and the ones derived from it
 //       public static i64 made;       one global, `shape_made`, no part of the object
@@ -44,6 +44,7 @@
 // and the origin of whatever file the parser is standing in
 i64 tk_decl_vis  = 0 - 1;
 i64 tk_decl_proj = 0 - 1;
+i64 tk_decl_abst = 0;                 // the `abstract` a class declaration carried
 
 uptr tk_proj_dir = 0;                 // the project's directory, no trailing '/'
 i64  tk_proj_len = 0;
@@ -98,9 +99,10 @@ i64 tk_origin_of_file(uptr f) {
 }
 
 // ---- the modifier a top-level declaration carries ----
-void tk_set_decl(i64 vis, i64 proj) {
+void tk_set_decl(i64 vis, i64 proj, i64 abst) {
     tk_decl_vis = vis;
     tk_decl_proj = proj;
+    tk_decl_abst = abst;
 }
 
 i64 tk_take_decl_vis() {
@@ -115,6 +117,12 @@ i64 tk_take_decl_proj() {
     tk_decl_proj = 0 - 1;
     if (p < 0) return tk_origin_of_file(p_file());
     return p;
+}
+
+i64 tk_take_decl_abst() {
+    i64 a = tk_decl_abst;
+    tk_decl_abst = 0;
+    return a;
 }
 
 // ---- where the parser or the pass is standing ----
@@ -277,24 +285,51 @@ i64 tk_type_stmt() {
     return tk_stmt(e);
 }
 
-// ---- `public class X { }` / `internal struct Y { }` ----
+// ---- `public class X { }` / `internal struct Y { }` / `abstract class Z { }` ----
 // The modifier opens the declaration, so it is a word of its own at top level;
 // `private`/`protected`/`static` are not, because they are only ever written on
 // a member, where this module is the parser and reads them as it finds them.
-void tk_decl_mod(i64 vis) {
+// They come in any order, as C# writes them, and each one at most once.
+i64 tk_head_vis(i64 vis, i64 w, i64 line, uptr fl) {
+    if (vis >= 0) err_at(fl, line, "teko: the declaration already has a visibility");
+    return w;
+}
+
+// `abstract` says the class has no object of its own: what a member left
+// abstract is answered by the first class derived from it that is not.
+i64 tk_head_abst(i64 abst, i64 line, uptr fl) {
+    if (abst) err_at(fl, line, "teko: the declaration is already abstract");
+    return 1;
+}
+
+void tk_reject_class_only(i64 abst, i64 line, uptr fl) {
+    if (abst) err_at2(fl, line, "teko: only a class is abstract", p_name());
+}
+
+// the modifiers of one top-level declaration, entered ON the first of them
+void tk_decl_head(i64 vis, i64 abst) {
     i64 line = p_line();
     uptr fl = p_file();
-    p_next();                                    // the modifier
-    tk_set_decl(vis, tk_origin_of_file(fl));
-    if (tk_word("class"))     { tk_class();     return; }
+    loop {
+        p_next();                                // the modifier just read
+        i64 l = p_line();
+        if (tk_word("public"))        { vis = tk_head_vis(vis, TK_TPUBLIC, l, fl);   continue; }
+        if (tk_word("internal"))      { vis = tk_head_vis(vis, TK_TINTERNAL, l, fl); continue; }
+        if (tk_word("abstract"))      { abst = tk_head_abst(abst, l, fl);            continue; }
+        break;
+    }
+    tk_set_decl(vis, tk_origin_of_file(fl), abst);
+    if (tk_word("class"))     { tk_class(); return; }
+    tk_reject_class_only(abst, line, fl);
     if (tk_word("struct"))    { tk_struct();    return; }
     if (tk_word("interface")) { tk_interface(); return; }
     if (tk_word("trait"))     { tk_trait();     return; }
     err_at2(fl, line, "teko: the modifier opens a class, a struct, an interface or a trait", p_name());
 }
 
-void tk_public()   { tk_decl_mod(TK_TPUBLIC); }
-void tk_internal() { tk_decl_mod(TK_TINTERNAL); }
+void tk_public()   { tk_decl_head(TK_TPUBLIC, 0); }
+void tk_internal() { tk_decl_head(TK_TINTERNAL, 0); }
+void tk_abstract() { tk_decl_head(0 - 1, 1); }
 
 // a type's name is a word of the language in three positions at once
 i64 tk_type_word(uptr name) {

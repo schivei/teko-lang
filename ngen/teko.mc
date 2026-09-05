@@ -65,6 +65,12 @@
 //   p.Name, p.Name = e, Name (inside the type), Type.Name for a static one
 //   interface: T Name { get; set; }, a method WITH a body, `static abstract`
 //
+// What entrega 5's `abstract` crumb adds (D224) -- C#'s own abstract class:
+//   abstract class Shape { public abstract i64 area(); }      syntax (M12)
+//   an abstract member is a vtable slot with nothing in it, which the first
+//   concrete class of the chain has to fill with an `override`; `new Shape` is
+//   refused, and the class emits no vtable and no constructor at all
+//
 // Everything else in docs/design/port-teko-mc.md §3 (types/classes,
 // generics, error-union, `service`/DI, concurrency, the
 // rest of the stdlib) is a later entrega and is not stubbed here: it does
@@ -95,6 +101,7 @@ void user_init() {
 
     syntax("public",    &tk_public);
     syntax("internal",  &tk_internal);
+    syntax("abstract",  &tk_abstract);
     syntax("class",     &tk_class);
     syntax("interface", &tk_interface);
     syntax("trait",     &tk_trait);

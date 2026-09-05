@@ -148,6 +148,8 @@ i64 tk_base_call(i64 line, uptr fl) {
     if (mi < 0) tk_base_refuse(mi, m, line, fl);
     if (mt_static_at(mi))
         err_at2(fl, line, "teko: the base's method is static; reach it through its type", m);
+    if (mt_abst_at(mi))
+        err_at2(fl, line, "teko: the base's method is abstract; it has no body to call", m);
     tk_check_member(mt_cls_at(mi), mt_vis_at(mi), m, line, fl);
     tk_line = line;
     tk_file = fl;
