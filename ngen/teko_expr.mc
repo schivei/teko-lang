@@ -49,9 +49,11 @@ i64 tk_new() {
     i64 line = p_line();
     uptr fl = p_file();
     p_next();                                    // the `new` word
+    i64 ety = type_of_token(p_id());              // `new T[n]` (K3, §41): peeked before it moves
     uptr name = p_name();                        // a type word is reserved: not T_IDENT
     i64 gi = tk_gen_find(name);                  // `new Box<Circle, 4>`
     p_next();
+    if (ety >= 0 && p_id() == K_LBRACK) return tk_new_array(ety, line, fl);
     if (gi >= 0) name = sr_name_at(tk_gen_struct(gi));
     else         name = tk_ns_walk(name);
     i64 di = tk_deleg_find(name);                 // `new Op(add)` (K1, D221 §41)
@@ -256,6 +258,7 @@ void tk_reject_static_member(i64 si, uptr m, i64 line, uptr fl) {
 // a method
 i64 tk_member_of(i64 left, i64 si, uptr m, i64 line, uptr fl) {
     if (tk_is_iface(si)) return tk_iface_member_of(left, si, m, line, fl);
+    if (tk_is_ha(si)) return tk_ha_member_of(left, si, m, line, fl);
     i64 fi = tk_field_find(si, m);
     if (fi >= 0) {
         tk_check_member(tk_field_owner(fi), fd_vis_at(fi), m, line, fl);
@@ -293,6 +296,8 @@ i64 tk_dot(i64 left) {
     if (nd_kind(left) == N_IDENT) {
         i64 ai = tk_arr_find(nd_name(left));      // a LOCAL array (teko_array.mc): only `.Length`
         if (ai >= 0) return tk_arr_length_of(ai, m, line, fl);
+        i64 pty = tk_hp_find(nd_name(left));      // a `T[]` PARAMETER (K3): known at parse time too
+        if (pty >= 0) return tk_member_of(left, tk_struct_by_ty(pty), m, line, fl);
     }
     i64 si = tk_struct_of_expr(left);
     if (si >= 0) return tk_member_of(left, si, m, line, fl);

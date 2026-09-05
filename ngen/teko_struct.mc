@@ -73,6 +73,7 @@ i64 tk_type_word(uptr name);
 #define TK_KCLASS  1
 #define TK_KIFACE  2
 #define TK_KDELEG  3
+#define TK_KARRAY  4
 
 // how much of a class has been read: one declared in one place is whole where
 // it stands, and a `partial` one stays OPEN until the first use of it closes
@@ -107,6 +108,7 @@ i64  sr_part[TK_MAXSTRUCT];           // TK_PWHOLE, TK_POPEN or TK_PDONE
 i64  sr_off[TK_MAXSTRUCT];            // where the next field goes: carried across the parts
 i64  sr_hline[TK_MAXSTRUCT];          // where the FIRST part was written, which is where a
 uptr sr_hfile[TK_MAXSTRUCT];          // ...refusal at closing time is reported
+i64  ha_ety[TK_MAXSTRUCT];            // a TK_KARRAY row's own element type (K3, §41)
 i64  tk_nstruct = 0;
 
 uptr fd_name[TK_MAXFIELD];
@@ -158,6 +160,8 @@ i64  sr_part_at(i64 i)  { return ld64(sr_part + i * 8); }
 i64  sr_off_at(i64 i)   { return ld64(sr_off + i * 8); }
 i64  sr_hline_at(i64 i) { return ld64(sr_hline + i * 8); }
 uptr sr_hfile_at(i64 i) { return ld64(sr_hfile + i * 8); }
+i64  ha_ety_at(i64 i)   { return ld64(ha_ety + i * 8); }
+void set_ha_ety_at(i64 i, i64 v) { st64(ha_ety + i * 8, v); }
 uptr fd_name_at(i64 i)  { return ld64(fd_name + i * 8); }
 i64  fd_cls_at(i64 i)   { return ld64(fd_cls + i * 8); }
 i64  fd_off_at(i64 i)   { return ld64(fd_off + i * 8); }
@@ -197,6 +201,7 @@ void set_sr_hfile_at(i64 i, uptr v) { st64(sr_hfile + i * 8, v); }
 i64 tk_is_class(i64 si) { return sr_kind_at(si) == TK_KCLASS; }
 i64 tk_is_iface(i64 si) { return sr_kind_at(si) == TK_KIFACE; }
 i64 tk_is_deleg(i64 si) { return sr_kind_at(si) == TK_KDELEG; }
+i64 tk_is_ha(i64 si)    { return si >= 0 && sr_kind_at(si) == TK_KARRAY; }
 void set_fd_name_at(i64 i, uptr v)  { st64(fd_name + i * 8, v); }
 void set_fd_cls_at(i64 i, i64 v)    { st64(fd_cls + i * 8, v); }
 void set_fd_off_at(i64 i, i64 v)    { st64(fd_off + i * 8, v); }
@@ -470,16 +475,105 @@ i64 tk_struct_by_ty(i64 ty) {
     return 0 - 1;
 }
 
-// 1 when a value of type `ty` is a COUNTED reference: a class, an interface or
-// a delegate, whose object carries the vtable and the count the reclaim works
-// through. A struct is not one -- it has no vtable, hence no release to reach
-// and no count to keep, which ngen/lib/rt.mc declares as the debt of this slice.
+// 1 when a value of type `ty` is a COUNTED reference: a class, an interface, a
+// delegate or a T[] of heap (K3), whose object carries the vtable and the
+// count the reclaim works through. A struct is not one -- it has no vtable,
+// hence no release to reach and no count to keep, which ngen/lib/rt.mc
+// declares as the debt of this slice.
 i64 tk_is_counted(i64 ty) {
     i64 si = tk_struct_by_ty(ty);
     if (si < 0) return 0;
     if (tk_is_class(si)) return 1;
     if (tk_is_deleg(si)) return 1;
+    if (tk_is_ha(si)) return 1;
     return tk_is_iface(si);
+}
+
+// the row of `T[]` for element type `ety`, one per distinct element, made the
+// first time it is asked for (K3, §41): the type identity is the array's own
+// bracket spelling (a lexeme the lexer can never form, `lib/user_typearr.mc`'s
+// own precedent), which is what keeps it collision-free with a user name --
+// the mangling of a GENERATED SYMBOL for it never uses this spelling, since a
+// symbol name may not carry `[`/`]` (see `tk_ty_mangle_name`).
+i64 tk_ha_row(i64 ety) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nstruct) break;
+        if (tk_is_ha(i) && ha_ety_at(i) == ety) return sr_ty_at(i);
+        i = i + 1;
+    }
+    uptr name = tk_join(type_name(ety), "[]");
+    i64 ty = type_new(name, 8, 8, TK_INT);
+    i64 si = tk_type_add(name, ty, 0 - 1, TK_KARRAY, TK_TPUBLIC, 1);
+    set_ha_ety_at(si, ety);
+    return ty;
+}
+
+// 1 when the program spells at least one `T[]`
+i64 tk_ha_any() {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nstruct) break;
+        if (tk_is_ha(i)) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+// the identifier a MANGLED SYMBOL embeds for type `ty`: the plain type name,
+// except for `T[]` (K3), whose own registered spelling carries `[`/`]` --
+// safe for `--dump-ast` and for the word table, unsafe for a linker symbol.
+// `arr_i64`/`arr_Circle` is what an overload/constructor/method suffix uses
+// instead (`teko_ref.mc`'s own `tk_ty_sfx`).
+uptr tk_ty_mangle_name(i64 ty) {
+    i64 si = tk_struct_by_ty(ty);
+    if (tk_is_ha(si)) return tk_join("arr_", type_name(ha_ety_at(si)));
+    return type_name(ty);
+}
+
+// ---- a `T[]` PARAMETER of the declaration currently being read (K3) ----
+// The core never reports a parameter to a module mid-body any more than it
+// reports a struct/class one (teko_expr.mc's own header) -- but a `T[]`
+// parameter's TYPE is known the instant the parser reads it, at the SAME
+// point a struct/class local's is (`tk_on_stmt`, above). This table is that
+// same early knowledge for a PARAMETER: reset once at the start of the
+// declaration's own parameter list (`tk_hp_reset`, called by
+// `teko_default.mc`'s own per-declaration bookkeeping for a free function
+// and by `teko_class.mc`'s own `tk_params` for a member) and filled as each
+// parameter is read, so `xs[i]`/`xs.Length` on a `T[]` parameter resolve AT
+// PARSE TIME too (`teko_params.mc`'s `tk_bracket`, `teko_expr.mc`'s
+// `tk_dot`) -- with no oracle, and no placeholder left for a later pass.
+#define TK_MAXHP 32
+
+uptr hp_name[TK_MAXHP];
+i64  hp_ty[TK_MAXHP];
+i64  tk_nhp = 0;
+
+uptr hp_name_at(i64 i) { return ld64(hp_name + i * 8); }
+i64  hp_ty_at(i64 i)   { return ld64(hp_ty + i * 8); }
+void set_hp_name_at(i64 i, uptr v) { st64(hp_name + i * 8, v); }
+void set_hp_ty_at(i64 i, i64 v)    { st64(hp_ty + i * 8, v); }
+
+void tk_hp_reset() { tk_nhp = 0; }
+
+void tk_hp_add(uptr name, i64 ty) {
+    if (!tk_is_ha(tk_struct_by_ty(ty))) return;
+    if (tk_nhp == TK_MAXHP) err_at(tk_file, tk_line, "teko: too many `T[]` parameters in one declaration");
+    set_hp_name_at(tk_nhp, name);
+    set_hp_ty_at(tk_nhp, ty);
+    tk_nhp = tk_nhp + 1;
+}
+
+// the type of a `T[]` parameter named `name`, or -1: the newest one wins,
+// the same rule `tk_local_find` gives a shadowed local.
+i64 tk_hp_find(uptr name) {
+    i64 i = tk_nhp - 1;
+    loop {
+        if (i < 0) break;
+        if (str_eq(hp_name_at(i), name)) return hp_ty_at(i);
+        i = i - 1;
+    }
+    return 0 - 1;
 }
 
 // a store this module emitted into a slot of counted type -- a field, an

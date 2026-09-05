@@ -208,7 +208,7 @@ uptr tk_ref_kindname(i64 kind) {
 // helper `tk_sig_of` (teko_class.mc) and `tk_ov_sig` (teko_over.mc) both call
 uptr tk_ty_sfx(i64 p) {
     i64 rk = tk_rp_kind(p);
-    uptr base = type_name(nd_type(p));
+    uptr base = tk_ty_mangle_name(nd_type(p));       // K3: `T[]`'s own name is unsafe in a symbol
     if (rk == TK_RP_NONE) return base;
     return tk_join(tk_join(tk_ref_kindname(rk), "_"), base);
 }
@@ -231,11 +231,14 @@ i64 tk_ref_param(i64 kind) {
     i64 line = p_line();
     uptr fl = p_file();
     i64 ty = tk_ns_param_ty();
-    if (ty < 0) ty = type_of_token(p_id());
+    if (ty >= 0) {
+        p_next();
+        return ty;
+    }
+    ty = type_of_token(p_id());
     if (ty < 0 || ty == TY_VOID || ty == tk_ty_ref || ty == tk_ty_out)
         err_at(fl, line, tk_join3("teko: expected a type after `", tk_ref_kindname(kind), "`"));
-    p_next();
-    return ty;
+    return p_type();          // K3 (§41): lets a `[]` suffix register through syntax_type
 }
 
 // `ref`/`out` take no default: C# does not allow one, and a zeroed `out`

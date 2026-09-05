@@ -122,7 +122,11 @@ i64 tk_bracket(i64 left) {
     if (nd_kind(left) == N_IDENT) {
         i64 li = tk_arr_find(nd_name(left));      // a LOCAL array (teko_array.mc), known too
         if (li >= 0) return tk_arr_index_of(left, av_ty_at(li), av_nel_at(li), av_name_at(li));
+        i64 pty = tk_hp_find(nd_name(left));      // a `T[]` PARAMETER (K3): known at parse time too
+        if (pty >= 0) return tk_ha_index(left, tk_struct_by_ty(pty));
     }
+    i64 hi = tk_struct_of_expr(left);             // a `T[]` of heap (K3): a local, a field, a call
+    if (tk_is_ha(hi)) return tk_ha_index(left, hi);
     i64 line = p_line();
     uptr fl = p_file();
     i64 idx = parse_expr(0);

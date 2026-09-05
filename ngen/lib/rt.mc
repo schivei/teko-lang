@@ -250,6 +250,16 @@ uptr tk_deleg_code(uptr d) {
     return ld64(d + 16);
 }
 
+// the guarded address of element `i` of a `T[]` object `a` (K3, D221 §41):
+// `0 <= i < a.Length`, or `panic` -- word 16 of the object is its own length,
+// and the elements start at word 24 (`ngen/teko_heaparr.mc`'s own layout).
+uptr tk_arr_at(uptr a, i64 i, i64 w) {
+    i64 n = ld64(a + 16);
+    if (i < 0) panic("index below zero into an array");
+    if (i >= n) panic("index past the end of an array");
+    return a + 24 + i * w;
+}
+
 // length of a NUL-terminated `str`. teko's `str` names the same `uptr` mc
 // already gives a C string (`type_alias`, teko_type.mc) -- no separate
 // length field -- so this is `strlen` under teko's own spelling, call-
