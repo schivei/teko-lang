@@ -226,8 +226,10 @@ i64 tk_static_field_of(i64 si, uptr m, i64 line, uptr fl) {
 }
 
 // teko_deleg.mc is included after this file: D221 decision 21's second
-// escape, checked where a static field of delegate type is written
+// escape, checked where a static field of delegate type is written, and
+// K4b's own declaration reader for `Op f = <init>;`, read by `tk_type_stmt`
 i64 tk_lam_escapes(i64 e);
+i64 tk_deleg_var_stmt(i64 si, i64 line, uptr fl);
 
 // `Name.field` / `Name.field = e` -- the global the static field lives in, read
 // or written at the field's own width
@@ -320,13 +322,31 @@ i64 tk_dot_follows() {
     return ld8(p) == '.';
 }
 
+// 1 when the token right after the current one is `[` -- `Op[] ops = ...;`
+// (K3's own heap array TYPE marker), never a scalar declaration K4b's own
+// reader below takes over
+i64 tk_bracket_follows() {
+    uptr p = p_cp();
+    uptr e = p_src_end();
+    loop {
+        if (p >= e) return 0;
+        i64 c = ld8(p);
+        if (c != ' ' && c != 9 && c != 10 && c != 13) break;
+        p = p + 1;
+    }
+    return ld8(p) == '[';
+}
+
 // the type word in STATEMENT position. A declaration is the core's own
 // `parse_var`, entered with the type word still unread, so `Point p = new Point;`
 // is the very statement it always was; a static access is an ordinary
 // expression, because the type word opens one (tk_type_expr above). The same
 // "may not resolve" check as `tk_type_expr` applies to a namespaced short
 // name here too, ahead of `parse_var`, which would otherwise read a garbage
-// type off a row index of -1.
+// type off a row index of -1. K4b: a SCALAR delegate declaration reads its
+// own initializer instead (`tk_deleg_var_stmt`, teko_deleg.mc), so a lambda
+// gets a look before the core's own `(` would refuse it -- `Op[] ops = ...;`
+// (a heap array of delegate elements, K3) is not one, and falls through.
 i64 tk_type_stmt() {
     i64 line = p_line();
     uptr fl = p_file();
@@ -334,6 +354,7 @@ i64 tk_type_stmt() {
         uptr nm = p_name();
         i64 si = tk_struct_find(nm);
         if (si < 0) err_at2(fl, line, "teko: unresolved name", nm);
+        if (tk_is_deleg(si) && !tk_bracket_follows()) return tk_deleg_var_stmt(si, line, fl);
         return parse_var(line, fl, sr_ty_at(si));
     }
     i64 e = parse_expr(0);

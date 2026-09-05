@@ -250,6 +250,23 @@ i64 tk_method_named_find(i64 ci, uptr name) {
     return 0 - 1;
 }
 
+// K4b (D221/§41): how many methods `ci` ITSELF declares under `name` -- the
+// same "no overload" guard a free function's own contextual coercion reads
+// (teko_deleg.mc's `tk_default_decl_count`), so a method argument gets the
+// same lambda grafias only where picking the callee needs no argument count.
+// Bases are not walked: an `override` shares its base's own signature, so
+// counting only what `ci` itself adds never double-counts one.
+i64 tk_method_name_count(i64 ci, uptr name) {
+    i64 n = 0;
+    i64 i = 0;
+    loop {
+        if (i >= tk_nmethod) break;
+        if (mt_cls_at(i) == ci && str_eq(mt_name_at(i), name)) n = n + 1;
+        i = i + 1;
+    }
+    return n;
+}
+
 // the method `name` with signature `sig` in `ci` or in one of its bases, or -1
 i64 tk_method_sig_find(i64 ci, uptr name, uptr sig) {
     loop {

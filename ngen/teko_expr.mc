@@ -94,6 +94,45 @@ i64 tk_args(uptr pn) {
     return head;
 }
 
+// `tk_args`, but each position checked against the callee's OWN declared
+// parameter type first (K4b, D221/§41): a delegate one may spell either
+// lambda grafia, the same lookahead `tk_deleg_init_expr` (teko_deleg.mc)
+// reads for a declaration's own initializer.
+i64 tk_args_typed(uptr pn, i64 d, i64 recv_off) {
+    p_expect(K_LPAR, "expected ( in the method call");
+    i64 head = 0;
+    i64 n = 0;
+    loop {
+        if (p_id() == K_RPAR) break;
+        i64 line = p_line();
+        uptr fl = p_file();
+        i64 dsi = tk_deleg_row(decl_param_type(d, n + recv_off));
+        i64 a;
+        if (dsi >= 0) a = tk_deleg_init_expr(dsi, line, fl);
+        else          a = parse_expr(0);
+        head = list_append(head, a);
+        n = n + 1;
+        if (!p_accept(K_COMMA)) break;
+    }
+    p_expect(K_RPAR, "expected ) after the arguments");
+    st64(pn, n);
+    return head;
+}
+
+// `p.m(...)`'s own arguments, with the callee's parameter types in hand when
+// `m` names exactly one signature on `si` (K4b) -- an overloaded name falls
+// back to the plain, untyped `tk_args`: which signature applies is not known
+// until the argument COUNT is, and a lambda's own comma-separated parameters
+// would throw a blind count off. `left` occupies parameter 0 of the mangled
+// function `mt_fn_at` compiles to, hence the `+1` offset into it.
+i64 tk_call_method_args(i64 si, uptr m, uptr pn) {
+    if (tk_method_name_count(si, m) != 1) return tk_args(pn);
+    i64 mi = tk_method_named_find(si, m);
+    i64 d = decl_find(mt_fn_at(mi));
+    if (d < 0) return tk_args(pn);
+    return tk_args_typed(pn, d, 1);
+}
+
 // the arguments a call left out, taken from the callee's own defaults. Each
 // site gets a CLONE: a node lives in exactly one sibling list, so handing the
 // same default to two calls would rewire it out of the first.
@@ -197,7 +236,7 @@ i64 tk_emit_call(i64 left, i64 mi, i64 args, i64 na, i64 line, uptr fl) {
 // because how many there are is what tells one overload from the other
 i64 tk_call_method(i64 left, i64 si, uptr m, i64 line, uptr fl) {
     i64 na = 0;
-    i64 args = tk_args(&na);
+    i64 args = tk_call_method_args(si, m, &na);
     i64 mi = tk_method_pick(si, m, na);
     if (mi < 0) tk_pick_refuse(mi, m, line, fl);
     tk_check_member(mt_cls_at(mi), mt_vis_at(mi), m, line, fl);
