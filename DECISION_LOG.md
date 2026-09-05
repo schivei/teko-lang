@@ -1167,6 +1167,13 @@ Verificador reproduziu o crash instrumentando com ASan+UBSan (as flags do CI pro
   como `f(x)`, passagem como argumento. Captura de variáveis do escopo envolvente é design-open
   (o chão do mc é um `uptr` puro): architect-first — provável forma = objeto gerado (classe
   anônima com os capturados como campos + método) apontado por `uptr`, no espírito do D218/D219.
+- **Captura = modelo do PHP (dono, complemento do mesmo dia):** a função inline/local declara
+  EXPLICITAMENTE o que captura com **`use (a, b)`** — só essas variáveis do escopo declarante
+  entram; nada implícito. Por **valor** por padrão; **por referência** com `&` (`use (&a)`), que
+  é o `&x` do mc (endereço de local) — o próprio chão do mc dá a forma. O objeto gerado tem
+  exatamente os campos da lista do `use`. Palavra `use` já é contextual (trait, D216) — mesmo
+  reuso que o PHP faz. Fecha o design-open: sobra ao architect só a forma C-like da lambda e o
+  tempo de vida do capturado por referência (RC do reclaim / escopo).
 
 ### D220 · DONO: `public`/`private`/`protected`/`static` como em C#; `internal` se o mc permitir restringir; SEM classes aninhadas (dono 2026-09-04) 🔧 SUPERFÍCIE
 - **Modificadores como em C#:** `public`, `private`, `protected`, `static` em membros; `public`/

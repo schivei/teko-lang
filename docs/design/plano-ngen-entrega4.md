@@ -425,8 +425,12 @@ operadores estáticos → `while`/`for` → `namespace`/`import`/`using` → `co
 **Closures:** crumb com desenho prévio (teko-architect): (1) função **local** (dentro de
 outra) hoisted para o topo com nome manglado; (2) **lambda** inline; (3) tipo de função na
 superfície e chamada `f(x)` açucarando `callp`; (4) passagem por `&fn` como `uptr`;
-(5) **captura** — o chão é `uptr` puro, então a forma provável é objeto gerado (classe
-anônima: capturados como campos, corpo como método) — decidir por valor/por referência,
-tempo de vida (RC do reclaim), e recusas claras. Precedentes: `mc/docs/core-language.md`
+(5) **captura = PHP** (ruling do dono): explícita por **`use (a, b)`** na declaração da
+função local/lambda; por valor por padrão, **`use (&a)`** por referência (o `&x` do mc);
+objeto gerado com exatamente os campos do `use`; `use` é a mesma palavra contextual do
+trait. Ao architect sobra: a forma C-like da lambda (ex.: `i64 (i64 x) use (a) { ... }`
+como expressão, e função local nomeada `i64 f(i64 x) use (a) { }` dentro de outra),
+tempo de vida do capturado por referência (escopo/RC), e recusas claras (capturar nome
+que não é local; `use` sem função). Precedentes: `mc/docs/core-language.md`
 (`&x` de função), `examples/desktop` (callbacks GTK bidirecionais), `examples/conc`
 (`spawn` com `&fn`). Entra na fila depois de `const`.
