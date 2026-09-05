@@ -499,3 +499,29 @@ AST 17/18 idêntica; `types_struct` diverge só pelo `static`.
 lexema na arena) — usou `cp`; candidato a `p_cp()` público no mc; (2) `operator+` privado
 ainda funciona de fora — o pass de `N_BINARY` não checa visibilidade; fica para o **C5b**
 (operadores estáticos); (3) HANDOFF §5.1 item 8 estava obsoleto quanto a `base.m()`.
+
+## 22. mc 0.12.0 — o que as releases 0.10.3/0.11.0/0.12.0 mudam na fila (2026-09-05, madrugada)
+
+Baseline `fix/retirement` com **0.12.0**: 18/18 sem uma linha mudada. Do que entrou:
+- **0.10.3 = M41.5 (PR #17), "the follow-ups the ngen consumer exposed":**
+  1. **`syntax_param(&f)`** — hook na cabeça do laço de `parse_params`, antes de
+     `type_of_token`, contrato de `syntax_lit`: `i64 f()` devolve um `N_PARAM` ou 0. Mais
+     **`p_decl_name()`/`p_set_decl_name()`** (a que declaração o parâmetro pertence).
+     **Desbloqueia o C6** (default em função de topo: gravar o default na declaração,
+     completar no sítio por `pass()` + `decl_find` — a prova está em `lib/user_syntax_demo.mc`)
+     e permite o `params` como palavra ensinada na declaração (hoje: `type_new` + pass).
+     Guard novo: handler que **consome tokens e devolve 0 é recusado** (`tests/err/073`).
+  2. **`syntax_infix` sobre operador do core FUNCIONA** (`ops_init` lazy; `syntax_infix` o
+     chama primeiro); a precedência do módulo vence; `#infix` de fonte ainda derruba o
+     handler; duplicata recusada. **Supersede o §1.3**: o C5b pode escolher entre
+     `syntax_infix` (parse-time, tipa pelo oráculo do sítio) e o `pass()` sobre
+     `N_BINARY` (já existe e resolve pelo tipo dos dois operandos). Preferir o **pass**
+     (tem a regra de endereço do §12 e vê os dois tipos); registrar a escolha no C5b.
+- **0.11.0 = M40**: AVR bare-metal, `uptr = 2` por `type_set_width` — não afeta o ngen.
+- **0.12.0 = M42 (PR #19)**: **`--exe` em todo Linux sem `[linker]` e sem sysroot**
+  (`elf-exe`/`elf-exe-x86_64`, dinâmico com musl/glibc por `[target].interp`/`.libc`).
+  → as pernas Linux do CI podem dispensar `[linker] cc` (mini-crumb de CI; manter `cc`
+  até medir que o `--exe` dinâmico roda no runner — o PR testou alpine e ubuntu 26.04).
+**Fila (revista):** membros C# (em verificação) → propriedades/interface v2 → `abstract`/
+`partial class` → reclaim c/ ctor/dtor → C5b → **C6 (agora alcançável, `syntax_param`)** →
+`while`/`for` → `namespace`/`import`/`using` → `const` → `switch` → closures/`ref`/`out`.

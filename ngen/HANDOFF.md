@@ -132,7 +132,16 @@ antes o sysroot que o link precisa, tudo com o próprio `mc` + LLVM da imagem:
 `schivei/mc` `scripts/sysroot-windows.sh`). A linha de link é a do próprio `mc`
 (`src/mc.windows-*.toml`): `-entry:mc_start -nodefaultlib -stack:8388608`.
 
-## 3.2 O mc que o CI usa hoje: 0.10.2 (2026-09-04)
+## 3.2 O mc que o CI usa hoje: 0.12.0 (2026-09-05)
+
+**0.10.3 = M41.5** ("the follow-ups the ngen consumer exposed"): **`syntax_param(&f)`** +
+`p_decl_name()` — o hook de declaração de função que faltava (**C6 desbloqueado**); e
+**`syntax_infix` sobre operador do core funciona** (`ops_init` lazy). **0.11.0 = M40** (AVR).
+**0.12.0 = M42**: `--exe` em Linux sem `[linker]`/sysroot. Baseline 18/18 no 0.12.0. Plano §22.
+Os avisos de release da sessão do mc **não chegam** por mensagem — o dono repassa; conferir
+`gh api repos/schivei/mc/releases/latest` ao começar o dia.
+
+(Registro anterior, 0.10.2:)
 
 A sessão do mc coopera por **patch release** (`x.x.N`), sem mensagem: o CI resolve
 `latest` sozinho. **0.10.1** = M41 (core composto em cinco partes, `type_disable`/
