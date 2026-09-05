@@ -15,6 +15,18 @@
 //   break N; continue;  ->  { rc_dec(x); break N; } (every scope inside the loop)
 //   return e;           ->  { T $t = e; rc_inc($t); rc_dec(x); return $t; }
 //   f();                ->  rt_drop(f());           (a reference nobody took)
+//   g(f())              ->  g(rt_park(f()))         (...and a fence around the
+//                                                    statement that built it)
+//
+// TEMPORARIES. A function that answers with a class hands out a reference of
+// the caller's own -- that is the protocol the `return` above keeps, and it is
+// what lets `C x = f();` take the value without incrementing. So an owned value
+// that lands anywhere that gives it NO owner (an argument, which the callee
+// borrows; the receiver of a `.`; an operand) would live for the rest of the
+// run. Every one of them is parked (ngen/lib/rt.mc) and released when the
+// statement ends, which is where C# and C++ end the full expression too. The
+// condition of an `if` is read into a name of its own first, because `if (c)
+// return 1;` would jump straight over a sweep written after it.
 //
 // WHY A PASS AND NOT THE PARSER. The scope half of this could be written where
 // the block is parsed, as `mc/examples/lang` writes it (`lang_stmt.mc`
@@ -48,12 +60,14 @@ i64 rc_lp[TK_MAXLOOP];                // the scope top at the head of each open 
 i64 tk_nlp = 0;
 i64 tk_rc_floor = 0;                  // where the body's own locals start: past the parameters
 i64 tk_rc_ret = 0 - 1;                // the declared return type of the function being walked
+i64 tk_nparked = 0;                   // temporaries parked so far: a change detector
+i64 tk_rc_swept = 0;                  // 1 when the statement swept its own temporaries
 
 i64 rc_lp_at(i64 i)          { return ld64(rc_lp + i * 8); }
 void set_rc_lp_at(i64 i, i64 v) { st64(rc_lp + i * 8, v); }
 
 void tk_rc_stmt(i64 n);
-void tk_rc_list(i64 n);
+void tk_rc_block(i64 n);
 
 // nodes this pass builds report the position of the statement they replace
 void tk_rc_at(i64 n) {
@@ -144,22 +158,33 @@ void tk_rc_assign(i64 n) {
 // `return e;` becomes `{ T $t = e; [rc_inc($t);] releases...; return $t; }`.
 // The temporary is what makes the releases safe: the value is computed before
 // the locals go away, and a borrowed one is incremented first, so the caller
-// receives a reference of its own whatever the expression was.
-void tk_rc_return(i64 n) {
+// receives a reference of its own whatever the expression was. A `return` that
+// parked temporaries sweeps them ITSELF, before it leaves: a sweep written
+// after it would never run.
+void tk_rc_return(i64 n, i64 p0) {
     i64 e = nd_a(n);
+    i64 parked = tk_nparked > p0;
     i64 needinc = 0;
     if (e != 0 && tk_is_counted(tk_rc_ret)) needinc = !tk_rc_own(e);
     i64 rel = tk_rc_releases(tk_rc_floor);
-    if (rel == 0 && !needinc) return;
+    if (rel == 0 && !needinc && !parked) return;
     tk_rc_at(n);
     i64 st = 0;
+    uptr m = 0;
+    if (parked) {
+        m = gensym_new();
+        st = tk_var(TY_I64, m, tk_call("rt_mark", 0));
+    }
     i64 rv = 0;
-    if (e != 0) {
+    if (e != 0 && tk_rc_ret == TY_VOID) {
+        st = list_append(st, tk_stmt(e));
+    } else if (e != 0) {
         uptr t = gensym_new();
-        st = tk_var(tk_rc_ret, t, e);
+        st = list_append(st, tk_var(tk_rc_ret, t, e));
         if (needinc) st = list_append(st, tk_stmt(tk_call("rc_inc", tk_id(t))));
         rv = tk_id(t);
     }
+    if (parked) st = list_append(st, tk_stmt(tk_call("rt_sweep", tk_id(m))));
     st = list_append(st, rel);
     st = list_append(st, tk_ret(rv));
     set_nd_kind(n, N_BLOCK);
@@ -167,6 +192,8 @@ void tk_rc_return(i64 n) {
     set_nd_val(n, 0);
     set_nd_name(n, 0);
     set_nd_a(n, st);
+    tk_rc_swept = 1;
+    tk_nparked = p0;
 }
 
 // `break N` / `continue` leave every scope opened inside the loop they jump out
@@ -211,27 +238,101 @@ void tk_rc_store(i64 n) {
 }
 
 // ---- the walk ----
-// An expression is walked for the marked stores alone; a statement is walked
-// for everything else. A statement the pass rewrote is NOT walked again: the
-// block it became holds the very node that was just lowered.
+// An expression is walked for the marked stores and the temporaries it hands to
+// a call; a statement is walked for everything else. A statement the pass
+// rewrote is NOT walked again: the block it became holds the very node that was
+// just lowered.
 
-void tk_rc_expr(i64 n) {
+// a shallow copy of `n`, so that the original may be overwritten in place while
+// what it held keeps its children and its place in the tree
+i64 tk_rc_detach(i64 n) {
+    i64 c = node_new(nd_kind(n), nd_line(n), nd_file(n));
+    set_nd_op(c, nd_op(n));
+    set_nd_type(c, nd_type(n));
+    set_nd_val(c, nd_val(n));
+    set_nd_name(c, nd_name(n));
+    set_nd_a(c, nd_a(n));
+    set_nd_b(c, nd_b(n));
+    set_nd_c(c, nd_c(n));
+    set_nd_d(c, nd_d(n));
+    return c;
+}
+
+// the value a marked store moves into the slot, which is the one place inside
+// an expression where an owned reference finds an owner
+i64 tk_rc_consumed(i64 n) {
+    if (!tk_os_has(n)) return 0;
+    return nd_next(nd_a(n));                     // stW(address, value)
+}
+
+// a reference of its own, in a place that gives it no owner: an argument the
+// callee borrows, the receiver of a `.`, an operand. It is PARKED, and the
+// statement that built it releases it at its end.
+void tk_rc_park(i64 n) {
+    if (!tk_rc_own(n)) return;
+    tk_rc_at(n);
+    i64 keep = nd_next(n);
+    node_assign(n, tk_call("rt_park", tk_rc_detach(n)));
+    set_nd_next(n, keep);
+    tk_nparked = tk_nparked + 1;
+}
+
+// walks one expression and the siblings after it. `owner` is the node of THIS
+// sibling list that an owning slot is about to take -- the initializer of a
+// local, the value of an assignment, what a `return` hands back -- and is the
+// only one not parked; every other owned value in the expression has nowhere to
+// live past the statement.
+void tk_rc_walk(i64 n, i64 owner) {
     loop {
         if (n == 0) break;
         tk_rc_store(n);
-        tk_rc_expr(nd_a(n));
-        tk_rc_expr(nd_b(n));
-        tk_rc_expr(nd_c(n));
-        tk_rc_expr(nd_d(n));
+        tk_rc_walk(nd_a(n), tk_rc_consumed(n));
+        tk_rc_walk(nd_b(n), 0);
+        tk_rc_walk(nd_c(n), 0);
+        tk_rc_walk(nd_d(n), 0);
+        if (n != owner) tk_rc_park(n);
         n = nd_next(n);
     }
+}
+
+void tk_rc_expr(i64 n) { tk_rc_walk(n, n); }
+
+// `i64 $m = rt_mark();` before the statement and `rt_sweep($m);` after it: what
+// the statement parked dies with it. The mark is read at run time rather than
+// counted here, because `a && f(new C())` may park nothing at all.
+i64 tk_rc_fence(i64 out, i64 n) {
+    uptr m = gensym_new();
+    out = list_append(out, tk_var(TY_I64, m, tk_call("rt_mark", 0)));
+    out = list_append(out, n);
+    return list_append(out, tk_stmt(tk_call("rt_sweep", tk_id(m))));
+}
+
+// the statements of one block, walked in order and rebuilt: a statement that
+// parked a temporary comes back fenced between its mark and its sweep
+i64 tk_rc_stmts(i64 head) {
+    i64 base = tk_nparked;
+    i64 out = 0;
+    i64 n = head;
+    loop {
+        if (n == 0) break;
+        i64 nx = nd_next(n);
+        set_nd_next(n, 0);
+        i64 p0 = tk_nparked;
+        tk_rc_swept = 0;
+        tk_rc_stmt(n);
+        if (tk_nparked > p0 && !tk_rc_swept) out = tk_rc_fence(out, n);
+        else                                 out = list_append(out, n);
+        n = nx;
+    }
+    tk_nparked = base;                           // every one of them is fenced by now
+    return out;
 }
 
 // `{ ... }`: the locals it declares die at its `}`, in reverse order, and the
 // releases are appended to the list the block already holds
 void tk_rc_block(i64 n) {
     i64 mark = tk_nscope;
-    tk_rc_list(nd_a(n));
+    set_nd_a(n, tk_rc_stmts(nd_a(n)));
     tk_rc_at(n);
     i64 rel = tk_rc_releases(mark);
     tk_nscope = mark;
@@ -239,18 +340,66 @@ void tk_rc_block(i64 n) {
     set_nd_a(n, list_append(nd_a(n), rel));
 }
 
+// the single statement an `if` or a `loop` may carry instead of a block. It is
+// not in a list, so a fence around it has to become a block of its own -- and
+// only when it really parked something, so a program that parks nothing keeps
+// the tree it had.
+void tk_rc_branch(i64 n) {
+    if (n == 0) return;
+    if (nd_kind(n) == N_BLOCK) {
+        tk_rc_block(n);
+        return;
+    }
+    i64 p0 = tk_nparked;
+    i64 keepswept = tk_rc_swept;
+    tk_rc_swept = 0;
+    tk_rc_stmt(n);
+    i64 fence = tk_nparked > p0 && !tk_rc_swept;
+    tk_rc_swept = keepswept;
+    tk_nparked = p0;                             // fenced here, or swept by the statement
+    if (!fence) return;
+    i64 c = tk_rc_detach(n);
+    i64 keep = nd_next(n);
+    tk_rc_at(n);
+    node_assign(n, tk_blk(tk_rc_fence(0, c)));
+    set_nd_next(n, keep);
+}
+
 void tk_rc_loop(i64 n) {
     if (tk_nlp == TK_MAXLOOP) err_at(tk_file, tk_line, "teko: loops nested too deep");
     set_rc_lp_at(tk_nlp, tk_nscope);
     tk_nlp = tk_nlp + 1;
-    tk_rc_stmt(nd_a(n));
+    tk_rc_branch(nd_a(n));
     tk_nlp = tk_nlp - 1;
 }
 
+// A condition that parked temporaries is HOISTED: `if (c) return 1;` would jump
+// straight over a sweep written after it, so the condition is read into a name
+// of its own and its temporaries die there, before either branch runs -- which
+// is where C# and C++ end the full expression too.
+void tk_rc_hoist_cond(i64 n) {
+    tk_rc_at(n);
+    uptr m = gensym_new();
+    uptr c = gensym_new();
+    i64 st = tk_var(TY_I64, m, tk_call("rt_mark", 0));
+    st = list_append(st, tk_var(TY_I64, c, nd_a(n)));
+    st = list_append(st, tk_stmt(tk_call("rt_sweep", tk_id(m))));
+    set_nd_a(n, tk_id(c));
+    i64 body = tk_rc_detach(n);
+    i64 keep = nd_next(n);
+    node_assign(n, tk_blk(list_append(st, body)));
+    set_nd_next(n, keep);
+    tk_rc_swept = 1;
+}
+
 void tk_rc_if(i64 n) {
-    tk_rc_expr(nd_a(n));
-    tk_rc_stmt(nd_b(n));
-    tk_rc_stmt(nd_c(n));
+    i64 p0 = tk_nparked;
+    tk_rc_walk(nd_a(n), 0);                      // a condition owns nothing
+    i64 hoist = tk_nparked > p0;
+    tk_nparked = p0;
+    tk_rc_branch(nd_b(n));
+    tk_rc_branch(nd_c(n));
+    if (hoist) tk_rc_hoist_cond(n);
 }
 
 void tk_rc_stmt(i64 n) {
@@ -259,7 +408,12 @@ void tk_rc_stmt(i64 n) {
     if (k == N_BLOCK)    { tk_rc_block(n);    return; }
     if (k == N_LOOP)     { tk_rc_loop(n);     return; }
     if (k == N_IF)       { tk_rc_if(n);       return; }
-    if (k == N_RETURN)   { tk_rc_expr(nd_a(n)); tk_rc_return(n); return; }
+    if (k == N_RETURN) {
+        i64 p0 = tk_nparked;
+        tk_rc_expr(nd_a(n));
+        tk_rc_return(n, p0);
+        return;
+    }
     if (k == N_BREAK)    { tk_rc_jump(n);     return; }
     if (k == N_CONTINUE) { tk_rc_jump(n);     return; }
     if (k == N_VAR) {
@@ -271,14 +425,6 @@ void tk_rc_stmt(i64 n) {
     if (k == N_ASSIGN)   { tk_rc_expr(nd_a(n)); tk_rc_assign(n); return; }
     if (k == N_EXPRSTMT) { tk_rc_expr(nd_a(n)); tk_rc_exprstmt(n); return; }
     tk_rc_expr(n);
-}
-
-void tk_rc_list(i64 n) {
-    loop {
-        if (n == 0) break;
-        tk_rc_stmt(n);
-        n = nd_next(n);
-    }
 }
 
 // the parameters of the function being walked: borrowed, every one of them, so

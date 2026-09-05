@@ -490,6 +490,10 @@ void tk_pend_do(i64 pi) {
     i64 keep = nd_next(n);
     node_assign(n, r);
     set_nd_next(n, keep);
+    // the node that ends up in the TREE is the placeholder, not what was built
+    // for it, so a store into a slot of counted type is re-marked under the
+    // identity the reclaim pass will walk (teko_rc.mc)
+    if (tk_os_has(r)) tk_os_add(n);
     if (rty >= 0) tk_xt_put(n, tk_struct_by_ty(rty), rty, pure);
 }
 
