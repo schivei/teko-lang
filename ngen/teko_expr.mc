@@ -40,6 +40,7 @@ i64 tk_new() {
     if (tk_is_iface(si)) err_at2(fl, line, "teko: an interface has no object to allocate", name);
     if (sr_abst_at(si)) err_at2(fl, line, "teko: an abstract class is not instantiated", name);
     tk_check_type_use(si, line, fl);
+    tk_close_open(si);                           // `new` is what the constructor is emitted for
     if (p_accept(K_LPAR)) p_expect(K_RPAR, "expected ) after the type name");
     tk_line = line;
     tk_file = fl;

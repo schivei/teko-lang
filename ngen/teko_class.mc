@@ -39,9 +39,24 @@
 // `callp(ld64(ld64(obj) + (1 + slot) * 8), obj, ...)` -- teko_expr.mc, which is
 // also where `p.field` and `p.method(...)` are resolved.
 //
+// A class may be written in more than one PART, here or in another file
+// (D224). Every part says `partial`, and each one after the first adds members
+// to the row the first one opened -- so the fields, the vtable slots and the
+// interfaces of a type are not a contiguous run of any table, and each row owns
+// its own (tk_slot_index, tk_impl_index, teko_struct.mc's fd_cls). The type
+// CLOSES -- its size, its vtable, its constructor, and the check that what it
+// left abstract was overridden -- at the first use of it, which is `new` or a
+// class derived from it, and at the end of the unit when nothing used it. A
+// part written after that is refused where it stands, so every part is read
+// before the first use or the source is told that one was not. There is no
+// partial METHOD: `partial` on a member is refused by name.
+//
 // The names after `:` are one base class at most, first, and then the
 // interfaces the class conforms to: the tables that answer them, and the
 // conformance check itself, are here (teko_iface.mc holds the declaration).
+// The interfaces are a UNION over the parts and may be named in any of them;
+// the base decides where the class's own fields start and which slots it
+// inherits, so it is named before any member is laid out.
 //
 // One limit, the same one `mc/examples/lang` has: a QUALIFIED name resolves in
 // declaration order, so `this.m()` reaches the methods declared above it in the
@@ -91,6 +106,8 @@ i64 tk_prop_member(i64 ci, uptr name, uptr m, i64 fty, i64 off, i64 ti, i64 vis,
 i64 tk_take_decl_vis();
 i64 tk_take_decl_proj();
 i64 tk_take_decl_abst();
+i64 tk_take_decl_part();
+i64 tk_decl_vis_written();
 i64 tk_type_word(uptr name);
 void tk_check_type_use_from(i64 si, i64 proj, i64 line, uptr fl);
 
@@ -119,7 +136,8 @@ i64  tk_ndflt = 0;
 
 uptr vs_m[TK_MAXVSLOT];               // the method name a slot answers to
 uptr vs_sig[TK_MAXVSLOT];             // ...at that signature: an overload is a slot of its own
-uptr vs_fn[TK_MAXVSLOT];              // the function currently filling it
+uptr vs_fn[TK_MAXVSLOT];              // the function currently filling it, or 0 when abstract
+i64  vs_cls[TK_MAXVSLOT];             // the class whose vtable it is a slot of
 i64  tk_nvslot = 0;
 
 uptr mt_name_at(i64 i) { return ld64(mt_name + i * 8); }
@@ -138,6 +156,7 @@ i64  mt_abst_at(i64 i)   { return ld64(mt_abst + i * 8); }
 uptr vs_m_at(i64 i)    { return ld64(vs_m + i * 8); }
 uptr vs_sig_at(i64 i)  { return ld64(vs_sig + i * 8); }
 uptr vs_fn_at(i64 i)   { return ld64(vs_fn + i * 8); }
+i64  vs_cls_at(i64 i)  { return ld64(vs_cls + i * 8); }
 i64  df_node_at(i64 i) { return ld64(df_node + i * 8); }
 
 void set_mt_name_at(i64 i, uptr v) { st64(mt_name + i * 8, v); }
@@ -156,6 +175,26 @@ void set_mt_abst_at(i64 i, i64 v)  { st64(mt_abst + i * 8, v); }
 void set_vs_m_at(i64 i, uptr v)    { st64(vs_m + i * 8, v); }
 void set_vs_sig_at(i64 i, uptr v)  { st64(vs_sig + i * 8, v); }
 void set_vs_fn_at(i64 i, uptr v)   { st64(vs_fn + i * 8, v); }
+void set_vs_cls_at(i64 i, i64 v)   { st64(vs_cls + i * 8, v); }
+
+// where the class's k-th slot sits in the table. A class OWNS its slots rather
+// than holding a slice of it: the parts of a partial class are read with
+// whatever else the source declares between them, so what one class took is not
+// a contiguous run. The ORDER is the table's, which is declaration order, so
+// the k a vtable indexes means the same thing it always did.
+i64 tk_slot_index(i64 ci, i64 k) {
+    i64 n = 0;
+    i64 i = 0;
+    loop {
+        if (i >= tk_nvslot) break;
+        if (vs_cls_at(i) == ci) {
+            if (n == k) return i;
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
 void set_df_node_at(i64 i, i64 v)  { st64(df_node + i * 8, v); }
 
 // the signature key of a parameter list: `__i64__Point` for `(i64 a, Point p)`,
@@ -400,8 +439,6 @@ i64 tk_member_mods(uptr pvis, uptr pstat) {
 // base's: a slot number means the same thing in both, which is what makes a
 // virtual call correct through a base-typed name
 void tk_slots_inherit(i64 ci, i64 base) {
-    i64 v0 = tk_nvslot;
-    set_sr_v0_at(ci, v0);
     set_sr_nv_at(ci, 0);
     if (base < 0) return;
     i64 n = sr_nv_at(base);
@@ -409,9 +446,11 @@ void tk_slots_inherit(i64 ci, i64 base) {
     loop {
         if (i >= n) break;
         if (tk_nvslot == TK_MAXVSLOT) err_at(tk_file, tk_line, "teko: too many virtual slots");
-        set_vs_m_at(tk_nvslot, vs_m_at(sr_v0_at(base) + i));
-        set_vs_sig_at(tk_nvslot, vs_sig_at(sr_v0_at(base) + i));
-        set_vs_fn_at(tk_nvslot, vs_fn_at(sr_v0_at(base) + i));
+        i64 b = tk_slot_index(base, i);
+        set_vs_m_at(tk_nvslot, vs_m_at(b));
+        set_vs_sig_at(tk_nvslot, vs_sig_at(b));
+        set_vs_fn_at(tk_nvslot, vs_fn_at(b));
+        set_vs_cls_at(tk_nvslot, ci);
         tk_nvslot = tk_nvslot + 1;
         i = i + 1;
     }
@@ -425,8 +464,9 @@ i64 tk_slot_find(i64 ci, uptr name, uptr sig) {
     i64 i = 0;
     loop {
         if (i >= sr_nv_at(ci)) break;
-        if (str_eq(vs_m_at(sr_v0_at(ci) + i), name)) {
-            if (str_eq(vs_sig_at(sr_v0_at(ci) + i), sig)) return i;
+        i64 t = tk_slot_index(ci, i);
+        if (str_eq(vs_m_at(t), name)) {
+            if (str_eq(vs_sig_at(t), sig)) return i;
         }
         i = i + 1;
     }
@@ -443,7 +483,7 @@ i64 tk_slot_take(i64 ci, i64 kind, uptr m, uptr sig, uptr fn) {
     if (kind == 3) fn = 0;                       // nothing implements it here
     if (kind == 2) {
         if (slot < 0) err_at2(tk_file, tk_line, "teko: override of a method the base does not declare", m);
-        set_vs_fn_at(sr_v0_at(ci) + slot, fn);
+        set_vs_fn_at(tk_slot_index(ci, slot), fn);
         return slot;
     }
     if (kind == 1 || kind == 3) {
@@ -452,6 +492,7 @@ i64 tk_slot_take(i64 ci, i64 kind, uptr m, uptr sig, uptr fn) {
         set_vs_m_at(tk_nvslot, m);
         set_vs_sig_at(tk_nvslot, sig);
         set_vs_fn_at(tk_nvslot, fn);
+        set_vs_cls_at(tk_nvslot, ci);
         tk_nvslot = tk_nvslot + 1;
         set_sr_nv_at(ci, sr_nv_at(ci) + 1);
         return sr_nv_at(ci) - 1;
@@ -523,7 +564,7 @@ i64 tk_vt_slots(i64 ci, uptr vt) {
     loop {
         if (i >= sr_nv_at(ci)) break;
         i64 dst = tk_bin(K_ADD, tk_id(vt), tk_int((TK_VT_FIXED + i) * 8));
-        stmts = list_append(stmts, tk_stmt(tk_call2("st64", dst, tk_addr(vs_fn_at(sr_v0_at(ci) + i)))));
+        stmts = list_append(stmts, tk_stmt(tk_call2("st64", dst, tk_addr(vs_fn_at(tk_slot_index(ci, i))))));
         i = i + 1;
     }
     return stmts;
@@ -609,7 +650,7 @@ i64 tk_itab_fill(i64 ci, uptr cls, uptr itab) {
     i64 i = 0;
     loop {
         if (i >= ni) break;
-        i64 fi = ci_if_at(sr_i0_at(ci) + i);
+        i64 fi = ci_if_at(tk_impl_index(ci, i));
         stmts = list_append(stmts, tk_mt_fill(ci, cls, fi));
         i64 idst = tk_bin(K_ADD, tk_id(itab), tk_int(8 + i * 16));
         stmts = list_append(stmts, tk_stmt(tk_call2("st64", idst, tk_int(fi))));
@@ -780,6 +821,10 @@ i64 tk_member(i64 ci, uptr name, i64 off, i64 ti) {
     return off;
 }
 
+// the close of a partial class, which the `:` list below is one of the two uses
+// that ask for it: a base class has to be whole before a class derives from it
+void tk_close_open(i64 si);
+
 // one name of the `:` list, whose word is reserved by then (type_new), so the
 // raw lexeme is read and looked up in the type table. `proj` is the origin of
 // the class being declared -- the list is read before its row exists, and an
@@ -800,6 +845,7 @@ i64 tk_conf_name(i64 base, i64 proj) {
     }
     if (!tk_is_class(si)) err_at2(fl, line, "teko: a base has to be a class, not a struct", nm);
     if (base >= 0) err_at2(fl, line, "teko: a class has one base class", nm);
+    tk_close_open(si);                           // a base is whole before it is derived from
     if (tk_nconf > 0) err_at2(fl, line, "teko: the base class comes before the interfaces", nm);
     return si;
 }
@@ -836,43 +882,125 @@ void tk_check_overridden(i64 ci) {
     i64 i = 0;
     loop {
         if (i >= sr_nv_at(ci)) break;
-        i64 k = sr_v0_at(ci) + i;
+        i64 k = tk_slot_index(ci, i);
         if (vs_fn_at(k) == 0) tk_missing_override(ci, vs_m_at(k), vs_sig_at(k));
         i = i + 1;
     }
 }
 
-// ---- class Name [: Base] { fields and methods } ----
-void tk_class() {
-    tk_line = p_line();
-    tk_file = p_file();
-    i64 head_line = tk_line;                     // position of the `class` word
-    uptr head_file = tk_file;
-    p_next();                                    // the `class` word
-    i64 vis = tk_take_decl_vis();                // the `public`/`internal` before the word
-    i64 proj = tk_take_decl_proj();
-    i64 abst = tk_take_decl_abst();
-    uptr name = tk_newname("class");
-    if (p_id() == K_LT) {                        // class Name<T, const N: i64>
-        tk_gen_record(name, TK_KCLASS, vis, proj, abst);   // recorded, not declared
-        return;
+// what a class emits once EVERY part of it has been read: its size, the vtable
+// its objects carry, the tables an interface is dispatched through, and the
+// constructor `new` calls. An abstract class emits none of the three -- there is
+// no object of it to build -- and only the size, which its derived classes lay
+// their own fields after.
+void tk_class_close(i64 ci) {
+    if (sr_part_at(ci) == TK_PDONE) return;
+    if (sr_part_at(ci) == TK_POPEN) set_sr_part_at(ci, TK_PDONE);
+    uptr name = sr_name_at(ci);
+    tk_line = sr_hline_at(ci);                   // the class's own level
+    tk_file = sr_hfile_at(ci);
+    i64 size = tk_size_of(sr_off_at(ci));
+    set_sr_size_at(ci, size);
+    def_add(tk_join(tk_case(name, 1), "_SIZE"), size, tk_line, tk_file);
+    if (sr_abst_at(ci)) return;                  // no object: no vtable and no constructor
+    tk_check_overridden(ci);
+    uptr vt = tk_join(tk_case(name, 0), "_vt");
+    top_add(tk_glb(TY_U8, vt, (TK_VT_FIXED + sr_nv_at(ci)) * 8));
+    top_add(tk_vt_init(ci, name, vt));
+    i64 install = tk_stmt(tk_call(tk_join(vt, "_init"), 0));
+    install = list_append(install, tk_stmt(tk_call2("st64", tk_id("p"), tk_id(vt))));
+    top_add(tk_ctor(name, sr_ty_at(ci), size, install));
+}
+
+// a partial class closes at the first USE of it: `new` needs the constructor,
+// and a class derived from it needs its layout and its slots. A part written
+// after that is refused where it stands, so either every part is read before
+// the first use or the source is told that one was not.
+void tk_close_open(i64 si) {
+    if (sr_part_at(si) != TK_POPEN) return;
+    tk_class_close(si);
+}
+
+// 1 when something has been laid out on the class already: a base decides where
+// its own fields start and which slots it inherits, so a part that named one
+// after a member was placed would be moving what is already written down
+i64 tk_class_has_member(i64 ci) {
+    if (sr_nv_at(ci) > 0) return 1;
+    i64 i = 0;
+    loop {
+        if (i >= tk_nmethod) break;
+        if (mt_cls_at(i) == ci) return 1;
+        i = i + 1;
     }
-    i64 base = 0 - 1;
-    tk_nconf = 0;
-    if (p_accept(K_COLON)) base = tk_class_conf(proj);
-    i64 ty = tk_type_word(name);
-    i64 ci = tk_type_add(name, ty, base, TK_KCLASS, vis, proj);
-    set_sr_abst_at(ci, abst);
+    i = 0;
+    loop {
+        if (i >= tk_nfield) break;
+        if (fd_cls_at(i) == ci) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+// the base of a class, taken where the `:` list names it: its fields keep their
+// offsets in the derived object, its slots are copied so that the derived
+// vtable is a PREFIX of its base's, and its interfaces are the derived class's
+void tk_base_take(i64 ci, i64 base) {
+    set_sr_base_at(ci, base);
+    set_sr_off_at(ci, sr_size_at(base));
     tk_slots_inherit(ci, base);
-    tk_impls_inherit(ci, base);                  // the base's interfaces are the derived class's
+    i64 n = sr_ni_at(base);
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        tk_impl_add(ci, ci_if_at(tk_impl_index(base, i)));
+        i = i + 1;
+    }
+}
+
+// the interfaces the `:` list of the part being read named
+void tk_conf_apply(i64 ci) {
     i64 c = 0;
     loop {
         if (c >= tk_nconf) break;
         tk_impl_add(ci, conf_if_at(c));
         c = c + 1;
     }
-    i64 off = 8;                                 // word 0 is the vtable
-    if (base >= 0) off = sr_size_at(base);       // the base's fields keep their offsets
+}
+
+// `: Base, Iface` on a part that is not the first. The interfaces are a UNION
+// and may be named in any part; the base decides the layout, so it may only be
+// named while the class has nothing laid out yet.
+void tk_class_reconf(i64 ci, i64 proj, i64 line, uptr fl) {
+    tk_nconf = 0;
+    i64 base = tk_class_conf(proj);
+    if (base >= 0) {
+        if (sr_base_at(ci) >= 0) err_at2(fl, line, "teko: a class has one base class", sr_name_at(ci));
+        if (tk_class_has_member(ci))
+            err_at2(fl, line, "teko: the base class is named in a part that comes before the members",
+                    sr_name_at(ci));
+        tk_base_take(ci, base);
+    }
+    tk_conf_apply(ci);
+}
+
+// the part of a partial class that is not the first: the row is there already,
+// and this declaration adds members to it. The modifiers of a type either say
+// what the first part said or say nothing at all.
+i64 tk_class_reopen(uptr nm, i64 vis, i64 abst, i64 line, uptr fl) {
+    i64 si = tk_struct_find(nm);
+    if (!tk_is_class(si)) err_at2(fl, line, "teko: only a class is partial", nm);
+    if (sr_part_at(si) == TK_PWHOLE) err_at2(fl, line, "teko: the type is declared without `partial`", nm);
+    if (sr_part_at(si) == TK_PDONE) err_at2(fl, line, "teko: this part comes after the type was used", nm);
+    if (vis >= 0 && vis != sr_vis_at(si))
+        err_at2(fl, line, "teko: the parts disagree on `public`/`internal`", nm);
+    if (abst && !sr_abst_at(si)) err_at2(fl, line, "teko: the parts disagree on `abstract`", nm);
+    return si;
+}
+
+// `{ fields and methods }`, of a first part or of any part after it: the offset
+// the next field goes at is the row's, so every part lays out one single object
+void tk_class_body(i64 ci, uptr name, i64 head_line, uptr head_file) {
+    i64 off = sr_off_at(ci);
     tk_use_reset();
     p_expect(K_LBRACE, "expected { in the class body");
     loop {
@@ -886,19 +1014,75 @@ void tk_class() {
     if (tk_ntu > 0) off = tk_flatten(ci, name, 0, off);   // the push spends the `}`
     else            p_next();                    // }
     p_accept(K_SEMI);
+    set_sr_off_at(ci, off);
     tk_line = head_line;                         // back to the class's own level
     tk_file = head_file;
-    i64 size = tk_size_of(off);
-    set_sr_size_at(ci, size);
-    def_add(tk_join(tk_case(name, 1), "_SIZE"), size, tk_line, tk_file);
-    if (abst) return;                            // no object: no vtable and no constructor
-    tk_check_overridden(ci);
-    uptr vt = tk_join(tk_case(name, 0), "_vt");
-    top_add(tk_glb(TY_U8, vt, (TK_VT_FIXED + sr_nv_at(ci)) * 8));
-    top_add(tk_vt_init(ci, name, vt));
-    i64 install = tk_stmt(tk_call(tk_join(vt, "_init"), 0));
-    install = list_append(install, tk_stmt(tk_call2("st64", tk_id("p"), tk_id(vt))));
-    top_add(tk_ctor(name, ty, size, install));
+}
+
+// ---- class Name [: Base] { fields and methods } ----
+void tk_class() {
+    tk_line = p_line();
+    tk_file = p_file();
+    i64 head_line = tk_line;                     // position of the `class` word
+    uptr head_file = tk_file;
+    p_next();                                    // the `class` word
+    i64 vwritten = tk_decl_vis_written();        // -1 when this part said nothing
+    i64 vis = tk_take_decl_vis();                // the `public`/`internal` before the word
+    i64 proj = tk_take_decl_proj();
+    i64 abst = tk_take_decl_abst();
+    i64 part = tk_take_decl_part();
+    if (part && tk_struct_find(p_name()) >= 0) {
+        i64 si = tk_class_reopen(p_name(), vwritten, abst, head_line, head_file);
+        p_next();                                // the class's own name
+        if (p_accept(K_COLON)) tk_class_reconf(si, proj, head_line, head_file);
+        tk_class_body(si, sr_name_at(si), head_line, head_file);
+        return;
+    }
+    if (part && tk_gen_find(p_name()) >= 0) {    // one more part of a generic
+        uptr gn = p_name();
+        p_next();                                // the generic's own name
+        tk_gen_record(gn, TK_KCLASS, vis, proj, abst, part);
+        return;
+    }
+    uptr name = tk_newname("class");
+    if (p_id() == K_LT) {                        // class Name<T, const N: i64>
+        tk_gen_record(name, TK_KCLASS, vis, proj, abst, part);   // recorded, not declared
+        return;
+    }
+    i64 base = 0 - 1;
+    tk_nconf = 0;
+    if (p_accept(K_COLON)) base = tk_class_conf(proj);
+    tk_line = head_line;                         // closing a partial base moved it
+    tk_file = head_file;
+    i64 ty = tk_type_word(name);
+    i64 ci = tk_type_add(name, ty, base, TK_KCLASS, vis, proj);
+    set_sr_abst_at(ci, abst);
+    set_sr_hline_at(ci, head_line);
+    set_sr_hfile_at(ci, head_file);
+    set_sr_off_at(ci, 8);                        // word 0 is the vtable
+    tk_slots_inherit(ci, base);
+    tk_impls_inherit(ci, base);                  // the base's interfaces are the derived class's
+    if (base >= 0) set_sr_off_at(ci, sr_size_at(base));   // the base's fields keep their offsets
+    tk_conf_apply(ci);
+    tk_class_body(ci, name, head_line, head_file);
+    if (part) {
+        set_sr_part_at(ci, TK_POPEN);            // more of it may follow
+        return;
+    }
+    tk_class_close(ci);
+}
+
+// every part of every partial class that no use closed is closed here, at the
+// end of the unit: a class nobody instantiated still owes the check that what
+// it left abstract was overridden and that what it named it implements.
+i64 tk_partial_pass(i64 root) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nstruct) break;
+        tk_close_open(i);
+        i = i + 1;
+    }
+    return root;
 }
 
 void tk_stop_type()      { i64 l = p_line(); uptr f = p_file(); p_next(); err_at(f, l, "teko: type not taught yet"); }

@@ -43,7 +43,7 @@
 // re-parsed by the very machine below; these two are what the declaration of a
 // type has to ask it before there is a type at all
 i64 tk_gen_find(uptr name);
-void tk_gen_record(uptr name, i64 kind, i64 vis, i64 proj, i64 abst);
+void tk_gen_record(uptr name, i64 kind, i64 vis, i64 proj, i64 abst, i64 part);
 
 // teko_access.mc is included after this file too -- it reads the tables below --
 // and these three are what a type declaration has to ask it: the modifier that
@@ -61,6 +61,12 @@ i64 tk_type_word(uptr name);
 #define TK_KCLASS  1
 #define TK_KIFACE  2
 
+// how much of a class has been read: one declared in one place is whole where
+// it stands, and a `partial` one stays OPEN until the first use of it closes
+#define TK_PWHOLE 0
+#define TK_POPEN  1
+#define TK_PDONE  2
+
 // where a member may be reached from, C#'s three words; a member with no
 // modifier at all is `private`
 #define TK_VPRIVATE   0
@@ -74,23 +80,24 @@ i64 tk_type_word(uptr name);
 
 uptr sr_name[TK_MAXSTRUCT];
 i64  sr_ty[TK_MAXSTRUCT];             // the id type_new returned for the name
-i64  sr_first[TK_MAXSTRUCT];          // slice [first, first+count) of the field table
-i64  sr_count[TK_MAXSTRUCT];
 i64  sr_size[TK_MAXSTRUCT];
 i64  sr_base[TK_MAXSTRUCT];           // the base class, or -1
 i64  sr_form[TK_MAXSTRUCT];           // TK_KSTRUCT, TK_KCLASS or TK_KIFACE
-i64  sr_v0[TK_MAXSTRUCT];             // slice [v0, v0+nv) of the virtual-slot table
-i64  sr_nv[TK_MAXSTRUCT];
+i64  sr_nv[TK_MAXSTRUCT];             // how many virtual slots it has, its own and the base's
 i64  sr_m0[TK_MAXSTRUCT];             // an interface's slice [m0, m0+mn) of the signature table
 i64  sr_mn[TK_MAXSTRUCT];
-i64  sr_i0[TK_MAXSTRUCT];             // a class's slice [i0, i0+ni) of the implemented-interface list
-i64  sr_ni[TK_MAXSTRUCT];
+i64  sr_ni[TK_MAXSTRUCT];             // ...and how many interfaces it implements
 i64  sr_vis[TK_MAXSTRUCT];            // TK_TPUBLIC or TK_TINTERNAL
 i64  sr_proj[TK_MAXSTRUCT];           // 1 when the project itself declared it
 i64  sr_abst[TK_MAXSTRUCT];           // 1 for an `abstract` class: no object, no constructor
+i64  sr_part[TK_MAXSTRUCT];           // TK_PWHOLE, TK_POPEN or TK_PDONE
+i64  sr_off[TK_MAXSTRUCT];            // where the next field goes: carried across the parts
+i64  sr_hline[TK_MAXSTRUCT];          // where the FIRST part was written, which is where a
+uptr sr_hfile[TK_MAXSTRUCT];          // ...refusal at closing time is reported
 i64  tk_nstruct = 0;
 
 uptr fd_name[TK_MAXFIELD];
+i64  fd_cls[TK_MAXFIELD];             // the type that declares it: the row this field belongs to
 i64  fd_off[TK_MAXFIELD];
 i64  fd_ty[TK_MAXFIELD];
 i64  fd_nel[TK_MAXFIELD];             // elements of an INLINE array field, 0 for a scalar
@@ -121,21 +128,22 @@ uptr tk_file = 0;
 // ---- table accessors (no raw ld64/st64 outside this section) ----
 uptr sr_name_at(i64 i)  { return ld64(sr_name + i * 8); }
 i64  sr_ty_at(i64 i)    { return ld64(sr_ty + i * 8); }
-i64  sr_first_at(i64 i) { return ld64(sr_first + i * 8); }
-i64  sr_count_at(i64 i) { return ld64(sr_count + i * 8); }
 i64  sr_size_at(i64 i)  { return ld64(sr_size + i * 8); }
 i64  sr_base_at(i64 i)  { return ld64(sr_base + i * 8); }
 i64  sr_kind_at(i64 i)  { return ld64(sr_form + i * 8); }
-i64  sr_v0_at(i64 i)    { return ld64(sr_v0 + i * 8); }
 i64  sr_nv_at(i64 i)    { return ld64(sr_nv + i * 8); }
 i64  sr_m0_at(i64 i)    { return ld64(sr_m0 + i * 8); }
 i64  sr_mn_at(i64 i)    { return ld64(sr_mn + i * 8); }
-i64  sr_i0_at(i64 i)    { return ld64(sr_i0 + i * 8); }
 i64  sr_ni_at(i64 i)    { return ld64(sr_ni + i * 8); }
 i64  sr_vis_at(i64 i)   { return ld64(sr_vis + i * 8); }
 i64  sr_proj_at(i64 i)  { return ld64(sr_proj + i * 8); }
 i64  sr_abst_at(i64 i)  { return ld64(sr_abst + i * 8); }
+i64  sr_part_at(i64 i)  { return ld64(sr_part + i * 8); }
+i64  sr_off_at(i64 i)   { return ld64(sr_off + i * 8); }
+i64  sr_hline_at(i64 i) { return ld64(sr_hline + i * 8); }
+uptr sr_hfile_at(i64 i) { return ld64(sr_hfile + i * 8); }
 uptr fd_name_at(i64 i)  { return ld64(fd_name + i * 8); }
+i64  fd_cls_at(i64 i)   { return ld64(fd_cls + i * 8); }
 i64  fd_off_at(i64 i)   { return ld64(fd_off + i * 8); }
 i64  fd_ty_at(i64 i)    { return ld64(fd_ty + i * 8); }
 i64  fd_nel_at(i64 i)   { return ld64(fd_nel + i * 8); }
@@ -154,24 +162,25 @@ i64  xt_pure_at(i64 i)  { return ld64(xt_pure + i * 8); }
 
 void set_sr_name_at(i64 i, uptr v)  { st64(sr_name + i * 8, v); }
 void set_sr_ty_at(i64 i, i64 v)     { st64(sr_ty + i * 8, v); }
-void set_sr_first_at(i64 i, i64 v)  { st64(sr_first + i * 8, v); }
-void set_sr_count_at(i64 i, i64 v)  { st64(sr_count + i * 8, v); }
 void set_sr_size_at(i64 i, i64 v)   { st64(sr_size + i * 8, v); }
 void set_sr_base_at(i64 i, i64 v)   { st64(sr_base + i * 8, v); }
 void set_sr_kind_at(i64 i, i64 v)   { st64(sr_form + i * 8, v); }
-void set_sr_v0_at(i64 i, i64 v)     { st64(sr_v0 + i * 8, v); }
 void set_sr_nv_at(i64 i, i64 v)     { st64(sr_nv + i * 8, v); }
 void set_sr_m0_at(i64 i, i64 v)     { st64(sr_m0 + i * 8, v); }
 void set_sr_mn_at(i64 i, i64 v)     { st64(sr_mn + i * 8, v); }
-void set_sr_i0_at(i64 i, i64 v)     { st64(sr_i0 + i * 8, v); }
 void set_sr_ni_at(i64 i, i64 v)     { st64(sr_ni + i * 8, v); }
 void set_sr_vis_at(i64 i, i64 v)    { st64(sr_vis + i * 8, v); }
 void set_sr_proj_at(i64 i, i64 v)   { st64(sr_proj + i * 8, v); }
 void set_sr_abst_at(i64 i, i64 v)   { st64(sr_abst + i * 8, v); }
+void set_sr_part_at(i64 i, i64 v)   { st64(sr_part + i * 8, v); }
+void set_sr_off_at(i64 i, i64 v)    { st64(sr_off + i * 8, v); }
+void set_sr_hline_at(i64 i, i64 v)  { st64(sr_hline + i * 8, v); }
+void set_sr_hfile_at(i64 i, uptr v) { st64(sr_hfile + i * 8, v); }
 
 i64 tk_is_class(i64 si) { return sr_kind_at(si) == TK_KCLASS; }
 i64 tk_is_iface(i64 si) { return sr_kind_at(si) == TK_KIFACE; }
 void set_fd_name_at(i64 i, uptr v)  { st64(fd_name + i * 8, v); }
+void set_fd_cls_at(i64 i, i64 v)    { st64(fd_cls + i * 8, v); }
 void set_fd_off_at(i64 i, i64 v)    { st64(fd_off + i * 8, v); }
 void set_fd_ty_at(i64 i, i64 v)     { st64(fd_ty + i * 8, v); }
 void set_fd_nel_at(i64 i, i64 v)    { st64(fd_nel + i * 8, v); }
@@ -415,15 +424,19 @@ i64 tk_struct_by_ty(i64 ty) {
 
 // index into the field table of `name` in `si` or in one of its bases -- the
 // base's fields keep their offsets in the derived object (base-first layout),
-// so the entry found up the chain is valid as it stands
+// so the entry found up the chain is valid as it stands. A row OWNS its fields
+// rather than holding a slice of the table: the parts of a partial class are
+// read with whatever else the source declares between them, so the fields of
+// one type are not a contiguous run.
 i64 tk_field_find(i64 si, uptr name) {
     loop {
         if (si < 0) break;
-        i64 first = sr_first_at(si);
         i64 i = 0;
         loop {
-            if (i >= sr_count_at(si)) break;
-            if (str_eq(fd_name_at(first + i), name)) return first + i;
+            if (i >= tk_nfield) break;
+            if (fd_cls_at(i) == si) {
+                if (str_eq(fd_name_at(i), name)) return i;
+            }
             i = i + 1;
         }
         si = sr_base_at(si);
@@ -434,16 +447,7 @@ i64 tk_field_find(i64 si, uptr name) {
 // the type that DECLARES the field at index `fi`, which is the type an access
 // to it is checked against: a field found up the base chain belongs to the base,
 // not to the receiver's own type
-i64 tk_field_owner(i64 fi) {
-    i64 i = 0;
-    loop {
-        if (i >= tk_nstruct) break;
-        i64 first = sr_first_at(i);
-        if (fi >= first && fi < first + sr_count_at(i)) return i;
-        i = i + 1;
-    }
-    return 0 - 1;
-}
+i64 tk_field_owner(i64 fi) { return fd_cls_at(fi); }
 
 // the field called `name` when the left side's type is NOT known statically --
 // a parameter, or a global, neither of which the core reports to a module. The
@@ -539,11 +543,12 @@ void tk_xt_put(i64 n, i64 si, i64 ty, i64 pure) {
 
 void tk_xt_add(i64 n, i64 si, i64 pure) { tk_xt_put(n, si, sr_ty_at(si), pure); }
 
-// appends the field and extends the owner's slice, so a method parsed further
-// down the same body already sees the fields declared above it. `sym` is the
-// global a STATIC field lives in, and 0 for one that lives in the object.
+// appends the field under its owner, so a method parsed further down the same
+// body already sees the fields declared above it. `sym` is the global a STATIC
+// field lives in, and 0 for one that lives in the object.
 void tk_field_add(i64 si, uptr name, i64 off, i64 ty, i64 nel, i64 vis, uptr sym) {
     if (tk_nfield == TK_MAXFIELD) err_at(tk_file, tk_line, "teko: too many fields");
+    set_fd_cls_at(tk_nfield, si);
     set_fd_name_at(tk_nfield, name);
     set_fd_off_at(tk_nfield, off);
     set_fd_ty_at(tk_nfield, ty);
@@ -551,7 +556,6 @@ void tk_field_add(i64 si, uptr name, i64 off, i64 ty, i64 nel, i64 vis, uptr sym
     set_fd_vis_at(tk_nfield, vis);
     set_fd_sym_at(tk_nfield, sym);
     tk_nfield = tk_nfield + 1;
-    set_sr_count_at(si, tk_nfield - sr_first_at(si));
 }
 
 // the row is appended BEFORE the body is read, so a field or a method body may
@@ -560,20 +564,20 @@ i64 tk_type_add(uptr name, i64 ty, i64 base, i64 kind, i64 vis, i64 proj) {
     if (tk_nstruct == TK_MAXSTRUCT) err_at(tk_file, tk_line, "teko: too many type declarations");
     set_sr_name_at(tk_nstruct, name);
     set_sr_ty_at(tk_nstruct, ty);
-    set_sr_first_at(tk_nstruct, tk_nfield);
-    set_sr_count_at(tk_nstruct, 0);
     set_sr_size_at(tk_nstruct, 0);
     set_sr_base_at(tk_nstruct, base);
     set_sr_kind_at(tk_nstruct, kind);
-    set_sr_v0_at(tk_nstruct, 0);
     set_sr_nv_at(tk_nstruct, 0);
     set_sr_m0_at(tk_nstruct, 0);
     set_sr_mn_at(tk_nstruct, 0);
-    set_sr_i0_at(tk_nstruct, 0);
     set_sr_ni_at(tk_nstruct, 0);
     set_sr_vis_at(tk_nstruct, vis);
     set_sr_proj_at(tk_nstruct, proj);
     set_sr_abst_at(tk_nstruct, 0);
+    set_sr_part_at(tk_nstruct, TK_PWHOLE);
+    set_sr_off_at(tk_nstruct, 0);
+    set_sr_hline_at(tk_nstruct, tk_line);
+    set_sr_hfile_at(tk_nstruct, tk_file);
     tk_nstruct = tk_nstruct + 1;
     return tk_nstruct - 1;
 }
@@ -803,7 +807,7 @@ void tk_struct() {
     i64 proj = tk_take_decl_proj();
     uptr name = tk_newname("struct");
     if (p_id() == K_LT) {                        // struct Name<T, const N: i64>
-        tk_gen_record(name, TK_KSTRUCT, vis, proj, 0);   // recorded, not declared
+        tk_gen_record(name, TK_KSTRUCT, vis, proj, 0, 0);   // recorded, not declared
         return;
     }
     i64 ty = tk_type_word(name);                 // a field of its own type parses

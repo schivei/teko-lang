@@ -64,6 +64,7 @@ uptr im_def[TK_MAXIFMETH];            // the symbol of its DEFAULT body, or 0
 i64  tk_nifmeth = 0;
 
 i64  ci_if[TK_MAXIMPL];               // the interface row of one implementation
+i64  ci_cls[TK_MAXIMPL];              // ...and the class that implements it
 i64  tk_nimpl = 0;
 
 i64  conf_if[TK_MAXCONF];             // scratch: the `:` list of the class being read
@@ -80,6 +81,7 @@ i64  im_static_at(i64 i) { return ld64(im_static + i * 8); }
 i64  im_prop_at(i64 i) { return ld64(im_prop + i * 8); }
 uptr im_def_at(i64 i)  { return ld64(im_def + i * 8); }
 i64  ci_if_at(i64 i)   { return ld64(ci_if + i * 8); }
+i64  ci_cls_at(i64 i)  { return ld64(ci_cls + i * 8); }
 i64  conf_if_at(i64 i) { return ld64(conf_if + i * 8); }
 
 void set_im_name_at(i64 i, uptr v) { st64(im_name + i * 8, v); }
@@ -92,6 +94,24 @@ void set_im_static_at(i64 i, i64 v) { st64(im_static + i * 8, v); }
 void set_im_prop_at(i64 i, i64 v)  { st64(im_prop + i * 8, v); }
 void set_im_def_at(i64 i, uptr v)  { st64(im_def + i * 8, v); }
 void set_ci_if_at(i64 i, i64 v)    { st64(ci_if + i * 8, v); }
+void set_ci_cls_at(i64 i, i64 v)   { st64(ci_cls + i * 8, v); }
+
+// where the class's k-th implemented interface sits in the list, under the same
+// ownership rule the fields and the slots follow (teko_class.mc's
+// tk_slot_index): what one class listed is not a contiguous run of the table
+i64 tk_impl_index(i64 ci, i64 k) {
+    i64 n = 0;
+    i64 i = 0;
+    loop {
+        if (i >= tk_nimpl) break;
+        if (ci_cls_at(i) == ci) {
+            if (n == k) return i;
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
 void set_conf_if_at(i64 i, i64 v)  { st64(conf_if + i * 8, v); }
 
 // the position of `name` INSIDE interface `si`, which is also its slot in the
@@ -269,8 +289,8 @@ i64 tk_ifprop_pick(i64 si, uptr m, i64 wantset, i64 line, uptr fl) {
 i64 tk_impl_has(i64 ci, i64 fi) {
     i64 i = 0;
     loop {
-        if (i >= sr_ni_at(ci)) break;
-        if (ci_if_at(sr_i0_at(ci) + i) == fi) return 1;
+        if (i >= tk_nimpl) break;
+        if (ci_cls_at(i) == ci && ci_if_at(i) == fi) return 1;
         i = i + 1;
     }
     return 0;
@@ -282,21 +302,22 @@ void tk_impl_add(i64 ci, i64 fi) {
     if (tk_impl_has(ci, fi)) return;
     if (tk_nimpl == TK_MAXIMPL) err_at(tk_file, tk_line, "teko: too many implemented interfaces");
     set_ci_if_at(tk_nimpl, fi);
+    set_ci_cls_at(tk_nimpl, ci);
     tk_nimpl = tk_nimpl + 1;
-    set_sr_ni_at(ci, tk_nimpl - sr_i0_at(ci));
+    set_sr_ni_at(ci, sr_ni_at(ci) + 1);
 }
 
 // the base's interfaces are the derived class's too: they are copied rather
 // than followed, because the derived class publishes its OWN method tables and
 // an `override` has to reach the interface as well
 void tk_impls_inherit(i64 ci, i64 base) {
-    set_sr_i0_at(ci, tk_nimpl);
     set_sr_ni_at(ci, 0);
     if (base < 0) return;
+    i64 n = sr_ni_at(base);
     i64 i = 0;
     loop {
-        if (i >= sr_ni_at(base)) break;
-        tk_impl_add(ci, ci_if_at(sr_i0_at(base) + i));
+        if (i >= n) break;
+        tk_impl_add(ci, ci_if_at(tk_impl_index(base, i)));
         i = i + 1;
     }
 }

@@ -70,6 +70,11 @@
 //   an abstract member is a vtable slot with nothing in it, which the first
 //   concrete class of the chain has to fill with an `override`; `new Shape` is
 //   refused, and the class emits no vtable and no constructor at all
+//   partial class Shape { ... }   the same class, declared in more than one
+//   partial class Shape { ... }   place; a part after the first adds members to
+//                                 the row the first one opened, and the type
+//                                 closes at its first use or at the end of the
+//                                 unit -- a part written after that is refused
 //
 // Everything else in docs/design/port-teko-mc.md §3 (types/classes,
 // generics, error-union, `service`/DI, concurrency, the
@@ -102,6 +107,7 @@ void user_init() {
     syntax("public",    &tk_public);
     syntax("internal",  &tk_internal);
     syntax("abstract",  &tk_abstract);
+    syntax("partial",   &tk_partial);
     syntax("class",     &tk_class);
     syntax("interface", &tk_interface);
     syntax("trait",     &tk_trait);
@@ -133,6 +139,11 @@ void user_init() {
     // ordinary functions with ordinary parameters, and never has to know what a
     // `params` list is. Running after it would mean mangling a declaration the
     // `params` pass is about to take away.
+    // AHEAD of every other pass: a partial class no use closed is closed here,
+    // and what that emits -- a constructor, a vtable initializer -- is an
+    // ordinary declaration the passes below have to see like any other.
+    pass(&tk_partial_pass);
+
     pass(&tk_params_pass);
     pass(&tk_typeof_pass);
 
