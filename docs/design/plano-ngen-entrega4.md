@@ -585,3 +585,35 @@ o D211). Pré-requisitos de superfície para (4): tudo que os módulos `.mc` usa
 de função/`&fn`/`callp` (D221), `ref`/`out`, arrays globais, `#define`/`const`, `#include`,
 `extern`, `switch` (D222), closures — logo a entrega 5 é, na prática, a lista do que a teko
 precisa para escrever o próprio compilador.
+
+## 26. Roadmap do mc até o 1.0.0 (da sessão do mc, `NOTICES-teko.md`, 2026-09-05)
+
+Ordem: **(1) patch pós-M42** (0.12.x, em implementação): `[target].libc = "gnu"|"musl"`,
+`[target].link = "dynamic"|"static"`, `--interp=`/`--libc=` → **trocar as pernas Linux do CI
+para `libc = "gnu"`** quando sair. **(2) M45 `i32`** (0.13.0, em implementação): `i32` pelo
+core via `type_new("i32", 4, 4, TK_SINT)` antes do `user_init`; kind **`TK_SINT`** (sinal por
+kind: `type_new("i16", 2, 2, TK_SINT)` de um módulo ganha tudo); retorno de chamada e `return`
+estendidos pelo tipo DECLARADO; `c_int()`; **`p_cp()` público** → no ngen: `extern i32` para C
+que devolve `int`; `TK_SINT` nos inteiros assinados próprios; trocar o acesso ao `cp` por
+`p_cp()`. **(3) M43 sandbox** (spec ratificada). **(4) M44 pacotes** (spec ratificada).
+**(5) M46** linker estático de `.a` (candidato). **(6) M33 wasm** (último). Entre 4 e 1.0.0 só
+correções; **1.0.0 = decisão do dono conosco**.
+
+**M44 — o que vem de lá (NÃO desenhar do lado da teko):** identidade por nome de registro +
+tag `vX.Y.Z`; `[deps]` = mínimo (MVS do Go); `#include <pack/lib.mc>`/`<pack>` resolvido por
+lock → bundle → pacote `mc` (nunca o cwd); `mc.lock` com hash de conteúdo (dirhash sobre
+`mc.toml` + `[package].files`; a lista é a fronteira — arquivo lido fora dela é erro); registro
+`schivei/mc-registry` por PR; fetch por tarball da tag (`curl`/`wget`), `deps/` vendoring,
+`[replace]`; comandos `mc pkg sync|add|list|vendor|verify|hash|check`, `mc install|update|
+upgrade` (com `--yes`); binário `mc-slim`; `mc --version`. **O que é da teko:** o sistema de
+pacotes da PRÓPRIA teko (imports/namespaces da linguagem), a forma do `teko_init()`, o
+`user.mc` do compilador teko. O ngen = pacote "ambos" (`module = "mc_teko.mc"`,
+`lib = "teko_rt.mc"`).
+
+**Auto-hospedagem — já possível hoje (M41):** `mc build` com `[compiler].core =
+"<mc/core_min>"` (+ partes) e `modules = ["<teko/mc_teko.mc>", "user.mc"]`; fixpoint
+`teko2 == teko3` pelo protocolo do `scripts/bootstrap.sh` do mc (`cmp` dos objetos +
+`--dump-asm` diff vazio). Com o M44 vira pacote pinado. O 1.0.0 dá a promessa de superfície
+estável, não a capacidade. → **Crumb "compilador teko de `core_min`"** entra na fila da
+entrega 5 (independente dos construtos): medir tamanho e provar que o CI de 5 pernas passa
+com o core mínimo + as partes que os alvos usam.
