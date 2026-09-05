@@ -197,6 +197,7 @@
 #include "teko_access.mc"
 #include "teko_typeof.mc"
 #include "teko_deleg.mc"
+#include "teko_heaparr.mc"
 #include "teko_ternary.mc"
 #include "teko_stmt.mc"
 #include "teko_expr.mc"
@@ -215,6 +216,7 @@ void user_init() {
     tk_loop_init();
     tk_ns_init();
     tk_ref_init();
+    tk_ha_init();
 
     syntax("public",    &tk_public);
     syntax("internal",  &tk_internal);

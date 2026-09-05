@@ -68,6 +68,7 @@ i64 tk_default_param() {
         set_fpd_name_at(tk_dflt_row, owner);
         set_fpd_mark_at(tk_dflt_row, tk_ndflt);
         tk_nfdecl = tk_nfdecl + 1;
+        tk_hp_reset();                            // K3: this declaration's own `T[]` parameters
     }
     i64 rk = tk_ref_kind();                      // K2 (§41): `ref`/`out` before the pointee type
     if (rk != TK_RP_NONE) {
@@ -80,12 +81,17 @@ i64 tk_default_param() {
         return pnode;
     }
     i64 ty = tk_ns_param_ty();                   // a namespaced short type name (§31 N1)
-    if (ty < 0) ty = type_of_token(p_id());
-    if (ty < 0 || ty == TY_VOID) return 0;       // not ours: the core's own two diagnostics stand
-    p_next();
+    if (ty >= 0) {
+        p_next();
+    } else {
+        ty = type_of_token(p_id());
+        if (ty < 0 || ty == TY_VOID) return 0;   // not ours: the core's own two diagnostics stand
+        ty = p_type();                           // K3 (§41): lets a `[]` suffix register
+    }
     uptr pn = p_ident();
     if (ty == tk_ty_params && p_id() == K_ASSIGN)
         err_at(p_file(), p_line(), "teko: a `params` list has no default");
+    tk_hp_add(pn, ty);                            // K3: a `T[]` parameter of a free function
     tk_param_default(fpd_mark_at(tk_dflt_row));
     return param_new(ty, pn);
 }

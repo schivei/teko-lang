@@ -559,6 +559,7 @@ void tk_param_default(i64 mark) {
 // `pnreq` answers with the smallest number of arguments a call may pass.
 i64 tk_params(uptr pnp, uptr pnreq, i64 extra, i64 recv) {
     i64 mark = tk_ndflt;
+    tk_hp_reset();                                // K3: this declaration's own `T[]` parameters
     p_expect(K_LPAR, "expected ( in the method parameter list");
     i64 head = 0;
     if (recv) head = param_new(TY_UPTR, tk_this_name());
@@ -576,7 +577,7 @@ i64 tk_params(uptr pnp, uptr pnreq, i64 extra, i64 recv) {
         head = list_append(head, pnode);
         np = np + 1;
         if (rk != TK_RP_NONE) { tk_rp_add(pnode, rk, ty); tk_ref_deny_default(rk, p_line(), p_file()); }
-        else tk_param_default(mark);
+        else { tk_hp_add(pn, ty); tk_param_default(mark); }
         if (np + recv + extra > MAXPARAMS)
             err_at(p_file(), p_line(), "teko: method with too many parameters (the receiver counts, and so does the vtable pointer of a virtual call)");
         if (!p_accept(K_COMMA)) break;
