@@ -74,10 +74,13 @@ i64 tk_switch_last(i64 head) {
 }
 
 // "control cannot fall out of a case" -- a non-empty case/default body has to
-// end in one of the four jumps C# itself requires here
+// end in one of the four jumps C# itself requires here. A body written as a
+// block ends in whatever ITS last statement is (tk_switch_no_continue_stmt's
+// own N_BLOCK recursion, just above), not in the block node itself.
 void tk_switch_check_end(i64 body) {
     i64 last = tk_switch_last(body);
     i64 k = nd_kind(last);
+    if (k == N_BLOCK) { tk_switch_check_end(nd_a(last)); return; }
     if (k == N_BREAK || k == N_RETURN || k == N_CONTINUE) return;
     err_at(nd_file(last), nd_line(last), "teko: control cannot fall out of a case; end it with break");
 }
