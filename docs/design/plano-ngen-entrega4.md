@@ -568,3 +568,20 @@ consumidor escreve as seis linhas do `user_init` chamando `teko_init()`). Preced
 (2) `mc.toml` do `ngen/` ganha `[package] name = "teko"`, `files`, `lib`, `module`;
 (3) regra do M44: todo arquivo lido sob a raiz do pacote tem de estar em `files`. Sem
 mudança de superfície. Coordenar a numeração com o mc (sem 1.0.0 sem o ngen).
+
+## 25. D225 — o rumo: auto-hospedagem da teko via re-arch do mc (M41)
+
+Não é entrega agora; é o **destino** que ordena as entregas. Etapas, cada uma sem
+mudança de superfície: (1) **recriar** o compilador teko das partes do `<mc/core>`
+(`core_min` + as máquinas/writers que os alvos do CI usam), como `examples/avr` e o
+`check-parts.sh` fazem — `[compiler].core` próprio em vez do bundle inteiro, medindo o
+tamanho; (2) `subcommand("build", …)` → `teko build` como driver, `type_disable`/
+`intrinsic_disable` para o que a teko redefine (candidatos: os tipos que a teko trata por
+`type_new`); (3) M44: pacote `teko` com `teko_init()`; (4) **auto-hospedagem**: reescrever
+`teko_*.mc` em teko (`.tk`), compilar com o `mc-teko` atual → `teko1`, com `teko1` → `teko2`,
+`teko2` → `teko3`, `cmp teko2 teko3` byte-idêntico — o mesmo rito de bootstrap do mc, e o
+único fixpoint que importa daqui para a frente (o `gen2==gen3` do `src/` congelado morreu com
+o D211). Pré-requisitos de superfície para (4): tudo que os módulos `.mc` usam hoje — ponteiro
+de função/`&fn`/`callp` (D221), `ref`/`out`, arrays globais, `#define`/`const`, `#include`,
+`extern`, `switch` (D222), closures — logo a entrega 5 é, na prática, a lista do que a teko
+precisa para escrever o próprio compilador.

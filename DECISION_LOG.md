@@ -1157,6 +1157,21 @@ Verificador reproduziu o crash instrumentando com ASan+UBSan (as flags do CI pro
 - **CONSERTO (dispatch):** `cg_emit_self_addr` tem que PARAR de escapar o endereço de um temp cujo escopo é o próprio statement-expression — hoist do `_rcvN` pra um escopo que sobrevive à chamada externa inteira, OU passar receptor tipo-valor por valor (Region/Arena são structs de 8B, métodos leem self). Root-cause, não workaround; conserta a CLASSE (todo receptor não-endereçável), não só o sítio arena.
 - **LEI DE PROCESSO (endurece D163/D164):** o fixpoint no sandbox NÃO pega UB que só crasha sob certos toolchains — **o gate de verificador de compiler-core passa a incluir um build ASan+UBSan** (`-fsanitize=address,undefined -fno-omit-frame-pointer -g`) do gen0 compilando o tip, além do fixpoint. Barato, pega stack-use-after-scope/UAF/OOB que o build seco esconde. (A ser gravado na CLAUDE.md.)
 
+### D225 · DONO: o RUMO do port — extensibilidade e override por superfície do mc (M41/M40) são o caminho para a teko se AUTO-HOSPEDAR (dono 2026-09-05) 🔭 RUMO
+O que importa nas releases 0.10.1-0.12.0 não é o AVR: é que o mc passou a ser **re-arquitetável
+e recompilável por superfície** — `<mc/core>` é a soma de cinco partes (`core_min`, `core_machines`,
+`core_writers`, `core_build`, `core_bundle`), e um módulo pode **omitir** partes e **sobrescrever**
+o core sem tocar em `src/` (`type_disable`, `intrinsic_disable`, `type_set_width`, `subcommand`,
+`backend_default`, `machine_use_if`, `on_plan` — M41; provado pelo M40, que recria um compilador
+inteiro com zero linhas em `src/`). **Consequência para o port:** quando estivermos "prontos", o
+compilador teko é um mc **recriado das partes** com os módulos teko em cima e o que a teko
+substitui desligado — e, com os módulos do `ngen` reescritos na própria teko, **a teko compila a
+si mesma** até o ponto fixo (`teko1 → teko2 → teko3` byte-idênticos), como o mc faz (M0-M8).
+Caminho: (1) hoje, `<mc/core>` + `teko.mc`; (2) M41: recriar o compilador teko das partes que a
+teko usa, `subcommand` para o driver (`teko build`), `type_disable`/`intrinsic_disable` para o que
+a teko redefine; (3) M44: o ngen como pacote (`teko_init()`); (4) auto-hospedagem: módulos do
+ngen em teko, fixpoint. Coordenado com o mc (sem 1.0.0 sem o ngen).
+
 ### D224 · DONO: classes abstratas como C#; classes/métodos PARCIAIS em avaliação (dono 2026-09-04) 🔧 SUPERFÍCIE
 - **`abstract` como em C# (ruling):** `abstract class Shape { public abstract i64 area(); }` —
   a classe não é instanciável (`new Shape` é erro claro), o método abstrato não tem corpo e
