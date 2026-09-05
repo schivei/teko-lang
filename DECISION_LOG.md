@@ -1157,6 +1157,20 @@ Verificador reproduziu o crash instrumentando com ASan+UBSan (as flags do CI pro
 - **CONSERTO (dispatch):** `cg_emit_self_addr` tem que PARAR de escapar o endereço de um temp cujo escopo é o próprio statement-expression — hoist do `_rcvN` pra um escopo que sobrevive à chamada externa inteira, OU passar receptor tipo-valor por valor (Region/Arena são structs de 8B, métodos leem self). Root-cause, não workaround; conserta a CLASSE (todo receptor não-endereçável), não só o sítio arena.
 - **LEI DE PROCESSO (endurece D163/D164):** o fixpoint no sandbox NÃO pega UB que só crasha sob certos toolchains — **o gate de verificador de compiler-core passa a incluir um build ASan+UBSan** (`-fsanitize=address,undefined -fno-omit-frame-pointer -g`) do gen0 compilando o tip, além do fixpoint. Barato, pega stack-use-after-scope/UAF/OOB que o build seco esconde. (A ser gravado na CLAUDE.md.)
 
+### D224 · DONO: classes abstratas como C#; classes/métodos PARCIAIS em avaliação (dono 2026-09-04) 🔧 SUPERFÍCIE
+- **`abstract` como em C# (ruling):** `abstract class Shape { public abstract i64 area(); }` —
+  a classe não é instanciável (`new Shape` é erro claro), o método abstrato não tem corpo e
+  obriga `override` na primeira derivada concreta (conformidade checada como a de interface);
+  método abstrato ocupa slot de vtable como um `virtual` sem corpo; `abstract` em membro exige
+  classe `abstract`. Substitui o honest-stop de `abstract` do trait (D216) para classes.
+- **`partial` (dono: "estou pensando", NÃO é ruling ainda):** classe parcial = a mesma classe
+  declarada em mais de um arquivo/lugar, unida na compilação (o mc já une `namespace` por
+  prefixo — precedente de "reabrir"); método parcial = declaração sem corpo cuja implementação
+  é opcional (C#: `partial void m();`, sem implementação a chamada some). Registrar a forma e o
+  custo (o record/replay de genéricos e o layout de campos precisam de todas as partes antes de
+  fechar o tipo — as partes têm de ser vistas antes do 1º uso, ou o tipo fecha tarde, no pass).
+  Decisão do dono pendente; não se implementa até ratificar.
+
 ### D223 · DONO: propriedades (`get`/`set`), corpo default em `interface` e assinatura estática em `interface` — como em C# (dono 2026-09-04) 🔧 SUPERFÍCIE
 - **Propriedades como C#:** `public i64 Side { get; set; }` (auto-propriedade: campo de apoio
   gerado), `{ get => side; set => side = value; }` e a forma com blocos; `value` contextual no

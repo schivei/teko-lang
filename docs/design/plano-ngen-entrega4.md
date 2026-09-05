@@ -474,3 +474,15 @@ Dois crumbs, logo após "membros C#":
   implementador fornece `static`; `Tipo.m()`; conformidade checada como os métodos).
   Fixture `surface_iface_default.tk`. O crumb de membros em voo **recusa** `static` em
   interface com mensagem — este crumb substitui a recusa.
+
+## 21. D224 — `abstract` (ruling) e `partial` (em avaliação) (2026-09-04, noite)
+
+- **`abstract`:** entra no crumb de membros/propriedades ou logo após: `abstract class`
+  (não instanciável), `abstract` método (sem corpo, slot de vtable, obriga `override` na
+  primeira concreta), `abstract` só em classe `abstract`. Fixture `surface_abstract.tk`.
+- **`partial` (a decidir pelo dono):** custo a levantar — o tipo só fecha (layout, vtable,
+  record de genérico) quando todas as partes foram lidas; como o mc parseia em uma passada e
+  o `.` resolve no parse, parte declarada depois do 1º uso exige fechar o tipo no **pass**
+  (o oráculo já resolve `.` deferido — é o mesmo mecanismo) ou exigir que as partes venham
+  antes do uso. Método parcial sem implementação: a chamada é removida (C#). Precedente do
+  mc para "reabrir": `namespace` mergeando por prefixo (`examples/lang/README.md:265`).
