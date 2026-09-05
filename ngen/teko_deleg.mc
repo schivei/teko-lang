@@ -806,15 +806,15 @@ uptr tk_lambda_gensym(uptr base) {
     return nm;
 }
 
-// `(i64 a, i64 b) [use (...)] => body`, already past `new Op(` -- the whole
-// closure: the generated function, its vtable, its release, its allocator,
-// and the CALL to that allocator this hands back in place of the plain
-// function-name wrap `tk_new_deleg` builds for a bare name
-i64 tk_lambda_build(i64 si, i64 line, uptr fl) {
-    uptr name = tk_lambda_gensym(sr_name_at(si));
-    uptr saved = p_decl_name();
-    p_set_decl_name(name);
-    i64 params = parse_params();
+// the tail every lambda grafia shares once its own parameter list is known:
+// `[use (...)] => body`, the generated function, its vtable, its release,
+// its allocator, and the CALL to that allocator handed back in the
+// initializer's own place. `name`/`saved` are `tk_lambda_gensym`'s own
+// result and the enclosing declaration's name, opened by the CALLER (K4b:
+// a caller that reads its own parameter list, the short grafia below, opens
+// them BEFORE reading it too, exactly as `tk_lambda_build` always has,
+// since `p_decl_name` has to be the lambda's own for `parse_params` itself).
+i64 tk_lambda_finish(i64 si, uptr name, uptr saved, i64 params, i64 line, uptr fl) {
     tk_lambda_check_params(si, params, line, fl);
     tk_nlc = 0;
     if (tk_word("use")) tk_lambda_use(line, fl);
@@ -860,6 +860,124 @@ i64 tk_lambda_build(i64 si, i64 line, uptr fl) {
     tk_xt_add(call, si, 0);
     tk_nlc = 0;
     return call;
+}
+
+// `(i64 a, i64 b) [use (...)] => body`, already past `new Op(` -- the whole
+// closure, its own parameter list read from the LIVE token stream (K4b's own
+// two grafias below feed `tk_lambda_finish` a parameter list read some other
+// way instead)
+i64 tk_lambda_build(i64 si, i64 line, uptr fl) {
+    uptr name = tk_lambda_gensym(sr_name_at(si));
+    uptr saved = p_decl_name();
+    p_set_decl_name(name);
+    i64 params = parse_params();
+    return tk_lambda_finish(si, name, saved, params, line, fl);
+}
+
+// 1 when the token right after the current one spells `=>` -- K4b's own
+// short lambda grafia (`x => body`), the same `p_cp()` scan `tk_dot_follows`
+// (teko_access.mc) already reads a `.` with, extended to a two-byte pair
+i64 tk_arrow_follows() {
+    uptr p = p_cp();
+    uptr e = p_src_end();
+    loop {
+        if (p >= e) return 0;
+        i64 c = ld8(p);
+        if (c != ' ' && c != 9 && c != 10 && c != 13) break;
+        p = p + 1;
+    }
+    if (p + 1 >= e) return 0;
+    return ld8(p) == '=' && ld8(p + 1) == '>';
+}
+
+// `x => body` -- the delegate's own declared parameter fills the ONE
+// implicit one (D221 decision 19: only when the target gives the type), so
+// `tk_lambda_check_params` still catches a delegate that does not take
+// exactly one, exactly as an explicit mismatch does
+i64 tk_deleg_short_lambda(i64 si, i64 line, uptr fl) {
+    uptr pname = p_ident();
+    uptr name = tk_lambda_gensym(sr_name_at(si));
+    uptr saved = p_decl_name();
+    p_set_decl_name(name);
+    i64 params = param_new(dg_pty_at(si, 0), pname);
+    return tk_lambda_finish(si, name, saved, params, line, fl);
+}
+
+// non-consuming: does the balanced `(...)` the CURRENT `(` opens end in
+// `use` or `=>`? A parameter list holds no string literal that could
+// unbalance a raw scan, so counting bytes from `p_cp()` is exact -- and,
+// unlike `p_skip_balanced`, it touches no token at all: `p_push_source`
+// right after a peek DISCARDS that peek's own pending lookahead (mc
+// `docs/reference/hooks.md` § Record and replay, "the push does not touch
+// the pending lookahead token"), which is exactly the `=>` this decision
+// needs to still be there once it is made.
+i64 tk_paren_lambda_follows() {
+    uptr p = p_cp();
+    uptr e = p_src_end();
+    i64 depth = 1;
+    loop {
+        if (p >= e) return 0;
+        i64 c = ld8(p);
+        p = p + 1;
+        if (c == '(') depth = depth + 1;
+        else if (c == ')') { depth = depth - 1; if (depth == 0) break; }
+    }
+    loop {
+        if (p >= e) return 0;
+        i64 c = ld8(p);
+        if (c != ' ' && c != 9 && c != 10 && c != 13) break;
+        p = p + 1;
+    }
+    if (p + 1 < e && ld8(p) == '=' && ld8(p + 1) == '>') return 1;
+    if (p + 3 <= e && ld8(p) == 'u' && ld8(p + 1) == 's' && ld8(p + 2) == 'e') {
+        i64 nx = ld8(p + 3);
+        return nx == ' ' || nx == '(' || nx == 9;
+    }
+    return 0;
+}
+
+// `(params) [use (...)] => body`, no `new` -- decided by the non-consuming
+// scan above, so BOTH branches read the LIVE stream directly: a lambda
+// calls `tk_lambda_build`, sitting on the same unconsumed `(` `new
+// Op((params) => ...)` already hands it; anything else is `parse_expr(0)`,
+// the ordinary grouped/cast expression the parens always could have been.
+i64 tk_deleg_paren_init(i64 si, i64 line, uptr fl) {
+    if (tk_paren_lambda_follows()) return tk_lambda_build(si, line, fl);
+    return parse_expr(0);
+}
+
+// the initializer of a delegate-typed declaration (K4b): the two lambda
+// grafias above, or `parse_expr(0)` unchanged -- a bare function name,
+// `new Op(...)`, `null`, or another delegate expression, everything
+// `tk_deleg_coerce`'s later pass already knows how to read
+i64 tk_deleg_init_expr(i64 si, i64 line, uptr fl) {
+    if (p_id() == K_LPAR) return tk_deleg_paren_init(si, line, fl);
+    if (p_id() == T_IDENT && tk_arrow_follows()) return tk_deleg_short_lambda(si, line, fl);
+    return parse_expr(0);
+}
+
+// `Op f = <init>;` -- K4b: the module reads the declaration itself once the
+// type word is known to name a delegate, instead of handing it to the
+// core's own `parse_var`, so the two grafias above get a look at the
+// initializer before the core's `(` -- a cast/group disambiguation with no
+// fallback -- would refuse `(i64 x) => ...` outright (§46's own finding).
+// An array of delegate elements is refused exactly as `tk_var_after_type`
+// (teko_ns.mc) refuses one of a namespaced type: `teko_array.mc` already
+// refuses ANY row of the type table as an array element, delegates
+// included, so this is unreachable rather than a new restriction. Anything
+// else is `parse_expr(0)`, so the `N_VAR` this builds is byte-identical to
+// what `parse_var` always produced.
+i64 tk_deleg_var_stmt(i64 si, i64 line, uptr fl) {
+    p_next();                                     // the type word
+    uptr vn = p_ident();
+    if (p_id() == K_LBRACK)
+        err_at2(fl, line, "teko: an array of this type is not taught yet", vn);
+    i64 init = 0;
+    if (p_accept(K_ASSIGN)) init = tk_deleg_init_expr(si, line, fl);
+    p_expect(K_SEMI, "expected ; after declaration");
+    tk_line = line;
+    tk_file = fl;
+    return tk_var(sr_ty_at(si), vn, init);
 }
 
 // 1 when the program declares at least one delegate: a program that declares

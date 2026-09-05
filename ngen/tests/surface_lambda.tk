@@ -1,7 +1,7 @@
 // surface_lambda.tk -- lambda, local named function, `use (a, &b)` (K4, D221
 // §41): the explicit form `new Op((T a, T b) => body)`, over the same
 // object K1's plain-function wrap already builds. K4b adds a delegate
-// captured BY VALUE (item 11).
+// captured BY VALUE (item 11) and the contextual/short grafias (items 12/13).
 //
 // What each helper proves, in order:
 //
@@ -15,7 +15,8 @@
 //   5. `local_named_check` -- `Op twice = new Op(...)`, D221 decision 22's
 //      own reading of a "local named function".
 //   6. `method_check` -- a lambda stored in a field and called through
-//      `this.cb(x)`, and one passed as a METHOD argument and called there.
+//      `this.cb(x)`, one passed as a METHOD argument (explicit AND
+//      contextual grafia) and called there.
 //   7. `counted_check` -- `use (b)` of a class reference: the closure holds
 //      its own count, `rt_live()` stays at 1 after the declarer's own `b`
 //      is dropped, and drops to 0 only once the closure itself is released.
@@ -23,6 +24,8 @@
 //   9. `block_check` -- a lambda with a BLOCK body, `=> { ...; return e; }`.
 //  10. `free_arg_check` -- `new Op(...)` as the argument of a FREE function.
 //  11. `deleg_byval_check` -- a delegate itself captured BY VALUE (K4b).
+//  12. `contextual_check` -- `Op f = (i64 x) use (k) => x * k;`, no `new`.
+//  13. `short_check` -- `Op g = x => x + 1;`, the single-parameter grafia.
 //
 // expect-exit: 42
 
@@ -114,6 +117,7 @@ i64 method_check() {
     h.cb = new Op((i64 x) => x + 1);
     if (h.run(41) != 42) return 1;
     if (h.relay(new Op((i64 x) => x - 1), 43) != 42) return 2;
+    if (h.relay((i64 x) => x - 1, 43) != 42) return 3;         // contextual, no `new` (K4b)
     return 0;
 }
 
@@ -144,6 +148,19 @@ i64 deleg_byval_check() {
     Op inner = new Op((i64 x) => x + 1);
     Op f = new Op((i64 x) use (inner) => inner(x) * 2);
     if (f(4) != 10) return 1;
+    return 0;
+}
+
+i64 contextual_check() {
+    i64 k = 3;
+    Op f = (i64 x) use (k) => x * k;
+    if (f(5) != 15) return 1;
+    return 0;
+}
+
+i64 short_check() {
+    Op g = x => x + 1;
+    if (g(41) != 42) return 1;
     return 0;
 }
 
@@ -190,6 +207,14 @@ i64 main() {
     bad = deleg_byval_check();
     if (bad != 0) return 210 + bad;
     if (rt_live() != 0) return 220;
+
+    bad = contextual_check();
+    if (bad != 0) return 230 + bad;
+    if (rt_live() != 0) return 240;
+
+    bad = short_check();
+    if (bad != 0) return 250 + bad;
+    if (rt_live() != 0) return 260;
 
     return 42;
 }
