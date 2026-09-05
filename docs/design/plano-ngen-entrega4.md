@@ -351,3 +351,27 @@ nunca mais lowera para `(uptr, i64)`; duas `g(uptr, i64)` escritas à mão num p
 (2) `params` em **método** é recusado (`wrong number of arguments`) — pré-existente;
 `tk_method_pick` não sabe o que é lista. (3) O teto de 12 virou **política**: a instância
 gasta um registrador a menos; se o dono quiser o teto real do ABI, são dois números.
+
+## 14. Entrega 5 — comportamento base; crumb 1 = RECLAIM pela "arena automática" do mc (dono, 2026-09-04)
+
+**Ruling do dono:** o reclaim segue o precedente do mc — a "arena automática" dos
+exemplos. É o `examples/lang`: **arena fixa (4 MiB) com free lists por classe de
+tamanho + reference counting por escopo**, tudo por hooks (`docs/guide/60-examples.md:171`,
+`:264` "objects inside a 4 MiB arena, which is what proves the deallocation is real").
+Peças, e onde o `ngen` já as tem:
+- refcount no **word 1** do objeto (`+8`) — o `ngen` reservou desde o crumb do `class`
+  (header 16 B: vtable@+0, refcount@+8); `Class_release` no **slot 0** da vtable;
+- `rc_dec` para cada local de tipo classe na **saída do bloco**, em ordem reversa de
+  declaração (`lang_stmt.mc:313-322`) — é o `syntax_stmt("{")` que o crumb de escopo já
+  possui, agora injetando código; **`on_jump`** entra aqui, nas arestas `return`/`break`/
+  `continue` (`hooks.md:495-541`);
+- `return e` → `{ T $t = e; rc_inc($t); releases…; return $t; }` (`lang_stmt.mc:329-345`);
+  `lg_eown` decide se a expressão já é dona (um `new`) ou precisa de `rc_inc`;
+- `p.f = e` de campo classe: `rc_inc` do novo, `rc_dec` do antigo; `dispose(self)` roda
+  quando o count chega a zero (`lang/README.md:78`); `rt_free` devolve ao free list.
+Fecha a dívida de `new` e de `params` em loop quente (hoje: `arena exhausted` ruidoso).
+**Prova:** fixture `surface_reclaim.tk` (`// expect-exit: 42`) com `live()` (contagem de
+objetos vivos, como o `01-inherit.lx` imprime) voltando a 0 ao fim, e um loop de 1M
+`new` + descarte que **não** esgota a arena. Ratchet: o pico de nós/heap do compilador não
+cresce além do que o RC exige (`mc limits`).
+Restrições: zero Variant (D217); nenhum toque no mc; forma C-like (D215).
