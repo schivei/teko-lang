@@ -392,3 +392,16 @@ Restrições: zero Variant (D217); nenhum toque no mc; forma C-like (D215).
 - **Pergunta ao dono em aberto:** C# escreve `public static … operator+` e `public Vec(...)`;
   o ngen ainda não ensina `public`/`static` (D196). Ensinar os modificadores junto, ou aceitar
   a forma sem modificador (`Vec operator+(Vec a, Vec b)`, `Vec(i64 x) { }`) até o D196 entrar?
+
+## 16. D219 — `this` implícito e `base`: sweep ANTES do reclaim (2026-09-04, noite)
+
+Métodos deixam de declarar `self`. O compilador injeta o receptor oculto (mesmo mecanismo
+de hoje, `tk_params(... extra)`), `this` vira palavra contextual dentro de corpo de
+tipo, nome não-qualificado que não é local/param resolve como `this.nome` (C#: local
+sombreia campo), e `base.m()` chama a implementação da base direto (precedente `lx`:
+`01-inherit.lx`, `README.md:71`). Interfaces: `i64 area();`. Construtor/destrutor
+(D218) idem. Operador estático (D218) não tem `this`.
+**Ordem:** este sweep toca `teko_class.mc`, `teko_iface.mc`, `teko_trait.mc`,
+`teko_struct.mc`, `teko_expr.mc`, `teko_typeof.mc` e as 18 fixtures — por isso vem
+**antes** do reclaim e do C5b, que escreveriam código na forma velha. Prova: 18/18 na
+forma nova; `grep -c "self" ngen/tests` = 0; `base.m()` numa fixture existente.

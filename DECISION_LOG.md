@@ -1157,6 +1157,18 @@ Verificador reproduziu o crash instrumentando com ASan+UBSan (as flags do CI pro
 - **CONSERTO (dispatch):** `cg_emit_self_addr` tem que PARAR de escapar o endereço de um temp cujo escopo é o próprio statement-expression — hoist do `_rcvN` pra um escopo que sobrevive à chamada externa inteira, OU passar receptor tipo-valor por valor (Region/Arena são structs de 8B, métodos leem self). Root-cause, não workaround; conserta a CLASSE (todo receptor não-endereçável), não só o sítio arena.
 - **LEI DE PROCESSO (endurece D163/D164):** o fixpoint no sandbox NÃO pega UB que só crasha sob certos toolchains — **o gate de verificador de compiler-core passa a incluir um build ASan+UBSan** (`-fsanitize=address,undefined -fno-omit-frame-pointer -g`) do gen0 compilando o tip, além do fixpoint. Barato, pega stack-use-after-scope/UAF/OOB que o build seco esconde. (A ser gravado na CLAUDE.md.)
 
+### D219 · DONO: métodos SEM `self` — `this` implícito e `base`, como em C# (dono 2026-09-04) 🔧 SUPERFÍCIE
+O `self` explícito na lista de parâmetros é a forma do `lx`, não a do teko-mc. **Prefira a forma
+inferida do C#:** o método não declara o receptor — `i64 area() { return side; }` —, o
+compilador injeta o receptor oculto; dentro do corpo um campo/método sem qualificador resolve
+como membro de `this` quando não há local/parâmetro com o nome (local sombreia campo, como em
+C#); `this` é palavra contextual para o receptor explícito (`this.side`); **`base.m()`** chama
+a implementação da classe base diretamente (não-virtual), como o `lx` já faz (`README.md:71`,
+`tests/01-inherit.lx`). Vale para `class`, `struct`, `trait` e assinaturas de `interface`
+(`i64 area();`), para construtor (`Nome(i64 s) { side = s; }`) e destrutor (`~Nome()`).
+Operador estático (D218) não tem `this`. Sweep: toda a superfície landada e todas as fixtures
+passam para a forma nova; o `self` deixa de ser aceito.
+
 ### D218 · DONO: rulings de superfície do teko-mc — operadores como C#, construtores/destrutores, `while`/`for`/`namespace`/`break N` pelo mc, `var`/`type`/`match` fora (dono 2026-09-04) 🔧 SUPERFÍCIE
 Batelada de rulings do dono sobre a lista de honest-stops e sobre o que já landou:
 - **Sobrecarga de operadores: como em C#, e o C5 landado está ERRADO por completo.** Operador é
