@@ -630,3 +630,18 @@ pacotes da PRÓPRIA teko (imports/namespaces da linguagem), a forma do `teko_ini
 estável, não a capacidade. → **Crumb "compilador teko de `core_min`"** entra na fila da
 entrega 5 (independente dos construtos): medir tamanho e provar que o CI de 5 pernas passa
 com o core mínimo + as partes que os alvos usam.
+
+**§21 — D224 pronto (`feat/ngen-abstract-partial` @ `65654014`, em verificação):** `abstract`
+como C# (membro abstrato ocupa slot de vtable sem corpo; derivada concreta sem `override` é
+erro nomeando propriedade e acessor); **`partial class` fecha no primeiro USO** (`new`, ou
+derivação) ou no fim da unidade por um pass à frente dos demais — parte depois do uso é
+erro claro; membro não precisa do fecho (nome nu resolve no pass). Pré-requisito feito:
+tabelas por **posse** (`fd_cls`, `vs_cls`, `ci_cls`) em vez de fatias — tipo declarado
+entre duas partes corrompia o layout em silêncio. Base só numa parte antes de membros;
+interfaces em união livre. `partial` genérica em dois arquivos funciona (grava por parte no
+arquivo declarante). **Defeito pego só pelo CI:** com config em caminho ABSOLUTO,
+`tk_origin_of_file` diz "fora do projeto" para tudo e **nenhuma checagem de `internal`
+dispara** — a validação local fica cega. **Regra: validar sempre com config RELATIVO e cwd
+no repo** (o laço do coordenador já é assim). O `region crosses a file boundary` é
+pré-existente: dispara quando a declaração gravada é a última coisa de um arquivo
+incluído (`nopen` antes/depois); contorno `;` — reportado ao mc.

@@ -200,6 +200,10 @@ for src in ngen/tests/*.tk; do
 done
 ```
 
+**Config sempre RELATIVO, cwd no repo** (`ngen/mc.macos.toml`, não `/abs/...`): com caminho
+absoluto o módulo trata todo arquivo como "fora do projeto" e a checagem de `internal` fica
+cega — o CI pegou um defeito que a validação absoluta não via (D224).
+
 Hoje isso dá **18/18 em exit 42**. `ngen/mc.macos.toml`, os `ngen/mc.*.toml` transientes
 e `ngen/build/` **nunca se commitam**, e `ngen/mc.toml` fica **intacto** — alterá-lo
 quebra o CI.
