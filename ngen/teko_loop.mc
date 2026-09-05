@@ -58,6 +58,13 @@ i64 tk_minuseq_tok = 0;
 i64 tk_plus_tok = 0;
 i64 tk_minus_tok = 0;
 
+// how many REAL loops (`while`/`do`/`for`) the parser is lexically inside of
+// right now -- what `switch`'s own `continue` rewrite (teko_switch.mc) reads
+// to tell "no enclosing loop at all" from "some real loop, maybe reached
+// through the core's own out-of-range check". `switch` does not bump it: its
+// own one-lap loop is never a valid `continue` target from outside itself.
+i64 tk_realloop_depth = 0;
+
 // registers the four compound-assignment tokens and pushes the `#rule` text
 // that lowers the free-standing statement form; called once, from
 // user_init(), before parse_unit() reads its first token.
@@ -105,17 +112,29 @@ i64 tk_loop_guard(i64 cond) { return tk_if(tk_not(cond), tk_break_lvl(1)); }
 // that already reaches past everything the body itself opened (`k > depth`)
 // also has to reach past the wrapper this pass is about to add, so it becomes
 // `break k+1`; one that stays within the body's own nested loops (`k <=
-// depth`) is untouched -- it already names the right one. `continue` never
-// carries a level, so the same test collapses to `depth == 0`: only a
-// `continue` sitting directly in the body (not inside a further loop it
-// wrote itself) meant the body's own -- now missing -- top level, and becomes
-// `break 1` to land where the wrapper's own trailing `break;` would have,
-// right on the condition check or the step. Applied once per `do`/`for`, from
-// the innermost outward as parsing unwinds, this composes correctly across
-// nesting: an inner `for`'s own rewrite already bumped what needed bumping
-// for ITS wrapper, and this pass only bumps again what still reaches past
-// the depth it can see -- `docs/design/plano-ngen-entrega4.md` §29 walks the
-// two-level nested case this relies on.
+// depth`) is untouched -- it already names the right one.
+//
+// `continue k` (mc 0.14.1, level-counted the same way `break k` is) cannot
+// just gain the same `+1` and stay a `continue`, though: the level that
+// exactly reaches this `for`/`do` (`k == depth + 1`) would restart the
+// wrapper loop itself, which skips the step/condition check entirely -- the
+// same bug the ORIGINAL bare-`continue` conversion (still correct at
+// `depth == 0`) was written to avoid. So that ONE level converts to
+// `break depth + 1`, landing exactly where the wrapper's own trailing
+// `break;` would have, right on the condition check or the step -- generalising
+// the old `depth == 0 -> break 1` case, which is what `k == 1` at `depth == 0`
+// reduces to. A level reaching further out (`k > depth + 1`) is not this
+// for/do's business: it stays a `continue`, gains the same `+1` `break` gets
+// (this for/do's own extra wrapper layer), and is left for whatever loop it
+// eventually lands on -- a plain `while` (no wrapper, so a raw `continue`
+// already reaches it directly, the `k <= depth` case below never triggers a
+// rewrite for it) or another `for`/`do`'s own later, separate rewrite call
+// (which sees it at a greater depth and repeats this same test). Applied once
+// per `do`/`for`, from the innermost outward as parsing unwinds, this composes
+// correctly across nesting: an inner `for`'s own rewrite already bumped what
+// needed bumping for ITS wrapper, and this pass only bumps again what still
+// reaches past the depth it can see -- `docs/design/plano-ngen-entrega4.md`
+// §29 walks the two-level nested case this relies on.
 void tk_loop_rewrite_stmt(i64 n, i64 depth);
 
 void tk_loop_rewrite_list(i64 n, i64 depth) {
@@ -141,9 +160,15 @@ void tk_loop_rewrite_stmt(i64 n, i64 depth) {
         if (lvl > depth) set_nd_val(n, lvl + 1);
         return;
     }
-    if (k == N_CONTINUE && depth == 0) {
-        set_nd_kind(n, N_BREAK);
-        set_nd_val(n, 1);
+    if (k == N_CONTINUE) {
+        i64 lvl = nd_val(n);
+        if (lvl == 0) lvl = 1;
+        if (lvl == depth + 1) {
+            set_nd_kind(n, N_BREAK);
+            set_nd_val(n, depth + 1);
+            return;
+        }
+        if (lvl > depth + 1) set_nd_val(n, lvl + 1);
     }
 }
 
@@ -155,7 +180,9 @@ i64 tk_while() {
     p_expect(K_LPAR, "expected ( after while");
     i64 cond = parse_expr(0);
     p_expect(K_RPAR, "expected ) after while condition");
+    tk_realloop_depth = tk_realloop_depth + 1;
     i64 body = parse_stmt();
+    tk_realloop_depth = tk_realloop_depth - 1;
     tk_line = line;
     tk_file = fl;
     return tk_loop_of(tk_blk(list_append(tk_loop_guard(cond), body)));
@@ -166,7 +193,9 @@ i64 tk_do() {
     i64 line = p_line();
     uptr fl = p_file();
     p_next();                                    // `do`
+    tk_realloop_depth = tk_realloop_depth + 1;
     i64 body = parse_stmt();
+    tk_realloop_depth = tk_realloop_depth - 1;
     i64 wtok = word_add("while");
     p_expect(wtok, "expected while after do body");
     p_expect(K_LPAR, "expected ( after do-while");
@@ -247,7 +276,9 @@ i64 tk_for() {
     i64 step = 0;
     if (p_id() != K_RPAR) step = tk_for_step();
     p_expect(K_RPAR, "expected ) after for clauses");
+    tk_realloop_depth = tk_realloop_depth + 1;
     i64 body = parse_stmt();
+    tk_realloop_depth = tk_realloop_depth - 1;
     tk_loop_rewrite_stmt(body, 0);
     tk_line = line;
     tk_file = fl;
