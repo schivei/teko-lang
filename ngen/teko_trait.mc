@@ -37,8 +37,12 @@
 // colliding with a field of the class or of its base is refused (PHP 7+ is fatal
 // for an incompatible one, and this port has no notion of a compatible one).
 //
-// Not taught, and refused by name rather than by surprise: `abstract` in a
-// trait, static members, and member visibility.
+// A trait's members carry C#'s modifiers like any other (D220): a copied member
+// takes its visibility and its `static` into the class it lands in. The trait
+// itself is `public` or `internal`, and an `internal` one answers only to a
+// `use` written by code of its own project.
+//
+// Not taught, and refused by name rather than by surprise: `abstract` in a trait.
 
 #define TK_MAXTRAIT 32                // traits declared in one source
 #define TK_MAXUSE   32                // `use` entries queued at any one time

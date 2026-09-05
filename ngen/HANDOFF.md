@@ -286,13 +286,61 @@ vem antes do reclaim e do C5b porque os dois escreveriam código na forma velha:
   `types_interface`, onde o `override` passou a usar `base.area()` (a diferença é
   exatamente a chamada direta no lugar do corpo antigo).
 
+**Entrega 5 — crumb "membros C#" LANDADO** (D220, plano §17), o modelo de membros que o
+reclaim (construtor/destrutor `public`) e o C5b (`public static … operator+`) já escrevem:
+- **Modificadores como em C#**, em qualquer ordem e antes do tipo
+  (`public static i64 f()`): `public`/`private`/`protected`/`static` em MEMBRO,
+  `public`/`internal` em TIPO de topo (`class`/`struct`/`interface`/`trait`).
+  **Defaults do C#:** tipo sem modificador é `internal`, membro sem modificador é `private`.
+- **Palavras:** só `public` e `internal` são reservadas (elas ABREM uma declaração de topo);
+  `private`/`protected`/`static` seguem **contextuais**, como `virtual`/`override` — valem
+  dentro de corpo de tipo, que é onde este módulo é o parser, e continuam nomes comuns fora.
+- **`internal` = código do PROJETO — a regra exata implementada.** O mc não tem unidade de
+  compilação (`core-language.md:422`), então a unidade sai da **origem da declaração**:
+  *uma declaração é do projeto quando o arquivo de que foi lida é um caminho **dentro do
+  diretório do projeto** — o diretório do `mc.toml` que a build usou (`cfg_file`), e, sem
+  config (CLI de arquivo único), o diretório do arquivo de entrada.* São EXTERNOS: caminho
+  absoluto, caminho que sobe (`../fora/x.tk`) e `#include <bundle>`, que é nome e não caminho.
+  Todo nome de arquivo que o lexer produz é normalizado contra o mesmo lugar do config
+  (`path_join`/`path_norm`), então um prefixo puro responde, sem syscall e sem heurística.
+  Distinguem-se **duas** origens (o projeto e todo o resto), logo `internal` lê-se
+  "declaração e sítio de uso têm a mesma origem" — dois pacotes externos distintos não se
+  distinguem entre si (o mc não tem identidade de pacote). Local e CI batem: o config é
+  `ngen/mc.*.toml`, o diretório do projeto é `ngen`, e `<float>`/`<mc/core>` ficam de fora.
+  Declaração que **não vem de arquivo** não pergunta: instância de genérico
+  (`p_push_source`, cujo "arquivo" é o nome do frame) recebe a origem do **template**, e
+  membro copiado de trait vira membro da **classe**, com a origem dela.
+- **Checagem em todo sítio:** `.` no parse e no pass deferido, chamada de método, `new`,
+  `base.`, lista `: Base, Iface`, `use` de trait, campo estático `Tipo.campo` e nome
+  não-qualificado dentro do tipo. `protected` = o próprio tipo e as derivadas; `private` =
+  só o próprio tipo. Mensagens: `arquivo:linha: teko: X.m is private` / `is protected` /
+  `X is internal to another project`.
+- **`static`:** campo vira **um global manglado `Tipo_campo`** — nenhum byte no objeto, e os
+  offsets seguintes não mudam (`POINT_SIZE` segue 24 em `types_struct.tk`); método não recebe
+  `this` e é chamado por `Tipo.m()`. O nome do tipo passou a ser palavra em **três** posições:
+  tipo, expressão (`Tipo.campo`, que o `parse_primary` do core recusaria) e statement — e o
+  statement só desvia quando um `.` segue o nome, senão entra no `parse_var` do próprio core,
+  de forma que `Point p = new Point;` é o statement que sempre foi.
+- **Recusas com mensagem própria:** `this`/`base` em membro estático; membro de instância
+  alcançado de método estático; membro estático alcançado por objeto (`p.made`); método de
+  instância alcançado por tipo (`Tipo.m()`); `private`/`protected` em membro de interface;
+  método estático em interface (a forma C# 8 com corpo não é ensinada); **tipo dentro de
+  tipo** (o par excludente do D220 escolheu `internal`, logo não há aninhado); modificador de
+  visibilidade repetido; `public` diante do que não é tipo; método não-público implementando
+  interface.
+- **Fixtures:** as 18 escrevem `public` onde acessam membro de fora; o que só o próprio tipo
+  alcança fica sem modificador e prova o default (`items`/`count` de `Box`, os dois `pick`);
+  `Counted.n` é `protected`; `types_struct.tk` ganhou o par estático. A AST final de 17 das 18
+  é **byte-idêntica** à da base `c9b8c596` — visibilidade é checagem, não muda a árvore —, e a
+  única que diverge é `types_struct`, exatamente pelo `static` que entrou nela.
+
 **Entrega 5 — a seguir:** crumb 1, **reclaim** pela "arena automática" do mc (plano §14):
 free lists + reference counting por escopo (`rc_dec` na saída do bloco e nas arestas de
 `on_jump`; `return` com temporário; `rc_inc`/`rc_dec` em atribuição de local/campo
 classe; destrutor `~Nome()` no lugar do `dispose` do lx, D218); fixture
 `surface_reclaim.tk` com 1M `new` sem esgotar a arena.
 
-**Fila:** entrega 5 (comportamento base): reclaim c/ construtor+destrutor → C5b
+**Fila:** entrega 5 (comportamento base): membros C# (feito) → reclaim c/ construtor+destrutor → C5b
 (operador estático, D218) → `while`/`for` (prelude do mc) → stops restantes
 (`namespace`/`import`/`using`/`const`/`match`/`when`) → stdlib mínima; **C6** quando o mc
 der o hook de declaração de função (`0.10.N`).
@@ -372,6 +420,19 @@ ao mc; rota é `pass()`).
     `extern` declarado e NÃO chamado não custa nada: o `mc` só emite símbolo
     indefinido para o que é referenciado (é por isso que os `<sys>` de `lib/rt.mc`
     — `munmap`, `_NSGetEnviron`, `posix_spawnp` — não quebram o link).
+
+13. **`p_start()` NÃO aponta para a fonte quando o token foi substituído.** A
+    substituição higiênica do `p_subst_name` (instância de genérico) troca
+    `tok_start`/`tok_len` pelo LEXEMA DE SUBSTITUIÇÃO, que mora na arena
+    (`mc/src/lex.mc` `subst_apply`) — então `p_start() + tamanho-do-nome` cai em
+    lugar nenhum e varrer a partir dali é lixo. Quem precisa **espiar o que vem
+    depois do token atual** (o `Tipo.campo` do D220 tem que distinguir
+    `Shape.made = 1;` de `Shape s = new Shape;`, e o parser guarda UM token de
+    lookahead) usa **`cp`**, o cursor do lexer — é de onde o próximo token vai ser
+    lido, no mesmo buffer que `p_src_end()` limita, e é o que o próprio
+    `stmt_syntax` do core compara no seu guard. Um comentário entre o nome e o `.`
+    não é lido pela varredura (só espaço em branco), e o caso cai na recusa clara
+    do `parse_var`, nunca em silêncio.
 
 ## 6. Comunicação — coordenador remoto + sessão local
 
