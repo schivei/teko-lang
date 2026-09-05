@@ -51,6 +51,7 @@ i64 tk_body_class = 0 - 1;            // the type whose body is being PARSED, or
 i64 tk_body_static = 0;               // ...and 1 when that member takes no receiver
 i64 tk_pass_class = 0 - 1;            // the type whose method the PASS is walking, or -1
 i64 tk_pass_static = 0;               // ...and 1 when that method takes no receiver
+i64 tk_pass_acc = 0;                  // ...and 1 when it is a property's accessor
 
 // the one spelling of the receiver, in the source and in the tree alike
 uptr tk_this_name() { return "this"; }
@@ -174,14 +175,17 @@ void tk_this_enter_fn(uptr fn) {
     i64 mi = tk_method_of_fn(fn);
     tk_pass_class = 0 - 1;
     tk_pass_static = 0;
+    tk_pass_acc = 0;
     if (mi < 0) return;
     tk_pass_class = mt_cls_at(mi);
     tk_pass_static = mt_static_at(mi);
+    tk_pass_acc = mt_prop_at(mi);
 }
 
 void tk_this_leave_fn() {
     tk_pass_class = 0 - 1;
     tk_pass_static = 0;
+    tk_pass_acc = 0;
 }
 
 // nodes this file builds report the position of the name they replace
@@ -227,10 +231,52 @@ void tk_this_check(i64 fi) {
     tk_check_member(tk_field_owner(fi), fd_vis_at(fi), fd_name_at(fi), tk_line, tk_file);
 }
 
+// `value` names the parameter a `set` accessor is handed and nothing else, so
+// inside an accessor that is not one it names nothing at all -- said here
+// rather than left to the resolver's report of an unknown name. Everywhere
+// else, and for a local or a field spelled that way, the word is the
+// program's own.
+void tk_reject_stray_value(i64 n, uptr name) {
+    if (!tk_pass_acc) return;
+    if (!str_eq(name, tk_value_name())) return;
+    tk_this_at(n);
+    err_at(tk_file, tk_line, "teko: `value` is the value a `set` accessor is handed");
+}
+
+// `Side`  ->  the getter, called on `this`
+void tk_this_prop_read(i64 n) {
+    uptr m = nd_name(n);
+    if (tk_ty_scope_find(m) >= 0) return;         // a local or a parameter answers first
+    if (tk_prop_find(tk_pass_class, m) < 0) {
+        tk_reject_stray_value(n, m);
+        return;
+    }
+    tk_this_at(n);
+    i64 mi = tk_prop_accessor_of(tk_pass_class, m, 0, tk_line, tk_file);
+    tk_node_replace(n, tk_this_emit(mi, 0));
+    tk_xt_put(n, tk_struct_by_ty(mt_ret_at(mi)), mt_ret_at(mi), 0);
+}
+
+// `Side = e;`  ->  the setter, called on `this` with `e`
+void tk_this_prop_write(i64 n) {
+    uptr m = nd_name(n);
+    if (tk_ty_scope_find(m) >= 0) return;         // a local or a parameter answers first
+    if (tk_prop_find(tk_pass_class, m) < 0) {
+        tk_reject_stray_value(n, m);
+        return;
+    }
+    tk_this_at(n);
+    i64 mi = tk_prop_accessor_of(tk_pass_class, m, 1, tk_line, tk_file);
+    tk_node_replace(n, tk_stmt(tk_this_emit(mi, nd_a(n))));
+}
+
 // `side`  ->  ldW(this + OFF), the very node `this.side` produces
 void tk_this_ident(i64 n) {
     i64 fi = tk_this_field(nd_name(n));
-    if (fi < 0) return;
+    if (fi < 0) {
+        tk_this_prop_read(n);
+        return;
+    }
     tk_this_at(n);
     tk_this_check(fi);
     i64 fty = fd_ty_at(fi);
@@ -242,7 +288,10 @@ void tk_this_ident(i64 n) {
 // as N_ASSIGN, so this is the statement form of the load above.
 void tk_this_assign(i64 n) {
     i64 fi = tk_this_field(nd_name(n));
-    if (fi < 0) return;
+    if (fi < 0) {
+        tk_this_prop_write(n);
+        return;
+    }
     tk_this_at(n);
     tk_this_check(fi);
     i64 st = tk_call2(tk_stn(fd_ty_at(fi)), tk_this_field_addr(fi), nd_a(n));
@@ -263,12 +312,23 @@ i64 tk_this_emit(i64 mi, i64 args) {
     return tk_call("callp", list_append(list_append(fnp, tk_this_recv()), args));
 }
 
+// a property is reached by its own name and never called, which is worth saying
+// where the call is written
+void tk_reject_prop_call(i64 n, uptr m) {
+    if (tk_prop_find(tk_pass_class, m) < 0) return;
+    tk_this_at(n);
+    err_at2(tk_file, tk_line, "teko: the member is a property; it is not called", m);
+}
+
 // `area(2)`  ->  `this.area(2)`. A name the type declares as a method wins over
 // a function of the same name at top level, as it does in C#; a name it does not
 // declare is a call to that function and is not touched.
 void tk_this_call(i64 n) {
     uptr m = nd_name(n);
-    if (tk_method_named_find(tk_pass_class, m) < 0) return;
+    if (tk_method_named_find(tk_pass_class, m) < 0) {
+        tk_reject_prop_call(n, m);
+        return;
+    }
     tk_this_at(n);
     i64 na = tk_arg_count(nd_a(n));
     i64 mi = tk_method_pick(tk_pass_class, m, na);
