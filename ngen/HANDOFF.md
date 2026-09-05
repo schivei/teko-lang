@@ -712,6 +712,13 @@ vence o que já era visível sem ele). `tk_ns_walk_calls_in` ganhou o mesmo esco
 `teko_typeof.mc` já mantém para seu próprio passe (`sc_name`/`tk_nscope`, reusado, não uma
 terceira tabela).
 
+**Entrega 5 — N3c LANDADO** (plano §35, correção de bug real do verificador do N3b): um membro do
+tipo corrente (método, inclusive herdado da base, inclusive estático) vencia em C#, mas perdia
+para o `using` porque `tk_ns_pass` reescrevia a chamada bare ANTES de `tk_this_call` sequer ver o
+nome; ordem final: local/parâmetro → membro do tipo corrente → namespace corrente e prefixos →
+declaração plana de topo → `using`s (`tk_ns_call_cls`, lido de `teko_class.mc`'s `tk_method_of_fn`/
+`tk_method_named_find`, os dois já usados por `teko_this.mc` para o mesmo passe posterior).
+
 **Fila:** `const` → `switch` (D222) → closures/`ref`/`out` (D221, architect-first) →
 compilador teko de `<mc/core_min>` (plano §26). **Fora:** `var`, `type`, `match`, Variant,
 método parcial, nested, `foreach` (precisa de iteráveis), herança de interface, `using G = geo;`/

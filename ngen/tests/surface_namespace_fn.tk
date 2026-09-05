@@ -26,7 +26,12 @@
 //   8. `geo.use_own_f(5)` -- a bare `f(z)` call written INSIDE `namespace
 //      geo` resolves to `geo`'s OWN `f`, even with the same plain `f` also
 //      visible -- the namespace-prefix step still wins over the plain one
-//      (N3b's own exception, §35).
+//      (N3b's own exception, §35);
+//   9. `Circle.test`, `Square.test_base`, `Util.test_static` -- N3c's own
+//      bug: a bare call inside a METHOD reaches the type's OWN member (a
+//      method the type declares itself, one inherited from a base, or a
+//      static one) before it ever reaches `using geo;`'s `geo.f`, the same
+//      order a written-out `this.f()` already gave.
 //
 // expect-exit: 42
 
@@ -99,6 +104,42 @@ namespace geo {
     }
 }
 
+// N3c's own target: this file's `using geo;` brings in `geo.f`, but a bare
+// call inside a method reaches the TYPE before it reaches a namespace/`using`
+// candidate -- the C# member-lookup order, unaffected by which namespace (if
+// any) the call site happens to sit in.
+class Circle {
+    public i64 f(i64 x) {                        // the class's OWN member
+        return x + 1;
+    }
+
+    public i64 test(i64 x) {
+        return f(x);                              // bare: the member above, not geo.f
+    }
+}
+
+class Shape {
+    public i64 f(i64 x) {                        // a BASE's own member
+        return x + 2;
+    }
+}
+
+class Square : Shape {
+    public i64 test_base(i64 x) {
+        return f(x);                              // bare: the INHERITED member, not geo.f
+    }
+}
+
+class Util {
+    public static i64 f(i64 x) {                 // a STATIC member
+        return x + 3;
+    }
+
+    public static i64 test_static(i64 x) {
+        return f(x);                              // bare: the static member, not geo.f
+    }
+}
+
 using geo;
 
 i64 main() {
@@ -125,6 +166,12 @@ i64 main() {
     }
     if (f(5) != 6) return 13;                    // the block closed: bare `f` is the PLAIN one
     if (geo.use_own_f(5) != 1005) return 14;      // inside geo, bare `f` is geo's OWN
+
+    Circle c = new Circle;
+    if (c.test(1) != 2) return 15;               // a member wins over `using geo;`'s `geo.f`
+    Square sq = new Square;
+    if (sq.test_base(1) != 3) return 16;         // ...and so does one inherited from a base
+    if (Util.test_static(1) != 4) return 17;     // ...and so does a static member
 
     return 42;
 }
