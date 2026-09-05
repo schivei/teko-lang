@@ -1870,3 +1870,9 @@ cada função e reusar `tk_ns_call_try_prefixes`/`tk_ns_call_try_usings` na coer
 (`tk_deleg_resolve_fn`, `ngen/teko_deleg.mc`). `new Op(fn)`, em tempo de parse, resolve antes da
 renomeação e não precisou do mesmo tratamento. Resto do crumb saiu como desenhado; ver
 `ngen/HANDOFF.md` § K1 LANDADO para o gate completo.
+
+**K1b (2026-09-05).** `tk_deleg_build` registrava o tipo do retorno com `tk_xt_put` sobre o nó QUE
+CONSTRUÍA, mas `tk_deleg_call` depois copiava esse nó para outra posição (`node_assign`) sem mover a
+entrada -- um `Cell c = f(7);` via delegate lia "emprestado" e ganhava um `rt_own` que nunca zera.
+Corrigido movendo o `tk_xt_put` para depois do `node_assign`, sobre o nó final (`tk_deleg_call`),
+com o mesmo split em `tk_field_deleg_call` (nó fresco, sem cópia).

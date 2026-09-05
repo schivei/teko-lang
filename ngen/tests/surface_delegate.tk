@@ -12,6 +12,16 @@
 //      (`h.cb(2, 3)`), and released along with the object that holds it;
 //   3. `ncheck` -- `null`, an `N_INT` 0, guarded by an `if`;
 //   4. `geo.use_gop()` -- the same declaration, INSIDE a namespace.
+//   5. `rcheck` -- a delegate whose RETURN is a counted class (`Make`):
+//      `Cell c = f(7);` takes the reference `f(7)` already owns with no
+//      extra increment; `c = null;` then runs the destructor -- the bug K1b
+//      fixed, an increment `rt_own` never sheds because the reclaim looked
+//      up the count under the ORPHANED node the delegate rewrite built
+//      rather than the one it copied into (teko_deleg.mc's `tk_deleg_call`).
+//      Also covers a reassignment (`c = f(8)`, the prior reference released),
+//      `return f(x)` from a function declared to answer `Cell`, `f(x)` as an
+//      argument (parked and swept with the statement), and a delegate whose
+//      own return is ANOTHER delegate (`Chooser`, itself counted).
 //
 // `rt_live()` is back to its floor after every helper returns: the reclaim
 // (teko_rc.mc) already scopes a delegate value exactly as it scopes a class
@@ -93,6 +103,67 @@ namespace geo {
     }
 }
 
+i64 cell_dtors = 0;
+
+class Cell {
+    public i64 v;
+
+    public Cell(i64 x) {
+        v = x;
+    }
+
+    ~Cell() {
+        cell_dtors = cell_dtors + 1;
+    }
+}
+
+delegate Cell Make(i64 x);
+delegate Make Chooser(i64 which);
+
+Cell mkcell(i64 x) {
+    return new Cell(x);
+}
+
+Cell mkcell2(i64 x) {
+    return new Cell(x + 100);
+}
+
+Make choose_make(i64 which) {
+    if (which != 0) return new Make(mkcell2);
+    return new Make(mkcell);
+}
+
+Cell via_return(Make f, i64 x) {
+    return f(x);
+}
+
+i64 via_arg(Cell c) {
+    return c.v;
+}
+
+i64 rcheck() {
+    Make f = mkcell;
+    Cell c = f(7);
+    if (c.v != 7) return 1;
+    c = null;
+    if (cell_dtors != 1) return 2;                // the reference `f(7)` owned, freed once
+
+    c = f(8);                                     // reassignment: no prior slot to release
+    if (c.v != 8) return 3;
+
+    Cell r = via_return(f, 9);                     // `return f(x);` from a Cell-returning fn
+    if (r.v != 9) return 4;
+
+    if (via_arg(f(10)) != 10) return 5;            // `f(x)` as an argument, parked and swept
+
+    Chooser pick = choose_make;
+    Make picked = pick(1);                         // a delegate returning ANOTHER delegate
+    Cell got = picked(5);
+    if (got.v != 105) return 6;
+
+    return 0;
+}
+
 i64 main() {
     i64 bad = dcheck();
     if (bad != 0) return 10 + bad;
@@ -108,6 +179,11 @@ i64 main() {
 
     if (geo.use_gop() != 30) return 70;
     if (rt_live() != 0) return 80;
+
+    bad = rcheck();
+    if (bad != 0) return 90 + bad;
+    if (rt_live() != 0) return 100;
+    if (cell_dtors != 5) return 110 + cell_dtors;
 
     return 42;
 }
