@@ -1157,6 +1157,28 @@ Verificador reproduziu o crash instrumentando com ASan+UBSan (as flags do CI pro
 - **CONSERTO (dispatch):** `cg_emit_self_addr` tem que PARAR de escapar o endereço de um temp cujo escopo é o próprio statement-expression — hoist do `_rcvN` pra um escopo que sobrevive à chamada externa inteira, OU passar receptor tipo-valor por valor (Region/Arena são structs de 8B, métodos leem self). Root-cause, não workaround; conserta a CLASSE (todo receptor não-endereçável), não só o sítio arena.
 - **LEI DE PROCESSO (endurece D163/D164):** o fixpoint no sandbox NÃO pega UB que só crasha sob certos toolchains — **o gate de verificador de compiler-core passa a incluir um build ASan+UBSan** (`-fsanitize=address,undefined -fno-omit-frame-pointer -g`) do gen0 compilando o tip, além do fixpoint. Barato, pega stack-use-after-scope/UAF/OOB que o build seco esconde. (A ser gravado na CLAUDE.md.)
 
+### D218 · DONO: rulings de superfície do teko-mc — operadores como C#, construtores/destrutores, `while`/`for`/`namespace`/`break N` pelo mc, `var`/`type`/`match` fora (dono 2026-09-04) 🔧 SUPERFÍCIE
+Batelada de rulings do dono sobre a lista de honest-stops e sobre o que já landou:
+- **Sobrecarga de operadores: como em C#, e o C5 landado está ERRADO por completo.** Operador é
+  membro **estático** do tipo, com os operandos como parâmetros explícitos (sem `self`):
+  `Vec operator+(Vec a, Vec b)`, `Vec operator+(i64 k, Vec v)` (o "reversed" que o C5 recusava),
+  unários com um parâmetro (`Vec operator-(Vec a)`, `operator!`), resolução por sobrecarga sobre os
+  tipos de AMBOS os operandos (candidatos = operadores declarados no tipo de qualquer operando,
+  pelo menos um parâmetro do tipo declarante), pares obrigatórios (`==`/`!=`, `<`/`>`, `<=`/`>=`).
+  Sem despacho por vtable. Refazer (C5b).
+- **`new` → construtores e destrutores** no novo modelo: `Nome(params) { }` é construtor
+  (`new Nome(args)` aloca, instala a vtable, chama-o), `~Nome() { }` é destrutor — chamado pelo
+  reclaim (RC) quando o count chega a zero, antes de liberar os campos. Substitui o `dispose` do lx.
+- **`while`/`for`:** há exemplo no mc (o `<prelude>`: `#rule` + `#token`) — usar.
+- **`namespace`:** açúcar sobre `#include` (D212); **`using`/`import`:** exemplo pronto no
+  `examples/lang` (`import n;` = `#include "n.lx"` + `using n;`, mangling por prefixo) — usar.
+- **`break` por profundidade** (`break N` do core) em vez de etiquetado — já é do core; nada a ensinar.
+- **`var`:** desnecessário — fora. (Inferência, se vier, é assunto para a sessão do mc.)
+- **`const`:** o mc usa `#define`; construir como açúcar (`#rule`/`syntax_stmt`) sobre `#define`.
+- **`match`:** em dúvida se é necessário; a doc do mc mostra como usar a AST se for.
+- **`when`:** se `match` e inferência se resolverem, é açúcar sobre `if`.
+- **`type`:** abandonar — não se usa.
+
 ### D217 · DONO: NADA DE `Variant` na versão teko-mc (dono 2026-09-04) 🔧 SUPERFÍCIE
 Ruling curto e duro para o port `ngen/`: **não se ensina `Variant`** — nenhuma união
 dinâmica / valor etiquetado em runtime / tipo "qualquer". A superfície teko-mc é

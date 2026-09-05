@@ -375,3 +375,20 @@ objetos vivos, como o `01-inherit.lx` imprime) voltando a 0 ao fim, e um loop de
 `new` + descarte que **não** esgota a arena. Ratchet: o pico de nós/heap do compilador não
 cresce além do que o RC exige (`mc limits`).
 Restrições: zero Variant (D217); nenhum toque no mc; forma C-like (D215).
+
+## 15. Rulings D218 — o que muda na fila (2026-09-04, noite)
+
+- **C5 está ERRADO e vai ser refeito (C5b):** operadores **como em C#** — estáticos, sem
+  `self`, dois parâmetros explícitos (unário: um), `i64 + Vec` permitido (operador declarado
+  em qualquer dos tipos dos operandos), resolução por sobrecarga sobre os dois tipos, pares
+  obrigatórios (`==`/`!=`, `<`/`>`, `<=`/`>=`). O pass sobre `N_BINARY`/`N_UNARY` e a regra do
+  §12 (endereço ≠ operando; core+core não se toca) **ficam**; muda a declaração, a tabela de
+  candidatos e a resolução. A fixture `surface_operator.tk` é reescrita na forma nova.
+- **Reclaim (entrega 5, crumb 1) redespachado** com **construtor/destrutor**: `Nome(params)`
+  chamado por `new Nome(args)`; `~Nome()` chamado pelo release. Sem `dispose`.
+- **Fila da entrega 5:** reclaim c/ ctor/dtor → C5b → `while`/`for` (prelude do mc) →
+  `namespace`/`import`/`using` (lx) → `const` como açúcar sobre `#define` → (`match`/`when`
+  em dúvida) → stdlib mínima. **Fora:** `var`, `type`. `break N` já é do core.
+- **Pergunta ao dono em aberto:** C# escreve `public static … operator+` e `public Vec(...)`;
+  o ngen ainda não ensina `public`/`static` (D196). Ensinar os modificadores junto, ou aceitar
+  a forma sem modificador (`Vec operator+(Vec a, Vec b)`, `Vec(i64 x) { }`) até o D196 entrar?
