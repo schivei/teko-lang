@@ -383,11 +383,6 @@ membro completo que o reclaim (construtor/destrutor) e o C5b escrevem contra:
   dá `unknown member` claro). A chamada **nua** (`area()`) resolve no pass e é insensível à
   ordem — funciona em qualquer posição.
 
-**Em voo:** crumb **D224** — `abstract class`/membro abstrato (obriga `override` na primeira
-concreta; `new` de abstrata é erro) e **`partial class`** (a mesma classe em mais de um
-arquivo, unida na compilação; método parcial NÃO). Fixtures `surface_abstract.tk`,
-`surface_partial.tk` (parte 2 em subpasta).
-
 **Entrega 5 — D224 LANDADO** (`b60e7dfe`, 22 fixtures): `abstract class`/membro/propriedade
 abstratos como C# (slot de vtable sem corpo; derivada concreta sem `override` é erro nomeando
 o acessor); **`partial class`** fecha no primeiro uso ou no fim da unidade (parte depois do uso
@@ -398,11 +393,12 @@ corrompe o layout; base só numa parte antes de membros; interfaces em união; m
 §14/§15): free lists + RC por escopo no parse (`tk_block`, `on_jump`); `Nome(params)` por
 `new Nome(args)`, `~Nome()` no release; fixture `surface_reclaim.tk` com 1M `new`.
 
-**Fila:** entrega 5 (comportamento base): membros C# (feito) → propriedades + interface v2 (feito)
-→ `abstract`/`partial class` (D224) → reclaim c/ construtor+destrutor → C5b
-(operador estático, D218) → `while`/`for` (prelude do mc) → stops restantes
-(`namespace`/`import`/`using`/`const`/`match`/`when`) → stdlib mínima; **C6** quando o mc
-der o hook de declaração de função (`0.10.N`).
+**Fila:** reclaim c/ construtor+destrutor (em voo) → **C5b** operadores `public static` como
+C# (o C5 landado está errado) → **C6** default em função de topo (`syntax_param`, mc ≥ 0.10.3)
+→ `while`/`for` (prelude do mc) → `namespace`/`import`/`using` (lx) → `const` (açúcar sobre
+`#define`) → `switch` nas duas vertentes + `when` guarda (D222) → closures `use (a, &b)` +
+ponteiro de função/`ref`/`out` como primitivas (D221, architect-first) → compilador teko de
+`<mc/core_min>` (plano §26). **Fora:** `var`, `type`, `match`, Variant, método parcial, nested.
 
 **Dívida do C8:** `p.items[i]` sobre um receptor que o parser NÃO tipa (um parâmetro,
 que só o oráculo do `pass()` resolve) não chega ao `[` de array — cai no `[` do `params`
