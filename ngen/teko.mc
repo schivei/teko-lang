@@ -105,6 +105,13 @@
 //   x++;  x--;  x += e;  x -= e;   (also a `for` loop's step)   word_add +
 //                                                               a pushed #rule
 //
+// What entrega 5's M45 crumb adds -- the unary `+` (teko_ops.mc's own
+// `tk_unary_plus`, the mc 0.13.0 release the `syntax_expr`/`parse_expr`
+// route came from) and the two boolean literals (teko_type.mc):
+//   +v  (a type declares `operator+(T a)`)                     syntax_expr,
+//   +i  (over a core type: the identity, `+i == i`)             pass()
+//   true  false                                                 syntax_expr
+//
 // Everything else in docs/design/port-teko-mc.md §3 (types/classes,
 // generics, error-union, `service`/DI, concurrency, the
 // rest of the stdlib) is a later entrega and is not stubbed here: it does
@@ -162,6 +169,9 @@ void user_init() {
 
     syntax_expr("new", &tk_new);
     syntax_expr("this", &tk_this);
+    syntax_expr("+", &tk_unary_plus);
+    syntax_expr("true", &tk_true);
+    syntax_expr("false", &tk_false);
     syntax_infix(".", 12, &tk_dot);
     syntax_infix("[", 12, &tk_bracket);
 

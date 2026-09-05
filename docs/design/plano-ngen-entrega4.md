@@ -860,3 +860,15 @@ um único `for` → `break out of range` (checagem do NÚCLEO, na compilação c
 em `--dump-ast`, só no passe de resolve/codegen); variável do `init` usada depois do `for` →
 `unknown name` (mesma checagem de escopo léxico que qualquer bloco já tem, porque o `for` é um
 `N_BLOCK` de verdade — nada de tabela de escopo própria precisou ser ensinada).
+
+## 30. mc 0.13.0 (M45) — `+` unário, `true`/`false`, `i32`/`p_cp()` (2026-09-05)
+
+Três itens sem crumb próprio. **Adoção do 0.13.0**: `p_cp()` público troca a leitura crua de `cp`
+em `tk_dot_follows`; `chmod` da `surface_overload_free.tk` vira `extern i32` (D5, uma chamada
+devolve o que declara); nenhum contorno de "region crosses a file boundary" existia a remover.
+**`+` unário** fecha a dívida do §27: `tk_unary_plus` (`syntax_expr("+")` + `parse_expr(11)`, a
+precedência acima de `*`/`/`/`%`) devolve o mesmo `N_UNARY` do núcleo, `tk_ops_unary` resolve pelo
+tipo e colapsa no próprio operando (`tk_ops_replace`) quando é um tipo do núcleo. **`true`/`false`**:
+`N_INT` de 1/0 tipado `TY_I64` (como toda comparação, não `TY_U8`), reservados por `syntax_expr`.
+Gate: 25/25; AST das 22 fixtures não tocadas **byte-idêntica** contra o compilador da base
+`545b26b5` (0.13.0 dos dois lados); `mc limits` verdict `ok`.

@@ -132,7 +132,19 @@ antes o sysroot que o link precisa, tudo com o próprio `mc` + LLVM da imagem:
 `schivei/mc` `scripts/sysroot-windows.sh`). A linha de link é a do próprio `mc`
 (`src/mc.windows-*.toml`): `-entry:mc_start -nodefaultlib -stack:8388608`.
 
-## 3.2 O mc que o CI usa hoje: 0.12.1 (2026-09-05, 05:26)
+## 3.2 O mc que o CI usa hoje: 0.13.0 (2026-09-05, 06:28)
+
+**0.13.0 (PR #22, M45):** `i32` (`type_new` pelo NÚCLEO, kind `TK_SINT`, sinal por kind); **uma
+chamada devolve o que declara** (D5) — todo `extern` que devolve C `int` passa a `extern i32`
+(corrigido em `ngen/tests/surface_overload_free.tk`'s `chmod`); **`p_cp()`** público (o cursor do
+lexer sob substituição, usado em `ngen/teko_access.mc`'s `tk_dot_follows`); e o falso positivo
+`region crosses a file boundary` no fim de um arquivo incluído, corrigido no núcleo (nada a tirar
+aqui — `teko_generic.mc` não tinha contorno algum, só o design região-por-parte). O mesmo release
+também respondeu ao lote C5b: `+` unário tem site por `syntax_expr("+")` + `parse_expr(11)` (a
+precedência acima de `*`/`/`/`%`, a mais alta do `--dump-rules`), sem linha nova no núcleo —
+`ngen/teko_ops.mc`'s `tk_unary_plus`. Baseline local no 0.13.0: 25/25.
+
+(Registro anterior, 0.12.1:)
 
 **0.12.1 (PR #21, patch de cooperação):** `[target].libc = "gnu"|"musl"` (FAMÍLIA; a grafia
 soname é recusada), `[target].link = "dynamic"|"static"` (static = asserção; com importação
@@ -429,8 +441,9 @@ corrompe o layout; base só numa parte antes de membros; interfaces em união; m
 a forma velha do C5 (receptor implícito) deixa de ser aceita, com mensagem própria.
 - **Declaração** `public static T operator<op>(A a[, B b])` em `class` e em `struct`. O operador é
   um membro **estático**: sem `this`, sem slot de vtable, e é a assinatura que diz tudo. Binários
-  `+ - * / % == != < <= > >= & | ^ << >>`, unários `- ! ~` (e `+`, aceito na declaração — o core
-  não tem prefixo `+`, então ainda não há sítio que o alcance; `mc/src/parse.mc` `ops_init`).
+  `+ - * / % == != < <= > >= & | ^ << >>`, unários `- ! ~ +`. O `+` unário TEM SÍTIO (M45, entrega
+  5 crumb 0): `teko_ops.mc`'s `tk_unary_plus`, `syntax_expr("+")` + `parse_expr(11)`; sobre um tipo
+  do NÚCLEO o pass colapsa o nó no próprio operando (`+x == x`), o gen do núcleo nunca vê o `N_UNARY`.
 - **Resolução pelos DOIS operandos** (`teko_ops.mc`, tabela `op_*`): candidatos = operadores
   declarados pelo tipo de QUALQUER operando **e pelas bases dele**; pelo menos um parâmetro tem
   de ser do tipo declarante. Três rodadas, nessa ordem — **exata**, **literal** (a do C4: um
@@ -532,6 +545,26 @@ sem `#include`.
   dentro de método de `class` (o passe de RC caminhando a árvore sintetizada) e `x += 3;`. AST das
   24 fixtures anteriores **byte-idêntica**.
 
+**Entrega 5 — M45 crumb LANDADO** (mc 0.13.0, 25 fixtures): três itens, nenhum novo `.tk`.
+- **Adoção do mc 0.13.0**: `p_cp()` público troca a leitura crua de `cp` em `teko_access.mc`'s
+  `tk_dot_follows`; `ngen/tests/surface_overload_free.tk`'s `chmod` (C ABI, devolve `int`) passa a
+  `extern i32` (D5 — uma chamada devolve o que declara, sign-extended); nenhum outro `extern` do
+  `ngen` chama C que devolve `int` (`lib/rt.mc` é 100% `callp`). Sem contorno de "region crosses a
+  file boundary" a remover — o núcleo corrigiu o falso positivo, e o `teko_generic.mc` nunca teve um.
+- **`+` unário** (fecha a dívida do C5b acima): `teko_ops.mc`'s `tk_unary_plus`, registrado por
+  `syntax_expr("+")`, lê o operando por `parse_expr(11)` (uma acima da maior precedência infixa) e
+  devolve o MESMO `N_UNARY` que o núcleo constrói para `-v`. `tk_ops_unary` resolve `T.operator+`
+  quando o operando é de um tipo teko; sobre um tipo do núcleo colapsa o nó no próprio operando
+  (`tk_ops_replace`, `+x == x`) — o gen do núcleo nunca vê um `N_UNARY` de `+`.
+- **`true`/`false`**: `teko_type.mc`'s `tk_true`/`tk_false`, `N_INT` de 1/0 tipado `TY_I64` (como
+  o oráculo já tipa toda comparação/`!`/`&&`/`||`, não `TY_U8`/`bool` — `bool` é a largura de uma
+  DECLARAÇÃO, não o tipo de um valor de verdade). `syntax_expr` reserva as duas palavras: `i64 true
+  = 1;` é recusado (`name reserved by a syntax/type_alias registration: true`).
+- **Fixtures**: `surface_operator.tk` ganhou `operator+(Vec a)` unário e os sítios `+v`/`+i`;
+  `surface_loops.tk` ganhou `while (true) { ... break; }` com dois `bool`. AST das 22 fixtures
+  realmente não tocadas (todas menos essas duas e `surface_overload_free.tk`) **byte-idêntica**
+  contra o compilador da base em `545b26b5`, os dois no mc 0.13.0.
+
 **Fila:** `namespace`/`import`/`using` → `const` → `switch` (D222) →
 closures/`ref`/`out` (D221, architect-first) → compilador teko de `<mc/core_min>` (plano
 §26). **Fora:** `var`, `type`, `match`, Variant, método parcial, nested, `foreach` (precisa de
@@ -547,13 +580,11 @@ que só o oráculo do `pass()` resolve) não chega ao `[` de array — cai no `[
 e é recusado com `teko: \`[\` indexes a \`params\` list only`. Recusa clara, nunca
 miscompilação; fechar isso é trabalho no `teko_typeof.mc` (C3b, em voo em paralelo).
 
-**Dívidas conhecidas:** **o core não tem prefixo
-`+`** (`ops_init` registra só `- ~ ! &`), então `operator+` unário é declarável e não tem
-sítio — não existe hook `syntax_prefix`, é pedido ao mc; `struct`, pacote de `params` e
-campo `static` de classe sem reclaim (acima). Fechadas: a arena bump sem reclaim (D218), o
-`syntax_infix` sobre operador do core (mc 0.10.3/M41.5 — mas a rota do C5b segue sendo o
-`pass()`, pelos dois motivos do cabeçalho de `teko_ops.mc`) e o default em função de topo
-(C6, acima).
+**Dívidas conhecidas:** `struct`, pacote de `params` e campo `static` de classe sem reclaim
+(acima). Fechadas: a arena bump sem reclaim (D218), o `syntax_infix` sobre operador do core
+(mc 0.10.3/M41.5 — mas a rota do C5b segue sendo o `pass()`, pelos dois motivos do cabeçalho
+de `teko_ops.mc`), o default em função de topo (C6, acima) e o `+` unário sem sítio (M45,
+`syntax_expr("+")` + `parse_expr(11)` em `teko_ops.mc`'s `tk_unary_plus`).
 
 ### Por que o RC ficou no PASSE e não no parse (achado do crumb do reclaim)
 

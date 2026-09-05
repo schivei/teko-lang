@@ -24,6 +24,26 @@
 // through the parameter list: one pointer, `TK_INT`.
 i64 tk_ty_params = 0;
 
+// `true`/`false`: an ordinary `N_INT` of 1/0, typed `TY_I64` like every other
+// truth value this project's oracle answers (teko_typeof.mc's `tk_ty_of`
+// types a comparison, `!`, `&&`, `||` all `TY_I64` -- `bool`'s own `TY_U8`
+// alias is for a DECLARATION's width, not for what a truth value carries).
+// `syntax_expr` reserves the word program-wide (hooks.md § 3), so a program
+// declaring `i64 true = 1;` is refused where it is written, the way C#
+// refuses the same collision with its own keyword.
+i64 tk_bool_lit(i64 v) {
+    i64 line = p_line();
+    uptr fl = p_file();
+    p_next();
+    i64 n = node_new(N_INT, line, fl);
+    set_nd_val(n, v);
+    set_nd_type(n, TY_I64);
+    return n;
+}
+
+i64 tk_true()  { return tk_bool_lit(1); }
+i64 tk_false() { return tk_bool_lit(0); }
+
 void tk_types_init() {
     type_alias("bool",  TY_U8);
     type_alias("char",  TY_U32);

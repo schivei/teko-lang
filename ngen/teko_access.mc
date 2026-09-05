@@ -289,10 +289,10 @@ i64 tk_type_expr() {
 // 1 when a `.` comes right after the current token, which is the one thing that
 // tells `Shape.made = 1;` from `Shape s = new Shape;`. The parser keeps a single
 // token of lookahead, so the answer is read from the source the lexer is about
-// to read the next token from -- `cp`, the very cursor the core's own
+// to read the next token from -- `p_cp()`, the very cursor the core's own
 // `stmt_syntax` guard compares (mc `src/parse.mc`).
 i64 tk_dot_follows() {
-    uptr p = cp;
+    uptr p = p_cp();
     uptr e = p_src_end();
     loop {
         if (p >= e) return 0;
