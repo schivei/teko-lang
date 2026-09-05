@@ -102,6 +102,7 @@ Each fixture is a program the taught compiler builds and RUNS on the five CI leg
 | `tests/surface_params.tk` | 42 |
 | `tests/surface_partial.tk` | 42 |
 | `tests/surface_property.tk` | 42 |
+| `tests/surface_reclaim.tk` | 42 |
 | `tests/surface_scope.tk` | 42 |
 | `tests/surface_typeof_expr.tk` | 42 |
 | `tests/surface_typeof_param.tk` | 42 |
