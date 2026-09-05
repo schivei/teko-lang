@@ -454,3 +454,9 @@ nome não-qualificado resolve no **pass** (o core entrega identificador cru; é 
 parâmetros são legíveis), local/parâmetro sombreia campo. Prova: AST nova byte-idêntica à
 velha em 16/18 módulo `name=self→this`; as 2 restantes divergem só pelo `base.m()`.
 **Limite honesto:** campo array inline (C8) só por `this.items[k]` — recusa clara.
+
+**§18, mecanismo (dono):** ponteiro de função, `ref T` e `out T` são **primitivas novas** por
+`type_new` (Tier 4, `mc/docs/guide/96-a-new-primitive.md`: id ≥ `TY_MAX` é do módulo), não
+`uptr` cru: o oráculo os distingue, `f(x)` sobre valor-função rebaixa a `callp` com o retorno
+tipado pela assinatura; `ref`/`out` levam `&` no sítio e deref implícito no uso; `out` é o
+DPS. Vai junto para o architect das closures — mesmo crumb de desenho.

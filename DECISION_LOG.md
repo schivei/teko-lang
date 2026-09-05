@@ -1186,6 +1186,14 @@ Verificador reproduziu o crash instrumentando com ASan+UBSan (as flags do CI pro
   reuso que o PHP faz. Fecha o design-open: sobra ao architect só a forma C-like da lambda e o
   tempo de vida do capturado por referência (RC do reclaim / escopo).
 
+- **Mecanismo (dono, complemento):** o mc já permite **criar primitivas novas** (M24, Tier 4:
+  `type_new` + `intrinsic`, guia `docs/guide/96-a-new-primitive.md` — id ≥ `TY_MAX` é do
+  módulo e toda decisão é delegada; `<float>` foi a primeira). Logo o **ponteiro de função é um
+  primitivo próprio** sobre `uptr` — identidade distinta para o oráculo, que rebaixa `f(x)` a
+  `callp` e tipa o retorno pela assinatura. **O mesmo vale para `ref T` e `out T`** (parâmetros
+  por referência como em C#; `out` = dest-passing, o DPS): primitivos de endereço tipados sobre
+  `uptr`, com `&` no sítio e deref implícito no uso.
+
 ### D220 · DONO: `public`/`private`/`protected`/`static` como em C#; `internal` se o mc permitir restringir; SEM classes aninhadas (dono 2026-09-04) 🔧 SUPERFÍCIE
 - **Modificadores como em C#:** `public`, `private`, `protected`, `static` em membros; `public`/
   `internal` em tipos de topo. **Defaults do C#** (ratificados pelo dono 2026-09-04): tipo de topo sem modificador é
