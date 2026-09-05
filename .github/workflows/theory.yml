@@ -1,0 +1,191 @@
+name: Theory CI
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# THEORY CI — the FULL six-target matrix, each with the SAME two legs, one NATIVE and one C.
+#
+# Every leg runs exactly what pr.yml's matching `artifact-<target>` job runs today —
+# scripts/produce_assets.sh (seed → ladder/degrau → dry build → native asset → stage) then
+# scripts/fixpoint_gate.sh — but on THIS theory/** branch's modified source, and with the
+# fixpoint/test backend PINNED per leg instead of looked up from the planner. The point is to see,
+# ACROSS EVERY OS/ARCH pr.yml ships (x86_64+arm64 / ELF+Mach-O+COFF), the native and the C
+# self-host results side by side, so which improvement (or which INTERACTION between improvements)
+# breaks the native path on a GIVEN target is isolated by construction rather than guessed at.
+#
+# `fail-fast: false` is load-bearing across BOTH matrix axes: a red leg on one target/backend must
+# NOT cancel a green leg elsewhere — seeing all twelve outcomes together is the entire experiment.
+#
+# Owner design 2026-08-03: "um CI que roda em push com duas pernas com mesmo alvo (Linux x86-64
+# glibc), mas cada uma com um target, um native e outro C, rodando exatamente o que o pr.yml roda
+# hoje mas com essas mudanças." Expanded 2026-08-05 to the full six-target matrix pr.yml already
+# runs, for the same reason stated across every arch/OS pr.yml provisions: a narrowing measured on
+# ONE target does not say whether it holds, or diverges, on the other five.
+#
+# PROVISIONING PER TARGET MIRRORS pr.yml's `artifact-<target>` JOBS EXACTLY — those are the
+# producer legs (seed → ladder → dry build → stage), not the `test-<target>` cross-gate legs, so
+# the object-format parsers (llvm/lld) pr.yml installs for the LATTER never belong here; only the
+# musl toolchain the TWO `-musl` producer legs install applies. macOS and Windows producer legs
+# install nothing beyond the checkout + toolchain report, because that is what
+# `artifact-macos-arm64` / `artifact-windows-x86_64` do in pr.yml.
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+
+on:
+  push:
+    branches:
+      - 'theory/**'
+
+concurrency:
+  group: theory-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  leg:
+    name: ${{ matrix.backend }} / ${{ matrix.leg.target }}
+    runs-on: ${{ matrix.leg.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [native, c]
+        leg:
+          - target: linux-x86_64-glibc
+            runner: ubuntu-latest
+            produce: linux linux-x86_64-glibc linux-x86_64-glibc
+          - target: linux-x86_64-musl
+            runner: ubuntu-latest
+            produce: linux linux-x86_64-glibc linux-x86_64-musl
+          - target: linux-arm64-glibc
+            runner: ubuntu-24.04-arm
+            produce: linux linux-arm64-glibc linux-arm64-glibc
+          - target: linux-arm64-musl
+            runner: ubuntu-24.04-arm
+            produce: linux linux-arm64-glibc linux-arm64-musl
+          - target: macos-arm64
+            runner: macos-latest
+            produce: native macos-arm64 macos-arm64
+          - target: windows-x86_64
+            runner: windows-latest
+            produce: native windows-x86_64 windows-x86_64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # LINUX ONLY, exactly as before this leg's target matrix expanded. Not required by
+      # scripts/produce_assets.sh or scripts/fixpoint_gate.sh on any target (neither shell out to
+      # an object-format parser), but kept as the diagnostic this leg already carried on
+      # linux-x86_64-glibc — now guarded so it never runs, and never fails, on macOS or Windows
+      # runners that carry no apt-get.
+      - name: Install the object-format parsers the gates read with (Linux)
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y llvm lld
+
+      # musl-tools INSTALLS ON BOTH LINUX RUNNERS — measured green on `ubuntu-24.04-arm` across
+      # three separate runs on 2026-07-27 (pr.yml's `artifact-linux-arm64-musl` /
+      # `artifact-linux-x86_64-musl`). Guarded to the two `-musl` legs; the two glibc Linux legs,
+      # and every non-Linux leg, skip it.
+      - name: Install musl-tools (this leg's native, non-container toolchain)
+        if: ${{ runner.os == 'Linux' && contains(matrix.leg.target, 'musl') }}
+        run: |
+          set -eu
+          sudo apt-get update -y
+          sudo apt-get install -y musl-tools
+          musl-gcc --version
+
+      - name: Report the host toolchain (diagnostic — never fails the job)
+        shell: bash
+        run: |
+          for t in cc clang gcc file python3; do
+            printf '%-8s ' "$t"; command -v "$t" || echo '(absent)'
+          done
+          for t in cc clang gcc; do
+            if command -v "$t" >/dev/null 2>&1; then
+              printf '%-8s target: ' "$t"; "$t" -dumpmachine 2>/dev/null || echo '(no -dumpmachine)'
+            fi
+          done
+
+      - name: Produce this leg's asset (seed → ladder → dry build → native asset → stage)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh scripts/produce_assets.sh ${{ matrix.leg.produce }}
+
+      # THE RUPTURE POINT. The fixpoint (gen1 rebuilds itself, gen2 == gen3) is the one signal this
+      # harness exists for: it is where the native path breaks (a guard refusal or a crash) while the
+      # C path holds — or, on a branch that closed the gap, where native finally holds too. Nothing
+      # heavier runs here (owner 2026-08-03: "não precisa, em theory, executar o mem paranoid,
+      # queremos apenas encontrar pontos de ruptura"); the CI-hygiene fixtures pr.yml runs after the
+      # fixpoint are not rupture detectors and are deliberately absent.
+      # ONE-OFF H2 NARROWING (2026-08-04, wild-write): gen2 native now COMPILES (gate met) but
+      # crashes M.1 in the CHECKER phase while building gen3 — before any lowering, so the fat-store
+      # guards cannot be on its path (H1 refuted for the residual). Arm the runtime's own H2 aids on
+      # the native leg ONLY: TEKO_NATIVE_POISON_FREE reports a corrupted PARKED block + offset at
+      # take, TEKO_NATIVE_PUSH_REDZONE catches a push-cache/stale-slot append overrun at its source.
+      # The C leg stays clean (both '0') so its byte-identity fixpoint + teko.c harvest are unaffected.
+      # These two aids and TEKO_MEM_PARANOID run on EVERY target now, not just linux-x86_64-glibc —
+      # the whole point of the expansion is to see whether the same rupture reproduces, or diverges,
+      # on the other five.
+      - name: Fixpoint — gen2 == gen3 over the same source (backend = ${{ matrix.backend }})
+        shell: bash
+        env:
+          TEKO_FIXPOINT_BACKEND: ${{ matrix.backend }}
+          TEKO_NATIVE_POISON_FREE: ${{ matrix.backend == 'native' && '1' || '0' }}
+          TEKO_NATIVE_PUSH_REDZONE: ${{ matrix.backend == 'native' && '1' || '0' }}
+          TEKO_MEM_PARANOID: '1'
+        run: sh scripts/fixpoint_gate.sh out/teko . .fixpoint
+
+      # THE WINDOWS GLOB GAP (Theory CI #62): every build on this leg produces `teko.exe`, not
+      # `teko` — this project's Windows toolchain is `clang --target=x86_64-pc-windows-msvc`
+      # (src/build/project.tks's WINDOWS_CC_NAME/build_cc_argv; MinGW is explicitly banned there,
+      # owner ruling 2026-08-05), and clang driving the MSVC linker (lld-link/link.exe) appends the
+      # extension automatically, same as `cl.exe` would. `take_gen` in
+      # scripts/fixpoint_gate.sh strips it ONLY for `.fixpoint/gen2`/`.fixpoint/gen3` (its rename
+      # target has no extension by construction: `mv "$W/out/teko.exe" "$W/$tg_name"`). `out/teko`
+      # (produce_assets.sh's dry build) and `.fixpoint/out/teko` (a build still IN PROGRESS at
+      # failure time, before take_gen ever runs) both keep whatever extension the compiler wrote —
+      # `.exe` on this runner — so the un-suffixed path never matched anything on Windows and the
+      # step warned "No files were found" even though the crashing gen2 binary sat right there on
+      # disk. Listing the `.exe` variant alongside each un-suffixed one is a no-op on Linux/macOS
+      # (upload-artifact's `if-no-files-found: warn` tolerates the pattern matching nothing there)
+      # and is what actually picks the binary up on Windows.
+      - name: Upload native binaries for offline symbolization (always — the crash IS the signal)
+        if: ${{ always() && matrix.backend == 'native' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-bins-${{ matrix.leg.target }}-${{ github.sha }}
+          path: |
+            out/teko
+            out/teko.exe
+            .fixpoint/gen2
+            .fixpoint/gen2.exe
+            .fixpoint/out/teko
+            .fixpoint/out/teko.exe
+          if-no-files-found: warn
+          retention-days: 7
+
+      # HARVEST THE FRESH SEED. When the fixpoint HELD, the gate staged gen3.c — this run's
+      # candidate for bootstrap/teko.c. The C leg is the reliable producer of a valid teko.c at
+      # any commit; uploading it makes this run a seed source for the reseed-and-continue bisection
+      # (owner 2026-08-03: "colhe a que a lane C reportou verde e semeia, até que ambas fiquem
+      # verdes"). Only runs on a fixpoint that passed — a crash leaves nothing worth harvesting.
+      - name: Harvest this leg's emitted teko.c (only over a fixpoint that held)
+        if: ${{ success() }}
+        shell: bash
+        run: |
+          set -eu
+          mkdir -p harvest
+          [ -f .fixpoint/gen3.c ] && cp .fixpoint/gen3.c harvest/teko.c || true
+          [ -f out/teko.c ] && cp out/teko.c harvest/out-teko.c || true
+          ls -la harvest/ || true
+
+      - name: Upload the harvested teko.c (the reseed candidate)
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: harvest-teko-c-${{ matrix.leg.target }}-${{ matrix.backend }}
+          path: harvest
+          if-no-files-found: warn
+          retention-days: 7

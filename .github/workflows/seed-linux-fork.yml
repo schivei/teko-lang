@@ -57,8 +57,24 @@ jobs:
         if: steps.exists.outputs.skip != 'true'
         run: ./scripts/ci_provision_teko.sh linux-x86_64-glibc
 
+      # THE BACKEND IS PINNED, AND ITS ABSENCE WAS A DEFECT OF THE SAME FAMILY THAT BROKE RUNG -1.
+      # `teko`'s default backend is the NATIVE one and the native backend cannot yet build the
+      # compiler, so this step was asking a road that does not reach the destination to carry the
+      # seed every agent and every fork lane stands on.
+      # `scripts/build_with_seed_fallback.sh` closed the identical hole in the ladder — *"o momento
+      # em que o seed foi substituído, rung -1 começou a falhar … green by detour"* — while this
+      # cut never had the pin at all.
+      #
+      # SCOPED TO THIS STEP, never the job: `scripts/fixpoint_gate.sh` records what a wide pin
+      # costs — `TEKO_BACKEND=c` *"LEAKS INTO EVERYTHING THAT RUNS BELOW IT"*, turning regressors
+      # green by compiling them down the road being retired. Here it wraps ONE compiler build.
+      #
+      # IT IS DELETED, NOT FLIPPED, the day the native route builds the compiler on Linux (the
+      # 0.3.1.0 goal): at that point there is one backend and nothing left to choose.
       - name: Build the seed — dry, no gate, no fixpoint
         if: steps.exists.outputs.skip != 'true'
+        env:
+          TEKO_BACKEND: c
         run: |
           set -eu
           mkdir -p out

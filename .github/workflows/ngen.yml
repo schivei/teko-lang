@@ -1,0 +1,433 @@
+name: ngen (mc) CI
+
+# Builds and tests `ngen/` -- the teko-over-mc port (docs/design/port-teko-mc.md,
+# DECISION_LOG.md D211/D212/D213) -- with the mc toolchain (github.com/minicompiler/mc),
+# always fetching its LATEST release. `src/` is frozen (D211/D212): the escada
+# gen0->gen3 this repository's other workflows run is irrelevant to `ngen/` and
+# is deliberately NOT run here.
+#
+# FIVE NATIVE LEGS (dono 2026-09-04): linux/x86_64, linux/aarch64, macos/aarch64,
+# windows/x86_64 and windows/aarch64. Each one runs on a runner of its own
+# operating system AND architecture, downloads the mc release built for THAT
+# pair, teaches the compiler there and RUNS every fixture there -- the exit code
+# is the oracle, so nothing is cross-compiled and left unproven. `mc --host` is
+# asserted against the leg before anything is built, which is what makes
+# "native" a checked fact rather than a runner label.
+#
+# The five legs are one matrix job, and the required check on `main` is the
+# AGGREGATOR job below, which keeps the name the ruleset already asks for
+# (`mc build ngen && run`) and fails if any leg failed.
+#
+# pr.yml (this repository's main gate) triggers on `pull_request` with NO
+# `paths:` filter, on purpose (its own header explains why: a GitHub Actions
+# required check that stops reporting goes pending forever, not red, so a
+# trigger-level `paths-ignore` is avoided there in favour of an internal
+# paths-filter job). A PR touching only `ngen/**` therefore still runs pr.yml's
+# full escada today; teaching it to skip that escada for an `ngen/`-only diff
+# means reworking its internal `dorny/paths-filter` job, which is out of this
+# entrega's scope -- left as-is, flagged for the integrator.
+
+on:
+  push:
+  pull_request:
+    branches: ['**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ngen-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  leg:
+    name: ngen (${{ matrix.os }}/${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      # every leg reports; a red one must not hide the state of the other four
+      fail-fast: false
+      matrix:
+        include:
+          # `arch` is what `mc`'s `[target]` and `mc --host` call the machine
+          # (`aarch64`, never `arm64`); `asset` is what the release file is
+          # called (`arm64`). They differ, so both are written out.
+          #
+          # `config` is what the leg appends to the generated `mc.toml`: the
+          # linker (and, on Windows, the sysroot) that `ngen/mc.toml`'s own
+          # `[linker]` is replaced with. macOS appends NOTHING -- with no
+          # `[linker]` the built-in `macho-exe` backend writes and signs the
+          # executable itself (docs/guide/50-cross-compile.md), which is the
+          # only shape that works there.
+          # Since mc 0.12.0 (M42) the Linux executable slot is filled: `mc build`
+          # writes a dynamic ELF itself, no `[linker]` and no sysroot. The loader
+          # and soname default to musl; the runners are glibc, so `[target]`
+          # names the glibc pair (mc docs/build.md § [target].interp/.libc) --
+          # a musl-interp binary on ubuntu is `not found` ("mc: cannot run").
+          - runner: ubuntu-latest
+            os: linux
+            arch: x86_64
+            asset: x86_64
+            exe: ''
+            target_tail: |
+              interp = "/lib64/ld-linux-x86-64.so.2"
+            libc_family: gnu
+            config: ''
+          - runner: ubuntu-24.04-arm
+            os: linux
+            arch: aarch64
+            asset: arm64
+            exe: ''
+            target_tail: |
+              interp = "/lib/ld-linux-aarch64.so.1"
+            libc_family: gnu
+            config: ''
+          - runner: macos-latest
+            target_tail: ''
+            libc_family: ''
+            os: macos
+            arch: aarch64
+            asset: arm64
+            exe: ''
+            config: ''
+          # Windows has no direct-executable backend and no C runtime: the link
+          # is `lld-link` against three files this workflow builds first (the
+          # sysroot step), exactly the line `mc` uses for its own Windows host
+          # (`minicompiler/mc` src/mc.windows-*.toml, scripts/link-windows.sh).
+          # `-stack:` is there because the default reserve is 1 MiB on Windows
+          # against 8 MiB elsewhere, and the compiler is written for the latter.
+          - runner: windows-latest
+            target_tail: ''
+            libc_family: ''
+            os: windows
+            arch: x86_64
+            asset: x86_64
+            exe: '.exe'
+            config: |
+              [sysroot]
+              path = "build/sysroot/windows-x86_64"
+
+              [linker]
+              cmd  = "lld-link"
+              args = ["-machine:x64", "-subsystem:console", "-entry:mc_start", "-nodefaultlib",
+                      "-stack:8388608", "-out:{out}", "{obj}",
+                      "{sysroot}/winstart.obj", "{sysroot}/mcrt.obj", "{sysroot}/kernel32.lib"]
+          - runner: windows-11-arm
+            target_tail: ''
+            libc_family: ''
+            os: windows
+            arch: aarch64
+            asset: arm64
+            exe: '.exe'
+            config: |
+              [sysroot]
+              path = "build/sysroot/windows-aarch64"
+
+              [linker]
+              cmd  = "lld-link"
+              args = ["-machine:arm64", "-subsystem:console", "-entry:mc_start", "-nodefaultlib",
+                      "-stack:8388608", "-out:{out}", "{obj}",
+                      "{sysroot}/winstart.obj", "{sysroot}/mcrt.obj", "{sysroot}/kernel32.lib"]
+    env:
+      MC_OS: ${{ matrix.os }}
+      MC_ARCH: ${{ matrix.arch }}
+      MC_ASSET: ${{ matrix.asset }}
+      MC_CONFIG_TAIL: ${{ matrix.config }}
+      MC_TARGET_TAIL: ${{ matrix.target_tail }}
+      MC_LIBC_FAMILY: ${{ matrix.libc_family }}
+      EXE: ${{ matrix.exe }}
+      # MSYS rewrites an argument that looks like a path, and every dash-form
+      # lld-link option does (`minicompiler/mc` docs/guide/95-windows-host.md § 4).
+      # Harmless where there is no MSYS.
+      MSYS2_ARG_CONV_EXCL: '*'
+    steps:
+      # GitHub's Windows images ship core.autocrlf=true and this leg compiles
+      # sources straight out of the checkout; a `\r` in a `.tk` or a `.mc` is
+      # not worth debugging. A no-op on the other three runners.
+      - name: never translate line endings
+        run: git config --global core.autocrlf false
+
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: resolve latest mc release
+        id: mc_release
+        run: |
+          set -eu
+          resp="$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            "https://api.github.com/repos/minicompiler/mc/releases/latest")" || {
+            echo "::error::could not reach the minicompiler/mc releases API" >&2
+            exit 1
+          }
+          tag="$(printf '%s' "$resp" | jq -r '.tag_name // empty')"
+          if [ -z "$tag" ]; then
+            echo "::error::minicompiler/mc has no releases (or the API response has no tag_name)" >&2
+            printf '%s\n' "$resp" >&2
+            exit 1
+          fi
+          ver="${tag#v}"
+          echo "tag=$tag"     >>"$GITHUB_OUTPUT"
+          echo "version=$ver" >>"$GITHUB_OUTPUT"
+          echo "resolved minicompiler/mc $tag"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # The toolchain is unpacked INSIDE the workspace and addressed by a
+      # relative path from here on: every step runs with the repository root as
+      # its working directory, and a relative path is the one form Git Bash,
+      # bash and `mc` itself read the same way.
+      - name: download and verify the mc toolchain
+        env:
+          MC_TAG: ${{ steps.mc_release.outputs.tag }}
+          MC_VERSION: ${{ steps.mc_release.outputs.version }}
+        run: |
+          set -eu
+          name="mc-${MC_VERSION}-${MC_OS}-${MC_ASSET}"
+          asset="$name.tar.gz"
+          base="https://github.com/minicompiler/mc/releases/download/${MC_TAG}"
+          rm -rf .mc-toolchain
+          mkdir -p .mc-toolchain
+          for f in "$asset" "$asset.sha256"; do
+            if ! curl -fsSL -o ".mc-toolchain/$f" "$base/$f"; then
+              echo "::error::missing release asset: $base/$f" >&2
+              exit 1
+            fi
+          done
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd .mc-toolchain && sha256sum -c "$asset.sha256")
+          else
+            (cd .mc-toolchain && shasum -a 256 -c "$asset.sha256")
+          fi
+          tar xzf ".mc-toolchain/$asset" -C .mc-toolchain
+          mc=".mc-toolchain/$name/mc$EXE"
+          chmod 755 "$mc"
+          "$mc" --host
+          # the leg is only native if the binary agrees; a wrong asset here
+          # would otherwise surface as a mystery ENOEXEC three steps later
+          host_os=$("$mc" --host | sed -n 's|^os *||p')
+          host_arch=$("$mc" --host | sed -n 's|^arch *||p')
+          if [ "$host_os" != "$MC_OS" ] || [ "$host_arch" != "$MC_ARCH" ]; then
+            echo "::error::the mc binary says it is hosted on '$host_os/$host_arch', not $MC_OS/$MC_ARCH" >&2
+            exit 1
+          fi
+          echo "MC=$mc" >>"$GITHUB_ENV"
+
+      # `lld-link` links and `llvm-dlltool` writes the import library; both ship
+      # with LLVM, which both Windows images already carry. The download is the
+      # branch that must never be reached silently -- this leg is the only place
+      # a Windows binary is executed, so it fails loudly instead of skipping.
+      - name: obtain the LLVM tools (Windows)
+        if: runner.os == 'Windows'
+        env:
+          LLVM_VERSION: '20.1.8'
+        run: |
+          set -eu
+          have() { [ -x "$1/lld-link.exe" ] && [ -x "$1/llvm-dlltool.exe" ]; }
+          bin=""
+          for cand in "/c/Program Files/LLVM/bin" "$PWD/.llvm/bin"; do
+            if have "$cand"; then bin="$cand"; break; fi
+          done
+          if [ -z "$bin" ]; then
+            echo "LLVM not on this image -- downloading $LLVM_VERSION"
+            case "$MC_ARCH" in
+              aarch64) tarball="clang+llvm-$LLVM_VERSION-aarch64-pc-windows-msvc.tar.xz"
+                       installer="LLVM-$LLVM_VERSION-woa64.exe" ;;
+              *)       tarball="clang+llvm-$LLVM_VERSION-x86_64-pc-windows-msvc.tar.xz"
+                       installer="LLVM-$LLVM_VERSION-win64.exe" ;;
+            esac
+            base="https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_VERSION"
+            mkdir -p .llvm
+            if curl -fSL -o "$RUNNER_TEMP/llvm.tar.xz" "$base/$tarball"; then
+              tar -xf "$RUNNER_TEMP/llvm.tar.xz" -C .llvm --strip-components=1
+            else
+              curl -fSL -o "$RUNNER_TEMP/llvm.exe" "$base/$installer"
+              7z x -o.llvm "$RUNNER_TEMP/llvm.exe" >/dev/null
+            fi
+            bin="$PWD/.llvm/bin"
+          fi
+          if ! have "$bin"; then
+            echo "::error::lld-link and llvm-dlltool are not both in $bin" >&2
+            exit 1
+          fi
+          # `mc` spawns the linker through CreateProcessA, which reads the WIN32
+          # PATH -- so the directory goes in in Windows form, not MSYS form.
+          cygpath -w "$bin" >>"$GITHUB_PATH"
+          # `mktemp -d` hands out /tmp/... paths, which the native mc cannot
+          # open (95-windows-host.md); the runner's own temp is a form both
+          # the shell and mc accept.
+          echo "TMPDIR=$(cygpath -m "$RUNNER_TEMP")" >>"$GITHUB_ENV"
+          # `llvm-dlltool` has no --version and answers its usage with a
+          # non-zero exit, so the existence check above is its whole probe.
+          "$bin/lld-link.exe" --version
+          echo "llvm-dlltool: $bin/llvm-dlltool.exe"
+
+      # Everything a Windows link needs that is not the program. There is
+      # nothing to download: the two objects are the system layer and the entry
+      # point, compiled out of the bundle inside `mc` itself, and the import
+      # library is generated from a list of names (`minicompiler/mc`
+      # scripts/sysroot-windows.sh -- the list is the kernel32 entry points
+      # those two layers declare).
+      - name: build the Windows sysroot
+        if: runner.os == 'Windows'
+        run: |
+          set -eu
+          case "$MC_ARCH" in
+            aarch64) backend="coff-obj-arm64";  machine="arm64" ;;
+            *)       backend="coff-obj-x86_64"; machine="i386:x86-64" ;;
+          esac
+          dir="ngen/build/sysroot/windows-$MC_ARCH"
+          mkdir -p "$dir"
+          printf '#include <sys_windows_start>\n' >"$dir/winstart.mc"
+          printf '#include <sys_windows_host>\n'  >"$dir/mcrt.mc"
+          "$MC" --backend="$backend" "$dir/winstart.mc" -o "$dir/winstart.obj"
+          "$MC" --backend="$backend" "$dir/mcrt.mc"     -o "$dir/mcrt.obj"
+          cat >"$dir/kernel32.def" <<'DEF'
+          LIBRARY kernel32.dll
+          EXPORTS
+          CloseHandle
+          CreateDirectoryA
+          CreateFileA
+          CreateProcessA
+          DeleteFileA
+          ExitProcess
+          GetCommandLineA
+          GetEnvironmentVariableA
+          GetExitCodeProcess
+          GetLastError
+          GetStdHandle
+          ReadFile
+          VirtualAlloc
+          WaitForSingleObject
+          WriteFile
+          DEF
+          llvm-dlltool -m "$machine" -d "$dir/kernel32.def" -D kernel32.dll -l "$dir/kernel32.lib"
+          ls -l "$dir"
+
+      # `ngen/mc.toml` is the single source of truth and is never edited: the
+      # leg config is DERIVED from it, so `[project]`, `[compiler]`, `[include]`
+      # and `[limits]` can never drift between the five legs. Only the machine
+      # and the way it links change -- `[target] os`/`arch`, the `.exe` suffix
+      # the Windows loader requires, and the `[linker]`/`[sysroot]` tail this
+      # leg carries in its matrix entry.
+      - name: generate the leg config
+        env:
+          MC_VERSION: ${{ steps.mc_release.outputs.version }}
+        run: |
+          set -eu
+          printf '%s' "$MC_TARGET_TAIL" >ngen/mc.target-tail
+          # `[target].libc` changed meaning in the post-M42 patch (mc >= 0.12.1):
+          # a soname ("libc.so.6") became a family ("gnu"|"musl"), and the old
+          # spelling is refused. The CI resolves `latest`, so pick by version.
+          if [ -n "$MC_LIBC_FAMILY" ]; then
+            if [ "$(printf '%s\n%s\n' 0.12.1 "$MC_VERSION" | sort -V | head -n1)" = "0.12.1" ]; then
+              printf 'libc   = "%s"\n' "$MC_LIBC_FAMILY" >>ngen/mc.target-tail
+            else
+              case "$MC_LIBC_FAMILY" in gnu) printf 'libc   = "libc.so.6"\n' >>ngen/mc.target-tail ;; musl) printf 'libc   = "libc.so"\n' >>ngen/mc.target-tail ;; esac
+            fi
+          fi
+          awk '/^\[/ { skip = ($0 == "[linker]") } !skip' ngen/mc.toml \
+            | sed -e "s#^os   = .*#os   = \"$MC_OS\"#" \
+                  -e "s#^arch = .*#arch = \"$MC_ARCH\"#" \
+                  -e "s#^out   = .*#out   = \"build/teko-hello$EXE\"#" \
+            | sed -e "/^arch = /r ngen/mc.target-tail" \
+            >ngen/mc.ci.toml
+          rm -f ngen/mc.target-tail
+          printf '\n%s\n' "$MC_CONFIG_TAIL" >>ngen/mc.ci.toml
+          cat ngen/mc.ci.toml
+
+      - name: mc build ngen
+        run: |
+          set -eu
+          "$MC" build ngen --config ngen/mc.ci.toml
+
+      - name: run tests/hello.tk, expect exit 42
+        run: |
+          set +e
+          "ngen/build/teko-hello$EXE"
+          rc=$?
+          set -e
+          if [ "$rc" -ne 42 ]; then
+            echo "::error::ngen/build/teko-hello$EXE exited $rc, expected 42" >&2
+            exit 1
+          fi
+          echo "ngen/build/teko-hello$EXE exited 42, as expected"
+
+      - name: run the primitives, types and surface fixtures
+        # `mc --exe` always emits a Mach-O (`minicompiler/mc` src/main.mc:227
+        # hardcodes `bname = "macho-exe"`, ignoring host and [target]), so
+        # compiling a fixture with `mc-teko --exe` produced an unrunnable
+        # binary off macOS (ENOEXEC, exit 126). The only path that honours
+        # `[target]` and `[linker]` is the one `mc build ngen` itself used for
+        # tests/hello.tk (docs/build.md `mc build DIR --config FILE`): a
+        # `[project]` naming the fixture. Each fixture gets its own config,
+        # generated here from the LEG config by swapping only
+        # `[project].entry`/`out` -- so it cannot drift from the leg's own
+        # `[target]`/`[linker]` -- and is fed to the already-built taught
+        # compiler with `--entry-only` (docs/build.md § [compiler]), which
+        # reuses it instead of re-teaching it once per fixture. Each fixture's
+        # own `// expect-exit: N` header is the oracle, the same convention
+        # `mc`'s own tests/*.mc use.
+        #
+        # The runner's default shell already runs with `-e` (bash -e {0}), so
+        # a bare `set -u` here let the FIRST fixture that failed `exit 1` the
+        # whole step immediately -- the loop's own `status=1; continue`
+        # accumulation never got to run past it. `set +e` below is what lets
+        # every fixture in the loop actually run and be reported.
+        run: |
+          set +e -u
+          status=0
+          for src in ngen/tests/primitives_*.tk ngen/tests/types_*.tk ngen/tests/surface_*.tk; do
+            name=$(basename "$src" .tk)
+            want=$(grep -m1 '// expect-exit:' "$src" | sed 's/.*expect-exit: *//')
+            if [ -z "$want" ]; then
+              echo "::error::$src has no // expect-exit: N header" >&2
+              status=1
+              continue
+            fi
+            cfg="ngen/mc.$name.toml"
+            sed -e "s#^entry = .*#entry = \"tests/$name.tk\"#" \
+                -e "s#^out   = .*#out   = \"build/$name$EXE\"#" \
+                ngen/mc.ci.toml >"$cfg"
+            if ! "ngen/build/mc-teko$EXE" build ngen --config "$cfg" --entry-only; then
+              echo "::error::$src failed to compile" >&2
+              status=1
+              rm -f "$cfg"
+              continue
+            fi
+            rm -f "$cfg"
+            "ngen/build/$name$EXE"
+            rc=$?
+            if [ "$rc" -ne "$want" ]; then
+              echo "::error::$src exited $rc, expected $want" >&2
+              status=1
+              continue
+            fi
+            echo "$src exited $rc, as expected"
+          done
+          exit $status
+
+  # The required check on `main` -- the name the ruleset asks for, kept while
+  # the work moved into a five-way matrix. `needs.leg.result` is the matrix's
+  # aggregate: `success` only when every leg succeeded.
+  gate:
+    name: mc build ngen && run
+    needs: leg
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: every leg must be green
+        env:
+          LEGS: ${{ needs.leg.result }}
+        run: |
+          set -eu
+          echo "the five ngen legs reported: $LEGS"
+          if [ "$LEGS" != "success" ]; then
+            echo "::error::at least one ngen leg is not green ($LEGS)" >&2
+            exit 1
+          fi

@@ -1,0 +1,509 @@
+// teko_ref.mc -- K2 (D221/§41): `ref T` and `out T`, C#'s by-reference
+// parameter forms, taught as two `type_new` primitives over a side table of
+// the POINTEE each declaration's parameter actually carries:
+//
+//   void bump(ref i64 x) { x = x + 1; }
+//   i64 a = 1; bump(ref a); // a is 2
+//
+//   void split(i64 v, out i64 hi, out i64 lo) { hi = v / 10; lo = v % 10; }
+//
+// `type_new("ref", 8, 8, TK_INT)` / `type_new("out", ...)` give the two words
+// an identity distinct from `uptr` (D221) and reserve them; a `ref T`/`out T`
+// PARAMETER is built with `nd_type` set to the POINTEE `T`, not to this
+// identity -- the oracle (`tk_ty_scope_params`, teko_typeof.mc) therefore
+// needs zero change, and overload/operator resolution over the parameter
+// already sees `T`. The identity lives ONLY in a side table keyed by the
+// PARAMETER NODE (`tk_rp_add`/`tk_rp_kind`/`tk_rp_pointee`): a node index is
+// already the unique, collision-free identity every other table in this
+// project keys structural data by (teko_struct.mc's `xt_*`, teko_typeof.mc's
+// pending members), and it sidesteps the ambiguity a bare (name, index) pair
+// would have across two overloads that differ only in a parameter's TYPE at
+// the same position (`f(ref i64)` next to `f(ref Circle)`).
+//
+// SITE: `f(ref a)`/`f(out a)` is mandatory, C#-style, through `syntax_expr`
+// (`tk_ref_arg`/`tk_out_arg`) firing in `parse_primary`, exactly where a call
+// argument lands. The handler returns the ADDRESS: `&a` (mc's own operator,
+// M10) for a bare local, `p + offset` for `ref p.x` (the same address
+// `teko_expr.mc`'s field store already computes), `base + idx*width` for
+// `ref a[i]` (`teko_array.mc`'s own `tk_arr_addr`). Each address is TAGGED
+// (`tk_rfarg_tag`/`tk_rfarg_kind`/`tk_rfarg_pointee`), by NODE again, because
+// an address is structurally indistinguishable from an ordinary expression
+// that happens to add an integer to a pointer -- the tag is what lets the
+// call-site check below and the overload matcher (teko_over.mc) tell a
+// `ref`/`out` argument apart from a value that merely LOOKS like one. A bare
+// local's pointee is not yet knowable at PARSE time (only a class/struct
+// local is tracked that early, `teko_struct.mc`'s own `tk_local_find`), so it
+// is tagged -1 and resolved lazily, once the oracle's scope IS live, by
+// whichever pass actually needs it (teko_over.mc's own `tk_ov_arg_ty`).
+//
+// DEREF: `tk_ref_pass` runs behind the oracle and ahead of every pass below
+// it (teko.mc's own ordering comment) -- a bare read of a `ref`/`out`
+// parameter becomes `ldW(x)` (`teko_array.mc`'s own `tk_arr_load`, which
+// already picks the right width and sign-extends), and `x = e` becomes
+// `stW(x, e)` UNLESS the pointee is a counted type (a class, an interface, a
+// delegate): a `ref Circle` is written through the SAME `rt_store`/
+// `rt_store_own` a local of class type already uses, just at `x` itself
+// instead of `&x` (`x` already IS the caller's slot address) -- the one
+// exception `teko_rc.mc`'s `tk_rc_assign` carries, and the only reason a
+// parameter of class type is ever reassigned at all. This pass ALSO walks
+// every call in the unit (not only inside a function that itself takes a
+// `ref`/`out`), because the caller of `bump`/`split` rarely does.
+//
+// `out`: DPS. A counted `out` parameter is zeroed (`st64(x, 0);`) as the
+// body's own first statement, because the frame `parse_var` reserves is not
+// zeroed, and the first real write through `rt_store` would otherwise
+// `rc_dec` garbage. The cheap half of "the body must assign it" is checked
+// (a body that never writes the name at all), never assigned by any PATH is
+// a declared debt (`docs/design/plano-ngen-entrega4.md` §41(e)).
+//
+// MANGLING: `tk_ty_sfx(p)` -- the parameter NODE's own suffix, `ref_i64` or
+// `out_Circle` in place of the bare `i64`/`Circle` `type_name` would answer
+// -- is the one helper `tk_sig_of` (teko_class.mc) and `tk_ov_sig`
+// (teko_over.mc) both call, so `f(i64)` and `f(ref i64)` mangle to distinct
+// symbols and a call resolves to the one whose parameter's KIND (this
+// module's own `tk_rp_kind`) matches the argument's tag -- `f(ref i64)` and
+// `f(out i64)` never coexist: `tk_ov_judge`'s own pairwise scan below refuses
+// two declarations whose bare (ref/out-stripped) signature is identical and
+// differ only in that kind.
+
+#define TK_RP_NONE 0
+#define TK_RP_REF  1
+#define TK_RP_OUT  2
+
+#define TK_MAXRP     512               // ref/out parameters declared, over the whole unit
+#define TK_MAXRFARG  512               // ref/out arguments written, over the whole unit
+
+i64 tk_ty_ref = 0;
+i64 tk_ty_out = 0;
+i64 tk_ref_dot = 0;                    // this module's own copy of the `.` token (idempotent intern)
+i64 tk_ref_root = 0;                   // the unit, for the same decl-count guard C6 already uses
+i64 tk_ref_cur_fn = 0;                 // the N_FUNC this pass is walking right now
+
+i64 tk_default_decl_count(i64 root, uptr name);   // teko_default.mc, included after this file
+
+// ---- side table: parameter NODE -> (kind, pointee type) ----
+i64 rp_node[TK_MAXRP];
+i64 rp_kind[TK_MAXRP];
+i64 rp_ty[TK_MAXRP];
+i64 rp_seen[TK_MAXRP];                 // the "assigned at least once" watermark, per row
+i64 tk_nrp = 0;
+
+i64 rp_node_at(i64 i) { return ld64(rp_node + i * 8); }
+i64 rp_kind_at(i64 i) { return ld64(rp_kind + i * 8); }
+i64 rp_ty_at(i64 i)   { return ld64(rp_ty + i * 8); }
+void set_rp_node_at(i64 i, i64 v) { st64(rp_node + i * 8, v); }
+void set_rp_kind_at(i64 i, i64 v) { st64(rp_kind + i * 8, v); }
+void set_rp_ty_at(i64 i, i64 v)   { st64(rp_ty + i * 8, v); }
+
+void tk_rp_add(i64 pnode, i64 kind, i64 ty) {
+    if (tk_nrp == TK_MAXRP) err_at(tk_file, tk_line, "teko: too many `ref`/`out` parameters in one unit");
+    set_rp_node_at(tk_nrp, pnode);
+    set_rp_kind_at(tk_nrp, kind);
+    set_rp_ty_at(tk_nrp, ty);
+    st64(rp_seen + tk_nrp * 8, 0);
+    tk_nrp = tk_nrp + 1;
+}
+
+i64 tk_rp_row(i64 pnode) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nrp) break;
+        if (rp_node_at(i) == pnode) return i;
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+i64 tk_rp_kind(i64 pnode) {
+    i64 r = tk_rp_row(pnode);
+    if (r < 0) return TK_RP_NONE;
+    return rp_kind_at(r);
+}
+
+i64 tk_rp_pointee(i64 pnode) {
+    i64 r = tk_rp_row(pnode);
+    if (r < 0) return 0 - 1;
+    return rp_ty_at(r);
+}
+
+void tk_rp_mark_seen(i64 pnode) {
+    i64 r = tk_rp_row(pnode);
+    if (r >= 0) st64(rp_seen + r * 8, 1);
+}
+
+i64 tk_rp_seen(i64 pnode) {
+    i64 r = tk_rp_row(pnode);
+    if (r < 0) return 0;
+    return ld64(rp_seen + r * 8);
+}
+
+// ---- side table: call-argument NODE -> (kind, pointee type) ----
+// an address is structurally identical whether it came from `ref`/`out`
+// sugar or from an ordinary expression that adds to a pointer -- this is
+// what lets the two be told apart at the call site and inside the overload
+// matcher, both of which need to know an argument's *intended* kind, not
+// merely its shape.
+i64 rf_node[TK_MAXRFARG];
+i64 rf_kind[TK_MAXRFARG];
+i64 rf_ty[TK_MAXRFARG];
+i64 tk_nrf = 0;
+
+i64 rf_node_at(i64 i) { return ld64(rf_node + i * 8); }
+i64 rf_kind_at(i64 i) { return ld64(rf_kind + i * 8); }
+i64 rf_ty_at(i64 i)   { return ld64(rf_ty + i * 8); }
+void set_rf_node_at(i64 i, i64 v) { st64(rf_node + i * 8, v); }
+void set_rf_kind_at(i64 i, i64 v) { st64(rf_kind + i * 8, v); }
+void set_rf_ty_at(i64 i, i64 v)   { st64(rf_ty + i * 8, v); }
+
+void tk_rfarg_tag(i64 n, i64 kind, i64 ty) {
+    if (tk_nrf == TK_MAXRFARG) err_at(tk_line, tk_file, "teko: too many `ref`/`out` arguments in one unit");
+    set_rf_node_at(tk_nrf, n);
+    set_rf_kind_at(tk_nrf, kind);
+    set_rf_ty_at(tk_nrf, ty);
+    tk_nrf = tk_nrf + 1;
+}
+
+i64 tk_rfarg_row(i64 n) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nrf) break;
+        if (rf_node_at(i) == n) return i;
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+i64 tk_rfarg_kind(i64 n) {
+    i64 r = tk_rfarg_row(n);
+    if (r < 0) return TK_RP_NONE;
+    return rf_kind_at(r);
+}
+
+i64 tk_rfarg_pointee(i64 n) {
+    i64 r = tk_rfarg_row(n);
+    if (r < 0) return 0 - 1;
+    return rf_ty_at(r);
+}
+
+// the i-th (0-based) parameter NODE of declaration `d`, or -1
+i64 tk_decl_param_node(i64 d, i64 i) {
+    i64 p = nd_a(d);
+    i64 k = 0;
+    loop {
+        if (p == 0) return 0 - 1;
+        if (k == i) return p;
+        k = k + 1;
+        p = nd_next(p);
+    }
+    return 0 - 1;
+}
+
+uptr tk_ref_kindname(i64 kind) {
+    if (kind == TK_RP_OUT) return "out";
+    return "ref";
+}
+
+// the mangling suffix parameter node `p` contributes: `ref_i64`/`out_Circle`
+// for a by-reference parameter, its plain type name otherwise -- the ONE
+// helper `tk_sig_of` (teko_class.mc) and `tk_ov_sig` (teko_over.mc) both call
+uptr tk_ty_sfx(i64 p) {
+    i64 rk = tk_rp_kind(p);
+    uptr base = tk_ty_mangle_name(nd_type(p));       // K3: `T[]`'s own name is unsafe in a symbol
+    if (rk == TK_RP_NONE) return base;
+    return tk_join(tk_join(tk_ref_kindname(rk), "_"), base);
+}
+
+// `ref`/`out` at the START of a parameter's type, peeked without consuming --
+// the same `type_of_token(p_id())` a plain parameter's type is already read
+// with (teko_default.mc's own `tk_default_param`)
+i64 tk_ref_kind() {
+    i64 ty = type_of_token(p_id());
+    if (ty == tk_ty_ref) return TK_RP_REF;
+    if (ty == tk_ty_out) return TK_RP_OUT;
+    return TK_RP_NONE;
+}
+
+// the pointee type after `ref`/`out` has already been consumed by the
+// caller -- a namespaced short name first (§31 N1), then the core's own
+// `type_of_token`, the same two-step `tk_default_param` already reads a
+// parameter's type with
+i64 tk_ref_param(i64 kind) {
+    i64 line = p_line();
+    uptr fl = p_file();
+    i64 ty = tk_ns_param_ty();
+    if (ty >= 0) {
+        p_next();
+        return ty;
+    }
+    ty = type_of_token(p_id());
+    if (ty < 0 || ty == TY_VOID || ty == tk_ty_ref || ty == tk_ty_out)
+        err_at(fl, line, tk_join3("teko: expected a type after `", tk_ref_kindname(kind), "`"));
+    return p_type();          // K3 (§41): lets a `[]` suffix register through syntax_type
+}
+
+// `ref`/`out` take no default: C# does not allow one, and a zeroed `out`
+// slot (the DPS prologue below) would make a default silently unreachable
+void tk_ref_deny_default(i64 kind, i64 line, uptr fl) {
+    if (p_id() == K_ASSIGN)
+        err_at(fl, line, tk_join3("teko: a `", tk_ref_kindname(kind), "` parameter has no default"));
+}
+
+// `tk_ref_addr` cannot return two values, and the pointee type is only known
+// once the operand has been read -- a single out-parameter, `pty`, carries
+// it back the same way `st64(pnp, np)` (teko_class.mc's own `tk_params`)
+// already hands a count back through a raw pointer
+void set_pty(i64 pty, i64 v) { st64(pty, v); }
+
+// `ref a` / `ref p.x` / `ref a[i]` -- the operand after `ref`/`out` at a call
+// argument position: the address a bare local's own `&` operator already
+// builds (mc core-language.md § Operators), the field-store's own
+// `left + offset` (teko_expr.mc's `tk_field_use`), or the local array's own
+// `tk_arr_addr` (teko_array.mc) -- never a copy of the value. Answers the
+// POINTEE type alongside the address, through `pty`, for the tag below --
+// -1 for a bare local (not parse-time-typed; resolved lazily where needed).
+i64 tk_ref_addr(i64 line, uptr fl, i64 pty) {
+    tk_line = line;
+    tk_file = fl;
+    if (p_id() != T_IDENT) err_at2(fl, line, "teko: `ref`/`out` requires a variable", p_name());
+    uptr name = p_ident();
+    if (p_id() == tk_ref_dot) {
+        p_next();
+        uptr m = p_ident();
+        i64 si = tk_local_find(name);
+        if (si < 0) err_at2(fl, line, "teko: not an object of a known type", name);
+        i64 fi = tk_field_find(si, m);
+        if (fi < 0) err_at2(fl, line, "teko: unknown member", m);
+        set_pty(pty, fd_ty_at(fi));
+        return tk_bin(K_ADD, tk_id(name), tk_int(fd_off_at(fi)));
+    }
+    if (p_id() == K_LBRACK) {
+        p_next();
+        i64 li = tk_arr_find(name);
+        if (li < 0) err_at2(fl, line, "teko: not a local array", name);
+        i64 idxRaw = parse_expr(0);
+        p_expect(K_RBRACK, "expected ] after the index");
+        tk_line = line;
+        tk_file = fl;
+        i64 idx = tk_arr_bounds(idxRaw, av_nel_at(li), av_name_at(li), line, fl);
+        set_pty(pty, av_ty_at(li));
+        return tk_arr_addr(tk_id(name), av_ty_at(li), idx);
+    }
+    set_pty(pty, 0 - 1);
+    return tk_addr(name);
+}
+
+// `ref a` -- the shared body of the two `syntax_expr` handlers below
+i64 tk_ref_expr(i64 kind) {
+    i64 line = p_line();
+    uptr fl = p_file();
+    p_next();
+    i64 pty = 0;
+    i64 n = tk_ref_addr(line, fl, &pty);
+    tk_rfarg_tag(n, kind, pty);
+    return n;
+}
+
+i64 tk_ref_arg() { return tk_ref_expr(TK_RP_REF); }
+i64 tk_out_arg() { return tk_ref_expr(TK_RP_OUT); }
+
+// `ref x;` / `out x;` as a LOCAL DECLARATION: `ref`/`out` name a parameter
+// FORM, not a real type a variable may hold -- refused where the core would
+// otherwise happily declare an 8-byte scalar named that
+i64 tk_ref_on_stmt(i64 n) {
+    if (n == 0) return n;
+    if (nd_kind(n) != N_VAR) return n;
+    if (nd_type(n) == tk_ty_ref || nd_type(n) == tk_ty_out)
+        err_at(nd_file(n), nd_line(n), "teko: `ref`/`out` is only valid as a parameter type");
+    return n;
+}
+
+// ---- the deref pass ----
+
+// the ref/out parameter of `fn` named `name`, or -1 -- shared with
+// `teko_rc.mc`'s own `tk_rc_assign`, which asks the SAME question of
+// whatever function IT is walking (its own `tk_rc_cur_fn`), for the one
+// exception a `ref`/`out` parameter of counted type earns there
+i64 tk_rp_named_in(i64 fn, uptr name) {
+    i64 p = nd_a(fn);
+    loop {
+        if (p == 0) break;
+        if (str_eq(nd_name(p), name) && tk_rp_kind(p) != TK_RP_NONE) return p;
+        p = nd_next(p);
+    }
+    return 0 - 1;
+}
+
+// the ref/out parameter of the CURRENT function named `name`, or -1
+i64 tk_ref_param_named(uptr name) { return tk_rp_named_in(tk_ref_cur_fn, name); }
+
+// `x = e;` on a `ref`/`out` parameter of a SCALAR pointee: `x` already IS the
+// caller's slot address, so the store goes straight through it -- a counted
+// pointee is left as an ordinary N_ASSIGN, `teko_rc.mc`'s own exception
+void tk_ref_rewrite_assign(i64 n, i64 pn) {
+    i64 store = tk_arr_store(nd_type(pn), tk_id(nd_name(n)), nd_a(n));
+    set_nd_kind(n, N_EXPRSTMT);
+    set_nd_name(n, 0);
+    set_nd_a(n, store);
+}
+
+// a call to a name declared exactly ONCE in the unit (teko_default.mc's own
+// decl-count guard: an overloaded name is left to teko_over.mc's own
+// kind-aware match, run over every declaration together) -- every argument
+// whose parameter is `ref`/`out` must carry that same tag, and every other
+// argument must carry none
+void tk_ref_check_call(i64 n) {
+    uptr name = nd_name(n);
+    if (tk_default_decl_count(tk_ref_root, name) != 1) return;
+    i64 d = decl_find(name);
+    if (d < 0) return;
+    i64 i = 0;
+    i64 a = nd_a(n);
+    loop {
+        if (a == 0) break;
+        i64 pn = tk_decl_param_node(d, i);
+        i64 pk = tk_rp_kind(pn);
+        i64 ak = tk_rfarg_kind(a);
+        if (pk != ak) {
+            if (pk == TK_RP_NONE)
+                err_at(nd_file(a), nd_line(a), tk_join3("teko: argument ", tk_num(i + 1), " is not passed by reference"));
+            err_at(nd_file(a), nd_line(a),
+                   tk_join(tk_join3("teko: argument ", tk_num(i + 1), " needs `"),
+                           tk_join(tk_ref_kindname(pk), "` at the call site")));
+        }
+        i = i + 1;
+        a = nd_next(a);
+    }
+}
+
+// `node_assign` copies the WHOLE node, `nd_next` included -- fine for a leaf
+// used on its own, but `n` may be one argument of several in a call's own
+// list, threaded through that very field. Every in-place rewrite below goes
+// through here so the list it sits in never loses its tail.
+void tk_ref_replace(i64 n, i64 repl) {
+    i64 nx = nd_next(n);
+    node_assign(n, repl);
+    set_nd_next(n, nx);
+}
+
+void tk_ref_walk(i64 n) {
+    loop {
+        if (n == 0) break;
+        i64 k = nd_kind(n);
+        if (k == N_ASSIGN) {
+            i64 pn = tk_ref_param_named(nd_name(n));
+            if (pn >= 0) {
+                tk_rp_mark_seen(pn);
+                tk_ref_walk(nd_a(n));
+                if (!tk_is_counted(nd_type(pn))) tk_ref_rewrite_assign(n, pn);
+                n = nd_next(n);
+                continue;
+            }
+        } else if (k == N_IDENT) {
+            i64 pn = tk_ref_param_named(nd_name(n));
+            if (pn >= 0) {
+                tk_ref_replace(n, tk_arr_load(nd_type(pn), tk_id(nd_name(n))));
+                n = nd_next(n);
+                continue;
+            }
+        } else if (k == N_CALL) {
+            tk_ref_check_call(n);
+        } else if (k == N_ADDR) {
+            // K2b bug 2: `ref x`/`out x` where `x` is ITSELF a `ref`/`out`
+            // parameter of the function being walked -- `&x` (parse time's
+            // own guess, tk_ref_addr) is the CALLEE's own slot, which dies on
+            // return; `x`'s VALUE already IS the caller's slot address, so
+            // that is what a repassed argument has to carry instead. An `out`
+            // repassed this way is handed to a callee that must itself write
+            // it, so it counts as assigned here too.
+            if (tk_rfarg_kind(n) != TK_RP_NONE) {
+                i64 pn = tk_ref_param_named(nd_name(n));
+                if (pn >= 0) {
+                    tk_rp_mark_seen(pn);
+                    tk_ref_replace(n, tk_id(nd_name(n)));
+                }
+            }
+        }
+        if (k == N_BLOCK) {
+            tk_ref_walk(nd_a(n));
+        } else {
+            tk_ref_walk(nd_a(n));
+            tk_ref_walk(nd_b(n));
+            tk_ref_walk(nd_c(n));
+            tk_ref_walk(nd_d(n));
+        }
+        n = nd_next(n);
+    }
+}
+
+// 1 when `f` declares at least one `ref`/`out` parameter
+i64 tk_ref_fn_has_refout(i64 f) {
+    i64 p = nd_a(f);
+    loop {
+        if (p == 0) break;
+        if (tk_rp_kind(p) != TK_RP_NONE) return 1;
+        p = nd_next(p);
+    }
+    return 0;
+}
+
+void tk_ref_check_out_assigned(i64 f) {
+    i64 p = nd_a(f);
+    loop {
+        if (p == 0) break;
+        if (tk_rp_kind(p) == TK_RP_OUT && !tk_rp_seen(p))
+            err_at(nd_file(f), nd_line(f), tk_join3("teko: the `out` parameter ", nd_name(p), " is never assigned"));
+        p = nd_next(p);
+    }
+}
+
+// `rt_store(x, 0);` ahead of the body's own first statement, for every
+// COUNTED `out` parameter -- `x` already IS the caller's own slot address
+// (K2b bug 1b): whatever the caller passed in it (a live reference from an
+// earlier call, on a second `make(out x)`) is released through the SAME
+// old-value `rc_dec` any other counted store runs, instead of the raw
+// `st64` this pass used to overwrite it with, which stomped the caller's
+// slot without ever releasing what was there
+void tk_ref_out_prologue(i64 f) {
+    i64 pre = 0;
+    i64 p = nd_a(f);
+    loop {
+        if (p == 0) break;
+        if (tk_rp_kind(p) == TK_RP_OUT && tk_is_counted(nd_type(p)))
+            pre = list_append(pre, tk_stmt(tk_call2("rt_store", tk_id(nd_name(p)), tk_int(0))));
+        p = nd_next(p);
+    }
+    if (pre == 0) return;
+    i64 blk = nd_b(f);
+    set_nd_a(blk, list_append(pre, nd_a(blk)));
+}
+
+// every function is walked, not only one that itself takes a `ref`/`out`:
+// the CALLER of `bump`/`split` rarely does, and its own call sites are what
+// `tk_ref_check_call` above has to see
+void tk_ref_fn(i64 f) {
+    tk_ref_cur_fn = f;
+    tk_ref_walk(nd_b(f));
+    if (tk_ref_fn_has_refout(f)) {
+        tk_ref_check_out_assigned(f);
+        tk_ref_out_prologue(f);
+    }
+    tk_ref_cur_fn = 0;
+}
+
+i64 tk_ref_pass(i64 root) {
+    if (tk_nrp == 0 && tk_nrf == 0) return root;   // no `ref`/`out` parameter AND no `ref`/`out` argument
+    tk_ref_root = root;
+    i64 f = root;
+    loop {
+        if (f == 0) break;
+        if (nd_kind(f) == N_FUNC) tk_ref_fn(f);
+        f = nd_next(f);
+    }
+    return root;
+}
+
+void tk_ref_init() {
+    tk_ty_ref = type_new("ref", 8, 8, TK_INT);
+    tk_ty_out = type_new("out", 8, 8, TK_INT);
+    tk_ref_dot = word_add(".");
+}

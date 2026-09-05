@@ -1,0 +1,71 @@
+// types_class.tk -- `class` (entrega 3, D214): word 0 of the object is the
+// vtable and word 1 the reference count (D218), fields are laid out base-first
+// (SHAPE_SIDE at 16 stays at 16 in
+// Square, whose own field lands after it), a plain method is a direct call and
+// a `virtual`/`override` pair dispatches through the vtable -- `s.area()` on a
+// name declared `Shape` runs `square_area` when the object is a Square.
+//
+// The receiver is not written (D219): `side` is `this.side` because no local or
+// parameter is called that, `this.side` says the same thing out loud, an
+// unqualified `area()` is `this.area()` and still goes through the vtable, and
+// `base.area()` runs Shape's own implementation directly -- which is what lets
+// an `override` build on the method it overrides instead of recursing.
+//
+// expect-exit: 42
+
+#include "../lib/rt.mc"
+
+class Shape {
+    public i64 side;
+
+    public i64 twice() {
+        return side * 2;
+    }
+
+    public virtual i64 area() {
+        return this.side;
+    }
+
+    public virtual i64 scaled(i64 k) {
+        return area() * k;
+    }
+}
+
+class Square : Shape {
+    public i64 tag;
+
+    public override i64 area() {
+        return base.area() * side;
+    }
+}
+
+i64 area_of(Shape s) {
+    return s.area();
+}
+
+i64 main() {
+    if (SHAPE_SIDE != 16) return 1;
+    if (SHAPE_SIZE != 24) return 2;
+    if (SQUARE_TAG != 24) return 3;
+    if (SQUARE_SIZE != 32) return 4;
+
+    Shape p = new Shape;
+    p.side = 3;
+    if (p.area() != 3) return 5;
+    if (p.twice() != 6) return 6;
+    if (p.scaled(2) != 6) return 7;
+
+    Square q = new Square;
+    q.side = 5;
+    q.tag = 1;
+    if (q.area() != 25) return 8;                // base.area() * side
+    if (q.twice() != 10) return 9;
+
+    Shape r = new Square;
+    r.side = 4;
+    if (r.area() != 16) return 10;               // the override, through the vtable
+    if (r.scaled(2) != 32) return 11;            // an inherited virtual calling it
+    if (area_of(r) != 16) return 12;             // ...and through a parameter
+
+    return p.area() + q.area() + r.area() - 2;
+}
