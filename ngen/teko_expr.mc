@@ -7,6 +7,8 @@
 //   p.x   p.x = e            syntax_infix(".")  -> ldW(p + POINT_X) / stW(...)
 //   p.area()                 syntax_infix(".")  -> a direct call, or callp
 //                                                  through the object's vtable
+//   base.area()              syntax_infix(".")  -> the base class's own symbol,
+//                                                  never a vtable slot (teko_this.mc)
 //
 // Member assignment works because `=` is deliberately not in the core's infix
 // table: the Pratt loop has already stopped by the time the handler runs, so it
@@ -152,7 +154,7 @@ i64 tk_call_method(i64 left, i64 si, uptr m, i64 line, uptr fl) {
 // `s.m(...)` where `s` is of INTERFACE type: the class is only known at run
 // time, so the method table comes from the object's own itab (`tk_itab`,
 // ngen/lib/rt.mc) and the call is indirect. The receiver is read twice -- once
-// for the table, once as `self` -- so, as with a virtual call, it is only
+// for the table, once as the receiver -- so, as with a virtual call, it is only
 // accepted where re-evaluating it is free.
 i64 tk_iface_call(i64 left, i64 si, uptr m, i64 line, uptr fl) {
     if (tk_ifmeth_find(si, m) < 0)
@@ -201,6 +203,7 @@ i64 tk_dot(i64 left) {
     uptr fl = p_file();
     tk_line = line;
     tk_file = fl;
+    if (tk_is_base(left)) return tk_base_call(line, fl);
     uptr m = p_ident();                          // the member name, on the right
     i64 si = tk_struct_of_expr(left);
     if (si >= 0) return tk_member_of(left, si, m, line, fl);
