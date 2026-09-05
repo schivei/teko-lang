@@ -1940,3 +1940,50 @@ herdada); `f(out i64 a)` inline; `ref`/`out` sobre um campo/elemento alcançado 
 (`ref p.inner.x`); `ref`/`out` sobre um parâmetro de tipo classe como receptor de `.`/campo
 implícito (`this.x`) dentro do próprio corpo -- não testado, `tk_ref_addr` só resolve um local
 BARE, `p.campo` explícito ou `a[i]` local.
+
+## 44. K2b — correção de reprovação do K2 (2026-09-05)
+
+Dois bugs medidos no K2 (`ngen/teko_ref.mc`/`teko_rc.mc`), ambos corrigidos:
+
+1. **`out T` contado vazava a partir da 2ª chamada.** `tk_ref_out_prologue` emitia `st64(x, 0)` cru
+   como 1º statement do corpo -- zerava o slot do caller sem `rc_dec` do que estava lá. Corrigido em
+   duas partes: (a) `tk_rc_var` (`teko_rc.mc`) agora dá a TODA local de tipo contado declarada SEM
+   inicializador (`Circle x;`) o mesmo `rt_own(0)` que um `null` explícito ganharia -- o slot nasce
+   sempre liberado, nunca com o lixo que o frame `parse_var` reserva; (b) o prólogo passa a
+   `rt_store(x, 0)` em vez do `st64` cru, liberando o valor anterior do slot do caller pelo mesmo
+   `rc_dec` de qualquer outro store contado. `rt_alloc` (`lib/rt.mc`) JÁ zera (`rt_zero`) em ambas as
+   rotas (freelist e bump) -- campos/elementos de heap não têm esse bug, só a local sem inicializador.
+2. **`ref x` onde `x` já é parâmetro `ref`/`out` da função corrente repassava o endereço errado.**
+   `tk_ref_addr`, para um identificador simples, sempre devolvia `&name` (`tk_addr`) -- o slot LOCAL
+   do parâmetro, que morre no retorno; deveria devolver o VALOR do parâmetro (`x`, que já É o
+   endereço do slot do caller). Corrigido no PASSE (`tk_ref_walk`, pós-oráculo, não no parse): um
+   `N_ADDR` tageado (`tk_rfarg_kind`) cujo nome resolve a um `ref`/`out` do `tk_ref_cur_fn` corrente
+   (`tk_ref_param_named`, a mesma consulta por-NÓ que a exceção do `tk_rc_assign` já usa) é reescrito
+   para `tk_id(name)`; um `out` repassado assim conta como atribuído (`tk_rp_mark_seen`), porque o
+   callee mais fundo é quem tem que escrevê-lo. Achado durante a correção: `node_assign` copia o nó
+   INTEIRO, `nd_next` incluso -- reescrever um argumento no MEIO de uma lista (`replace(ref c, nv)`)
+   sem preservar o `nd_next` truncava a lista de argumentos (`replace takes at least 2 arguments`
+   num caso que tinha 2). `tk_ref_replace` (novo, preserva `nd_next` ao redor de `node_assign`)
+   corrige isso tanto no rewrite novo quanto no rewrite de leitura já existente (`N_IDENT`), que
+   tinha o mesmo defeito latente (não exercitado até aqui por nenhuma fixture).
+
+**Adjacente corrigido (1 linha):** `tk_ref_addr` recusava `ref`/`out` sobre algo que não é
+identificador (`bump(ref 5)`) com a mensagem genérica do núcleo (`name expected`, de dentro de
+`p_ident()`); agora um guard antes de `p_ident()` dá a mensagem dedicada
+`` teko: `ref`/`out` requires a variable: 5 ``.
+
+**Adjacente verificado, sem correção:** a alegação de que o HANDOFF descreve o `syntax_param` lendo
+o tipo apontado com `p_type()` não foi encontrada -- nem no HANDOFF, nem aqui, nem no doc-comment de
+`tk_ref_param`; as três já descrevem o mesmo `tk_ns_param_ty()`/`type_of_token()` de dois passos que
+o código usa.
+
+Fixture: `surface_refout.tk` estendida (`expect-exit: 42` recalculado) -- `outcheck` (`out Circle`
+2x com contador de destrutor, e uma 3ª chamada sobre local já inicializado), `chaincheck` (`ref`
+escalar em 3 níveis, `1000+1+1`), `outrelaycheck` (`out` repassado), `rcheck_relay` (`ref Cell`
+repassado e reatribuído no nível mais fundo, `rt_live()` a 0 no fim).
+
+Gate: 35/35; `--dump-ast` das 34 fixtures não tocadas **byte-idêntico** contra `e175299d` (só
+`surface_refout.ast` difere, esperado); `mc limits ngen` `ok`, `intrin` 8/16 (zero crescimento).
+Probes (fora de `tests/`): os dois bugs revertidos isoladamente e re-testados (bug 1a crasha por
+SIGBUS ao desreferenciar o lixo do slot; bug 1b perde o `dtors` da 2ª chamada; bug 2 falha em
+compilar com `the \`out\` parameter y is never assigned` quando o rewrite/mark-seen é removido).

@@ -261,6 +261,7 @@ void set_pty(i64 pty, i64 v) { st64(pty, v); }
 i64 tk_ref_addr(i64 line, uptr fl, i64 pty) {
     tk_line = line;
     tk_file = fl;
+    if (p_id() != T_IDENT) err_at2(fl, line, "teko: `ref`/`out` requires a variable", p_name());
     uptr name = p_ident();
     if (p_id() == tk_ref_dot) {
         p_next();
@@ -371,6 +372,16 @@ void tk_ref_check_call(i64 n) {
     }
 }
 
+// `node_assign` copies the WHOLE node, `nd_next` included -- fine for a leaf
+// used on its own, but `n` may be one argument of several in a call's own
+// list, threaded through that very field. Every in-place rewrite below goes
+// through here so the list it sits in never loses its tail.
+void tk_ref_replace(i64 n, i64 repl) {
+    i64 nx = nd_next(n);
+    node_assign(n, repl);
+    set_nd_next(n, nx);
+}
+
 void tk_ref_walk(i64 n) {
     loop {
         if (n == 0) break;
@@ -387,12 +398,27 @@ void tk_ref_walk(i64 n) {
         } else if (k == N_IDENT) {
             i64 pn = tk_ref_param_named(nd_name(n));
             if (pn >= 0) {
-                node_assign(n, tk_arr_load(nd_type(pn), tk_id(nd_name(n))));
+                tk_ref_replace(n, tk_arr_load(nd_type(pn), tk_id(nd_name(n))));
                 n = nd_next(n);
                 continue;
             }
         } else if (k == N_CALL) {
             tk_ref_check_call(n);
+        } else if (k == N_ADDR) {
+            // K2b bug 2: `ref x`/`out x` where `x` is ITSELF a `ref`/`out`
+            // parameter of the function being walked -- `&x` (parse time's
+            // own guess, tk_ref_addr) is the CALLEE's own slot, which dies on
+            // return; `x`'s VALUE already IS the caller's slot address, so
+            // that is what a repassed argument has to carry instead. An `out`
+            // repassed this way is handed to a callee that must itself write
+            // it, so it counts as assigned here too.
+            if (tk_rfarg_kind(n) != TK_RP_NONE) {
+                i64 pn = tk_ref_param_named(nd_name(n));
+                if (pn >= 0) {
+                    tk_rp_mark_seen(pn);
+                    tk_ref_replace(n, tk_id(nd_name(n)));
+                }
+            }
         }
         if (k == N_BLOCK) {
             tk_ref_walk(nd_a(n));
@@ -427,17 +453,20 @@ void tk_ref_check_out_assigned(i64 f) {
     }
 }
 
-// `st64(x, 0);` ahead of the body's own first statement, for every COUNTED
-// `out` parameter -- the frame `parse_var` reserves is not zeroed, and the
-// first `rt_store`/`rt_store_own` a real assignment runs would otherwise
-// `rc_dec` whatever garbage was already there
+// `rt_store(x, 0);` ahead of the body's own first statement, for every
+// COUNTED `out` parameter -- `x` already IS the caller's own slot address
+// (K2b bug 1b): whatever the caller passed in it (a live reference from an
+// earlier call, on a second `make(out x)`) is released through the SAME
+// old-value `rc_dec` any other counted store runs, instead of the raw
+// `st64` this pass used to overwrite it with, which stomped the caller's
+// slot without ever releasing what was there
 void tk_ref_out_prologue(i64 f) {
     i64 pre = 0;
     i64 p = nd_a(f);
     loop {
         if (p == 0) break;
         if (tk_rp_kind(p) == TK_RP_OUT && tk_is_counted(nd_type(p)))
-            pre = list_append(pre, tk_stmt(tk_call2("st64", tk_id(nd_name(p)), tk_int(0))));
+            pre = list_append(pre, tk_stmt(tk_call2("rt_store", tk_id(nd_name(p)), tk_int(0))));
         p = nd_next(p);
     }
     if (pre == 0) return;

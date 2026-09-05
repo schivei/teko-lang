@@ -147,13 +147,17 @@ i64 tk_rc_releases(i64 base) {
 
 // `C x = e;`: an owning slot takes a reference. A value that already carries
 // one moves in; a borrowed one is incremented, so the local and whoever it was
-// read from each hold their own.
+// read from each hold their own. `C x;` (K2b bug 1a) is the SAME slot with no
+// `e` at all -- the frame `parse_var` reserves is not zeroed, so it is given
+// the borrowed `0` a plain `null` initializer would carry, through the same
+// `rt_own` every other counted local's slot is filled by, rather than left to
+// whatever the stack happened to hold.
 void tk_rc_var(i64 n) {
     if (nd_val(n) != 0) return;                  // `C tbl[4]`: references, not one object
     if (!tk_is_counted(nd_type(n))) return;
     i64 e = nd_a(n);
-    if (e == 0) return;
-    if (tk_rc_own(e)) return;
+    if (e == 0) e = tk_int(0);
+    else if (tk_rc_own(e)) return;
     tk_rc_at(n);
     set_nd_a(n, tk_call("rt_own", e));
 }
