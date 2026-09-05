@@ -706,3 +706,78 @@ novo (core à esquerda, teko à direita) não existe entre os nós que o projeto
 
 23/23; a AST das 22 fixtures que não usam operador é byte-idêntica à de `05dc7181`;
 `mc limits` verdict `ok`.
+
+## 28. C6 landado — default de parâmetro em função de topo, decisões (2026-09-05)
+
+`syntax_param` (mc 0.10.3) desbloqueou o C6: `i64 add(i64 a, i64 b = 10)`, `add(1)` →
+`add(1, 10)`. Módulo novo `ngen/teko_default.mc`; nada tocado em `ngen/mc.toml` nem no
+`src/` do mc.
+
+**Ordem do pass — decisão e porquê.** O crumb pedia para decidir se o preenchimento roda
+antes do `tk_over_pass` ou dentro dele, e registrar o motivo: as DUAS coisas, cada uma na
+metade certa.
+- **Antes** (`tk_default_pass`, pass novo, registrado logo depois de `tk_ops_pass` e antes
+  de `tk_over_pass`): resolve sozinho todo nome declarado EXATAMENTE UMA VEZ na unidade —
+  não há tipo a comparar, só aridade contra a tabela de defaults, e a resposta nunca
+  depende de outra declaração.
+- **Dentro** (`tk_ov_fits_default`/`tk_ov_match_default`, uma QUARTA rodada em
+  `tk_ov_resolve`, tentada só depois das duas de aridade exata falharem): um nome com MAIS
+  de uma declaração é uma pergunta sobre TODAS as assinaturas ao mesmo tempo — só
+  `tk_over_pass` tem a tabela de tipos dos candidatos. Tentar a rodada de default DEPOIS
+  das duas exatas é o que dá de graça a regra do C# (§12.6.4.5): `add(1)` com `add(i64)` e
+  `add(i64, i64 = 10)` resolve pela primeira, porque ela já venceu na rodada exata antes de
+  a tabela de defaults ser sequer consultada — nunca há empate a desempatar.
+- `tk_default_pass` DEIXA intocado todo nome com mais de uma declaração (contagem por
+  varredura de `root`, não pela tabela de linhas — ver achado abaixo), justamente para não
+  competir com a quarta rodada.
+
+**Achado 1 — a contagem de "declarado uma vez" não pode ser pela tabela de parâmetros.**
+Primeira versão contava linhas da própria tabela de `syntax_param` (uma por declaração com
+≥1 parâmetro). Quebrou `surface_overload_free.tk`: `tally()` (aridade zero, nunca aciona
+`syntax_param` — `parse_params` nem chama o handler quando o primeiro token já é `)`) ficava
+INVISÍVEL para essa contagem, e a chamada `tally()` era preenchida contra o default de
+`tally(i64 k)` por engano, virando `teko: tally takes at least 1 arguments`. Corrigido com
+`tk_default_decl_count`, uma varredura de `root` contando toda declaração cujo nome bate
+(`decl_valid` + `str_eq`), igual ao que `teko_over.mc` já faz para o seu próprio censo.
+
+**Achado 2 — a quarta rodada não pode casar pelo `nd_name` do nó.** `tk_ov_rename` sobrescreve
+o `nd_name` de CADA declaração (para o símbolo com sufixo) ANTES de `tk_ov_resolve` rodar
+sobre qualquer chamada. Uma primeira versão de `tk_ov_fits_default` procurava a linha da
+tabela de defaults por `nd_name(d) == fpd_name_at(i)` — comparação por IDENTIDADE de
+ponteiro, que fazia sentido para o nome ORIGINAL mas não sobrevive ao rename (o ponteiro
+mudou). Sintoma: uma sobrecarga genuína que precisava da quarta rodada (`foo(Vec v)` /
+`foo(i64 a, i64 b = 9)`, chamando `foo(3)`) errava com `teko: no overload of foo matches
+these arguments` mesmo com a rodada logicamente correta. Corrigido trocando a chave por
+`od_name_at(i)` — o nome que `tk_ov_collect` guarda no INSTANTE da coleta, antes do rename
+tocar o nó — e expondo `tk_default_ndef_of_name`/`tk_default_d0_of_name` (por NOME, não por
+nó) em `teko_default.mc` para esse uso.
+
+**Reuso, não duplicação.** `tk_param_default(mark)` (fold-para-constante, "deve ser
+constante", "sem default depois de default", com as mesmas mensagens) e
+`tk_fill_defaults(args, na, np, nreq, d0)` (append das constantes clonadas) são de
+`teko_class.mc`, usadas como estão — a função de topo é só mais um chamador da MESMA tabela
+`df_node`/`tk_ndflt` que método, construtor e assinatura de interface já usam.
+
+**`p_decl_name()` distingue membro de função livre sem `p_set_decl_name` do C1.** Não
+precisou de nenhuma coordenação: `tk_params` (membros, em `teko_class.mc`) tem laço PRÓPRIO
+e nunca chama o `parse_params()` do core — é por isso que o C1 sequer precisou do
+`syntax_param` — então o hook simplesmente nunca dispara para um parâmetro de membro. Zero
+colisão, zero checagem extra.
+
+**Recusas:** `params` com `=` no mesmo parâmetro, checado no PARSE (o handler já sabe que o
+tipo é `tk_ty_params`); `extern` com qualquer default — checado por DECLARAÇÃO
+(`tk_default_check_decls`, rodando sobre toda linha da tabela antes de olhar qualquer
+chamada), não por chamada, porque um default nunca exercitado por nenhum call-site ainda é
+uma recusa, não um default morto; `na < nreq` com a mensagem `teko: <fn> takes at least N
+arguments`; e as duas regras herdadas do C1 (constante, sem-default-após-default), mesma
+mensagem, mesmo código.
+
+**O que NÃO coube:** nada. O crumb pedia para reportar se sobrou dívida — não sobrou nenhuma
+das quatro combinações do escopo (função livre × sobrecarga × `params` × `extern`); os dois
+achados acima foram bugs do PRÓPRIO trabalho, corrigidos antes de fechar, não dívida
+deixada para depois.
+
+Fixture nova `surface_default_free.tk` (1 e 2 defaults, chamada com 0/1/2/3 argumentos,
+sobrecarga sem-default vencendo, chamada dentro do corpo de um método de classe). Gate:
+24/24 em exit esperado; AST das 23 fixtures anteriores byte-idêntica à base `2af755e5`;
+`mc limits` verdict `ok`.
