@@ -200,7 +200,7 @@ sobre saída do compilador ensinado. Compile sempre por `mc build DIR --config F
 Plano executável em `docs/design/plano-ngen-entrega4.md` (leia §1 descobertas medidas,
 §6 correção de rota do escopo, §7-§8 C7b/C8/C7c e a fila revista).
 
-**Landados em `fix/retirement`** (17 fixtures verdes, cada crumb com verificação
+**Landados em `fix/retirement`** (18 fixtures verdes, cada crumb com verificação
 independente e revalidação pós-cherry-pick):
 - **C0** glob do CI aceita `surface_*.tk`; erratas do handoff.
 - **C1** default de parâmetro em MÉTODO (`i64 scale(self, i64 k = 2)`), inclusive em
@@ -251,11 +251,22 @@ independente e revalidação pós-cherry-pick):
 - **CI com 5 pernas nativas** (linux x86_64/arm64, macos arm64, windows x86_64/arm64),
   agregador `mc build ngen && run`; sem filtro de `paths:`.
 
-**Em voo:** **C5** operadores por `pass()` (`feat/ngen-operators-v2`, costurado à API
-do C3c; 18/18 local) — em verificação.
+- **C5** sobrecarga de OPERADORES por `pass()` sobre `N_BINARY` (`teko_ops.mc`):
+  `T operator+(self, U b)` contextual no corpo do tipo; despacho pelo tipo do operando
+  ESQUERDO; `N_BINARY` de endereço construído pelo próprio ngen (`ld64(p+OFF)`,
+  `items[i]`) é reconhecido e nunca tratado como operador; teko à esquerda sem operador
+  + core à direita → o pass não toca. **Nunca `syntax_infix`** (morre em silêncio).
 
-**Fila:** C5 → **C6** quando o mc der o hook de declaração de função
-(pedido feito à sessão do mc, sai como `0.10.N`).
+**Entrega 4 FECHADA** (menos C6, bloqueado no hook do mc).
+
+**Entrega 5 — em voo:** crumb 1, **reclaim** pela "arena automática" do mc (plano §14):
+free lists + reference counting por escopo (`rc_dec` na saída do bloco e nas arestas de
+`on_jump`; `return` com temporário; `rc_inc`/`rc_dec` em atribuição de local/campo
+classe; `dispose(self)`); fixture `surface_reclaim.tk` com 1M `new` sem esgotar a arena.
+
+**Fila:** entrega 5 (comportamento base): reclaim → `while`/`for` (prelude do mc) → stops
+restantes (`type`/`namespace`/`import`/`using`/`var`/`const`/`match`/`when`) → stdlib
+mínima; **C6** quando o mc der o hook de declaração de função (`0.10.N`).
 
 **Dívida do C8:** `p.items[i]` sobre um receptor que o parser NÃO tipa (um parâmetro,
 que só o oráculo do `pass()` resolve) não chega ao `[` de array — cai no `[` do `params`
