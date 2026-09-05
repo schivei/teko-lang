@@ -1,0 +1,249 @@
+// teko_this.mc -- the receiver a method does NOT declare (D219, dono
+// 2026-09-04). teko-mc spells it the way C# does: the body is the only place
+// the receiver appears, and it appears implicitly.
+//
+//   class Square : Shape {            i64 square_area(uptr this)
+//       i64 side;
+//       override i64 area() {         `side`      -> ld64(this + SQUARE_SIDE)
+//           return side * this.side;  `this.side` -> the same load, spelled out
+//       }                             `base.m()`  -> shape_m(this), direct
+//   }
+//
+// Three pieces, one per phase:
+//
+//   1. the parameter list (teko_class.mc's tk_params) prepends `this` and
+//      REFUSES a parameter called `self`, so the old spelling stops compiling
+//      instead of quietly becoming an ordinary parameter;
+//   2. `this` and `base` are read while the body is parsed, where the type
+//      being declared is known -- `this` is a word of its own (`syntax_expr`,
+//      so it is reserved and nothing else may be called that), and `base` is
+//      CONTEXTUAL: it means the base class only inside the body of a type, and
+//      is an ordinary name everywhere else (`i64 offset_total(i64 base, ...)`
+//      in surface_params.tk keeps working);
+//   3. an UNQUALIFIED name is decided in the pass (teko_typeof.mc's walk),
+//      because a bare `side` reaches the core's parse_primary as an ordinary
+//      N_IDENT and no hook stands in that position. The pass is also the only
+//      place the function's own parameters and locals are readable, which is
+//      exactly what the C# rule asks for: a local or a parameter SHADOWS the
+//      field, and only a name that is neither becomes a member of `this`.
+//
+// `base.m(...)` is the BASE's implementation, called directly -- no vtable, so
+// an `override` may call the method it overrides without recursing. It is the
+// same thing `mc/examples/lang` does (`lang_expr.mc` § `base.m(...)`,
+// `tests/01-inherit.lx`), read here through teko_class.mc's method table.
+
+// teko_typeof.mc is included after this file: its pass is where an unqualified
+// name is decided, and its scope stack is what says whether the name is a local
+// or a parameter first
+i64 tk_ty_scope_find(uptr name);
+
+// teko_expr.mc is included after this file too; these three are what a call
+// needs to be the same call a written-out `this.m(...)` would have produced
+i64 tk_args(uptr pn);
+i64 tk_fill_defaults(i64 args, i64 na, i64 np, i64 nreq, i64 d0);
+void tk_pick_refuse(i64 mi, uptr m, i64 line, uptr fl);
+
+i64 tk_body_class = 0 - 1;            // the type whose body is being PARSED, or -1
+i64 tk_pass_class = 0 - 1;            // the type whose method the PASS is walking, or -1
+
+// the one spelling of the receiver, in the source and in the tree alike
+uptr tk_this_name() { return "this"; }
+
+i64 tk_this_recv() { return tk_id(tk_this_name()); }
+
+// how many arguments a call site wrote
+i64 tk_arg_count(i64 args) {
+    i64 n = 0;
+    loop {
+        if (args == 0) break;
+        n = n + 1;
+        args = nd_next(args);
+    }
+    return n;
+}
+
+// the rewrite is IN PLACE, so the parent keeps pointing at the same node and
+// the sibling list survives it (mc docs/reference/hooks.md § pass())
+void tk_node_replace(i64 n, i64 r) {
+    i64 keep = nd_next(n);
+    node_assign(n, r);
+    set_nd_next(n, keep);
+}
+
+// ---- while the body is parsed ----
+// the body of a type is entered and left by teko_class.mc's tk_member; the
+// previous value is restored rather than cleared, because instantiating a
+// generic re-parses a class body in the middle of another one
+i64 tk_this_enter_body(i64 ci) {
+    i64 keep = tk_body_class;
+    tk_body_class = ci;
+    return keep;
+}
+
+void tk_this_leave_body(i64 keep) { tk_body_class = keep; }
+
+// the old form, refused where it was written: a method takes no receiver of its
+// own, so `self` is neither a type nor a parameter name here
+void tk_reject_self(uptr name) {
+    if (!str_eq(name, "self")) return;
+    err_at(p_file(), p_line(), "teko: methods take no explicit receiver; use this");
+}
+
+// `this`, a word of the language (syntax_expr): the receiver of the method
+// being parsed. teko_class.mc registers it as a local of the type, so `.` on it
+// resolves against that type and nothing else.
+i64 tk_this() {
+    i64 line = p_line();
+    uptr fl = p_file();
+    p_next();                                    // the `this` word
+    if (tk_body_class < 0) err_at(fl, line, "teko: `this` is only valid inside the body of a type");
+    tk_line = line;
+    tk_file = fl;
+    return tk_this_recv();
+}
+
+// 1 when the left side of a `.` is the contextual `base` of the type being
+// parsed. Outside a type body the name means nothing special, which is what
+// keeps `base` usable as an ordinary parameter or local.
+i64 tk_is_base(i64 left) {
+    if (tk_body_class < 0) return 0;
+    if (nd_kind(left) != N_IDENT) return 0;
+    return str_eq(nd_name(left), "base");
+}
+
+// what a pick in the BASE class says when it did not land on one signature: the
+// name may be absent there and present here, which is the mistake worth its own
+// message
+void tk_base_refuse(i64 mi, uptr m, i64 line, uptr fl) {
+    if (mi == 0 - 1) err_at2(fl, line, "teko: the base class has no such method", m);
+    tk_pick_refuse(mi, m, line, fl);
+}
+
+// `base.m(...)`: the base class's own implementation, called DIRECTLY -- the
+// symbol of the declaration the base made, never a vtable slot, so an
+// `override` calling it is not a call to itself.
+i64 tk_base_call(i64 line, uptr fl) {
+    i64 bc = sr_base_at(tk_body_class);
+    if (bc < 0)
+        err_at2(fl, line, "teko: `base` in a type with no base class", sr_name_at(tk_body_class));
+    uptr m = p_ident();
+    if (p_id() != K_LPAR) err_at2(fl, line, "teko: `base` reaches a method of the base class", m);
+    i64 na = 0;
+    i64 args = tk_args(&na);
+    i64 mi = tk_method_pick(bc, m, na);
+    if (mi < 0) tk_base_refuse(mi, m, line, fl);
+    tk_line = line;
+    tk_file = fl;
+    args = tk_fill_defaults(args, na, mt_np_at(mi), mt_nreq_at(mi), mt_d0_at(mi));
+    i64 r = tk_call(mt_fn_at(mi), list_append(tk_this_recv(), args));
+    i64 rs = tk_struct_by_ty(mt_ret_at(mi));
+    if (rs >= 0) tk_xt_add(r, rs, 0);
+    return r;
+}
+
+// ---- in the pass ----
+// the method the function being walked is, or -1 for everything else: a
+// generated constructor, a vtable initializer, a plain function
+i64 tk_method_of_fn(uptr fn) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nmethod) break;
+        if (str_eq(mt_fn_at(i), fn)) return i;
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+void tk_this_enter_fn(uptr fn) {
+    i64 mi = tk_method_of_fn(fn);
+    tk_pass_class = 0 - 1;
+    if (mi >= 0) tk_pass_class = mt_cls_at(mi);
+}
+
+void tk_this_leave_fn() { tk_pass_class = 0 - 1; }
+
+// nodes this file builds report the position of the name they replace
+void tk_this_at(i64 n) {
+    tk_line = nd_line(n);
+    tk_file = nd_file(n);
+}
+
+i64 tk_this_addr(i64 fi) {
+    return tk_bin(K_ADD, tk_this_recv(), tk_int(fd_off_at(fi)));
+}
+
+// an inline array is not a value: `p.items[i]` is lowered by the `.` handler,
+// which the bare name never reaches, so the qualified form is what to write
+void tk_this_reject_array(i64 fi) {
+    if (fd_nel_at(fi) == 0) return;
+    err_at2(tk_file, tk_line, "teko: an array field is reached through `this.`", fd_name_at(fi));
+}
+
+// the field of `this` a bare name stands for, or -1: a local or a parameter of
+// the same name is the answer instead (C#'s rule), and a name the type does not
+// declare is left exactly as it was -- a global, or a mistake for the core's own
+// resolver to report
+i64 tk_this_field(uptr name) {
+    if (tk_ty_scope_find(name) >= 0) return 0 - 1;
+    return tk_field_find(tk_pass_class, name);
+}
+
+// `side`  ->  ldW(this + OFF), the very node `this.side` produces
+void tk_this_ident(i64 n) {
+    i64 fi = tk_this_field(nd_name(n));
+    if (fi < 0) return;
+    tk_this_at(n);
+    tk_this_reject_array(fi);
+    i64 fty = fd_ty_at(fi);
+    tk_node_replace(n, tk_call(tk_ldn(fty), tk_this_addr(fi)));
+    tk_xt_put(n, tk_struct_by_ty(fty), fty, 1);
+}
+
+// `side = e;`  ->  stW(this + OFF, e). The core parses an assignment to a name
+// as N_ASSIGN, so this is the statement form of the load above.
+void tk_this_assign(i64 n) {
+    i64 fi = tk_this_field(nd_name(n));
+    if (fi < 0) return;
+    tk_this_at(n);
+    tk_this_reject_array(fi);
+    i64 st = tk_call2(tk_stn(fd_ty_at(fi)), tk_this_addr(fi), nd_a(n));
+    tk_node_replace(n, tk_stmt(st));
+}
+
+// the call itself: a direct one to the mangled Owner_method, or the vtable slot
+// when the declaration is virtual -- the shapes teko_expr.mc emits for a
+// receiver it could type, with `this` in the receiver's place
+i64 tk_this_emit(i64 mi, i64 args) {
+    i64 slot = mt_slot_at(mi);
+    if (slot < 0) return tk_call(mt_fn_at(mi), list_append(tk_this_recv(), args));
+    i64 vt = tk_call("ld64", tk_this_recv());
+    i64 fnp = tk_call("ld64", tk_bin(K_ADD, vt, tk_int((TK_VT_FIXED + slot) * 8)));
+    return tk_call("callp", list_append(list_append(fnp, tk_this_recv()), args));
+}
+
+// `area(2)`  ->  `this.area(2)`. A name the type declares as a method wins over
+// a function of the same name at top level, as it does in C#; a name it does not
+// declare is a call to that function and is not touched.
+void tk_this_call(i64 n) {
+    uptr m = nd_name(n);
+    if (tk_method_named_find(tk_pass_class, m) < 0) return;
+    tk_this_at(n);
+    i64 na = tk_arg_count(nd_a(n));
+    i64 mi = tk_method_pick(tk_pass_class, m, na);
+    if (mi < 0) tk_pick_refuse(mi, m, tk_line, tk_file);
+    i64 args = tk_fill_defaults(nd_a(n), na, mt_np_at(mi), mt_nreq_at(mi), mt_d0_at(mi));
+    tk_node_replace(n, tk_this_emit(mi, args));
+    tk_xt_put(n, tk_struct_by_ty(mt_ret_at(mi)), mt_ret_at(mi), 0);
+}
+
+// the three shapes an unqualified member takes, asked of every node of a
+// method's body -- and of nothing else, because outside a method there is no
+// `this` for a name to belong to
+void tk_this_fix(i64 n) {
+    if (n == 0) return;
+    if (tk_pass_class < 0) return;
+    i64 k = nd_kind(n);
+    if (k == N_IDENT)  { tk_this_ident(n);  return; }
+    if (k == N_ASSIGN) { tk_this_assign(n); return; }
+    if (k == N_CALL)     tk_this_call(n);
+}

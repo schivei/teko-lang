@@ -4,7 +4,7 @@
 //   class Box<T, const N: i64> {      nothing is declared here: the parameter
 //       T items[N];                   list is read and the rest of the
 //       i64 count;                    declaration is RECORDED, byte for byte
-//       i64 cap(self) { return N; }
+//       i64 cap() { return N; }
 //   }
 //
 //   Box<Circle, 4> b = new Box<Circle, 4>;    -> class Box__Circle__4 { ... }

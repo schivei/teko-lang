@@ -35,9 +35,14 @@
 // argument count picks, whose symbol carries the overload suffix, and the
 // arguments the site left out, which come from that same declaration's
 // defaults -- a rebuild that skipped either would call another method than the
-// one written. A program in which nothing is deferred never enters the pass at
-// all -- `tk_typeof_pass` returns the root untouched -- so a tree that is not
-// this pass's business is not this pass's to move.
+// one written.
+//
+// The walk carries a SECOND rewrite, teko_this.mc's: an unqualified name inside
+// a method is a member of `this` unless a local or a parameter answers first,
+// and the scope this file already maintains is what answers that. A program
+// with no deferred `.` and no method at all never enters the pass --
+// `tk_typeof_pass` returns the root untouched -- so a tree that is not this
+// pass's business is not this pass's to move.
 
 #define TK_MAXSCOPE 256               // names of one function: parameters and locals
 #define TK_MAXPEND  128               // member accesses waiting for the pass
@@ -223,12 +228,14 @@ void tk_ty_pass_walk(i64 root, uptr visit) {
         if (f == 0) break;
         if (nd_kind(f) == N_FUNC) {
             tk_nscope = 0;
+            tk_this_enter_fn(nd_name(f));        // the type an unqualified name belongs to
             tk_ty_scope_params(nd_a(f));
             tk_ty_walk_list(nd_b(f), visit);
         }
         f = nd_next(f);
     }
     tk_nscope = 0;
+    tk_this_leave_fn();
 }
 
 // ---- the deferred member access ----
@@ -406,6 +413,7 @@ void tk_pend_do(i64 pi) {
     i64 recv = pd_recv_at(pi);
     i64 rp = tk_pend_at(recv);
     if (rp >= 0) tk_pend_do(rp);
+    tk_this_fix(recv);                           // `inner.x`: the receiver is a field of `this`
     tk_line = pd_line_at(pi);
     tk_file = pd_file_at(pi);
     i64 recv_ty = tk_ty_of(recv);
@@ -424,9 +432,17 @@ void tk_pend_do(i64 pi) {
     if (rty >= 0) tk_xt_put(n, tk_struct_by_ty(rty), rty, pure);
 }
 
+// One walk, two rewrites: the deferred `.` this file owns, and the unqualified
+// member teko_this.mc owns. They share the walk because they share what it
+// carries -- the scope that says whether a name is a local, and the position in
+// the tree where a node may be replaced by what it stood for.
 void tk_pend_visit(i64 n) {
     i64 pi = tk_pend_at(n);
-    if (pi >= 0) tk_pend_do(pi);
+    if (pi >= 0) {
+        tk_pend_do(pi);
+        return;
+    }
+    tk_this_fix(n);
 }
 
 // a deferred access the walk never reached -- a `.` outside any function body --
@@ -443,7 +459,7 @@ void tk_pend_check() {
 }
 
 i64 tk_typeof_pass(i64 root) {
-    if (tk_npend == 0) return root;
+    if (tk_npend == 0 && tk_nmethod == 0) return root;
     tk_ty_pass_walk(root, &tk_pend_visit);
     tk_pend_check();
     return root;

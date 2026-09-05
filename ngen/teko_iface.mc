@@ -4,8 +4,8 @@
 // the interfaces it conforms to in the list after `:` (teko_class.mc).
 //
 //   interface Shape {                 (no declaration is generated)
-//       i64 area(self);               type_new("Shape", 8, 8, TK_INT)
-//       i64 scaled(self, i64 k);
+//       i64 area();                   type_new("Shape", 8, 8, TK_INT)
+//       i64 scaled(i64 k);
 //   }
 //
 //   class Rect : Shape, Named {       u8 rect_shape_mt[16]   the two methods, in order
@@ -36,7 +36,7 @@
 
 uptr im_name[TK_MAXIFMETH];           // the signatures of every interface, in declaration order
 uptr im_sig[TK_MAXIFMETH];            // its parameter types: what a conforming class has to match
-i64  im_np[TK_MAXIFMETH];             // parameters, not counting `self`
+i64  im_np[TK_MAXIFMETH];             // parameters, not counting the receiver
 i64  im_nreq[TK_MAXIFMETH];           // of those, the ones with no default: the smallest call
 i64  im_d0[TK_MAXIFMETH];             // where its defaults start in the default table
 i64  im_ret[TK_MAXIFMETH];
@@ -201,7 +201,7 @@ uptr tk_mt_name(uptr cls, uptr iface) {
 // Rect  ->  rect_itab                (the { count, (id, mt)* } the vtable points at)
 uptr tk_itab_name(uptr cls) { return tk_join(tk_case(cls, 0), "_itab"); }
 
-// one signature of the body: `T m(self, ...);` and nothing else -- an interface
+// one signature of the body: `T m(...);` and nothing else -- an interface
 // declares no field, and says so rather than failing inside the parameter list
 void tk_iface_member(i64 si) {
     i64 rty = p_type();
@@ -218,7 +218,7 @@ void tk_iface_member(i64 si) {
     set_sr_mn_at(si, tk_nifmeth - sr_m0_at(si));
 }
 
-// ---- interface Name { T method(self, ...); ... } ----
+// ---- interface Name { T method(...); ... } ----
 void tk_interface() {
     tk_line = p_line();
     tk_file = p_file();

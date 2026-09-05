@@ -2,8 +2,8 @@
 // N_BINARY.
 //
 //   class Vec { i64 x; i64 y;
-//       Vec operator+(self, Vec b) { ... }
-//       i64 operator==(self, Vec b) { ... }
+//       Vec operator+(Vec b) { ... }
+//       i64 operator==(Vec b) { ... }
 //   }
 //   (a + b) == c
 //
@@ -114,10 +114,10 @@ uptr tk_op_name(uptr pisop) {
 }
 
 // what an operator declaration has to be for a site to reach it: one operand
-// besides `self`, always passed, and a value to hand back
+// besides the receiver, always passed, and a value to hand back
 void tk_op_decl_check(i64 np, i64 nreq, i64 fty) {
     if (np == 0) err_at(tk_file, tk_line, "teko: a unary operator is not taught yet");
-    if (np > 1) err_at(tk_file, tk_line, "teko: an operator takes `self` and one more parameter");
+    if (np > 1) err_at(tk_file, tk_line, "teko: an operator takes one parameter besides the receiver");
     if (nreq != 1) err_at(tk_file, tk_line, "teko: an operator parameter has no default; a site always passes it");
     if (fty == TY_VOID) err_at(tk_file, tk_line, "teko: an operator returns a value");
 }
@@ -183,7 +183,7 @@ i64 tk_op_pick_int(i64 si, uptr m) {
 }
 
 // the declaration the right operand lands on. The declared type is tried first,
-// so `v + 1` reaches `operator+(self, i64)` where there is one; a literal falls
+// so `v + 1` reaches `operator+(i64)` where there is one; a literal falls
 // back to the other integers of the core, under the same tie-break the free
 // overload resolution uses.
 i64 tk_op_pick(i64 si, uptr m, i64 b, i64 tb) {

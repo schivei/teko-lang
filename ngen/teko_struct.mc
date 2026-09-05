@@ -28,8 +28,9 @@
 // field nobody assigned reads as 0 and a reference field reads as null.
 //
 // A struct body is read by the very machine a class body is read by
-// (`tk_member`, teko_class.mc), so a struct declares METHODS -- with `self`,
-// with default arguments and with overloads -- under one difference: no vtable,
+// (`tk_member`, teko_class.mc), so a struct declares METHODS -- with the same
+// implicit receiver, with default arguments and with overloads -- under one
+// difference: no vtable,
 // hence no `virtual`/`override` and no trait, both refused by name.
 
 #define TK_MAXSTRUCT 32               // structs, classes and interfaces declared in one source
@@ -203,7 +204,7 @@ uptr tk_num(i64 v) {
 
 // Point         ->  point_new       (the generated constructor)
 uptr tk_ctor_name(uptr name) { return tk_join(tk_case(name, 0), "_new"); }
-// Point + area  ->  point_area      (a method, with an implicit `self`)
+// Point + area  ->  point_area      (a method, with an implicit receiver)
 uptr tk_fname(uptr name, uptr m) { return tk_join3(tk_case(name, 0), "_", m); }
 // Point + x     ->  POINT_X         (the #define of the field's offset)
 uptr tk_cname(uptr name, uptr m) { return tk_join3(tk_case(name, 1), "_", tk_case(m, 1)); }
@@ -311,7 +312,7 @@ i64 tk_glb(i64 ty, uptr name, i64 nel) {
 }
 
 // ---- copying an expression the parser handed over ----
-// A virtual call reads the receiver twice (its vtable, and `self`), and a node
+// A virtual call reads the receiver twice (its vtable, and the object), and a node
 // may sit in only ONE sibling list -- list_append would rewire the copy inside
 // the vtable load. tk_clone is the way out, and tk_pure below is what keeps it
 // honest: only a receiver whose re-evaluation costs nothing is ever cloned.
@@ -445,7 +446,7 @@ i64 tk_xt_find(i64 n) {
 }
 
 // the node's own type id, which a SCALAR one has as well: a field of `i64` is
-// no row of the type table, and answering -1 for it is what left `self.side`
+// no row of the type table, and answering -1 for it is what left `this.side`
 // untypable to whoever asks (teko_typeof.mc's tk_ty_of, and through it the
 // overload resolution)
 i64 tk_xt_ty(i64 n) {

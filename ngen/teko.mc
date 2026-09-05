@@ -29,7 +29,7 @@
 // dispatch through the class's vtable):
 //   struct Name { type field; ... }                          syntax      (M12)
 //   class Name [: Base][, Iface...] { fields, methods }      syntax      (M12)
-//   interface Name { T method(self, ...); ... }              syntax      (M12)
+//   interface Name { T method(...); ... }                    syntax      (M12)
 //   trait Name { fields, methods }  +  use A, B;             syntax      (M12)
 //   new Name                                                  syntax_expr (M21)
 //   p.field, p.field = e, p.method(...)                       syntax_infix (M21)
@@ -48,7 +48,7 @@
 //   total(1, 2)  ->  total__2(<two words>)                     one body per count
 // What entrega 4's C5 adds -- operator overloading, spelled as C++ and C# spell
 // it and dispatched by the LEFT operand's type (teko_ops.mc):
-//   T operator+(self, U b)  inside a class or struct body      a contextual word
+//   T operator+(U b)  inside a class or struct body            a contextual word
 //   a + b  /  (a + b) == c                                     pass() over N_BINARY
 //
 // Everything else in docs/design/port-teko-mc.md §3 (types/classes,
@@ -64,6 +64,7 @@
 #include "teko_trait.mc"
 #include "teko_generic.mc"
 #include "teko_class.mc"
+#include "teko_this.mc"
 #include "teko_typeof.mc"
 #include "teko_stmt.mc"
 #include "teko_expr.mc"
@@ -92,6 +93,7 @@ void user_init() {
     syntax("struct", &tk_struct);
 
     syntax_expr("new", &tk_new);
+    syntax_expr("this", &tk_this);
     syntax_infix(".", 12, &tk_dot);
     syntax_infix("[", 12, &tk_bracket);
 

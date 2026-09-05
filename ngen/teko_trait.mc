@@ -5,19 +5,19 @@
 //
 //   trait Counted {                   (nothing is generated here: the body is
 //       i64 n;                         recorded, not parsed -- p_skip_balanced)
-//       i64 bump(self, i64 k) { ... }
+//       i64 bump(i64 k) { ... }
 //   }
 //
 //   class Widget : Base {             #define WIDGET_N 16   the trait's field, in
 //       use Counted;                                        the class's own layout
-//       i64 w;                        i64 widget_bump(uptr self, i64 k)
+//       i64 w;                        i64 widget_bump(uptr this, i64 k)
 //   }                                                       ...mangled as the CLASS's
 //
 // Flattening is the recorded body re-parsed once per using class
 // (`p_push_source`, docs/reference/hooks.md § 4 record and replay), through the
 // SAME member machine `class` uses -- which is why a trait field lands in the
 // class's layout by the same offset and alignment rules, and a trait method's
-// `self.field` resolves against the class it was copied into.
+// unqualified field resolves against the class it was copied into.
 //
 // The four rules that follow from PHP's model, and are what this file enforces:
 //

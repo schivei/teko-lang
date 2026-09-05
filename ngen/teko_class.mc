@@ -3,19 +3,19 @@
 // top-level words teko still owes. A class is a struct (teko_struct.mc's
 // tables) plus three things: word 0 of the object is the vtable, fields are
 // laid out BASE-FIRST (so a derived object is a valid base object), and methods
-// take an implicit `self` (`mc/examples/lang` § Layout, and
-// `mc/examples/api/oop.mc` for the generated declarations).
+// take a receiver the source does not write (D219, teko_this.mc; the layout
+// machinery is `mc/examples/lang` § Layout and `mc/examples/api/oop.mc`).
 //
 //   class Shape {                     u8 shape_vt[16] (word 0 = itab, then the slots)
 //       i64 side;                     #define SHAPE_SIDE 8   (object word 0 = vtable)
-//       virtual i64 area(self) {      i64 shape_area(uptr self)  -> vtable slot 0
-//           return self.side;         void shape_vt_init()
+//       virtual i64 area() {          i64 shape_area(uptr this)  -> vtable slot 0
+//           return side;              void shape_vt_init()
 //       }                             Shape shape_new()
 //   }                                 type_new("Shape", 8, 8, TK_INT)
 //
 //   class Square : Shape {            #define SQUARE_SIZE 16 (Shape's fields kept)
-//       override i64 area(self) {     i64 square_area(uptr self) -> the SAME slot 0
-//           return self.side * self.side;
+//       override i64 area() {         i64 square_area(uptr this) -> the SAME slot 0
+//           return side * this.side;
 //       }
 //   }
 //
@@ -29,8 +29,10 @@
 // interfaces the class conforms to: the tables that answer them, and the
 // conformance check itself, are here (teko_iface.mc holds the declaration).
 //
-// One limit, the same one `mc/examples/lang` has: names resolve in declaration
-// order, so a method may call the methods declared ABOVE it in the same body.
+// One limit, the same one `mc/examples/lang` has: a QUALIFIED name resolves in
+// declaration order, so `this.m()` reaches the methods declared above it in the
+// same body. An unqualified `m()` is decided in the pass (teko_this.mc), where
+// the whole body has been read, and reaches them all.
 //
 // A name may be OVERLOADED: methods are keyed by (name, parameter types), the
 // first one of a name keeps the plain `class_method` symbol and the ones after
@@ -39,7 +41,7 @@
 // many arguments it passes; two signatures taking the same number are refused at
 // the call site, because the argument types are what would tell them apart.
 //
-// A parameter may carry a DEFAULT (`i64 area(self, i64 k = 2)`): the constant is
+// A parameter may carry a DEFAULT (`i64 area(i64 k = 2)`): the constant is
 // folded once, at the declaration, and every call that omits the argument gets a
 // clone of it. It is a property of the declaration the call site resolves
 // against, not of the vtable -- a `virtual`/`override` pair keeps one slot, and
@@ -54,6 +56,15 @@
 uptr tk_op_name(uptr pisop);
 void tk_op_decl_check(i64 np, i64 nreq, i64 fty);
 
+// teko_this.mc is included after this file for the same reason -- it reads the
+// method table too -- and these four are the receiver's side of a member
+// declaration: the name the prepended parameter carries, the refusal of the old
+// explicit one, and the body a `this`/`base` inside it belongs to
+uptr tk_this_name();
+void tk_reject_self(uptr name);
+i64 tk_this_enter_body(i64 ci);
+void tk_this_leave_body(i64 keep);
+
 #define TK_MAXMETHOD 128              // methods, summed across all classes
 #define TK_MAXVSLOT  128              // virtual slots, summed across all classes
 #define TK_MAXDFLT   64               // default arguments, summed across all signatures
@@ -63,7 +74,7 @@ uptr mt_name[TK_MAXMETHOD];
 i64  mt_cls[TK_MAXMETHOD];
 uptr mt_sig[TK_MAXMETHOD];            // its parameter types, `__i64__Point`: the overload key
 uptr mt_fn[TK_MAXMETHOD];             // the mangled name: class_method, class_method__i64...
-i64  mt_np[TK_MAXMETHOD];             // parameters, not counting `self`
+i64  mt_np[TK_MAXMETHOD];             // parameters, not counting the receiver
 i64  mt_nreq[TK_MAXMETHOD];           // of those, the ones with no default: the smallest call
 i64  mt_d0[TK_MAXMETHOD];             // where its defaults start in the default table
 i64  mt_ret[TK_MAXMETHOD];
@@ -106,13 +117,13 @@ void set_vs_sig_at(i64 i, uptr v)  { st64(vs_sig + i * 8, v); }
 void set_vs_fn_at(i64 i, uptr v)   { st64(vs_fn + i * 8, v); }
 void set_df_node_at(i64 i, i64 v)  { st64(df_node + i * 8, v); }
 
-// the signature key of a parameter list: `__i64__Point` for `(self, i64 a,
-// Point p)`, and empty for a method that takes `self` alone. It is what tells
-// two overloads apart -- one name, one class, different parameter types -- and
-// the suffix that keeps their two symbols apart.
+// the signature key of a parameter list: `__i64__Point` for `(i64 a, Point p)`,
+// and empty for a method that takes no parameter at all. It is what tells two
+// overloads apart -- one name, one class, different parameter types -- and the
+// suffix that keeps their two symbols apart.
 uptr tk_sig_of(i64 params) {
     uptr s = "";
-    i64 p = nd_next(params);                     // past `self`, which every method has
+    i64 p = nd_next(params);                     // past the receiver, which every method has
     loop {
         if (p == 0) break;
         s = tk_join3(s, "__", type_name(nd_type(p)));
@@ -314,8 +325,8 @@ void tk_slots_inherit(i64 ci, i64 base) {
 }
 
 // the slot of the class's own slice that answers to `name` at `sig`, or -1: an
-// overload is a slot of its own, so a derived class that adds `area(self, i64)`
-// beside the inherited `area(self)` extends the table instead of colliding with it
+// overload is a slot of its own, so a derived class that adds `area(i64)`
+// beside the inherited `area()` extends the table instead of colliding with it
 i64 tk_slot_find(i64 ci, uptr name, uptr sig) {
     i64 i = 0;
     loop {
@@ -373,31 +384,33 @@ void tk_param_default(i64 mark) {
     tk_ndflt = tk_ndflt + 1;
 }
 
-// `(self)`, `(self, type name, ...)` or `(self, type name = constant, ...)`:
-// parse_params cannot be used, because `self` comes with no type and a default
-// is not in the core's parameter grammar at all -- and both are reachable here
-// precisely because the body of a type is parsed by this module. `extra` is the
-// argument slot dispatch spends besides the parameters: 1 for a virtual method,
-// whose call is `callp(slot, self, ...)`, 0 for a direct one. The defaults go to
-// the shared table starting at the caller's own `tk_ndflt`, and `pnreq` answers
-// with the smallest number of arguments a call may pass.
+// `()`, `(type name, ...)` or `(type name = constant, ...)`: the receiver is
+// not written (D219), so the list the source spells is the parameters alone and
+// `this` is the slot prepended here. parse_params cannot be used, because a
+// default is not in the core's parameter grammar at all -- and it is reachable
+// here precisely because the body of a type is parsed by this module. `extra` is
+// the argument slot dispatch spends besides the parameters: 1 for a virtual
+// method, whose call is `callp(slot, this, ...)`, 0 for a direct one. The
+// defaults go to the shared table starting at the caller's own `tk_ndflt`, and
+// `pnreq` answers with the smallest number of arguments a call may pass.
 i64 tk_params(uptr pnp, uptr pnreq, i64 extra) {
     i64 mark = tk_ndflt;
     p_expect(K_LPAR, "expected ( in the method parameter list");
-    if (p_id() != T_IDENT || !str_eq(p_name(), "self"))
-        err_at(p_file(), p_line(), "teko: the first parameter of a method is `self`");
-    p_next();
-    i64 head = param_new(TY_UPTR, "self");
+    i64 head = param_new(TY_UPTR, tk_this_name());
     i64 np = 0;
     loop {
-        if (!p_accept(K_COMMA)) break;
+        if (p_id() == K_RPAR) break;
+        tk_reject_self(p_name());                // `(self, ...)`: the old form
         i64 ty = tk_gen_ty();
         if (ty == TY_VOID) err_at(p_file(), p_line(), "teko: parameter of type void");
-        head = list_append(head, param_new(ty, p_ident()));
+        uptr pn = p_ident();
+        tk_reject_self(pn);
+        head = list_append(head, param_new(ty, pn));
         np = np + 1;
         tk_param_default(mark);
         if (np + 1 + extra > MAXPARAMS)
-            err_at(p_file(), p_line(), "teko: method with too many parameters (`self` counts, and so does the vtable pointer of a virtual call)");
+            err_at(p_file(), p_line(), "teko: method with too many parameters (the receiver counts, and so does the vtable pointer of a virtual call)");
+        if (!p_accept(K_COMMA)) break;
     }
     p_expect(K_RPAR, "expected ) in the method parameter list");
     st64(pnp, np);
@@ -513,7 +526,7 @@ i64 tk_member_gate(i64 ci, uptr m, uptr sig, i64 ti, i64 kind) {
 // the symbol of a method: the FIRST one of a name in the class keeps the plain
 // `class_method`, and every overload after it carries its signature, so the two
 // reach the linker as two functions and the programs that never overload emit
-// exactly the symbols they emitted before. The one that takes `self` alone has
+// exactly the symbols they emitted before. The one that takes no parameter has
 // an EMPTY signature, and would collide with the plain symbol when it is not the
 // first to arrive -- `void` names it, being the one type a parameter cannot have.
 uptr tk_method_symbol(i64 ci, uptr name, uptr m, uptr sig) {
@@ -566,14 +579,16 @@ i64 tk_member(i64 ci, uptr name, i64 off, i64 ti) {
         return off;
     }
     if (kind && np + 2 > MAXPARAMS)              // a trait method promoted to a slot pays the vtable word
-        err_at(tk_file, tk_line, "teko: method with too many parameters (`self` counts, and so does the vtable pointer of a virtual call)");
+        err_at(tk_file, tk_line, "teko: method with too many parameters (the receiver counts, and so does the vtable pointer of a virtual call)");
     uptr fn = tk_method_symbol(ci, name, m, sig);
     tk_method_add(m, ci, sig, fn, np, nreq, d0, fty, tk_slot_take(ci, kind, m, sig, fn));
-    i64 mark = tk_nlocal;                        // `self` belongs to this body alone
-    tk_local_add("self", ci);                    // `self.field` inside the body
+    i64 mark = tk_nlocal;                        // the receiver belongs to this body alone
+    tk_local_add(tk_this_name(), ci);            // `this.field` inside the body
+    i64 keep = tk_this_enter_body(ci);           // ...and `this`/`base` themselves
     i64 line = p_line();
     uptr fl = p_file();
     i64 f = parse_function(fty, fn, params);
+    tk_this_leave_body(keep);
     tk_nlocal = mark;
     set_nd_line(f, line);                        // the declaration starts at the {
     set_nd_file(f, fl);
