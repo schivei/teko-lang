@@ -54,6 +54,14 @@
 //   public static i64 operator==  /  operator!=                declared in pairs
 //   a + b  /  (a + b) == c  /  2 + v  /  -a                    pass() over
 //                                                              N_BINARY, N_UNARY
+// What entrega 4's C6 adds -- a default parameter value in a free
+// (top-level) function, unblocked by mc 0.10.3's `syntax_param`
+// (teko_default.mc):
+//   i64 add(i64 a, i64 b = 10) { return a + b; }              syntax_param
+//   add(1)                                                     pass() ->
+//                                                              add(1, 10)
+//   add(1) against an overload of `add` that needs no default  teko_over.mc's
+//                                                              own fourth round
 //
 // What entrega 5's member crumb adds (D220, teko_access.mc) -- C#'s modifiers,
 // with C#'s defaults (a type is `internal`, a member is `private`):
@@ -108,6 +116,7 @@
 #include "teko_stmt.mc"
 #include "teko_expr.mc"
 #include "teko_params.mc"
+#include "teko_default.mc"
 #include "teko_over.mc"
 #include "teko_ops.mc"
 #include "teko_rc.mc"
@@ -144,6 +153,11 @@ void user_init() {
 
     on_stmt(&tk_on_stmt);
 
+    // C6: a default parameter value in a free function's own list. The only
+    // `syntax_param` registration in this compiler, so registration order
+    // among handlers does not come up -- see teko_default.mc's own header.
+    syntax_param(&tk_default_param);
+
     // FIRST among the passes, and a later one must not slip in front: the
     // `params` pass INSTANTIATES `i64 total(params xs)` once per argument count
     // -- `total(a, b, c)` becomes `total__3(ptr)`, with the count a constant
@@ -165,6 +179,14 @@ void user_init() {
     // the tree already names the method's own symbol -- the one teko_class.mc
     // gave the declaration -- and has nothing left for a mangling pass to pick.
     pass(&tk_ops_pass);
+
+    // C6's own default-fill, for a name declared exactly once: no type to
+    // compare, so it needs neither the oracle above nor the overload mangling
+    // below, and it must run BEFORE that mangling -- a name declared MORE
+    // than once is left untouched here on purpose (teko_default.mc's own
+    // header explains why) and is what the fourth round tk_over_pass adds
+    // just below resolves instead, defaults included.
+    pass(&tk_default_pass);
 
     // BEHIND both of the above: the overload mangling reads ordinary
     // parameter lists (a `params` list is gone by now, replaced by its

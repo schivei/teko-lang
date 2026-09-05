@@ -60,6 +60,15 @@
 // which is what makes `pick(pick(3, 4))` and recursion work: a call inside the
 // body of the very function it names is an ordinary call site here, the unit
 // being complete.
+//
+// C6 (teko_default.mc) adds a FOURTH round to the resolution below, tried only
+// once the two exact-arity ones have both failed: a call short of a
+// candidate's own parameter count still matches when what is missing is all
+// defaulted. Trying it last, never together with the exact rounds, is what
+// gives C# its "a candidate that needs no default beats one that does"
+// (§12.6.4.5) for free: `add(1)` against `add(i64)` and `add(i64, i64 = 10)`
+// is resolved -- unambiguously, to the first -- before the second is ever
+// asked whether it could cover the call too.
 
 #define TK_MAXODECL 1024              // declarations of one unit
 #define TK_MAXOVER  64                // names declared at more than one signature
@@ -286,13 +295,13 @@ i64 tk_ov_arg_ty(i64 a) {
     return tk_ty_of(a);
 }
 
-// 1 when the arguments land on `d`'s parameters, all of them, exactly. An
-// integer literal carries no type of its own: at `loose` it lands on any of the
-// core's integers, and without it only on `i64` -- which is the tie-break, since
-// the exact round is tried first and `pick(1)` with both `pick(i64)` and
-// `pick(u8)` in reach is `pick(i64)`.
-i64 tk_ov_fits(i64 d, i64 args, i64 na, uptr tys, i64 loose) {
-    if (decl_nparams(d) != na) return 0;
+// the arguments actually given, checked against `d`'s parameters one by one --
+// arity is the caller's business, not this loop's. An integer literal carries
+// no type of its own: at `loose` it lands on any of the core's integers, and
+// without it only on `i64` -- which is the tie-break, since the exact round is
+// tried first and `pick(1)` with both `pick(i64)` and `pick(u8)` in reach is
+// `pick(i64)`.
+i64 tk_ov_args_fit(i64 d, i64 args, uptr tys, i64 loose) {
     i64 a = args;
     i64 i = 0;
     loop {
@@ -313,6 +322,27 @@ i64 tk_ov_fits(i64 d, i64 args, i64 na, uptr tys, i64 loose) {
     return 1;
 }
 
+// 1 when the arguments land on `d`'s parameters, all of them, exactly
+i64 tk_ov_fits(i64 d, i64 args, i64 na, uptr tys, i64 loose) {
+    if (decl_nparams(d) != na) return 0;
+    return tk_ov_args_fit(d, args, tys, loose);
+}
+
+// `na` short of `d`'s own parameter count, but not short of what its
+// defaults (teko_default.mc's shared table) can cover. Tried only by the
+// fourth round, after the two exact-arity ones above have both failed --
+// what makes a same-arity candidate that needs no default win outright.
+// `orig_name` is `d`'s OWN name as `od_name_at` captured it, at collection
+// time, before `tk_ov_rename` overwrites `nd_name(d)` with the mangled
+// symbol -- teko_default.mc's table is keyed by that original pointer, from
+// when the parameters were parsed, and never sees the rename at all.
+i64 tk_ov_fits_default(i64 d, uptr orig_name, i64 args, i64 na, uptr tys, i64 loose) {
+    i64 np = decl_nparams(d);
+    if (na >= np) return 0;
+    if (na < np - tk_default_ndef_of_name(orig_name)) return 0;
+    return tk_ov_args_fit(d, args, tys, loose);
+}
+
 // the row of `name` the arguments land on, and through `pn` how many signatures
 // do -- more than one is what makes the call ambiguous rather than resolved. A
 // prototype and its definition are one signature and count once.
@@ -324,6 +354,30 @@ i64 tk_ov_match(uptr name, i64 args, i64 na, uptr tys, i64 loose, uptr pn) {
         if (i >= tk_nodecl) break;
         if (str_eq(od_name_at(i), name)) {
             if (tk_ov_fits(od_node_at(i), args, na, tys, loose)) {
+                if (found < 0) {
+                    found = i;
+                    count = 1;
+                } else if (!str_eq(od_sig_at(found), od_sig_at(i))) {
+                    count = count + 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    st64(pn, count);
+    return found;
+}
+
+// the same search as `tk_ov_match`, over the fourth (default-completing)
+// round instead of an exact one
+i64 tk_ov_match_default(uptr name, i64 args, i64 na, uptr tys, i64 loose, uptr pn) {
+    i64 found = 0 - 1;
+    i64 count = 0;
+    i64 i = 0;
+    loop {
+        if (i >= tk_nodecl) break;
+        if (str_eq(od_name_at(i), name)) {
+            if (tk_ov_fits_default(od_node_at(i), od_name_at(i), args, na, tys, loose)) {
                 if (found < 0) {
                     found = i;
                     count = 1;
@@ -377,12 +431,23 @@ i64 tk_ov_resolve(i64 n) {
     i64 count = 0;
     i64 r = tk_ov_match(name, args, na, tys, 0, &count);
     if (r < 0) r = tk_ov_match(name, args, na, tys, 1, &count);
+    // the fourth round: only a call still unmatched at exact arity ever asks
+    // a default-bearing candidate whether it could cover it instead
+    if (r < 0) r = tk_ov_match_default(name, args, na, tys, 0, &count);
+    if (r < 0) r = tk_ov_match_default(name, args, na, tys, 1, &count);
     if (r < 0)
         err_at(fl, line, tk_join3("teko: no overload of ", name, " matches these arguments"));
     if (count > 1)
         err_at(fl, line, tk_join3("teko: more than one overload of ", name, " matches these arguments"));
+    i64 d = od_node_at(r);
+    i64 np = decl_nparams(d);
+    if (na < np) {
+        uptr orig_name = od_name_at(r);
+        set_nd_a(n, tk_fill_defaults(nd_a(n), na, np, np - tk_default_ndef_of_name(orig_name),
+                                      tk_default_d0_of_name(orig_name)));
+    }
     set_nd_name(n, tk_ov_symbol(name, od_sig_at(r)));
-    return decl_ret(od_node_at(r));
+    return decl_ret(d);
 }
 
 // `&pick` names a symbol, and an overloaded name has as many as it has

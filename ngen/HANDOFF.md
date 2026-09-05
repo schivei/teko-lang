@@ -285,7 +285,8 @@ independente e revalidação pós-cherry-pick):
   próprio ngen (`ld64(p+OFF)`, `items[i]`) é reconhecido e nunca tratado como operador — e
   o **core+core não se toca**.
 
-**Entrega 4 FECHADA** (menos C6, bloqueado no hook do mc).
+**Entrega 4 FECHADA, C6 incluso** (desbloqueado pelo `syntax_param` do mc 0.10.3 — ver
+o bloco "C6 LANDADO" logo abaixo da fila da entrega 5).
 
 **Entrega 5 — crumb 0 LANDADO: `this` implícito e `base`** (D219, plano §16), o SWEEP que
 vem antes do reclaim e do C5b porque os dois escreveriam código na forma velha:
@@ -462,22 +463,57 @@ a forma velha do C5 (receptor implícito) deixa de ser aceita, com mensagem pró
 - **Fixture** `surface_operator.tk` reescrita na forma nova; a AST final das **22 outras é
   byte-idêntica** à de `05dc7181`.
 
-**Fila:** **C6** default em função de topo (`syntax_param`) → `while`/`for` →
-`namespace`/`import`/`using` → `const` → `switch` (D222) → closures/`ref`/`out` (D221,
-architect-first) → compilador teko de `<mc/core_min>` (plano §26). **Fora:** `var`, `type`,
-`match`, Variant, método parcial, nested.
+**Entrega 4 — C6 LANDADO** (`syntax_param`, `teko_default.mc`, 24 fixtures): default de
+parâmetro em FUNÇÃO DE TOPO, `i64 add(i64 a, i64 b = 10)` → `add(1)` completado em
+`add(1, 10)` por um `pass()` (`tk_default_pass`), registrado logo antes do `tk_over_pass`.
+- **Duas rotas, uma tabela.** `tk_default_pass` resolve sozinho toda chamada a um nome
+  declarado UMA VEZ na unidade (`tk_default_decl_count`, varredura de `root` — NÃO a
+  tabela de parâmetros, que só tem linha para declaração com ≥1 parâmetro; uma sobrecarga
+  de aridade zero, tipo `tally()` ao lado de `tally(i64)`, nunca aciona `syntax_param` e
+  ficaria invisível se a contagem fosse pelas linhas). Um nome declarado mais de uma vez
+  (C4) é deixado intocado aqui de propósito: `tk_over_pass` ganhou uma QUARTA rodada
+  (`tk_ov_fits_default`/`tk_ov_match_default`), tentada só depois das duas de aridade exata
+  falharem — o que dá de graça a regra do C# (§12.6.4.5, "candidato sem default vence"):
+  `add(1)` com `add(i64)` e `add(i64, i64 = 10)` resolve para o primeiro na rodada exata,
+  sem jamais consultar a tabela de defaults.
+- **Reuso total do C1** (`tk_param_default(mark)`, a tabela `df_node`/`tk_ndflt` e
+  `tk_fill_defaults`, todos de `teko_class.mc`) — zero regra ou mensagem duplicada; a
+  função de topo é só mais um chamador da mesma máquina que método/construtor já usam.
+- **Achado que exigiu correção:** `tk_over_pass` renomeia a declaração (`tk_ov_rename`,
+  para o símbolo com sufixo) ANTES de resolver qualquer chamada — então a quarta rodada
+  não pode casar pela `nd_name(d)` corrente (já mangled); casa pelo `od_name_at(i)`, o
+  nome ORIGINAL que `tk_ov_collect` guardou no instante da coleta, antes do rename tocar
+  o nó. `teko_default.mc` expõe `tk_default_ndef_of_name`/`tk_default_d0_of_name` (por
+  NOME, não por nó) exatamente por isso.
+- **Recusas:** `params` com `=` no mesmo parâmetro (`teko: a \`params\` list has no
+  default`); `extern` com qualquer default, mesmo que nenhum call-site precise dele —
+  checado por declaração, não por chamada (`teko: an extern parameter has no default`);
+  `na < nreq` (`teko: <fn> takes at least N arguments`); mais as duas regras herdadas do
+  C1 (constante, sem-default-após-default), mesma mensagem.
+- **`p_decl_name()` distingue membro de função de topo sem precisar de `p_set_decl_name`
+  do C1:** `tk_params` (membros, `teko_class.mc`) tem loop PRÓPRIO e nunca chama o
+  `parse_params()` do core, então `syntax_param` simplesmente nunca dispara para um
+  parâmetro de membro — zero colisão, zero checagem extra necessária.
+- **Fixture** `surface_default_free.tk` (1 e 2 defaults, 0/1/2/3 args, sobrecarga
+  sem-default vencendo, chamada dentro de método de classe); AST das outras 23 é
+  byte-idêntica à base.
+
+**Fila:** `while`/`for` → `namespace`/`import`/`using` → `const` → `switch` (D222) →
+closures/`ref`/`out` (D221, architect-first) → compilador teko de `<mc/core_min>` (plano
+§26). **Fora:** `var`, `type`, `match`, Variant, método parcial, nested.
 
 **Dívida do C8:** `p.items[i]` sobre um receptor que o parser NÃO tipa (um parâmetro,
 que só o oráculo do `pass()` resolve) não chega ao `[` de array — cai no `[` do `params`
 e é recusado com `teko: \`[\` indexes a \`params\` list only`. Recusa clara, nunca
 miscompilação; fechar isso é trabalho no `teko_typeof.mc` (C3b, em voo em paralelo).
 
-**Dívidas conhecidas:** default em função de topo bloqueado (C6); **o core não tem prefixo
+**Dívidas conhecidas:** **o core não tem prefixo
 `+`** (`ops_init` registra só `- ~ ! &`), então `operator+` unário é declarável e não tem
 sítio — não existe hook `syntax_prefix`, é pedido ao mc; `struct`, pacote de `params` e
-campo `static` de classe sem reclaim (acima). Fechadas: a arena bump sem reclaim (D218) e o
+campo `static` de classe sem reclaim (acima). Fechadas: a arena bump sem reclaim (D218), o
 `syntax_infix` sobre operador do core (mc 0.10.3/M41.5 — mas a rota do C5b segue sendo o
-`pass()`, pelos dois motivos do cabeçalho de `teko_ops.mc`).
+`pass()`, pelos dois motivos do cabeçalho de `teko_ops.mc`) e o default em função de topo
+(C6, acima).
 
 ### Por que o RC ficou no PASSE e não no parse (achado do crumb do reclaim)
 
