@@ -2147,3 +2147,153 @@ referência de tipo CONTADO; `op.Invoke(x)`/`Func<>`/`Action<>`/`params T[]` emb
 (herdadas do §41(e)); alvo-tipagem de lambda em argumento de função LIVRE sem `new Op(...)` --
 NA PRÁTICA fechada, já que a forma explícita já cobre essa posição
 (`apply(new Op((i64 x) => x - 1), 43)` funciona, testado no fixture).
+
+## 47. K4b landado -- as três ressalvas do verificador do K4 fecham (D221/§41, 2026-09-05)
+
+Três commits, um por item.
+
+**Item 1 -- captura de delegate por valor.** O prólogo (`tk_lambda_prologue`, teko_deleg.mc) gera
+`Op inner = ld64(addr);` para uma captura por valor de tipo delegate: um `N_CALL` que a MESMA
+passada (`tk_deleg_pass`, walking o corpo da própria lambda gerada, já que `top_add` a inclui no
+`root`) visita como inicializador de `N_VAR` comum e recusa via `tk_deleg_coerce` -- nenhuma das
+quatro formas que ele aceita bate com um `ld64`. Corrigido tageando o nó do `ld64` com o tipo do
+delegate (`tk_xt_put(ld, dsi, sr_ty_at(dsi), 1)`) no INSTANTE em que o prólogo o constrói -- o
+mesmo idioma que `tk_field_use` (teko_expr.mc) já usa para o load de um CAMPO de tipo delegate, e
+seguro aqui porque esse nó É o final: nada o copia (`node_assign`) antes da passada lê-lo, ao
+contrário do nó de `tk_deleg_call` que motivou a lição do K1b (§42) de tagear o nó FINAL, não o que
+se está construindo.
+
+**Item 2 -- taint flow-insensitivo, não forma literal.** `tk_lam_escapes(e)` só reconhecia `e` como
+um `N_CALL` direto ao alocador de uma lambda com captura por referência. Dois buracos confirmados:
+`Op f = new Op(...) use (&acc) => ...; return f;` (a variável `f`, não o `new Op(...)`, é o que
+`return` lê) e `cb = new Op(...) use (&x) => ...;` com `this` implícito (o `N_ASSIGN` de nome bare
+vai por `teko_this.mc`'s `tk_this_assign`, que nunca chamava `tk_lam_escapes`). Corrigido com:
+
+- **(a)** `tk_lamref_add` continua marcando o ALOCADOR (por nome) no instante em que a lambda com
+  `&`-captura é CONSTRUÍDA (parse time) -- inalterado.
+- **(b)** um NOVO `on_stmt` (`tk_lam_taint_stmt`, registrado em `teko.mc` ao lado dos outros três)
+  roda a CADA `N_VAR`/`N_ASSIGN` que o núcleo termina de ler, em QUALQUER lugar do programa,
+  aninhamento incluído -- exatamente o ponto de que `Op g = f;` (ou `g = f;`) precisa para propagar:
+  se `tk_lam_escapes(nd_a(n))` já é verdade (um `N_CALL` tainted OU um `N_IDENT` já tainted), o nome
+  ESCRITO (`nd_name(n)`) entra numa tabela nova (`taint_name`/`tk_taint_add`/`tk_taint_find`,
+  paralela a `lamref_name`). Sem reset de escopo -- flow-insensitivo por design, superset seguro do
+  que a forma literal recusava, nunca falso-negativo.
+- **(c)** `tk_lam_escapes` passa a aceitar as DUAS formas: `N_CALL` (via `tk_lamref_has`) OU
+  `N_IDENT` tainted (via `tk_taint_find`). Chamada nos MESMOS três pontos que já existiam
+  (`tk_deleg_return`, `tk_field_use`, `tk_static_use`) MAIS DOIS novos: `teko_this.mc`'s
+  `tk_this_assign` (o `cb = ...;` implícito) e `teko_heaparr.mc`'s `tk_ha_index` (`arr[i] = f;`
+  sobre `T[]`). Array FIXO (`teko_array.mc`) NÃO precisou de check: o módulo já recusa QUALQUER
+  linha da tabela de tipos como elemento de array fixo (`tk_struct_by_ty(ety) >= 0` -> "an array of
+  objects is not taught yet"), local e global -- um delegate é uma dessas linhas, então
+  `Op tbl[4];` já não compila, tornando o sítio inalcançável independente desta mudança.
+  Passar a lambda como ARGUMENTO de `new Op(...)` continua permitido, de propósito (D221/§41): o
+  callee só LÊ, C-like, nunca armazena -- registrado no cabeçalho de `tk_lam_escapes` como o limite.
+- Sem fixture nova para este item: as cinco recusas (return direto, return indireto, campo
+  explícito, campo implícito, elemento de `T[]`) e as duas aceitações (retorno de uma cadeia
+  `Op g = f;` sem vazamento até o ponto de retorno, argumento de função/método) viraram PROBES fora
+  de `ngen/tests/`, rodadas manualmente e descartadas -- `git status` limpo confirma que nenhuma
+  sobrou no worktree.
+
+**Item 3 -- grafia contextual e curta, nos alvos que já conhecem o tipo ANTES do inicializador.**
+`(` de expressão CONTINUA sem hook -- o §46 já media esse risco corretamente (`parse_primary`'s
+próprio ramo de `(` decide cast-ou-agrupamento pelo token seguinte, sem fallback ao núcleo, e um
+handler `syntax_expr("(", &f)` interceptaria TODO `(` do programa). A saída: entrar SÓ nos pontos
+onde o MÓDULO, não o núcleo, já decide o que vem a seguir, e onde o tipo alvo já é conhecido antes
+de sequer olhar o inicializador:
+
+- **`Op f = <init>;`** -- `tk_type_stmt` (teko_access.mc) parava de decidir e delegava CEGAMENTE ao
+  `parse_var` do núcleo assim que resolvia o tipo (`Point p = new Point;`, `Op f = add;`, QUALQUER
+  tipo). Agora, quando o tipo é um delegate ESCALAR (`tk_is_deleg(si)`), desvia para
+  `tk_deleg_var_stmt` (teko_deleg.mc) -- com UMA exceção que tem que continuar caindo no caminho
+  velho: `Op[] ops = new Op[2];` (K3's `T[]`), cujo marcador `[` vem logo após o tipo, não após o
+  nome -- checado por `tk_bracket_follows()` (o MESMO scan não-consumidor de `tk_dot_follows`,
+  trocando `.` por `[`) ANTES de desviar. Sem esse guard, `p_ident()` dentro de `tk_deleg_var_stmt`
+  lia `[` onde esperava um nome e morria em "name expected" -- pego pelo próprio
+  `surface_array_heap.tk` no gate, não hipotético.
+  `tk_deleg_var_stmt` lê nome/`=`/inicializador manualmente e monta o `N_VAR` com `tk_var(ty, nome,
+  init)` -- a MESMA forma que `teko_ns.mc`'s `tk_var_after_type` já usa para o mesmo problema
+  (namespaced/generic types que também não podem entregar ao `parse_var` do núcleo), e provado
+  idêntica ao que o núcleo produziria pelo dump-ast byte-a-byte das 37 fixtures antigas (nenhuma
+  delas tem `Op f = <init>;` cujo `N_VAR` mudasse de forma).
+  A ARRAY FIXA de delegate (`Op tbl[4];`) é refutada com a MESMA frase de `tk_var_after_type`
+  ("an array of this type is not taught yet") em vez de reimplementar o que já é dívida do §39
+  (array de linha-de-tipo é recusado, local e global, independente de quem lê a declaração).
+- **A decisão "é lambda?" é um LOOKAHEAD NÃO-CONSUMIDOR, não `p_skip_balanced`+`p_push_source`.**
+  Tentativa inicial usou o par record/replay (`p_skip_balanced` grava o `(...)`, decide pelo token
+  seguinte, `p_push_source` faz o replay) -- MEDIDO QUEBRADO: `p_push_source` logo após um `p_id()`
+  peek DESCARTA o lookahead pendente daquele peek (`docs/reference/hooks.md` § Record and replay:
+  "the push does not touch the pending lookahead token, so the p_next() after it discards the
+  lookahead") -- exatamente o `=>`/`use` que a decisão christalizou ao chamar `p_id()`. Sintoma
+  medido: `BoxOp f = new BoxOp(() use (b) => b.v);` (fixture já existente) passava a morrer em
+  "expected => after the lambda parameters", porque o `=>` sumia no push e o parser resumia
+  direto em `b.v`. Record/replay serve para REPLAY depois que a decisão já foi tomada por outro
+  meio -- não para TOMAR a decisão. Corrigido com `tk_paren_lambda_follows()`: uma varredura de
+  BYTES a partir de `p_cp()` (o mesmo princípio de `tk_dot_follows()`), contando profundidade de
+  parênteses para achar o `)` que fecha o ATUAL, sem consumir NENHUM token -- e só então, com a
+  resposta em mãos, o código real corre: lambda -> `tk_lambda_build(si, line, fl)` direto no stream
+  AO VIVO (o mesmo estado que `new Op((...) => ...)` já entrega, sem replay algum); não-lambda ->
+  `parse_expr(0)` direto no MESMO stream. Seguro para uma lista de parâmetros especificamente
+  (nunca tem string literal que desbalancearia a contagem crua de parênteses) -- não é uma técnica
+  geral para expressão arbitrária.
+- **A forma curta `x => e`** -- `tk_arrow_follows()` (o mesmo scan de `p_cp()`, checando `=>` em vez
+  de `[`/`.`) detecta um `T_IDENT` seguido de `=>`; `tk_deleg_short_lambda` lê o nome
+  (`p_ident()`), monta UM parâmetro com o tipo que o delegate já declara (`dg_pty_at(si, 0)`) e
+  entrega a `tk_lambda_finish` -- `tk_lambda_check_params` recusa sozinho se o delegate não tomar
+  exatamente um parâmetro (o loop compara contagem e tipo, `param_new(garbage, nome)` quando
+  `dg_np_at(si)==0` nunca chega a comparar tipo, já quebra na contagem).
+- **`tk_lambda_build` vira wrapper fino sobre `tk_lambda_finish`** (o rabo compartilhado: check de
+  parâmetros, `use`, corpo -- bloco ou expressão --, prólogo, walk de escopo, allocator/vtable/
+  release, montagem da chamada) -- reusado por `tk_deleg_short_lambda` E pela chamada direta que a
+  forma paren faz depois de decidir que é lambda. `name`/`saved` (o gensym e o `p_decl_name` salvo)
+  são abertos pelo CALLER antes de `tk_lambda_finish`, porque `p_decl_name` tem que estar correto
+  ANTES de `parse_params()` rodar (defaults/`tk_hp_reset`) -- a forma curta não chama
+  `parse_params()`, mas abre os dois do mesmo jeito por uniformidade, sem custo (nenhuma linha a
+  mais na leitura de UM identificador).
+- **Argumento de MÉTODO.** `tk_args` (teko_expr.mc) é genérico demais para saber o tipo esperado de
+  cada posição -- overload resolution (`tk_method_pick`) só decide DEPOIS de contar os argumentos.
+  `tk_call_method_args`/`tk_args_typed` fecham essa lacuna SÓ quando o nome do método NÃO É
+  sobrecarregado (`tk_method_name_count(si, m) == 1`, um contador NOVO em teko_class.mc que só
+  soma o que `si` mesmo declara -- bases não entram, porque um `override` repete a assinatura do
+  pai, e contar os dois dobraria à toa): nesse caso, e SÓ nesse, o tipo de cada posição vem direto
+  de `decl_param_type(mt_fn_at(mi)'s decl, posição+1)` (o `+1` pula o receptor, que ocupa o
+  parâmetro 0 da função mangled) -- se a posição for um delegate, o argumento passa por
+  `tk_deleg_init_expr`, a MESMA função que a declaração usa; senão, `parse_expr(0)` de sempre. Um
+  nome sobrecarregado cai de volta em `tk_args` puro -- dívida ACEITA, não código morto: bater a
+  overload certa exigiria contar argumentos ANTES de saber os tipos, um problema de ordem que este
+  crumb não resolve (C# resolve com inferência de tipo natural sobre lambda, máquina bem maior).
+
+Fixture: `surface_lambda.tk` ganha `contextual_check` (`Op f = (i64 x) use (k) => x * k;`),
+`short_check` (`Op g = x => x + 1;`) e uma chamada contextual em `method_check`
+(`h.relay((i64 x) => x - 1, 43)`, sem `new`) -- `relay` não é sobrecarregado, então bate no caminho
+novo.
+
+**Gate:** 38/38 (37 anteriores + `surface_lambda.tk` recalculada -- os TRÊS itens landam na MESMA
+fixture); `--dump-ast` das 37 anteriores byte-idêntico ao compilador da base `68b38174`
+(`same=37 diff=0`, 0.15.0 dos dois lados); `mc limits ngen` `verdict ok`, `intrin` 8/16 em ambos os
+lados (zero intrínseco novo). Probes (fora de `tests/`, descartadas depois de rodar): as cinco
+recusas do item 2 (todas com a frase "a lambda that captures by reference cannot leave its scope");
+passar uma lambda com `&`-captura como argumento (aceito, sem erro); `Op g = (add);` e
+`Op f = (flag != 0 ? add : mul);` (o fallback não-lambda da grafia contextual -- o segundo confirma
+uma dívida PRÉ-EXISTENTE e não-relacionada: coerção de delegate dentro dos braços de um ternário
+nunca foi implementada, o mesmo erro sai idêntico do compilador da base `68b38174` sem os parênteses
+extras, `Op f = flag != 0 ? add : mul;` puro).
+
+**Achado adjacente, fora de escopo, reportado e NÃO corrigido:** `apply(Op f, i64 x) { return
+f(x); }` (ou o equivalente como método) chamado com uma VARIÁVEL já existente como primeiro
+argumento (`apply(f, 41)`, `f` uma `Op` local) morre em `call to unknown function` na posição de
+`f(x)` dentro do callee -- reproduz IDÊNTICO no compilador da base `68b38174`, então não é regressão
+deste crumb. Isolado: reproduz com QUALQUER segunda posição de parâmetro após o `Op` (livre OU
+método, com OU sem overload, com OU sem captura), mas NÃO reproduz quando a chamada usa
+`new Op(...)`/um literal diretamente como argumento (o padrão que TODAS as fixtures já usam) --
+sugere que o problema está em como uma REFERÊNCIA a um delegate já existente, passada como
+argumento, interage com a mangling/lowering de uma função de mais de um parâmetro, não com a
+lambda em si. Fica para quem pegar essa dívida achá-la e corrigi-la; nenhuma fixture ou probe deste
+crumb depende dela (a prova de "passar como argumento é permitido" usa `h.relay(f, 41)` livre de
+capturas problemáticas, que não bate nesse caminho).
+
+Dívidas que seguem abertas, herdadas ou reafirmadas: `return (params) => e;`/`return x => e;` (o
+`return` é palavra do núcleo, sem hook -- fica `return new Op(...)`); captura por referência de um
+tipo CONTADO (K4); captura de um PARÂMETRO da função declarante (K4); `op.Invoke(x)`/`Func<>`/
+`Action<>`/`params T[]` embalando lambda (§41(e)); a grafia contextual como argumento de uma função
+LIVRE ou de um método SOBRECARREGADO (a forma explícita `new Op(...)` já cobre as duas posições, na
+prática).
