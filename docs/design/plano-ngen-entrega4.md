@@ -4717,7 +4717,7 @@ de dentro de `ngen/`:
 
 Logo `check = ["mc_teko.tk"]`, e `files` ganhou `mc_teko.tk` + `core_teko.mc` + `user.mc` (o
 hash de árvore cobre só `files`; unidade de `check` fora dele é recusada). É a forma do pacote
-do próprio `mc`. Hash novo: `9318b19cb5b76629c03ca1b354d0d93bc3860e8a4f7747945cd19e235a5e5004`
+do próprio `mc`. Hash novo: `057e7aed61f2f244d52a53b522b06fb84eaf88d552247e37060ea651761424d5`
 (era `d41a0c80…`), o MESMO calculado no runner linux do CI. A ressalva do §3.3 do handoff segue
 viva: teko-ificar o compilador (S4.4+) torna `mc_teko.tk` ilegível ao parser de prateleira e o
 pacote perde o `check`.
