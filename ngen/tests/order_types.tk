@@ -1,0 +1,105 @@
+// order_types.tk -- free order of declaration for a type name (§50 O1,
+// docs/design/plano-ngen-entrega4.md): every construct below is used BEFORE
+// it is declared, resolving through the forward scan (teko_fwd.mc) instead
+// of the "declared above" limit the handoff's C6 debt named.
+//
+// `Holder` uses `Circle`, a class inside `namespace Geo`, by its short name
+// (through `using Geo;`, itself written before the namespace even exists in
+// the file) as a field, a method parameter and a method return type.
+// `ShapeUser` does the same for `Shape`, a PLAIN (non-namespaced) class.
+// `BoxUser`/`OpUser` each hold a LOCAL of a type declared further down --
+// `Box` (a class) and `Op` (a delegate). `TraitUser` writes `use T;` above
+// `trait T`. Every one of the five types is declared normally afterward and
+// used again the ordinary way, proving the free order costs nothing once the
+// declaration is read for real.
+//
+// expect-exit: 42
+
+#include "../lib/rt.mc"
+
+using Geo;
+
+class Holder {
+    public Circle mine;
+
+    public Circle same(Circle c) {
+        return c;
+    }
+}
+
+class ShapeUser {
+    public Shape s;
+
+    public Shape pick(Shape a, Shape b) {
+        return a;
+    }
+}
+
+class BoxUser {
+    public i64 check() {
+        Box b = null;
+        if (b == null) return 1;
+        return 0;
+    }
+}
+
+class OpUser {
+    public i64 check() {
+        Op f = null;
+        if (f == null) return 1;
+        return 0;
+    }
+}
+
+class TraitUser {
+    use T;
+}
+
+namespace Geo {
+    class Circle {
+        public i64 r;
+    }
+}
+
+class Shape {
+    public i64 sides;
+}
+
+class Box {
+    public i64 v;
+}
+
+delegate i64 Op(i64 a, i64 b);
+
+trait T {
+    public i64 tval() {
+        return 9;
+    }
+}
+
+i64 main() {
+    Holder h = new Holder();
+    Geo.Circle gc = new Geo.Circle();
+    gc.r = 7;
+    h.mine = gc;
+    if (h.same(gc).r != 7) return 1;
+
+    ShapeUser su = new ShapeUser();
+    Shape sh1 = new Shape();
+    sh1.sides = 3;
+    Shape sh2 = new Shape();
+    sh2.sides = 4;
+    su.s = sh1;
+    if (su.pick(sh1, sh2).sides != 3) return 2;
+
+    BoxUser bu = new BoxUser();
+    if (bu.check() != 1) return 3;
+
+    OpUser ou = new OpUser();
+    if (ou.check() != 1) return 4;
+
+    TraitUser tu = new TraitUser();
+    if (tu.tval() != 9) return 5;
+
+    return 42;
+}
