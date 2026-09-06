@@ -6,7 +6,7 @@
 # from (D64.1) can quote a real number instead of a guess.
 #
 # BINARY is the compiler `mc build` produced (`[compiler].out`, e.g.
-# `ngen/build/mc-teko`); CONFIG is the `mc.toml`-shaped file `mc build`/
+# `ngen/build/teko`); CONFIG is the `mc.toml`-shaped file `mc build`/
 # `mc limits` read (host-derived, per HANDOFF.md §4 -- never `ngen/mc.toml`
 # itself, which targets the CI's linux/x86_64 leg); DIR is the project
 # directory `mc limits` reads, default `ngen`.

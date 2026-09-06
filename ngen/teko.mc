@@ -199,6 +199,23 @@
 // the rest of DI, concurrency, the rest of the stdlib) is a later entrega and
 // is not stubbed here: it does not yet have a reserved word to stop on, so it
 // simply is not part of the language this compiler accepts.
+//
+// What §64's S2 crumb adds -- `teko` as its own driver, not a dialect of `mc`
+// dressed up with modules (D64.3/D64.4/D64.5, core_teko.mc's own main()):
+//   teko build [DIR] [--config FILE] ...   tk_build below, delegating to the
+//                                          core's own drv_build once the
+//                                          config is resolved
+//   DIR/teko.toml                          the dev-facing config `teko build`
+//                                          prefers; DIR/mc.toml (the core's
+//                                          own default) when it is absent or
+//                                          `--config` already names one
+//   teko limits [DIR|FILE.tk]              tk_limits below, the core's own
+//                                          drv_limits with a `.tk` single
+//                                          file also recognized (the core's
+//                                          own check only knows `.mc`); a
+//                                          DIR still defaults to DIR/mc.toml,
+//                                          the file that taught this
+//                                          compiler in the first place
 
 #include "teko_type.mc"
 #include "teko_prefix.mc"
@@ -230,6 +247,89 @@
 #include "teko_rc.mc"
 #include "teko_loop.mc"
 #include "teko_switch.mc"
+
+// tk_build(argc, argv) -- `teko build`'s own handler, registered by
+// core_teko.mc's main() (D64.3). D64.4: it resolves the config `drv_build`
+// (src/driver.mc) is about to read, then delegates to it -- the driver
+// itself is not reimplemented, only the file it reads is chosen first.
+//
+// The scan below answers exactly two questions drv_build will re-derive on
+// its own in full (this is not a second parse of every flag, only of the two
+// that decide the config file): was `--config` already given, and what is
+// DIR (defaulting to "." the same way drv_run does)? `--sysroot-dir`/
+// `--libs-dir` are skipped over because each takes the next token, which
+// must not be mistaken for DIR.
+//
+// D64.5: with no `--config`, `DIR/teko.toml` -- the dev-facing config, same
+// schema as `mc.toml` minus `[compiler]` -- wins when it exists; `mc.toml`
+// (drv_build's own default, `ngen/mc.toml`'s enduring role: what taught this
+// very compiler) applies otherwise, unchanged, via the untouched call below.
+i64 tk_build(i64 argc, uptr argv) {
+    uptr dir = 0;
+    i64 has_cfg = 0;
+    i64 i = 2;                                 // argv[1] is "build"
+    loop {
+        if (i >= argc) break;
+        uptr a = ld64(argv + i * 8);
+        if (str_eq(a, "--config"))           { has_cfg = 1; i = i + 1; }
+        else if (str_eq(a, "--sysroot-dir")) i = i + 1;
+        else if (str_eq(a, "--libs-dir"))    i = i + 1;
+        else if (ld8(a) != '-' && dir == 0)  dir = a;
+        i = i + 1;
+    }
+    if (dir == 0) dir = ".";
+    if (!has_cfg) {
+        uptr tcfg = path_norm(tm_cat(dir, "/teko.toml"));
+        if (path_exists(tcfg)) {
+            uptr av = xalloc((argc + 2) * 8);
+            i64 k = 0;
+            loop {
+                if (k >= argc) break;
+                st64(av + k * 8, ld64(argv + k * 8));
+                k = k + 1;
+            }
+            st64(av + argc * 8, "--config");
+            st64(av + (argc + 1) * 8, tcfg);
+            return drv_build(argc + 2, av);
+        }
+    }
+    return drv_build(argc, argv);
+}
+
+// tk_limits(argc, argv) -- `teko limits`'s own handler. `drv_limits`
+// (src/driver.mc) tells a single source file from a project directory with
+// `drv_is_source`, which asks for a `.mc` suffix -- the one thing that does
+// not carry over unchanged from `mc limits`, since a teko source is `.tk`.
+// The scan below finds the same two things `drv_limits` would (the path and
+// whether `--config` was given) only to decide which case this is; a `.tk`
+// path takes the exact three calls `drv_limits` makes for a `.mc` one
+// (`lim_compile_file`/`lim_report`/`lim_exit_code`, all public in
+// src/limits.mc), and everything else -- a directory, a `.mc` file, no
+// argument at all, an unknown flag -- is left to `drv_limits` unchanged.
+i64 tk_is_source(uptr p) {
+    i64 n = cstrlen(p);
+    if (n < 3) return 0;
+    return ld8(p + n - 3) == '.' && ld8(p + n - 2) == 't' && ld8(p + n - 1) == 'k';
+}
+
+i64 tk_limits(i64 argc, uptr argv) {
+    uptr path = 0;
+    i64 i = 2;                                 // argv[1] is "limits"
+    loop {
+        if (i >= argc) break;
+        uptr a = ld64(argv + i * 8);
+        if (str_eq(a, "--config")) i = i + 1;
+        else if (ld8(a) != '-' && path == 0) path = a;
+        i = i + 1;
+    }
+    if (path != 0 && tk_is_source(path)) {
+        drv_lim_mode = 1;
+        lim_compile_file(path);
+        lim_report(path);
+        return lim_exit_code();
+    }
+    return drv_limits(argc, argv);
+}
 
 void user_init() {
     // `tk_access_init` first: it reads `cfg_file`/`lex_file()` and touches
