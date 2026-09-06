@@ -162,7 +162,18 @@ compilador (S4.4+, fork g3) tornaria o `check` recusado pelo parser de prateleir
 "obrigatório". mc 0.15.9 publicado (só o registro padrão muda para `https://pkg.minicompiler.dev`); o patch
 `TE_RULE` que destrava o S4.2 vem como 0.15.10.
 
-## 3.2 O mc que o CI usa hoje: 0.15.8 (2026-09-06)
+## 3.2 O mc que o CI usa hoje: 0.15.10 (2026-09-06)
+
+**0.15.10 (PR #40): `TE_RULE`** -- lexema criado por `#rule`/`#token`/`#infix`/`#prefix` nunca é escondido
+pelo `source_claim` (`lex_word_id` devolve o id em qualquer fonte); o handler do módulo sobre esse lexema só
+despacha em fonte reivindicada; em fonte não reivindicada vai à regra/núcleo. Fora de escopo, documentado:
+lexema que é literal de regra E tipo ensinado. **0.15.9**: só o registro padrão (`https://pkg.minicompiler.dev`).
+**Pendente no mc:** `machine(name, tab)` faz `mach_tab = tab` sem condição (hooks.mc:834) -- o re-registro dos
+três nomes pelo `teko_float.tk` em `user_init` move a máquina corrente do modo CRU para a última (`x86_64-win`);
+`teko build --config` não sofre. Patch aceito (re-registro preserva o current); NÃO aplicamos o contorno
+`machine_use_if(host_machine())` -- esperamos o núcleo.
+
+### 3.2a O anterior: 0.15.8
 
 **0.15.8 (PR #37, patch de cooperação): `void source_claim(uptr fn)`**, handler `i64 f(uptr name)`,
 1 = "esta fonte é do meu dialeto". Chamado de `lex_push_mem`, UMA vez por quadro, com o nome que
@@ -2348,6 +2359,10 @@ existe e o fixpoint FECHA com um único bloqueio removido, que é do lado do `mc
   `surface_foreach`, `surface_loops`, `surface_switch`, `surface_ternary`), porque a sonda desliga a
   semântica de laço da teko. Fecha só com o patch do `mc`; "fixpoint FECHA" aqui = critérios 1+2 (objeto
   e `--dump-asm`), não os três.
+  **FECHOU (2026-09-06, mc 0.15.10 = `TE_RULE`):** `ngen/scripts/bootstrap.sh` tal como está, sem contorno:
+  teko0 1,8 s → teko1 3,8 s (`teko1.o` 1 712 808 B) → teko2 4,2 s → teko3 3,8 s; `cmp teko2.o teko3.o` limpo;
+  `--dump-asm` 220 651 linhas, diff vazio; **teko1 compila as 45 (45/45)**; total ~40 s; `FIXPOINT OK`. Os três
+  critérios da tabela §64(f) fecham. A teko está auto-hospedada sobre o mc (rota A).
 
 **O BLOQUEIO (pedido ao mc, um só).** `word_add` marca a ENTRADA de token como `TE_TAUGHT`, e a
 entrada é COMPARTILHADA entre a estrada de módulo e a de diretiva (`tok_add` é idempotente por
@@ -2463,7 +2478,12 @@ base e 42 no tip**; os de largura 8 (`ref`/`out` de classe com destrutor e `rt_l
 **Dívida ADJACENTE do K2w (não tocada): `ref f64` devolve valor errado, no tip E na base.** A
 largura é 8, então NÃO é o defeito do K2w; a causa é o deref usar o par INTEIRO `ld64`/`st64`
 (`tk_arr_load`/`tk_arr_store`) para um apontado de ponto flutuante. Precisa do par de load/store de
-FLOAT.
+FLOAT. **Ampliação (verificador do K2w, 2026-09-06):** a causa é `tk_ldn`/`tk_stn`
+(`teko_struct.tk`), que mapeiam SÓ pela largura (1/2/4/8 → `ld8..ld64`/`st8..st64`) sem olhar se o tipo
+é float; logo atinge TODO acesso indireto `f64` por esse par -- `ref f64` E campo de classe `f64`
+(`teko_this.tk`, `p.v = p.v + 1.0` errado) -- e NÃO o array fixo local (`a[0] = a[0] + 1.0` correto,
+caminho próprio). O mc já expõe `ldf64`/`stf64`/`ldf32`/`stf32` (`lib/float.mc:424-427`), nunca usados no
+`ngen/`; conserto = ramo de float em `tk_ldn`/`tk_stn` antes do `type_width`. Higiene 4.
 
 ## 5.1 Armadilhas já pagas (não repita)
 

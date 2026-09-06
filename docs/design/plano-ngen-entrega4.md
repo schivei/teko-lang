@@ -4142,6 +4142,12 @@ materializou: o binário auto-hospedado roda (`teko1 --version` → `mc 0.15.8`,
 fixtures que usam `while`/`for` -- consequência direta de comentar `syntax_stmt("while"/"for")`. O
 3º critério só fecha com o patch do `mc` de (f).
 
+**FECHOU (2026-09-06, mc 0.15.10 = `TE_RULE`, PR #40 do mc):** `ngen/scripts/bootstrap.sh` sem nenhum
+contorno: teko0 1,8 s → teko1 3,8 s (`teko1.o` 1 712 808 B) → teko2 4,2 s → teko3 3,8 s; `cmp teko2.o
+teko3.o` limpo; `--dump-asm` 220 651 linhas, diff vazio; teko1 compila as 45 fixtures (45/45); `FIXPOINT OK`
+em ~40 s (macOS/aarch64). Os três critérios da tabela (f) do §64 fecham: **a teko está auto-hospedada sobre
+o mc, rota A.** S4.3 (perna de CI) destravada.
+
 ### (f) O bloqueio que sobra é do `mc`, e é UM — pedido registrado
 
 `word_add` marca a ENTRADA de token (`TE_TAUGHT`), e `tok_add` é idempotente por lexema: a entrada é
@@ -4409,3 +4415,6 @@ não vira `2.5`): a largura é 8, então NÃO é o defeito do K2w, e o comportam
 depois. A causa é outra — o deref usa `ld64`/`st64` (`tk_arr_load`/`tk_arr_store`, inteiros), e a
 aritmética do corpo é de ponto flutuante; um `ref` de f64 precisa do par de load/store de FLOAT.
 Registrado aqui e no HANDOFF §5; não foi tocado.
+**Ampliação (verificador do K2w):** a causa é `tk_ldn`/`tk_stn` (`teko_struct.tk`) mapearem só pela largura;
+atinge todo acesso indireto `f64` por esse par (`ref f64` e campo de classe `f64`), não o array fixo local. O
+mc já expõe `ldf64`/`stf64`/`ldf32`/`stf32` (`lib/float.mc`). Conserto mecânico = higiene 4.
