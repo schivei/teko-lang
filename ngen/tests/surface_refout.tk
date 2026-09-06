@@ -32,6 +32,14 @@
 //      identical match, over a class distinct from `Cell`'s own -- a
 //      mismatched pointee (`ref Cell`/`ref Square`) is a probe, not a
 //      fixture, per this crumb's own instruction.
+//  10. `scopecheck` (higiene 3, item A) -- the pointee check reaches SCALARS
+//      too, so a `ref i64` argument is now matched against the parameter's
+//      own `i64`: one local declared in an inner block, one in the function
+//      body, and `lvl_b`'s own repass of a `ref i64` PARAMETER under a name
+//      (`x`) that `outcheck` declares as a `Box`. The last one is what makes
+//      the check read the enclosing declaration instead of the unit-wide
+//      table of locals, which answers with the unrelated `Box`. A
+//      mismatched scalar (`ref i64` given a `ref u8`) is a probe.
 //
 // expect-exit: 42
 
@@ -249,6 +257,18 @@ i64 gcheck() {
     return 0;
 }
 
+i64 scopecheck() {
+    i64 outer = 1;
+    if (outer == 1) {
+        i64 inner = 5;
+        lvl_c(ref inner);
+        if (inner != 6) return 1;
+    }
+    lvl_c(ref outer);
+    if (outer != 2) return 2;
+    return 0;
+}
+
 i64 main() {
     i64 bad = scheck();
     if (bad != 0) return 10 + bad;
@@ -282,6 +302,9 @@ i64 main() {
 
     bad = gcheck();
     if (bad != 0) return 100 + bad;
+
+    bad = scopecheck();
+    if (bad != 0) return 110 + bad;
 
     return 42;
 }
