@@ -48,10 +48,25 @@
 // (RC covers a name, not an array cell), so it stays unowned and leaks the
 // moment it is overwritten. Refused where it is declared, local or global,
 // with the debt spelled out in the message.
+//
+// G1 (§50): a GLOBAL `T[]` of HEAP (K3, teko_heaparr.mc) -- `i64[] g;`, with
+// no bracket count of its own, `g = new i64[n];` at some later statement --
+// rides the exact same two mechanisms above, collected in the SAME pass
+// (`hg_*`, right beside `gv_*`) and rewritten through the SAME `N_INDEX`
+// fallback and deferred write. What differs is the RESOLUTION, not the
+// collection or the parse-time plumbing: a heap element's address is
+// run-time-checked (`teko_heaparr.mc`'s `tk_ha_load`/`tk_ha_store`/
+// `tk_ha_compound`, over `tk_arr_at`), never a compile-time bound, because
+// the element count is whatever the last `new T[n]` gave it, not a constant
+// the declaration carries. The global itself is a ROOT (§50 decision 16): it
+// keeps the reference correctly (a counted element earns the SAME `rt_store`/
+// `rt_store_own` split a local's own store does) but is never released, the
+// same debt a class's own `static` field already carries.
 
 #define TK_MAXARR   256                // local array declarations in scope so far
 #define TK_MAXGARR  64                 // global arrays declared in one source
 #define TK_MAXGDEF  64                 // deferred writes into a possibly-global array
+#define TK_MAXHG    32                 // global `T[]` of heap declared in one source
 
 #define TK_ASTORE    0                 // a[i] = e
 #define TK_ACOMPOUND 1                 // a[i] += e / -= e / ++ / --
@@ -67,6 +82,18 @@ uptr gv_name[TK_MAXGARR];
 i64  gv_ty[TK_MAXGARR];
 i64  gv_nel[TK_MAXGARR];
 i64  tk_ngv = 0;
+
+// ---- a global `T[]` of heap (G1), collected in the SAME pass ----
+uptr hg_name[TK_MAXHG];
+i64  hg_ty[TK_MAXHG];                  // the `T[]` row type itself (teko_heaparr.mc's tk_ha_row)
+i64  tk_nhg = 0;
+
+// teko_heaparr.mc is included after this file: the run-time-checked
+// address/load/store/compound a heap array's LOCAL, FIELD and PARAMETER
+// forms already share (K3) is exactly what a GLOBAL one resolves through too.
+i64 tk_ha_load(i64 base, i64 ety, i64 idx);
+i64 tk_ha_store(i64 base, i64 ety, i64 idx, i64 v);
+i64 tk_ha_compound(i64 base, i64 ety, i64 idx, i64 op, i64 v);
 
 // ---- a write the parser read but could not yet place ----
 i64  gd_node[TK_MAXGDEF];             // the placeholder the pass rewrites in place
@@ -93,6 +120,11 @@ i64  gv_nel_at(i64 i)  { return ld64(gv_nel + i * 8); }
 void set_gv_name_at(i64 i, uptr v) { st64(gv_name + i * 8, v); }
 void set_gv_ty_at(i64 i, i64 v)    { st64(gv_ty + i * 8, v); }
 void set_gv_nel_at(i64 i, i64 v)   { st64(gv_nel + i * 8, v); }
+
+uptr hg_name_at(i64 i) { return ld64(hg_name + i * 8); }
+i64  hg_ty_at(i64 i)   { return ld64(hg_ty + i * 8); }
+void set_hg_name_at(i64 i, uptr v) { st64(hg_name + i * 8, v); }
+void set_hg_ty_at(i64 i, i64 v)    { st64(hg_ty + i * 8, v); }
 
 i64  gd_node_at(i64 i) { return ld64(gd_node + i * 8); }
 i64  gd_base_at(i64 i) { return ld64(gd_base + i * 8); }
@@ -179,6 +211,50 @@ void tk_garr_collect() {
         }
         n = n + 1;
     }
+}
+
+// ---- global `T[]` of heap (G1): collected in the SAME sweep, keyed by TYPE
+// rather than by `nd_val` -- `i64[] g;` carries no bracket count of its own,
+// so a plain `nd_val(n) != 0` test (above) would never see it ----
+i64 tk_hg_find(uptr name) {
+    i64 i = tk_nhg - 1;
+    loop {
+        if (i < 0) break;
+        if (str_eq(hg_name_at(i), name)) return i;
+        i = i - 1;
+    }
+    return 0 - 1;
+}
+
+void tk_hg_add(uptr name, i64 ty) {
+    if (tk_nhg == TK_MAXHG) err_at(tk_file, tk_line, "teko: too many global `T[]` of heap");
+    set_hg_name_at(tk_nhg, name);
+    set_hg_ty_at(tk_nhg, ty);
+    tk_nhg = tk_nhg + 1;
+}
+
+void tk_hg_collect() {
+    i64 n = 1;
+    loop {
+        if (n >= nnodes) break;
+        if (nd_kind(n) == N_GLOBAL && tk_is_ha(tk_struct_by_ty(nd_type(n))))
+            tk_hg_add(nd_name(n), nd_type(n));
+        n = n + 1;
+    }
+}
+
+// the element type a global `T[]` row carries, for the load/store/compound
+// machinery below -- teko_heaparr.mc's own `ha_ety_at`, over the row
+// `tk_struct_by_ty` finds for the type `tk_hg_add` recorded.
+i64 tk_hg_ety_at(i64 i) { return ha_ety_at(tk_struct_by_ty(hg_ty_at(i))); }
+
+// the type of a global `T[]`, for teko_typeof.mc's oracle (`tk_ty_of`) --
+// -1 for anything else, a global SCALAR included, so the oracle keeps
+// answering "not known" for one the way it always has.
+i64 tk_ty_global_ha(uptr name) {
+    i64 hi = tk_hg_find(name);
+    if (hi < 0) return 0 - 1;
+    return hg_ty_at(hi);
 }
 
 // ---- shared address/load/store machinery, LOCAL and GLOBAL alike ----
@@ -368,7 +444,7 @@ void tk_array_maybe_rewrite_index(i64 n) {
     i64 base = nd_a(n);
     if (nd_kind(base) != N_IDENT) return;
     i64 gi = tk_garr_find(nd_name(base));
-    if (gi < 0) return;
+    if (gi < 0) { tk_hg_rewrite_index(n); return; }
     i64 ety = gv_ty_at(gi);
     i64 nel = gv_nel_at(gi);
     uptr nm = gv_name_at(gi);
@@ -382,6 +458,27 @@ void tk_array_maybe_rewrite_index(i64 n) {
     set_nd_next(n, keep);
 }
 
+// `g[i]` on a global `T[]` (G1): unlike a FIXED array's own rewrite above,
+// there is no compile-time bound to check against -- the element count is
+// whatever the last `new T[n]` gave it -- so the load is the run-time-checked
+// one K3's local/field/parameter forms already share (`tk_ha_load`, over
+// `tk_arr_at`). A base this table does not know either is none of this
+// module's business, same as the fixed-array branch it mirrors: it is left
+// for `params`' own walk (teko_params.mc) to find, unrewritten.
+void tk_hg_rewrite_index(i64 n) {
+    i64 base = nd_a(n);
+    i64 hi = tk_hg_find(nd_name(base));
+    if (hi < 0) return;
+    i64 ety = tk_hg_ety_at(hi);
+    tk_line = nd_line(n);
+    tk_file = nd_file(n);
+    i64 keep = nd_next(n);
+    node_assign(n, tk_ha_load(base, ety, nd_b(n)));
+    set_nd_next(n, keep);
+    i64 es = tk_struct_by_ty(ety);                // the same re-mark tk_ha_load
+    if (es >= 0) tk_xt_add(n, es, 1);              // gives its OWN return node
+}
+
 // a deferred write whose base never turns out to be a global array is not a
 // silent no-op: the core would have refused it outright before this crumb
 // (`left side of assignment must be a name`), so failing here is a strict
@@ -391,7 +488,7 @@ void tk_array_resolve_write(i64 i) {
     i64 line = gd_line_at(i);
     uptr fl = gd_file_at(i);
     i64 gi = tk_garr_find(nd_name(base));
-    if (gi < 0) err_at2(fl, line, "teko: not a known array", nd_name(base));
+    if (gi < 0) { tk_hg_resolve_write(i); return; }
     i64 ety = gv_ty_at(gi);
     i64 nel = gv_nel_at(gi);
     uptr nm = gv_name_at(gi);
@@ -407,6 +504,31 @@ void tk_array_resolve_write(i64 i) {
     set_nd_next(n, keep);
 }
 
+// the write half of a global `T[]` (G1): the address is the SAME
+// run-time-checked one the read side above uses, so a store past the end
+// panics exactly as an out-of-range LOAD would (K3's own guard, `tk_arr_at`).
+// A base neither table knows is the same "not a known array" the fixed-array
+// branch above already gives.
+void tk_hg_resolve_write(i64 i) {
+    i64 base = gd_base_at(i);
+    i64 line = gd_line_at(i);
+    uptr fl = gd_file_at(i);
+    i64 hi = tk_hg_find(nd_name(base));
+    if (hi < 0) err_at2(fl, line, "teko: not a known array", nd_name(base));
+    i64 ety = tk_hg_ety_at(hi);
+    tk_line = line;
+    tk_file = fl;
+    i64 idx = gd_idx_at(i);
+    i64 r = 0;
+    if (gd_form_at(i) == TK_ASTORE) r = tk_ha_store(base, ety, idx, gd_val_at(i));
+    else                            r = tk_ha_compound(base, ety, idx, gd_op_at(i), gd_val_at(i));
+    i64 n = gd_node_at(i);
+    i64 keep = nd_next(n);
+    node_assign(n, r);
+    set_nd_next(n, keep);
+    if (tk_is_counted(ety)) tk_os_add(n);          // the same re-mark tk_ha_store
+}                                                   // gives its OWN return node
+
 void tk_array_resolve_writes() {
     i64 i = 0;
     loop {
@@ -421,7 +543,8 @@ void tk_array_resolve_writes() {
 // N_INDEX in the unit once a `params` list exists anywhere in it.
 i64 tk_array_pass(i64 root) {
     tk_garr_collect();
-    if (tk_ngv > 0) tk_array_walk_reads(root);
+    tk_hg_collect();
+    if (tk_ngv > 0 || tk_nhg > 0) tk_array_walk_reads(root);
     tk_array_resolve_writes();
     return root;
 }

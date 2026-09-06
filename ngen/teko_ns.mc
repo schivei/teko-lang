@@ -723,10 +723,25 @@ i64 tk_ns_seg_expr() {
 // gave it one the moment the class was declared), so the guard here is the
 // SAME "already qualified" one D31.9 gives a free function's own rename: a
 // global still short and bare is what the source itself wrote.
+//
+// ONE exception (G1, §50): a global `T[]` of heap (teko_heaparr.mc's `tk_is_ha`
+// row) is let through UNRENAMED, the way a namespaced free function's own
+// symbol IS renamed -- the plain-global ban above stays exactly what it always
+// was for a SCALAR. Qualifying a mutable global's every bare use site the way
+// `tk_ns_rewrite_ident` qualifies a CONST reference would need that same
+// resolver reading a table (`teko_array.mc`'s `hg_*`) this pass runs before
+// (`tk_ns_pass` is registered ahead of `tk_array_pass`) -- registered as a
+// debt, not worked around: a name collision across two namespaces' own `T[]`
+// globals is unresolved, same as every other namespace-qualification debt
+// this file already spells out for `T[]` and forward declarations.
+i64 tk_ns_topglobal_ha(i64 n) {
+    return nd_kind(n) == N_GLOBAL && tk_is_ha(tk_struct_by_ty(nd_type(n)));
+}
+
 void tk_ns_reject_topkind(i64 n) {
     if (n == 0) return;
     i64 k = nd_kind(n);
-    if (k == N_GLOBAL && tk_ns_of_name(nd_name(n)) == 0)
+    if (k == N_GLOBAL && tk_ns_of_name(nd_name(n)) == 0 && !tk_ns_topglobal_ha(n))
         err_at(nd_file(n), nd_line(n), "teko: a global is declared outside every namespace");
     if ((k == N_PROTO || k == N_FUNC) && str_eq(nd_name(n), "main"))
         err_at(nd_file(n), nd_line(n), "teko: main is declared outside every namespace");
