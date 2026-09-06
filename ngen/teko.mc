@@ -174,12 +174,26 @@
 //                                            teko_expr.mc's own field access
 //   Op f = null;   f == null                the null reference, an `N_INT` 0
 //
-// What §58's DI1 crumb adds (D229) -- a class names its own lifetime in the
-// list after `:`, and `inject` resolves a service with no dependency of its
-// own at comptime, no runtime container (teko_di.mc):
+// What §58's DI1/DI2 crumbs add (D229) -- a class names its own lifetime in
+// the list after `:`, `inject` resolves a service with no dependency of its
+// own at comptime (no runtime container), and constructor injection over the
+// dependency graph it names (teko_di.mc):
 //   class Clock : IClock, IServiceSingleton { ... }   a NAME, not a base
 //   IClock a = inject IClock;   Clock b = inject Clock;   both the same
 //                                                          instance
+//   class Repo : IServiceTransient {
+//       public Repo(IClock c) { ... }                     INJECTED BY
+//                                                          CONSTRUCTOR
+//   }
+//
+// What §58's DI3 crumb adds -- `scope { ... }`, and the Scoped/Transient
+// lifetimes a Singleton's own root does not distinguish (teko_di.mc):
+//   scope {                                               a lexical scope
+//       IAudit a = inject IAudit;                         one instance per
+//       IAudit b = inject IAudit;                          `scope { }`, freed
+//   }                                                       at its own `}`
+//   Repo r = inject Repo;                                 a Transient: fresh
+//                                                          every injection
 //
 // Everything else in docs/design/port-teko-mc.md §3 (generics, error-union,
 // the rest of DI, concurrency, the rest of the stdlib) is a later entrega and
@@ -261,6 +275,7 @@ void user_init() {
     syntax_stmt("for",    &tk_for);
     syntax_stmt("foreach", &tk_foreach);
     syntax_stmt("switch", &tk_switch_stmt);
+    syntax_stmt("scope",  &tk_scope_stmt);
 
     syntax("struct", &tk_struct);
 
