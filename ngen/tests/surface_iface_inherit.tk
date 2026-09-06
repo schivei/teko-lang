@@ -1,0 +1,99 @@
+// surface_iface_inherit.tk -- interface INHERITANCE, C#'s `interface I2 : I1`
+// (§50 I1, docs/design/plano-ngen-entrega4.md): `I2`'s own conformance set
+// carries `I1` too, flattened rather than followed at dispatch time (decision
+// 15), so a class that names only `I2` in its own `:` list still owes every
+// method `I1` declares, still answers `I1 x = <the I2 value>`, and still
+// answers `.` called straight on the `I2`-typed value (`tk_ifmeth_find_deep`).
+//
+// `I1`'s own `area` is a DEFAULT BODY (D223) `Sq` never redeclares -- proof
+// that the default reaches the class through `I1`'s OWN itab entry, an entry
+// the class earns only because it extends `I2`. `unit` is `static abstract`
+// (C# 11): `Sq.unit()` answers it directly, unaffected by which interface's
+// `:` list happened to name it.
+//
+// `IC : IA, IB`, both declaring `m()` at the same signature, is the diamond
+// C# accepts: `Box` implements `m` once, and the itab entries of `IA`, `IB`
+// AND `IC` (which declares nothing of its own) all point at the same symbol.
+//
+// expect-exit: 42
+
+#include "../lib/rt.mc"
+
+interface I1 {
+    i64 side();
+
+    i64 area() {
+        return this.side() * this.side();
+    }
+
+    static abstract i64 unit();
+}
+
+interface I2 : I1 {
+    i64 tag();
+}
+
+class Sq : I2 {
+    public i64 w;
+
+    public i64 side() {
+        return w;
+    }
+
+    public i64 tag() {
+        return 7;
+    }
+
+    public static i64 unit() {
+        return 5;
+    }
+}
+
+interface IA {
+    i64 m();
+}
+
+interface IB {
+    i64 m();
+}
+
+interface IC : IA, IB {
+}
+
+class Box : IC {
+    public i64 v;
+
+    public i64 m() {
+        return v * 2;
+    }
+}
+
+i64 checks() {
+    Sq q = new Sq;
+    q.w = 3;
+    I2 i2 = q;
+    if (i2.tag() != 7) return 1;
+    if (i2.area() != 9) return 2;                // I1's default, reached through an I2-typed value
+    I1 x = q;
+    if (x.area() != 9) return 3;                 // the same default, through I1 directly
+    if (Sq.unit() != 5) return 4;                // static abstract, inherited from I1
+
+    Box bx = new Box;
+    bx.v = 4;
+    IA a = bx;
+    IB b = bx;
+    IC c = bx;
+    if (a.m() != 8) return 5;
+    if (b.m() != 8) return 6;
+    if (c.m() != 8) return 7;                    // IC declares nothing of its own; `m` reached via IA
+
+    return 0;
+}
+
+i64 main() {
+    i64 floor = rt_live();
+    i64 bad = checks();
+    if (bad != 0) return bad;
+    if (rt_live() != floor) return 8;
+    return 42;
+}
