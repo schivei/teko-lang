@@ -143,6 +143,20 @@ nomes antigos, mas o CI (`ngen.yml`: API de releases e base de download) e a rec
 para `minicompiler/mc`. Tags, releases e checksums não mudam. A org é a casa dos pacotes oficiais e a
 identidade admin do registro.
 
+## 3.3 Pacotes: validado com o mc — nada muda agora; como a teko será distribuída (2026-09-06, D230)
+
+O dono pediu validar com o mc um redesenho de pacotes ("libs e bundles via empacotamento"). Resposta
+do mc (NOTICES-teko 2026-09-06): o modelo publicado NÃO muda; o redesenho é spec futura (pacote `mclib`
+das libs do mc como ADIÇÃO ao blob; ferramentas como pacotes `kind = "exe"` + `[[tool]]` +
+`mc tool install`; `[[permission]]`; site). Para o `ngen/`: `<mc/core_min>`/`<mc/host>` seguem no blob com
+a mesma grafia; `[compiler]` e `[package]` estão certos; **`module =` é chave ignorada pelo mc** (fica
+como documentação). Distribuição futura: `[deps] teko = "x.y.z"` + `#include <teko>` para o runtime;
+compilador ensinado via `[compiler] modules = ["<teko/teko.tk>", "user.mc"]` no projeto do usuário
+(hoje) ou `mc tool install teko` (depois). **Dívida antes de publicar:** `check = ["teko.tk",
+"lib/rt.tk"]` -- o validador compila cada unidade SOZINHA na caixa linux/x86_64 sem rede, e `teko.tk`
+não é unidade autônoma; candidata: uma unidade que inclua o compilador inteiro (`mc_teko.tk`). Publicar
+só em versão estável (decisão do dono). Detalhe em `DECISION_LOG.md` D230.
+
 ## 3.2 O mc que o CI usa hoje: 0.15.8 (2026-09-06)
 
 **0.15.8 (PR #37, patch de cooperação): `void source_claim(uptr fn)`**, handler `i64 f(uptr name)`,
