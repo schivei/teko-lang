@@ -26,25 +26,50 @@ name: ngen (mc) CI
 # meaning stays exactly what it says. Promoting the ladder to a required check
 # is a ruleset decision, taken outside this workflow.
 #
-# pr.yml (this repository's main gate) triggers on `pull_request` with NO
-# `paths:` filter, on purpose (its own header explains why: a GitHub Actions
-# required check that stops reporting goes pending forever, not red, so a
-# trigger-level `paths-ignore` is avoided there in favour of an internal
-# paths-filter job). A PR touching only `ngen/**` therefore still runs pr.yml's
-# full escada today; teaching it to skip that escada for an `ngen/`-only diff
-# means reworking its internal `dorny/paths-filter` job, which is out of this
-# entrega's scope -- left as-is, flagged for the integrator.
+# THIS WORKFLOW IS ALSO THE RELEASE GATE (R1). `release.yml` calls it with
+# `workflow_call` instead of repeating the matrix: a release must publish the
+# BINARY THE GATE PROVED, never a sibling rebuilt at tag time, and the only way
+# to have both properties is for the job that runs the fixtures to be the job
+# that packages. `package: true` turns on two steps that are off for an ordinary
+# push -- the per-leg tarball and the fixpoint provenance file -- and `ref`
+# names the commit to check out when the caller is releasing a tag from a
+# `workflow_dispatch` that is not itself on that tag.
+#
+# `push` is filtered to BRANCHES so that pushing `v1.2.3` runs this workflow
+# exactly once, through the release, instead of racing a standalone run of it
+# for the same `github.ref`.
 
 on:
   push:
+    branches: ['**']
   pull_request:
     branches: ['**']
+  workflow_call:
+    inputs:
+      ref:
+        description: 'commit, branch or tag to check out; empty means the caller''s own ref'
+        required: false
+        type: string
+        default: ''
+      package:
+        description: 'also package each leg as a release asset and archive the fixpoint provenance'
+        required: false
+        type: boolean
+        default: false
+      version:
+        description: 'release version the assets are named after, without its leading `v`'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
 
+# `github.workflow` is the CALLER's name when this workflow is called, so a
+# release's gate and an ordinary CI run of the same ref are two groups and
+# cannot cancel one another.
 concurrency:
-  group: ngen-${{ github.ref }}
+  group: ngen-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -158,8 +183,13 @@ jobs:
       - name: never translate line endings
         run: git config --global core.autocrlf false
 
+      # An empty `ref` is what `actions/checkout` does by default -- the ref the
+      # run is for. It is only ever non-empty when a release is gating a tag
+      # from a dispatch that runs on a branch.
       - name: checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       # `.github/actions/setup-mc` resolves the LATEST minicompiler/mc release,
       # downloads the asset for this pair, verifies the `.sha256` and asserts
@@ -369,6 +399,27 @@ jobs:
           done
           exit $status
 
+      # R1: only when a release is calling. The binary packaged here is the one
+      # the fixtures above have just run against -- the release PROMOTES what
+      # the gate proved instead of recompiling bytes no gate ever saw.
+      - name: package this leg as a release asset
+        if: inputs.package
+        uses: ./.github/actions/package-teko
+        with:
+          version: ${{ inputs.version }}
+          target: ${{ matrix.os }}-${{ matrix.asset }}
+          exe: ${{ matrix.exe }}
+
+      - name: upload the release asset
+        if: inputs.package
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.os }}-${{ matrix.asset }}
+          path: |
+            dist/teko-*.tar.gz
+            dist/teko-*.tar.gz.sha256
+          if-no-files-found: error
+
   # The SIXTH job (docs/design/plano-ngen-entrega4.md §64(f) S4.3, §73): the
   # self-hosting ladder, not the fixture suite. `ngen/scripts/bootstrap.sh` runs
   # teko0 (`mc build ngen --compiler-only`, the stock mc) -> teko1 -> teko2 ->
@@ -411,6 +462,8 @@ jobs:
     steps:
       - name: checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: set up the mc toolchain
         id: mc
@@ -441,6 +494,10 @@ jobs:
       # machines is a separate claim (the mc repository pins its own with
       # tests/golden/mc2.sha256). Printing it is what lets that claim be
       # checked before anything is pinned to it.
+      # Written to a FILE and then appended to the summary, because a release
+      # quotes the very same table in its notes (`release.yml`, job `release`):
+      # one derivation, two readers, no chance of the published number and the
+      # measured one drifting apart.
       - name: sizes and sha256 of the objects
         if: always()
         run: |
@@ -452,6 +509,7 @@ jobs:
               shasum -a 256 "$1" | cut -d' ' -f1
             fi
           }
+          mkdir -p ngen/build
           {
             printf '### fixpoint (%s/%s), mc %s\n\n' \
               "${{ matrix.os }}" "${{ matrix.arch }}" "${{ steps.mc.outputs.version }}"
@@ -465,8 +523,17 @@ jobs:
               fi
             done
             printf '\nThe sha256 is reported, not gated.\n'
-          } >>"$GITHUB_STEP_SUMMARY"
-          cat "$GITHUB_STEP_SUMMARY"
+          } >ngen/build/provenance.md
+          cat ngen/build/provenance.md >>"$GITHUB_STEP_SUMMARY"
+          cat ngen/build/provenance.md
+
+      - name: upload the fixpoint provenance
+        if: inputs.package
+        uses: actions/upload-artifact@v4
+        with:
+          name: provenance-${{ matrix.os }}-${{ matrix.arch }}
+          path: ngen/build/provenance.md
+          if-no-files-found: error
 
       # higiene 4 item B: `teko1.o` was once seen differing between two runs of
       # the ladder on one machine, and it has not reproduced (44 runs, plano
