@@ -102,6 +102,30 @@ i64 tk_prop_find(i64 ci, uptr m) {
     return 0 - 1;
 }
 
+// 1 when `m` is a property somewhere in the interface CLOSURE of `si` -- its
+// own, or one it reaches only by extending another interface -- and `pdecl`
+// then holds the interface that actually DECLARES it (mirrors
+// `tk_ifmeth_find_deep`, teko_iface.mc): a receiver typed `I2` (`interface
+// I2 : I1`) reaches an `I1` property without redeclaring it, and dispatch
+// has to go through `I1`'s own itab entry, the same way a method already
+// does since §50 I1. `tk_prop_find`'s own `sr_base_at` walk answers a
+// CLASS's property; an interface never sets that field, so this is a
+// separate function rather than one more branch in it.
+i64 tk_ifprop_find_deep(i64 si, uptr m, uptr pdecl) {
+    if (tk_prop_own(si, m) >= 0) {
+        st64(pdecl, si);
+        return 1;
+    }
+    i64 n = tk_iface_nbase(si);
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        if (tk_ifprop_find_deep(tk_iface_base_at(si, i), m, pdecl)) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
 // the property called `m` when the receiver's type is not known statically,
 // under the rule tk_field_by_name uses: -1 nobody declares it, -2 more than one
 // type does and only the receiver's type could decide

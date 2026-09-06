@@ -1733,6 +1733,39 @@ pass nova -- I1 só estendeu `tk_interface`/`tk_conf_apply`/os três sítios de 
 Plano: `docs/design/plano-ngen-entrega4.md` §50 (I1 desta série; G1 segue na fila; §54 tem a errata).
 Sem PR, sem dreno -- branch `feat/ngen-i1-iface`, forward-only para `fix/retirement`.
 
+**I1b LANDADO — errata: propriedade herdada de interface** (§56, 2026-09-06): a ressalva do I1 --
+`tk_iface_member_of` decidia "é propriedade?" por `tk_prop_find(si, m)`, que só percorre
+`sr_base_at` (cadeia de CLASSE) e nunca as arestas de herança de interface -- fecha aqui.
+- `teko_prop.mc`: `tk_ifprop_find_deep(si, m, pdecl)` (nova, ao lado de `tk_prop_find`), o mesmo
+  padrão de `tk_ifmeth_find_deep`: própria (`tk_prop_own`) primeiro, senão recursa em
+  `tk_iface_nbase`/`tk_iface_base_at`, devolvendo em `pdecl` a interface que de fato declara `m`.
+  `tk_prop_find` em si NÃO muda -- percorrer `tk_iface_nbase` por ali passaria a aceitar, para uma
+  CLASSE, a propriedade abstrata de uma interface que ela implementa mas não redeclarou, o que
+  despacharia para um acessor nunca compilado.
+- **Três sítios trocados** (o mesmo padrão do I1 -- `si`/`sr_m0_at(si)` cru por `di`/`sr_m0_at(di)`,
+  sem tabela nova): `tk_iface_member_of` (teko_expr.mc, `.` sobre valor de tipo de interface já
+  conhecido no PARSE) e `tk_iface_prop_use`/`tk_pend_iface_prop` passam a receber a interface
+  DECLARANTE (não mais o tipo estático do receptor); `tk_pend_iface` (teko_typeof.mc, o mesmo `.`
+  quando só o `pass()` tipa o receptor -- um parâmetro); `tk_this_iface_prop` (teko_this.mc, `X`/`X
+  = e` bare dentro do corpo DEFAULT de uma interface que ela mesma não declara, herdado de uma base).
+- **Fixture** `ngen/tests/surface_iface_inherit.tk` cresceu (exit 42 recalculado): `I1` ganhou
+  `i64 Value { get; set; }`; `I2 : I1` ganhou um corpo DEFAULT `doubled()` que lê `Value` bare (só de
+  `I1`); `Sq` implementa `Value` como auto-propriedade própria; `bump_via_i2(I2 v)` lê e escreve
+  `v.Value` sobre um PARÂMETRO (o sítio pass-deferred). `checks()` cobre os quatro sítios: getter e
+  setter através de um valor tipado `I2` (`i2.Value`), o corpo default de `I2` (`doubled()`) e o
+  parâmetro deferido (`bump_via_i2`). AST das **41 fixtures anteriores** byte-idêntica ao
+  compilador da base `0a0bd0f4` (`same=41 diff=0`). Probe (fora de `tests/`, descartado): o mesmo
+  programa contra o compilador PRÉ-fix reproduz o defeito relatado ao pé da letra --
+  `teko: unknown member of I2: Value`; com o fix, compila e roda.
+
+Gate: `rm -rf ngen/build`, build do zero; `--entry-only` **42/42** (nenhuma fixture nova, uma
+tocada); `--dump-ast` das **41 fixtures não tocadas byte-idêntico** (`same=41 diff=0`); `mc limits`
+`verdict ok`, `intrin` 8/8, `passes`/`syntax` 14/14 nos dois lados (zero intrínseco/pass/palavra
+nova -- I1b só estendeu três sítios de despacho já existentes).
+
+Plano: `docs/design/plano-ngen-entrega4.md` §56 (I1b, esta errata). Sem PR, sem dreno -- branch
+`feat/ngen-onsource`, forward-only para `fix/retirement`.
+
 ## 5.1 Armadilhas já pagas (não repita)
 
 1. **`mc --exe` emite Mach-O SEMPRE.** `minicompiler/mc` `src/main.mc:227` faz

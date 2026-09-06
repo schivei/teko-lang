@@ -408,7 +408,9 @@ i64 tk_pend_method(i64 pi, i64 si, uptr pty, uptr ppure) {
     return tk_pend_emit_method(pi, mi, pty, ppure);
 }
 
-// `s.X` / `s.X = e` on an interface-typed receiver the oracle answered for
+// `s.X` / `s.X = e` on an interface-typed receiver the oracle answered for;
+// `si` is already the interface that DECLARES `X` (the caller resolved the
+// closure -- item 2 of this crumb)
 i64 tk_pend_iface_prop(i64 pi, i64 si, uptr pty, uptr ppure) {
     uptr m = pd_name_at(pi);
     if (pd_form_at(pi) == TK_PCALL)
@@ -425,13 +427,15 @@ i64 tk_pend_iface_prop(i64 pi, i64 si, uptr pty, uptr ppure) {
     return tk_itab_emit(pd_recv_at(pi), si, j, args, m, tk_line, tk_file);
 }
 
-// `m` may belong to `si` itself or to an interface it extends (§50 I1) --
-// same deep lookup `tk_iface_call` (teko_expr.mc) makes, dispatch through
+// `m` may belong to `si` itself or to an interface it extends (§50 I1, and
+// item 2 of this crumb for a property) -- the same deep lookup
+// `tk_iface_call`/`tk_iface_member_of` (teko_expr.mc) make, dispatch through
 // whichever interface actually declares it.
 i64 tk_pend_iface(i64 pi, i64 si, uptr pty, uptr ppure) {
     uptr m = pd_name_at(pi);
     tk_check_type_use(si, tk_line, tk_file);     // an interface's members are public
-    if (tk_prop_find(si, m) >= 0) return tk_pend_iface_prop(pi, si, pty, ppure);
+    uptr propdecl = xalloc(8);
+    if (tk_ifprop_find_deep(si, m, propdecl)) return tk_pend_iface_prop(pi, ld64(propdecl), pty, ppure);
     uptr pdecl = xalloc(8);
     if (tk_ifmeth_find_deep(si, m, pdecl) < 0)
         err_at2(tk_file, tk_line, tk_join("teko: unknown member of ", sr_name_at(si)), m);
