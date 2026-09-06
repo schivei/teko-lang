@@ -2434,3 +2434,224 @@ A série do §41 (closures, ponteiro de função, `ref`/`out`, `T[]` de heap, `f
 Próxima onda: revisar a lista de dívidas acima com o dono para priorizar o que entra no plano
 seguinte (D214 segue mandando primitivas->tipos->superfície; a dívida de maior alavancagem
 aparente é `T[]` como GLOBAL, por destravar `params T[]` em seguida).
+
+## 50. Ordem LIVRE de declaração de tipos; herança de interface; `T[]` global — desenho (architect-first, 2026-09-05)
+
+Escopo: a dívida do verificador do C6 (§5 do handoff — "o `ngen` é um parser de UMA passada: um tipo
+precisa estar declarado ANTES do primeiro uso"), mais dois itens pequenos da mesma onda. Lei: D226
+(C#/mercado), D213 (reusa o núcleo, ensina só o delta), D216 (trait não é tipo), D214, D218/D220/D221.
+MEDIDO no código, não presumido: `mc/src/lex.mc:474`/`:692` (`lex_push_mem`/`lex_init` põem
+`cp`/`cend` na fonte empurrada — logo, em `user_init`, `p_cp()`..`p_src_end()` É o arquivo de entrada
+inteiro); `mc/src/ast.mc:350` (`--dump-ast` imprime `type=<nome>`, NUNCA o id de `type_new`);
+`mc/src/parse.mc:226` (`cur_name` = fatia crua da fonte: serve para pontuação e palavra reservada); e
+`ngen/teko_iface.mc:242` — `tk_call2("tk_itab", vt, tk_int(si))`: **o índice da linha `sr_*` é EMITIDO
+na árvore**, o fato que governa o desenho abaixo.
+
+### (a) Decisões
+
+1. **Pré-registro de NOMES por varredura léxica da fonte (opção A), não hook novo do mc (opção D).**
+   O sítio que falha (`Box b = new Box();` antes de `class Box`) é lido pelo núcleo como expressão
+   porque `Box` ainda não é palavra. Um `syntax_ident` do mc NÃO resolveria sozinho: para responder
+   "isto é um tipo" o handler varreria o resto da unidade de qualquer jeito — o hook só mudaria ONDE a
+   varredura dispara. A varredura é a causa-raiz atacada, sem dependência do mc.
+2. **A varredura registra a PALAVRA; a linha `sr_*` continua nascendo tarde.** `type_new` +
+   `syntax_expr`/`syntax_stmt` (e `tk_ns_register` do nome curto) na varredura; a linha `sr_*` só é
+   materializada na DECLARAÇÃO real ou no primeiro USO. Motivo duro: o índice da linha é emitido
+   (`tk_itab`), então criar linhas na varredura reordenaria os itabs e quebraria o gate de AST das 39
+   fixtures. Num programa já em ordem o primeiro uso vem DEPOIS da declaração — a ordem das linhas
+   fica byte-a-byte a de hoje. O id de `type_new` pode mudar de ordem: não é emitido.
+3. **A varredura só ADICIONA; na dúvida, não registra** — nunca recusa, nunca reporta erro, nunca
+   consome token; nome já reclamado (keyword do núcleo, `alias_find`, outra registração) não é
+   registrado e a declaração real dá a mensagem de sempre. **Regras do varredor** (autômato de 5
+   estados, ~90 linhas): pula `//`, `/* */`, `"…"`, `'…'` e a LINHA de uma diretiva `#`; conta chaves;
+   segue `namespace A.B {`/`namespace A.B;` para formar o nome qualificado; acumula `public`/`internal`/
+   `abstract`/`partial` pendentes; ao ver `class|struct|interface|trait|delegate` **na profundidade de
+   chave do namespace corrente** (nunca dentro de um corpo — tipo aninhado não é ensinado, D220) grava
+   {nome qualificado, kind, vis, arquivo, linha, span}. Nome seguido de `<` é GENÉRICO → não registra.
+4. **`tk_fwd_init()` é a PRIMEIRA linha de `user_init()`** — `tk_loop_init()` empurra o prelúdio e daí
+   em diante `p_cp()` aponta para ele, não para a entrada (armadilha nova, §5.1).
+5. **O arquivo de um `import` é varrido no `tk_import`,** logo depois de `lex_include(...)` devolver 1
+   (o push já pôs `cp`/`cend` nele, medido); `#include "x.tk"` cru do núcleo não é varrido — dívida
+   declarada; teko escreve `import`.
+6. **Linha PFWD.** A linha materializada por uso carrega `sr_part = TK_PFWD` (quarto estado, ao lado
+   de PWHOLE/POPEN/PDONE) e o `sr_form` que a varredura leu. A declaração real ADOTA a linha
+   (`tk_fwd_adopt`) em vez de criar outra; `tk_newname` ganha o ramo "a palavra é um forward ainda NÃO
+   declarado → aceita"; `tk_class_reopen` idem, para o `partial` cujo primeiro uso materializou.
+7. **Quem precisa só da IDENTIDADE resolve no parse; quem precisa do CORPO defere para um `pass()`.**
+   É a fronteira única do desenho, e a tabela (b2) enumera todo sítio.
+8. **`.` sobre linha PFWD reusa o deferimento que JÁ existe** (`tk_defer_member`/`tk_pend_*`,
+   teko_typeof.mc): no `pass` a linha está completa e `tk_ty_of` tipa o receptor pelo id declarado —
+   resolve pelo TIPO, nunca pelo nome (a precisão que o K3 mediu e exigiu).
+9. **`new` sobre linha PFWD defere com placeholder** `tk_unresolved_new` (o idioma de
+   `tk_unresolved_member`/`tk_unresolved_array`): construtor, recusa de `abstract` e `tk_close_open`
+   acontecem no `tk_fwd_pass`; o nó já é tipado no parse (`tk_xt_add(n, si, 0)`), logo oráculo e RC não
+   perdem nada, e o que o pass não resolver morre em `call to unknown function`.
+10. **`Tipo.membro` estático sobre linha PFWD defere pela mesma máquina** (`tk_fwd_static`): nome do
+    membro e argumentos lidos no parse (o parser é quem tem os tokens), nó construído no pass.
+11. **Base/interface declarada DEPOIS materializa a declaração no ATO, no sítio da lista `:`** — não é
+    deferível: `tk_base_take` precisa de `sr_size`, slots e itab da base para dispor o objeto derivado.
+    `tk_fwd_materialize(fi)` empurra o TEXTO gravado pela varredura com `p_push_source` e chama
+    `parse_top()` UMA vez. O token gasto pelo `p_next()` do contrato de push (`hooks.md` §4) é o próprio
+    nome da base, e ele é REGENERADO: o texto empurrado é `<declaração da base>` + ` ` + `<lexema do
+    token corrente>` (`p_name()`). Alcançada a declaração real mais abaixo, a linha já está adotada
+    DAQUELE span → `tk_class`/`tk_interface` PULA a declaração (`tk_fwd_skip_decl`), sem mensagem.
+12. **Materialização por demanda só com nome BARE e no MESMO namespace** que a varredura gravou;
+    qualificada (`geo.B`) ou de outro namespace cai na recusa de hoje ("unknown base class or
+    interface"). Dívida estreita e honesta, não silêncio.
+13. **Trait não precisa de espera: a varredura grava o SPAN do corpo** e preenche a linha da tabela de
+    traits (nome, texto, len, vis, proj). `use T;` antes de `trait T` funciona com a máquina de
+    `tk_flatten` intacta; a declaração real sobrescreve o texto com o span autoritativo do
+    `p_skip_balanced`. D216 segue valendo: trait não ganha `type_new`.
+14. **Ciclo** (`class A : B` / `class B : A`) é recusado onde a materialização recursa
+    (`tk_fwd_cycle_check`, pilha de nomes em materialização): `teko: base class cycle`. Hoje é
+    inescrevível, logo é recusa estritamente nova. **Forward usado e NUNCA declarado** (só por falso
+    positivo da varredura) é recusado no `tk_fwd_pass`: `teko: <nome> is used but never declared`.
+15. **Herança de interface NÃO achata o `im_*`; grava ARESTAS.** `interface I2 : I1` registra o par por
+    `tk_impl_add(i2, i1)` (a tabela `(classe, interface)` já existe e nada exige que o "dono" seja
+    classe); a classe que conforma a `I2` conforma ao fecho transitivo, o itab ganha uma linha por
+    interface e o upcast `I1 x = <valor I2>` é NO-OP em runtime (o valor é o ponteiro do objeto; o sítio
+    busca pelo id da interface ESTÁTICA). Achatar duplicaria a assinatura no diamante — que é **ACEITO,
+    como em C#** (`I3 : I1, I2`, ambas com `m()`): a classe implementa `m` uma vez e as duas tabelas de
+    método apontam para o mesmo símbolo; `tk_impl_has` já deduplica o conjunto.
+16. **`T[]` GLOBAL resolve num `pass()`**, o precedente MEDIDO deste mesmo módulo para array fixo global
+    (`teko_array.mc`: `on_stmt` não vê declaração de topo e não há hook sobre uma); a rota alternativa —
+    farejar a posição no `syntax_type` — exige lookahead de DOIS tokens em bytes para separar `i64[] g;`
+    de `i64[] f()` e criaria duas fontes de verdade. **O global é RAIZ:** guarda a referência
+    corretamente e nunca é liberado, como o campo `static` de tipo classe. Nada de RC novo.
+
+### (b1) Hook → uso
+
+| hook / API | uso |
+|---|---|
+| `p_cp()` / `p_src_end()` em `user_init` e no `tk_import` | os bytes que a varredura lê (medido) |
+| `type_new(nome, 8, 8, TK_INT)` + `syntax_expr`/`syntax_stmt` | a palavra do tipo, antes do 1º token (O1) |
+| `tk_ns_register` (teko_ns.mc) | o nome CURTO de um tipo namespaced, a registração de hoje |
+| `p_push_source` + `p_name()` (regeneração do lexema) + `parse_top()`; `p_skip_balanced` | materialização da base declarada abaixo, e o PULO da declaração já materializada (O3) |
+| `pass(&tk_fwd_pass)` / `pass(&tk_array_pass)` estendido | `new`/estático/ciclo (O2); `g[i]`, `g[i] = e` (G1) |
+| `tk_defer_member`/`tk_pend_*` (teko_typeof.mc) | `.` sobre linha PFWD, sem uma linha nova (O2) |
+| `tk_impl_add`/`ci_if`/`ci_cls` (teko_iface.mc) | as arestas `I2 : I1` e o fecho na classe (I1) |
+
+### (b2) Sítios que consultam `sr_*` no PARSE, e o que cada um passa a fazer
+
+| sítio | precisa de | com linha PFWD |
+|---|---|---|
+| `tk_type_stmt` → `parse_var` (teko_access.mc:350) | só o id | resolve: identidade basta |
+| `tk_gen_ty`/`p_type()` — campo, parâmetro, retorno, cast | id + `type_width` (8 p/ toda referência) | resolve |
+| `tk_on_stmt` (teko_struct.mc:694) | a linha | materializa PFWD com o kind da varredura |
+| `tk_is_counted` (teko_struct.mc:492) / `teko_rc.mc`; `tk_ha_row` (`:507`) | o kind; o id do elemento | resolve (kind conhecido desde a varredura) |
+| `tk_dot` → `tk_member_of` (teko_expr.mc:300) | campos, props, métodos | DEFERE (`tk_defer_member`, já existe) |
+| `tk_new` → `tk_new_pick` (teko_expr.mc:29) | construtores, `abstract`, `tk_close_open` | DEFERE (`tk_unresolved_new`) |
+| `tk_type_expr` → `tk_static_member` (teko_access.mc:298) | const/campo/método estático | DEFERE (`tk_fwd_static`) |
+| `tk_deleg_var_stmt`/`tk_deleg_coerce` (teko_deleg.mc) | assinatura `dg_*` | `parse_var` puro; coerção no `tk_deleg_pass` |
+| `tk_conf_name` + `tk_base_take` (teko_class.mc:1063/1277) | `sr_size`, slots, itab | MATERIALIZA no ato (O3) |
+| `tk_use` (teko_trait.mc:296) | texto do trait | a varredura já gravou o span (O1) |
+| `tk_fe_source` (teko_loop.mc, `foreach`) | ety/len no parse | local/`this` só — global e forward = dívida |
+
+### (c) Sequência de crumbs
+
+**O1 — pré-registro de nomes, linha PFWD, adoção.** Arquivos: `ngen/teko_fwd.mc` (novo), `teko.mc`
+(`#include`, `tk_fwd_init()` como PRIMEIRA linha de `user_init`, `pass(&tk_fwd_pass)` logo depois de
+`tk_ns_pass`), `teko_struct.mc` (`TK_PFWD`, ramo de `tk_newname`, adoção em `tk_type_add`),
+`teko_access.mc` (`tk_type_word` idempotente), `teko_ns.mc` (a varredura chama `tk_ns_register`),
+`teko_trait.mc` (linha adotada do span), `teko_class.mc`/`teko_iface.mc`/`teko_deleg.mc` (adotam).
+Assinaturas: `void tk_fwd_init(); void tk_fwd_scan(uptr p, uptr end, uptr file); i64 tk_fwd_find(uptr
+qname); i64 tk_fwd_ty(i64 fi); i64 tk_fwd_kind(i64 fi); i64 tk_fwd_row(uptr qname); void
+tk_fwd_adopt(i64 si, i64 vis, i64 proj); i64 tk_fwd_pass(i64 root);`
+Fixture: `ngen/tests/order_types.tk` (`expect-exit: 42`) — campo, parâmetro e retorno de tipo
+declarado ABAIXO; local `Box b = null;` de tipo posterior; `Op f = null;` de delegate posterior;
+`use T;` acima de `trait T`; classe em `namespace` usada antes pelo nome curto via `using`.
+Gate: 5 pernas; `--entry-only` 40/40; `--dump-ast` das 39 anteriores **byte-idêntico**; `mc limits
+ngen` `ok`, `intrin` sem crescimento, `passes` +1. Probes fora de `tests/`: nome de tipo usado como
+variável antes da declaração (recusa; divergência do C# documentada); `class` em string e em
+comentário (não reserva palavra — `limits` é a régua).
+
+**O2 — usos que precisam do CORPO, deferidos.** Arquivos: `teko_expr.mc` (`tk_dot` desvia para
+`tk_defer_member` quando `sr_part == TK_PFWD`; `tk_new` desvia para o placeholder), `teko_access.mc`
+(`tk_type_expr` estático), `teko_fwd.mc` (as duas tabelas e a resolução), `teko_deleg.mc` (coerção
+contextual adiada). Assinaturas: `i64 tk_fwd_defer_new(i64 si, uptr name, i64 line, uptr fl); i64
+tk_fwd_defer_static(i64 si, i64 line, uptr fl); void tk_fwd_resolve_new(i64 i); void
+tk_fwd_resolve_static(i64 i);`
+Fixture: `order_types.tk` cresce — `Box b = new Box(41); b.bump(); return b.get() + Box.made;` com
+`class Box` no FIM do arquivo, construtor com argumento, `static`/`const` por `Tipo.X`, e método
+chamado sobre parâmetro de tipo posterior.
+Gate: 40/40 (a mesma fixture cresce, nenhuma nova); AST das 39 anteriores byte-idêntica; `limits ok`.
+Probes: `new` de tipo posterior `abstract` (recusa no pass, com a posição do SÍTIO); membro
+inexistente (`unknown member of Box`); forward nunca declarado (decisão 14).
+
+**O3 — base/interface declarada depois.** Arquivos: `teko_class.mc` (`tk_conf_name` espia o nome antes
+de consumir; `tk_class` pula a declaração já materializada), `teko_iface.mc` (idem), `teko_fwd.mc`
+(materialização, pilha de ciclo, pulo). Assinaturas: `i64 tk_fwd_materialize(i64 fi); void
+tk_fwd_replay(uptr text, i64 len, uptr frame); i64 tk_fwd_skip_decl(i64 fi); i64 tk_fwd_in_flight(uptr
+qname);`
+Fixture: `ngen/tests/order_bases.tk` (`expect-exit: 42`) — `class Dog : Animal` ACIMA de `class
+Animal` (campo da base, `override` de método virtual, `base.m()`), `class Sq : IShape` acima de
+`interface IShape`, cadeia de três níveis fora de ordem, `rt_live()` de volta ao piso.
+Gate: 41/41; AST das 40 anteriores byte-idêntica; `limits ok`. Probes: ciclo `A : B`/`B : A`; base
+qualificada declarada abaixo (recusa de hoje); base de outro namespace (recusa de hoje).
+
+**I1 — herança de interface.** Arquivos: `teko_iface.mc` (`: I1, I2` na declaração; membro pelo fecho;
+`tk_iface_conf_close`), `teko_class.mc` (conformidade e tabelas pelo fecho), `teko_typeof.mc`
+(`tk_ifmeth_by_name` enxerga as bases). Assinaturas: `void tk_iface_conf(i64 si, i64 proj); i64
+tk_iface_nbase(i64 si); i64 tk_iface_base_at(i64 si, i64 k); void tk_iface_conf_close(i64 ci, i64 fi);
+i64 tk_ifmeth_find_deep(i64 si, uptr m, uptr pdecl);`
+Fixture: `ngen/tests/surface_iface_inherit.tk` (`expect-exit: 42`) — `interface I2 : I1`, classe
+implementando só `I2` e respondendo aos dois; `I1 x = <valor I2>` chamando o método de `I1`; corpo
+default herdado de `I1`; diamante `I3 : I1, I2` com `m()` repetido e uma implementação só.
+Gate: 42/42; AST das anteriores byte-idêntica; `limits ok`. Probes: base de interface que é
+classe/struct/trait (recusa); ciclo `I1 : I2`/`I2 : I1`; classe que não implementa o método herdado.
+
+**G1 — `T[]` GLOBAL.** Arquivos: `teko_array.mc` (tabela `hg_*` dentro do mesmo `tk_array_pass`),
+`teko_heaparr.mc` (endereço/carga/armazenamento reusados), `teko_typeof.mc` (o oráculo responde o tipo
+de um global **só** quando é linha `TK_KARRAY`), `teko_params.mc` (`tk_bracket` já deixa o `N_INDEX`/o
+placeholder — zero linha nova). Assinaturas: `void tk_hg_collect(); i64 tk_hg_find(uptr name); void
+tk_hg_rewrite_index(i64 n); i64 tk_ty_global_ha(uptr name);`
+Fixture: `ngen/tests/surface_array_global.tk` (`expect-exit: 42`) — `i64[] g;` no topo, `g = new
+i64[n];` com `n` de runtime, `g[i]`/`g[i] = e`/`+=`/`++`, `g.Length` em `while` e em `for`,
+`u8[]`/`i32[]` provando largura e sinal, `Circle[] cs` global (raiz: `rt_live()` acima do piso, DITO na
+fixture) e um `T[]` global em `namespace`.
+Gate: 43/43; AST das anteriores byte-idêntica; `limits ok`. Probes: `g.Length = 3` (só-leitura);
+índice além do fim (guard de runtime do K3, exit 70); `foreach` sobre `T[]` global (recusa clara).
+
+### (d) Fora do escopo, e o pedido ao mc
+
+**Nenhum pedido BLOQUEIA este bloco** (decisão 1). Um pedido OPCIONAL, de conveniência:
+
+> **Pedido (ngen → mc, não bloqueante): `on_source(&fn)`, avisar o módulo de toda fonte empurrada.**
+> Handler `void f(uptr name, uptr src, i64 len)`, chamado de `lex_push_mem` logo depois de `cp`/`cend`
+> mudarem. Hoje o ngen varre a entrada em `user_init` e o arquivo de um `import` dentro do próprio
+> handler (que chama `lex_include`), mas um `#include "x.tk"` do NÚCLEO nunca é visto — a varredura que
+> dá ordem livre de declaração fica cega para os tipos daquele arquivo. Com o hook, a mesma varredura
+> cobre toda fonte: incluída, embutida (`<bundle>`) ou empurrada.
+
+**Dívidas declaradas** (nada escondido): `#include "x.tk"` cru não varrido (use `import`); base ou
+interface QUALIFICADA (`geo.B`) declarada abaixo, e base em OUTRO namespace (decisão 12); lambda na
+grafia contextual contra um `delegate` declarado abaixo (use `new Op(...)`); `foreach` sobre `T[]`
+global e sobre um forward (a fonte do `foreach` resolve no parse); `b.x += 1` sobre receptor deferido
+(herdada); tipo aninhado segue não ensinado (D220); `T[]` global nunca liberado (decisão 16);
+`params T[]`, `T[][]`, `ref`/`out T[]` (herdadas do §41); covariância de interface e `I1 x = <valor
+I2>` em posição de ARGUMENTO sobrecarregado (a sobrecarga não conhece o fecho de interfaces).
+
+### (e) Riscos
+
+1. **A régua é a ordem das linhas `sr_*`, porque o índice é EMITIDO** (`tk_int(si)` em `tk_itab_emit`,
+   teko_iface.mc:242). A decisão 2 existe por isso: linha materializada tarde = ordem idêntica à de
+   hoje para programa já em ordem = AST byte-idêntica. Um crumb que criar linha na varredura deixa o
+   gate VERMELHO nas fixtures com interface — e é o sinal certo.
+2. **Falso positivo do varredor reserva palavra** que o programa usava como identificador. Contido pela
+   decisão 3, pelo gate de AST e por `mc limits ngen` (palavra a mais = `grow`); o modo de falha é
+   mensagem do núcleo (`name reserved by a syntax/type_alias registration`), nunca miscompilação.
+3. **Ordem de `user_init`** (decisão 4): varrer depois do prelúdio de `teko_loop.mc` varre o PRELÚDIO.
+   É o primeiro item que o implementador confirma por probe (os 40 primeiros bytes vistos).
+4. **O token gasto pelo push (O3).** O contrato de `p_push_source` come exatamente um token; a
+   regeneração pelo lexema (decisão 11) o devolve. `T_EOF` não precisa (o lexer o reproduz ao esvaziar
+   o frame) e o token regenerado carrega o `p_file()`/`p_line()` do frame — desvio cosmético em UM
+   token. **Reentrância**: base de base fora de ordem recursa, e a pilha da decisão 14 dá terminação em
+   vez de estouro (o precedente medido do N1, §5.1 item 16).
+5. **Diagnóstico que migra de parse para pass** (O2): a posição TEM de viajar nas tabelas (`line`/
+   `file`, como `pd_line`/`gd_line` já fazem), senão a recusa aponta para o fim do arquivo.
+6. **`partial` + forward**: um uso pode materializar a linha antes da primeira parte, e `tk_class_reopen`
+   tem de adotar PFWD em vez de acusar "the type is declared without `partial`". **Genérico**: nome
+   seguido de `<` nunca é pré-registrado (decisão 3), senão colide com "the name is already a type".
+7. **Emissão em outra ordem** para o programa que USA a liberdade nova (a base materializada é emitida
+   no sítio que a pediu): correto para o linker, invisível para as 39 fixtures, e reconfirmado por
+   `--dump-ast` a cada crumb.
