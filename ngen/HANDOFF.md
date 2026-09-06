@@ -2521,6 +2521,48 @@ FLOAT. **Ampliação (verificador do K2w, 2026-09-06):** a causa é `tk_ldn`/`tk
 caminho próprio). O mc já expõe `ldf64`/`stf64`/`ldf32`/`stf32` (`lib/float.mc:424-427`), nunca usados no
 `ngen/`; conserto = ramo de float em `tk_ldn`/`tk_stn` antes do `type_width`. Higiene 4.
 
+**HIGIENE 4 item A LANDADO** (plano §74(a), 2026-09-06, base `55ec9ffe`): o acesso INDIRETO a
+`f32`/`f64` deixa de usar o par de load/store INTEIRO -- fecha a dívida que o verificador do K2w
+ampliou (`ref f64`, campo `f64`).
+- **`tk_ldn`/`tk_stn` (`teko_struct.tk`) perguntam o KIND antes da largura:** `type_kind(ty) ==
+  TK_FLOAT` -> `ldf32`/`ldf64`/`stf32`/`stf64`, os acessores que `<float>` já registra
+  (`lib/float.mc:424-427`, M24, zero intrínseco novo -- `mc limits` segue `intrin 8/16`). Largura
+  4/8 é a mesma de um inteiro, mas o valor mora no OUTRO banco de registradores (`v`/`x` sob
+  AAPCS64), então mover os bytes certos com o par inteiro é entregá-los no lugar errado. Um só
+  conserto cobre todos os sítios que chamam o par: apontado de `ref`/`out`, campo de classe e de
+  struct, elemento de array local/heap (`new f64[n]`)/inline, backing de propriedade, captura de
+  closure, campo `static`.
+- **`tk_ops_is_mem` (`teko_ops.tk`)** ganhou os quatro nomes: é a lista que diz "o 1º argumento
+  deste intrínseco é um ENDEREÇO", sem a qual a espinha `obj + OFF` de um campo `f64` seria lida
+  como operando de um `operator+` do tipo do objeto.
+- **A captura de closure passou a ser gravada pelo banco certo.** `tk_cap_put` recebe o valor num
+  parâmetro `i64` e um argumento float viaja no banco de float: a palavra gravada era LIXO. Isso não
+  aparecia porque a leitura (`ld64`) também estava errada e o valor lido vinha, por acidente, do
+  registrador de float que a própria lambda deixara para trás -- o "f64 atravessa bit a bit
+  (medido)" da higiene 3 era esse acidente, provado agora com um probe que SOBRESCREVE a variável
+  capturada depois de criar a closure (base: valor errado; tip: 42). `tk_cap_writer`
+  (`teko_deleg.tk`) escolhe por kind entre `tk_cap_put`/`tk_cap_own` e os novos
+  `tk_cap_putf`/`tk_cap_putf32` (`lib/rt.tk`, parâmetro DECLARADO `f64`/`f32`, gravando com
+  `stf64`/`stf32`).
+- **O cast de retorno estreito de delegate** (`tk_deleg_build`) era `type_width(ret) < 8`, outra
+  decisão por largura pura: sobre `f32` emitia uma CONVERSÃO numérica do resultado inteiro da
+  chamada. `tk_deleg_ret_narrow` espelha a regra do próprio núcleo (`walk_narrow`, só
+  `TK_INT`/`TK_SINT`; "float é do módulo").
+- **NÃO consertado, porque é do mc (pedido registrado, sem contorno):** `callp` é tipado `TY_I64`
+  pelo núcleo (`src/gen_resolve.mc:446`), logo `walk_ret_type()` numa chamada INDIRETA sempre diz
+  inteiro e o `fa_result` de `<float>` nunca move `d0` para o destino -- toda chamada indireta que
+  devolve float (delegate, virtual, interface: as três são `callp`) só acerta por coincidência de
+  registrador. Repro mínimo e o segundo pedido (as conversões `f32` de `fa_w` em arm64) no plano
+  §74(b). Enquanto isso, fixture e probes de `f32` COMPARAM contra literais `f32` em vez de castar
+  para `i64`.
+- Gate (host macOS/aarch64, `mc` 0.15.10): `rm -rf ngen/build`, build do zero; `--entry-only`
+  **45/45** (nenhuma fixture nova; `surface_refout.tk` ganha `floatcheck`, e contra o compilador da
+  base a MESMA fixture sai 131 = `130 + 1`); `mc limits ngen --config` `verdict ok`, `intrin 8/16` e
+  `passes 15/30`, os mesmos da base; `ngen/mc.toml` intocado. `--dump-ast` das 45, compilador+árvore
+  da base × tip: **3 byte-idênticas** (`hello`, `primitives_ptr`, `primitives_scalar` -- as que não
+  incluem `lib/rt.tk`) e **42 com o MESMO diff** (mesmo sha256 nos 42: as 26 linhas das duas
+  declarações novas de `lib/rt.tk`, nada mais), a mesma partição estrutural que a higiene 3 explicou.
+
 **S4.3 LANDADO** (plano §64(f)/§73, 2026-09-06, base `e50ab97b`, branch `feat/ngen-s43-ci`,
 dois commits): a escada do fixpoint virou a **SEXTA** perna do CI — job `fixpoint`, matriz
 própria de dois runners, `fixpoint (linux/x86_64)` e `fixpoint (macos/aarch64)`, rodando
@@ -2810,6 +2852,20 @@ Descrição no §3.1 acima; detalhe e medições no plano §73.
     DERIVADO do `ngen/mc.toml` não herda o que as pernas do CI carregam na matriz — o que a
     perna resolve com `target_tail` a escada tem de resolver por conta (`write_target_tail` no
     `bootstrap.sh`, e detectando o loader, porque quem executa o que constrói é esta máquina).
+
+31. **Um valor de PONTO FLUTUANTE não atravessa um parâmetro/slot declarado inteiro -- e o
+    acidente esconde isso.** O float mora no outro banco de registradores, então: (a) escolher
+    `ld64`/`st64` pela LARGURA move os oito bytes certos para o banco errado; (b) passar um `f64`
+    a um parâmetro `i64` (o `tk_cap_put` da captura de closure) não passa nada -- o callee lê um
+    registrador inteiro que ninguém escreveu; (c) casar uma "medida por largura" (`type_width(ret)
+    < 8`) sobre um `f32` produz uma CONVERSÃO numérica onde se queria uma leitura. E o pior: com
+    (a) e (b) errados AO MESMO TEMPO o programa acerta por coincidência, porque o valor lido vem do
+    registrador de float que a função chamada deixou para trás — foi assim que a higiene 3 mediu
+    "f64 atravessa bit a bit". **Probe que separa acerto de acidente: SOBRESCREVA a variável
+    (`a = 0.0;`) depois de capturá-la/gravá-la e leia só então**; e teste o valor DENTRO de uma
+    expressão maior (`1.0 + f(2.0)`), que muda a profundidade e portanto o registrador de destino.
+    Regra: para float, decida por `type_kind(ty) == TK_FLOAT` antes da largura, e DECLARE `f32`/
+    `f64` em todo parâmetro por onde o valor passa.
 
 
 ## 5.2 Canal com a sessão do mc

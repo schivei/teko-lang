@@ -4509,3 +4509,83 @@ um golden versionado pinaria.
    já faz — mas é obra, não configuração.
 4. **linux/aarch64 sem escada.** O par tem perna (`ubuntu-24.04-arm`) e o `bootstrap.sh` já
    conhece o loader dele; ficou de fora só para o job novo custar dois runners, não quatro.
+
+## 74. Higiene 4 — acesso indireto a float, e o não-determinismo do `teko1.o` (2026-09-06)
+
+Dois itens sem relação entre si, um commit cada. O (a) fecha a dívida que o verificador do K2w
+ampliou (`ref f64` devolve valor errado); o (b) caça o não-determinismo que o verificador do S4.3
+registrou (`teko1.o` diferente entre corridas), pré-requisito de qualquer golden pinado.
+
+### (a) Item A — o par de load/store escolhe pela LARGURA, e float mora no outro banco
+
+`tk_ldn`/`tk_stn` (`ngen/teko_struct.tk`) mapeavam só pela largura -- 1/2/4/8 -> `ld8..ld64`/
+`st8..st64`. Um `f32`/`f64` tem largura 4/8 como um inteiro qualquer, mas vive no OUTRO banco de
+registradores (`v0..v7`/`x0..x7` sob AAPCS64; `xmm`/`gpr` no x86_64): mover os oito bytes certos
+para o lugar errado é o mesmo que não movê-los. Todo acesso INDIRETO a float passava por esse par
+-- apontado de `ref`/`out`, campo de classe/struct, elemento de array (local, global de classe,
+heap `new f64[n]`), backing de propriedade, captura de closure. `<float>` (M24) já registra
+`ldf32`/`ldf64`/`stf32`/`stf64` (`lib/float.mc:424-427`) e o `ngen` nunca os havia usado.
+
+**Correção:** as duas funções perguntam `type_kind(ty) == TK_FLOAT` ANTES da largura e devolvem o
+acessor do banco certo (4 -> `ldf32`/`stf32`, 8 -> `ldf64`/`stf64`); nenhuma outra largura de float
+existe na superfície, então o resto cai no caminho inteiro de sempre. Isso conserta, de uma vez, os
+sete sítios que chamam o par (`teko_access`/`teko_array`/`teko_deleg`/`teko_expr`/`teko_heaparr`/
+`teko_prop`/`teko_struct`/`teko_this`/`teko_typeof`).
+
+Três consertos que a mesma mudança exigiu, todos achados por probe:
+
+1. **`tk_ops_is_mem` (`ngen/teko_ops.tk`)** lista os intrínsecos de memória cujo 1º argumento é um
+   ENDEREÇO -- é o que impede a espinha `obj + OFF` de ser lida como operando de um `operator+` do
+   tipo do objeto. Os quatro acessores de `<float>` entraram na lista pelo mesmo motivo.
+2. **A escrita da CAPTURA de closure** (`tk_cap_put`, `lib/rt.tk`) recebe o valor num parâmetro
+   `i64`: um argumento float viaja no banco de float e um parâmetro inteiro NUNCA o recebe -- a
+   palavra gravada era lixo. Antes da higiene 4 isso não aparecia porque a leitura (`ld64`) também
+   estava errada e o valor lido vinha, por acidente, do registrador de float que a lambda tinha
+   deixado para trás. Agora o escritor é escolhido pelo kind (`tk_cap_writer`, `teko_deleg.tk`):
+   `tk_cap_putf`/`tk_cap_putf32` (novos em `lib/rt.tk`, `f64`/`f32` DECLARADOS) gravam com
+   `stf64`/`stf32`, o par exato que o prólogo lê.
+3. **O cast de retorno estreito de delegate** (`tk_deleg_build`) era `type_width(ret) < 8` -- outra
+   decisão por largura pura. Sobre um `f32` ele emitia `(f32) callp(...)`, isto é, uma CONVERSÃO
+   numérica do resultado INTEIRO da chamada. A regra do próprio núcleo (`walk_narrow`,
+   mc `src/gen_walk.mc`) conta só `TK_INT`/`TK_SINT` mais estreito que uma palavra -- float é do
+   módulo. `tk_deleg_ret_narrow` passa a espelhá-la.
+
+**Probes (fora de `ngen/tests/`), base -> tip:** `ref f64` (`1.5` intacto -> `2.5`); `out f64`
+(0 -> 26); campo `f64` de classe (0 -> 25); array local `f64` (0 -> 25); `f32` por `ref`/`out`/campo/
+array (1 -> 42); struct, propriedade auto, campo herdado, `new f64[3]`, `foreach` sobre `f64[]`,
+campo `static f64`, campo array inline `f64[3]`, ternário de braços `f64` (2 -> 42); captura `f64` e
+`f32` em lambda com o valor SOBRESCRITO depois da criação (1 -> 42), que é a prova de que a captura
+é cópia congelada e não leitura do registrador que sobrou.
+
+**Fixture:** `surface_refout.tk` ganha `floatcheck` (`ref f64`, `out f64`, campo `f64` lido+escrito,
+`ref f64` como parâmetro de MÉTODO), `expect-exit: 42` inalterado. Contra o compilador da base a
+mesma fixture sai **131** (`130 + 1`, o `ref f64`); contra o tip, 42.
+
+### (b) O que o item A NÃO conserta — dois pedidos ao mc, sem contorno
+
+1. **`callp` é tipado `TY_I64` pelo núcleo** (`src/gen_resolve.mc:446`), então `walk_ret_type()` numa
+   chamada INDIRETA sempre responde inteiro e o `fa_result` de `<float>`
+   (`lib/machine_arm64_float.mc:492` e o gêmeo x86_64) nunca move `d0`/`xmm0` para o registrador de
+   destino. Toda chamada indireta que devolve float (delegate, método virtual, método de interface --
+   as três usam `callp`) entrega o valor SÓ por coincidência, quando o registrador de destino é o
+   mesmo que o callee deixou escrito. Repro mínimo, sem nada do `ngen`:
+
+   ```
+   f64 dbl(f64 x) { return x * 2.0; }
+   i64 main() {
+       uptr p = &dbl;
+       f64 direct = callp(p, 2.0);        // 4.0 -- por coincidência (profundidade 0)
+       f64 nested = 1.0 + callp(p, 2.0);  // 3.0 em vez de 5.0
+       return (i64) nested;
+   }
+   ```
+
+   **Pedido:** uma forma de a chamada indireta declarar o tipo de retorno -- `callp` honrando o tipo
+   que o módulo põe no nó, ou uma grafia tipada. Sem isso não há conserto do lado da teko: o valor
+   está em `d0` e nenhuma expressão da superfície o alcança.
+2. **`fa_w` (`lib/machine_arm64_float.mc:193`) não mapeia as CONVERSÕES para a variante single.**
+   `FI_SCVTF_S`/`FI_UCVTF_S`/`FI_FCVTZS_S`/`FI_FCVTZU_S` (132/133/136/137) existem e nunca são
+   escolhidos, então em arm64 `(i64) <expr f32>` emite `fcvtzs x, d` (lê o valor como double) e
+   `(f32) <expr i64>` emite `scvtf d, x`. Repro: `i64 main() { f32 y = 2.5f; return (i64) (y * 10.0f); }`
+   -- 0 em arm64; o machine x86_64 de `<float>` está correto (`cvttss2si`). O `ngen` não contorna:
+   as fixtures/probes de `f32` comparam contra literais `f32` em vez de castar.
