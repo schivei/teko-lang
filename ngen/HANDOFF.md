@@ -1826,6 +1826,54 @@ parâmetro OU global) e sobre um forward; `b.x += 1` sobre receptor deferido; ti
 de nome (este crumb); `params T[]`, `T[][]`, `ref`/`out T[]`; covariância de interface e `I1 x =
 <valor I2>` em posição de ARGUMENTO sobrecarregado.
 
+**DI1 LANDADO** (D229, plano §58; 44 fixtures): os três marcadores de lifetime
+(`IServiceSingleton`/`IServiceScoped`/`IServiceTransient`), o registro em comptime e `inject T` de
+um singleton sem dependência.
+- **`ngen/teko_di.mc` (novo).** Um marcador é um NOME que `tk_di_marker` reconhece onde a lista `:`
+  já lê um (`tk_conf_name`, teko_class.mc:1159; `tk_iface_base_name`, teko_iface.mc) -- ANTES de
+  qualquer busca na tabela de tipos, então um programa sem os três nomes nunca cria uma linha, um
+  global ou um símbolo por causa deste arquivo (§58 (h) risco 1: o laço de `tk_di_pass` sobre uma
+  tabela vazia é o mesmo no-op que `tk_params_pass` já prova para um programa sem `params`).
+  `tk_conf_apply` (teko_class.mc:1417) consome o scratch e registra (classe, lifetime); as CHAVES
+  são a própria classe mais o fecho de interfaces que ela já implementa (`ci_if_at`/`tk_nimpl`,
+  §50 I1). `interface IServiceSingleton { }` do usuário é recusado em `tk_newname`
+  (`teko_struct.mc`), e o marcador numa lista `:` de INTERFACE é recusado em `tk_iface_base_name`.
+- **`inject T`** (`syntax_expr`, lido como `new`): sempre DEFERE com um placeholder
+  (`tk_unresolved_inject`, o idioma de `tk_unresolved_new`), resolvido em `tk_di_pass` -- entre
+  `tk_fwd_pass` e `tk_array_pass`, depois que `tk_partial_pass` já fechou toda classe parcial e
+  todo serviço da unidade já está registrado, qualquer que seja a ordem em que o fonte os nomeou.
+  Um Singleton (e, nesta fatia, um Scoped-de-raiz -- decisão 10) ganha um slot global + um getter
+  memoizado (`<cls>_di_get`, emitido na primeira necessidade); o construtor é o de zero argumentos
+  necessários (`tk_new_pick`, o mesmo de `new Nome` sem argumento), com uma recusa própria quando a
+  classe só declara construtores que pedem algo esta fatia não sabe suprir (`teko: no constructor
+  of this service takes only services` -- a dependência real é DI2).
+- **RC: zero regra nova** (decisão 13) -- o getter devolve `uptr` (o RC nunca o toca) e o SÍTIO
+  (`IClock a = inject IClock;`) recebe `xt_pure = 1` só depois que o passe resolve o lifetime, então
+  `tk_rc_var` incrementa via `rt_own` como qualquer valor emprestado; o objeto do singleton nunca é
+  liberado (a 1ª referência, a da própria alocação, nunca é decrementada -- `rt_live()` prova o piso).
+- **Fixture** `ngen/tests/surface_di.tk`: `Clock : IClock, IServiceSingleton`, duas injeções (uma
+  pela interface, outra pela classe concreta) provando a MESMA instância (`tick()` chega a 2),
+  `rt_live() == 1` no fim (o singleton, nunca liberado). Probes (fora de `tests/`, descartados):
+  marcador numa `interface`; dois marcadores na mesma classe; `abstract class : IServiceScoped`;
+  `interface IServiceSingleton { }` do usuário; `inject` de tipo sem registro; duas implementações
+  da mesma chave; construtor que só aceita um argumento não-serviço -- as cinco primeiras batem as
+  mensagens exatas do plano, as duas últimas (fora da lista do crumb) confirmam a máquina de qualquer
+  forma.
+- Gate: `rm -rf ngen/build`, build do zero; `--entry-only` **44/44**; `--dump-ast` das **43
+  anteriores byte-idêntico** ao compilador da base `b95d14ec` (`same=43 diff=0`); `mc limits ngen`
+  `verdict ok`, `passes` 14->15 (`tk_di_pass`), `intrin` sem crescimento (8->8). A tabela `syntax`
+  do relatório fica em 14 nos dois lados -- ela é o MÁXIMO entre `syntax()`/`syntax_stmt()`/
+  `syntax_expr()` (as três chamam `grow(T_SYNTAX, ...)`, mc's `hooks.mc`), e `syntax()` (14, os
+  honest-stops de topo) já domina `syntax_expr()` (8->9 com `inject`); a leitura correta do gate é
+  "verdict ok", não o número aparecer.
+
+**Fila DI2->DI4** (plano §58 (f)): DI2 -- injeção por CONSTRUTOR com dependência (o grafo,
+`tk_di_ctor_pick`, ciclo `A -> B -> A`); DI3 -- `syntax_stmt("scope")`, Scoped e Transient com seu
+próprio ciclo de vida; DI4 -- namespaces como chave, interface-base como chave, o Singleton que
+recebe um Scoped (decisão 11, o escopo PRÓPRIO do singleton). Fora do escopo do port por ora
+(dívida declarada, plano §58 (g)): genérico como chave, `inject T.m()` direto, `delegate`/`struct`
+como serviço, `IDisposable`, factory/decoração de registro.
+
 ## 5.1 Armadilhas já pagas (não repita)
 
 1. **`mc --exe` emite Mach-O SEMPRE.** `minicompiler/mc` `src/main.mc:227` faz

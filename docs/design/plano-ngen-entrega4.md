@@ -3183,3 +3183,25 @@ explícita e serviço com chave (`[FromKeyedServices]`); `inject` em inicializad
    `<cls>_vt`/`<cls>_new` e correm o mesmo risco (função livre com o nome exato) — recusa clara do
    núcleo, régua `mc limits ngen`; `TK_MAXSVC`/`TK_MAXSITE`/`TK_MAXSCOPE`/`TK_MAXSDEP` seguem o idioma
    do módulo, cada estouro com mensagem própria.
+
+## 59. Errata — DI1 landado (2026-09-06)
+
+1. **A régua "`syntax` +1" do risco (h)1/crumb DI1 não aparece como número visível — o gate real é
+   `verdict ok`.** `mc` conta `syntax()`, `syntax_stmt()` e `syntax_expr()` na MESMA coluna do
+   relatório (as três chamam `grow(T_SYNTAX, ...)`, `hooks.mc`), que publica o MÁXIMO das três, não
+   a soma. `syntax()` (14, os honest-stops de topo) já domina `syntax_expr()` (8→9 com `inject`), e o
+   número reportado fica em 14 dos dois lados — nada quebrou, só a métrica é o teto e não a soma. A
+   régua do gate segue sendo `verdict ok` mais a checagem individual das tabelas que de fato
+   crescem (`passes` 14→15, `intrin` 8→8).
+2. **`teko_di.mc` entra DEPOIS de `teko_class.mc`** (não antes, nem junto de `teko_iface.mc`): a
+   máquina de resolução (`tk_di_new_call`/`tk_di_find_impl`) precisa de `tk_ctor_named`/
+   `tk_ctor_pick`/`tk_new_pick` (teko_class.mc) e de `ci_if_at`/`tk_nimpl` (teko_iface.mc) já
+   inteiros, enquanto os TRÊS chamadores que precisam de `tk_di_marker` mais cedo
+   (`teko_struct.mc`'s `tk_newname`, `teko_iface.mc`'s `tk_iface_base_name`, `teko_class.mc`'s
+   `tk_conf_name`/`tk_conf_apply`) recebem um forward-declare de três linhas cada, o mesmo idioma
+   que `teko_iface.mc` já usa para `tk_fwd_materialize`/`tk_check_type_use_from`/`tk_trait_find`
+   (§50 I1). Não há necessidade de mover `teko_di.mc` para mais cedo na cadeia de `#include`.
+3. **`tk_struct_find_fwd` (teko_struct.mc, "identity-only site") é o lookup certo para `inject`,
+   não `tk_struct_find` + `tk_fwd_row` manual.** O crumb já pede TK_PFWD aceito (decisão 5); o par
+   pronto que a base já dava para field/param/return/local materializa o placeholder sozinho e
+   poupa uma reimplementação.
