@@ -3798,3 +3798,61 @@ só é legítimo quando a palavra (i) é de fato proibida na superfície teko E
 (ii) não aparece nos fontes do núcleo — a lista de hoje não tem um único
 candidato que passe as duas. Lista vazia é um resultado válido, registrado
 aqui e em `ngen/README.md`; nenhum código muda.
+
+## 67. Errata do §64 — S3 landado; o pacote `teko` (2026-09-06)
+
+**S3 landado** (`ngen/teko.mc`, `ngen/user.mc` novo, `ngen/mc.toml` — D64.7): `teko.mc` para de
+definir `user_init` e exporta `void teko_init()`, mesmo corpo; `ngen/user.mc`, do PROJETO e não do
+pacote, é `void user_init() { teko_init(); }`; `ngen/mc.toml`'s `[compiler].modules` ganha
+`"user.mc"` no fim. `[package]` novo:
+
+```toml
+[package]
+name   = "teko"
+lib    = "lib/rt.mc"
+module = "teko.mc"
+files  = [ "lib/rt.mc", "teko.mc", "teko_access.mc", … os 30 irmãos … ]
+check  = ["teko.mc", "lib/rt.mc"]
+```
+
+Achado durante a implementação, fora do que o §64(d) previu: se `core_teko.mc` (o `main()` deste
+repositório) pertence a `[package].files` ficou em aberto ali ("decida pelo packages.md e
+registre"). O precedente `tests/pkg/src/teach-1.0.0` do mc resolve: um pacote "módulo de
+compilador" mínimo tem `files = ["mc_teach.mc"]`, `module = "mc_teach.mc"` — o arquivo que
+registra os hooks e exporta `<nome>_init()` — e NUNCA lista o `user.mc`/driver que o consome (esse
+é do lado do CONSUMIDOR, não do pacote). `ngen/core_teko.mc` está para `ngen/teko.mc` exatamente
+como o `user.mc` de qualquer consumidor do pacote `teach` está para `mc_teach.mc`: monta o
+compilador (host layer via `[compiler].core`, as quatro partes do D64.1, `main()`), não é
+conteúdo do pacote. `[package].files` fica só com os 30 `teko_*.mc` + `teko.mc` + `lib/rt.mc`;
+`core_teko.mc` e `user.mc` ficam de fora.
+
+`check = ["teko.mc", "lib/rt.mc"]` segue §64(d): o pacote é "ambos" (duas respostas, `lib` e
+`module`, não uma só), e sem `check` a validação do registro cairia só em `lib` (packages.md §3:
+"com no `check` key the unit is `lib`"). As duas entradas já estão em `files`, como a regra exige.
+
+Prova (host macOS/aarch64, `mc` 0.15.5, config derivado por `sed` como o CI faz): build do zero,
+**45/45** fixtures via `teko build ngen --config … --entry-only`; `--dump-ast` das 45 contra o
+compilador da base `faac4d56` — **`same=45 diff=0`**; `mc limits ngen` (o binário de RELEASE, a
+régua de S1/S2) `verdict ok`; `teko limits ngen/tests/hello.tk` inalterado (exit 3, "grew"); `mc
+pkg hash ngen` estável entre dois runs —
+`0f85d3fbbced52f69716fd36366c9209cea99a706121de3962061e1a8435fce4` — e idêntico via `mc pkg hash .`
+de dentro de `ngen/` (confirma o fix do mc 0.15.4 para `dep_under` com `dir == "."`).
+
+Achado adicional: `ngen/build/teko limits ngen` (o binário TAUGHT, não o de release, sobre um
+DIRETÓRIO) recompila `build/teko.mc` consigo mesmo e bate em `mc/objmodel:293: name expected` —
+exatamente a colisão de palavra `type` do §64(e)/S4.0, medida ali contra o mc estoque. Não é uma
+regressão de S3: a medição de `mc limits ngen` sempre foi feita com o `mc` de release (S1/S2), e
+`teko limits DIR` nunca foi o caminho certo para essa régua — só `teko limits FILE.tk` (S2's
+próprio critério de aceite) o é. Registrado aqui para não ser repetido como falso alarme.
+
+`.github/workflows/ngen.yml` não muda: conferido que o `awk`/`sed` que corta `[linker]` e
+reescreve `[target]`/`entry`/`out` (linhas 333-340) não toca `[package]` — a seção não tem `out`
+nem `[linker]`, atravessa inteira e inerte, o mesmo comportamento que `[compiler]` já demonstrou
+em S1.
+
+Publicação (GitHub Release na tag, tree hash, PR em `minicompiler/mc-registry`) fica de fora — o
+registro do mc ainda não abriu para pacotes de terceiros (NOTICES-teko.md, 2026-09-06: só
+`minicompiler/mc` está registrado, e mesmo essa entrada saiu vermelha de propósito até o S5b do
+servidor). `mc pkg check` não roda localmente pela mesma razão (lê `index/<nome>.toml` de um
+registro, não uma árvore local); `mc pkg verify ngen` roda offline e devolve "verified 0 packages
+against mc.lock" (sem `[deps]`, exit 0).
