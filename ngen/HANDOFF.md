@@ -1371,6 +1371,82 @@ Fixture: `surface_lambda.tk` ganha `clean_f_returns_check` (item 14, item 1) e `
 `verdict ok`, zero linha `grew`. Detalhe completo, incluindo as sete variações do item 2 e as
 probes de runtime do item 3, em `docs/design/plano-ngen-entrega4.md` §48.
 
+**K5 LANDADO — série §41 fechada** (entrega 5, D221/§41 decisão 23, 2026-09-05): `foreach (T x in
+xs)`, açúcar sobre a MESMA máquina do `for` (`teko_loop.mc`), sobre as três fontes com `Length`
+conhecido: `T[]` de heap (K3), array fixo local e campo-array inline (ambas de `teko_array.mc`/
+`teko_struct.mc`). `in` é lido como o identificador contextual que é (`tk_kw`, teko_class.mc) —
+nunca registrado como palavra.
+
+**Desvio medido do §41(b) (a "Assinatura nova" do plano previa um `tk_fe_source(pkind, plen,
+pety)`; saiu com uma assinatura maior, pelo motivo abaixo — não é frouxidão, é o que o `p.items`
+sem colchete exige).** A fonte NÃO é lida por `parse_expr(0)` genérico: um campo-array inline sem
+`[`/`=` logo depois (`foreach (i64 v in this.items)`, exatamente a forma que o crumb pede) é
+recusado por `tk_array_of` (teko_struct.mc) com "an array field is read one element at a time" —
+a MESMA guarda que pega um `p.items;` solto em qualquer outro lugar do programa. `tk_fe_source`
+(`teko_loop.mc`) é por isso um parser PEQUENO e dedicado: lê um nome bare OU `name.member` (`this`
+incluso, pela mesma tabela `tk_local_find` que já registra `this` — teko_class.mc, D219) e resolve
+pela MESMA cedo-no-parse que `[`/`.` já usam para cada uma das três formas (`tk_arr_find`/
+`tk_hp_find`/`tk_local_find`+`tk_field_find`) — nunca um `parser cannot type -> defer` que as três
+já evitam. Saiu com CINCO saídas (`pkind`, `pety`, `pnel`, `psrc`, `poff`) em vez de três: um
+campo-array precisa do nome do RECEPTOR (`psrc`) e do OFFSET do campo (`poff`) para que o
+endereço possa ser reconstruído FRESCO em cada um dos dois lugares que o usam (o bound e a carga
+por elemento) sem violar "um nó vive em uma lista de irmãos só" — a mesma razão pela qual
+`tk_ha_len` já recebe um NOME em vez de um nó.
+
+**Achado que o build local precisou confirmar antes de reusar `tk_loop_rewrite_stmt` (registrado
+como armadilha nova, §5.1 item 19): `break;` puro já nasce `nd_val = 1` no núcleo, não 0** — só
+por isso a mesma função que `for`/`do` já usam, chamada exatamente do mesmo jeito
+(`tk_loop_rewrite_stmt(stmt, 0)` sobre o corpo do usuário, ANTES de embrulhar no `loop` de uma
+volta), soma corretamente os dois níveis extras que CADA `foreach` introduz (o `once` de uma volta
+e o `loop` externo do bound) em qualquer profundidade de aninhamento — verificado ponta-a-ponta com
+`break 2` escapando de dois `foreach` aninhados (`nestedcheck`, abaixo) sem UMA linha de lógica de
+"foreach" na própria `tk_loop_rewrite_stmt`.
+
+**Tipo do elemento — alarga, nunca estreita.** `i64 x in u8[]` (ou qualquer largura menor)
+alarga implícito (`tk_cast`, o mesmo idioma de `teko_array.mc`); mesma largura com base diferente,
+ou o inverso (estreitando), é recusado (`teko: the foreach variable's type does not fit the array
+element`) — D131/D132 aplicado ao único lugar deste crumb que precisa decidir.
+
+Fixture: `surface_foreach.tk` (`expect-exit: 42`) — `T[]` de heap com `break`/`continue`
+(`heapcheck`), array fixo local (`localcheck`), dois `foreach` aninhados com `break 2`
+(`nestedcheck`), `Circle2[]` com `rt_live()` provando que a variável de iteração só EMPRESTA (o
+array segue dono; `circle_dtors2` fica em 0 durante o laço, os três destrutores só disparam em
+`cs = null;`, e `rt_live()` volta ao piso nas duas pontas), `foreach` dentro de método sobre
+`this.xs` (`T[]` campo) e `this.items` (campo-array inline) — `methodcheck` —, e o alargamento
+implícito (`widencheck`).
+
+Gate: `--entry-only` **39/39** (as 38 anteriores + a nova); `--dump-ast` das 38 anteriores
+**byte-idêntico** ao compilador da base `5b21e790` (`same=38 diff=0`); `mc limits ngen`
+`verdict ok`, `intrin` 8/16 em ambos os lados (zero intrínseco novo), `passes` 13/13 (zero pass
+nova) — tudo por sintaxe pura em `teko_loop.mc`. Probes (fora de `tests/`, descartadas depois de
+rodar): `foreach` sobre um escalar (`teko: not a known array`); `in` faltando (`teko: expected in
+after the foreach variable`); `var x in xs` (recusado pelo próprio núcleo, `type expected` — D218
+confirmado sem mensagem dedicada); tipo estreito (`u8 x in i64[]`, a mensagem dedicada acima);
+`x = 99;` no corpo — **NÃO recusado** (compila e roda seguro, só não é o `readonly` do C# — registrado
+como dívida abaixo, "se barato" do crumb não se aplicou: não há tabela de nomes somente-leitura
+para locais nesta base).
+
+**Dívidas — consolidado da série §41 inteira (K1-K5), nada escondido:** `lambda` aninhada +
+localização de erro errada (não investigada nesta série); `return (…) => e;`/`return x => e;` (o
+`return` é palavra do núcleo, sem hook — usa-se `return new Op(...)`); `T[]` como GLOBAL (o tipo é
+aceito em toda posição, leitura/escrita/`.Length` sobre a global não); `params T[]` (embalar o
+pacote variádico num `T[]` de heap); `ref`/`out T[]` (o valor de um `ref`/`out` é o ENDEREÇO do
+slot do caller, não o objeto — `tk_hp_add` só registra a forma PLANA); `T[][]`/multidimensional;
+`&`-captura de um tipo CONTADO (a exceção que `teko_rc.mc` dá a um parâmetro `ref` contado não foi
+generalizada para uma captura); atribuição-por-CAMINHO para `out` (só a forma barata "nunca
+atribuído" é checada); `f(out i64 a)` inline (declaração C# do parâmetro no próprio sítio de
+chamada); `Func<>`/`Action<>` (prelúdio de delegates genéricos sobre a máquina de `delegate`
+nomeado); `+=`/`-=` de delegate (multicast, exige lista de invocação); `x = 99;` dentro de um
+`foreach` não é recusado (K5, acima); `p.items`/`p.xs` como fonte de `foreach` sobre um PARÂMETRO
+(só um LOCAL ou `this` resolve — a mesma dívida "sem `this.` explícito" herdada do K3/D219);
+captura de um PARÂMETRO da função declarante (K4); grafia CONTEXTUAL/curta de lambda como argumento
+de função LIVRE ou método SOBRECARREGADO (a forma explícita `new Op(...)` já cobre as duas
+posições, na prática); `op.Invoke(x)`; covariância/contravariância de delegate; `delegate`
+genérico.
+
+Plano: `docs/design/plano-ngen-entrega4.md` §49 (fechamento da série, próxima onda). Sem PR, sem
+dreno — branch `feat/ngen-k5-foreach`, forward-only para `fix/retirement`.
+
 ## 5.1 Armadilhas já pagas (não repita)
 
 1. **`mc --exe` emite Mach-O SEMPRE.** `minicompiler/mc` `src/main.mc:227` faz
@@ -1498,6 +1574,15 @@ probes de runtime do item 3, em `docs/design/plano-ngen-entrega4.md` §48.
     por função, item 1). Regra: **quem chama `top_add` para uma declaração GERADA dentro de outra
     ainda em curso restaura `p_decl_name()` por ÚLTIMO, depois de TODO `top_add` que fizer** --
     não no meio.
+19. **`break;` puro (sem número) já nasce `nd_val = 1` no núcleo -- `continue;` puro nasce
+    `nd_val = 0`.** As duas palavras NÃO são simétricas. `tk_loop_rewrite_stmt` (`teko_loop.mc`)
+    só funciona porque, num `break` puro, `lvl(1) > depth(0)` já é verdadeiro no nível mais externo
+    do corpo (por isso um `break;` escrito dentro de um `for`/`foreach` escapa o wrapper de UMA
+    volta inteiro, não só ele) -- um `continue;` puro precisaria da MESMA sorte, mas `nd_val` vem
+    0, daí o `if (lvl == 0) lvl = 1;` explícito que só o ramo `N_CONTINUE` tem. Confirmado com o
+    build local (`for (;;) { infCount++; if (infCount == 4) break; }` de `surface_loops.tk` só
+    para no valor certo por causa disso) antes de escrever K5 -- reusar `tk_loop_rewrite_stmt` sem
+    entender essa assimetria teria parecido "óbvio" e estaria errado.
 
 ## 5.2 Canal com a sessão do mc
 

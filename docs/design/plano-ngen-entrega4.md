@@ -2371,3 +2371,66 @@ recusas de escape do K4b (ainda recusadas, mesma frase); reatribuição pra lamb
 tainted, limite mantido); as sete variações do item 2 acima; ternário direto, parentetizado, via
 `return`, via atribuição, e aninhado (item 3), todos corretos em RUNTIME (não só compilam -- o
 braço certo roda).
+
+## 49. K5 landado -- `foreach`, fecha a série §41 (2026-09-05)
+
+Decisão 23 do §41(a): `foreach (T x in xs)`, açúcar sobre a MESMA máquina de `tk_for` (o `loop` de
+uma volta + `tk_loop_rewrite_stmt`), sobre as três fontes com `Length` conhecido sem oráculo --
+`T[]` de heap (K3), array fixo local e campo-array inline (`teko_array.mc`/`teko_struct.mc`).
+Arquivo único: `ngen/teko_loop.mc` (ao lado de `tk_for`), mais uma linha de registro em `teko.mc`
+(`syntax_stmt("foreach", &tk_foreach)`).
+
+**Desvio 1, medido: a fonte não é lida por `parse_expr(0)`.** Um campo-array inline sem `[`/`=`
+logo depois (`this.items` como fonte, exatamente o que o crumb pede) é recusado por `tk_array_of`
+(teko_struct.mc, "an array field is read one element at a time") -- a mesma guarda que pega
+`p.items;` solto em qualquer parte do programa. `tk_fe_source` é por isso um parser PEQUENO e
+dedicado (não um `syntax_expr`/hook novo): lê um nome bare ou `name.member` (`this` incluso, pela
+mesma tabela `tk_local_find` que já registra `this`, D219) e resolve pela MESMA cedo-no-parse que
+`[`/`.` já usam para cada uma das três formas -- nunca cai no "parser não sabe tipar -> defere ao
+pass" que as três já evitam desde K3/K4.
+
+**Desvio 2, a assinatura ficou maior que o `tk_fe_source(pkind, plen, pety)` do §41(d).** Saiu
+`tk_fe_source(pkind, pety, pnel, psrc, poff)` -- um campo precisa do NOME do receptor (`psrc`) e do
+OFFSET do campo (`poff`) para que o endereço seja reconstruído FRESCO em cada um dos dois lugares
+que o usam (o bound do laço e a carga por elemento), nunca compartilhado -- a mesma razão pela qual
+`tk_ha_len` (K3) já recebe um NOME em vez de um nó pronto: "um nó vive em uma lista de irmãos só".
+
+**Achado que o build local teve que confirmar antes de reusar `tk_loop_rewrite_stmt` sem alteração
+nenhuma (não hipotético -- rodado): `break;` puro já nasce `nd_val = 1` no núcleo (`continue;` puro
+nasce 0).** Só por essa assimetria a MESMA chamada que `for`/`do` já fazem
+(`tk_loop_rewrite_stmt(stmt, 0)`, sem uma linha de "foreach" na própria função) soma corretamente
+os DOIS níveis extras que cada `foreach` introduz (o `once` de uma volta e o `loop` externo do
+bound) em qualquer profundidade -- verificado com `break 2` escapando de dois `foreach` aninhados.
+Registrado como armadilha nova, `ngen/HANDOFF.md` §5.1 item 19.
+
+**Tipo do elemento, D131/D132 aplicado:** alarga implícito quando `T` declarado é mais largo que o
+elemento (`tk_cast`, o idioma de `teko_array.mc`); mesma largura com base diferente, ou o inverso,
+é recusado (`teko: the foreach variable's type does not fit the array element`).
+
+Fixture: `surface_foreach.tk` (`expect-exit: 42`) -- `T[]` de heap com `break`/`continue`; array
+fixo local; dois `foreach` aninhados com `break 2`; `Circle2[]` com `rt_live()` provando que a
+variável de iteração só EMPRESTA (o array segue dono do elemento durante o laço, os destrutores só
+disparam em `cs = null;`, piso batido nas duas pontas); `foreach` em MÉTODO sobre `this.xs` (`T[]`
+campo) e `this.items` (campo-array inline); alargamento implícito (`u8[]` somado num `i64`).
+
+Gate: `--entry-only` **39/39**; `--dump-ast` das 38 anteriores **byte-idêntico** à base `5b21e790`
+(`same=38 diff=0`); `mc limits ngen` `verdict ok`, `intrin` 8/16 em ambos (zero intrínseco novo),
+`passes` 13/13 (zero pass nova, tudo por sintaxe pura em `teko_loop.mc`). Probes fora de `tests/`,
+descartadas: `foreach` sobre escalar; `in` faltando; `var x in xs` (recusado pelo núcleo, `type
+expected`); tipo estreito (`u8 x in i64[]`); `x = 99;` no corpo -- **não recusado** (roda seguro,
+só não é o `readonly` do C#, registrado como dívida, não como falha).
+
+**Dívidas -- consolidado da série §41 inteira (K1-K5), nada escondido:** lambda aninhada com
+localização de erro errada (não investigada); `return (…) => e;`/`return x => e;` (`return` é
+palavra do núcleo, sem hook); `T[]` como GLOBAL (tipo aceito, leitura/escrita/`.Length` não);
+`params T[]`; `ref`/`out T[]`; `T[][]`/multidimensional; `&`-captura de tipo CONTADO; atribuição-
+por-CAMINHO para `out`; `f(out i64 a)` inline; `Func<>`/`Action<>`; `+=`/`-=` de delegate
+(multicast); `x = 99;` num `foreach` não recusado (K5); `p.items`/`p.xs` como fonte de `foreach`
+sobre um PARÂMETRO (só LOCAL/`this` resolvem, dívida herdada de K3/D219); captura de um PARÂMETRO
+da função declarante; grafia contextual/curta de lambda como argumento de função LIVRE ou método
+SOBRECARREGADO; `op.Invoke(x)`; covariância/contravariância de delegate; `delegate` genérico.
+
+A série do §41 (closures, ponteiro de função, `ref`/`out`, `T[]` de heap, `foreach`) está FECHADA.
+Próxima onda: revisar a lista de dívidas acima com o dono para priorizar o que entra no plano
+seguinte (D214 segue mandando primitivas->tipos->superfície; a dívida de maior alavancagem
+aparente é `T[]` como GLOBAL, por destravar `params T[]` em seguida).
