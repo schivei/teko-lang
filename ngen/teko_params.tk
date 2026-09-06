@@ -81,12 +81,13 @@ uptr vi_name[TK_MAXVAI];              // the instances already generated
 i64  tk_nvai = 0;
 
 // the instance being specialised: its list parameter, the count that parameter
-// stands for, and the frame every refusal inside it is reported under. 0 in
-// tk_va_xs means the walk is outside any instance, where a `[` has no list to
-// index and `xs_len` is an ordinary name.
+// stands for, its declared return type, and the frame every refusal inside it
+// is reported under. 0 in tk_va_xs means the walk is outside any instance,
+// where a `[` has no list to index and `xs_len` is an ordinary name.
 uptr tk_va_xs = 0;
 uptr tk_va_lenname = 0;
 i64  tk_va_n = 0;
+i64  tk_va_ret = 0 - 1;
 uptr tk_va_frame = 0;
 
 // ---- table accessors (no raw ld64/st64 outside this section) ----
@@ -359,6 +360,7 @@ uptr tk_va_inst(i64 t, i64 v, uptr fl, i64 line) {
     uptr s_xs = tk_va_xs;
     uptr s_len = tk_va_lenname;
     i64 s_n = tk_va_n;
+    i64 s_ret = tk_va_ret;
     uptr s_frame = tk_va_frame;
     i64 s_line = tk_line;
     uptr s_file = tk_file;
@@ -369,11 +371,13 @@ uptr tk_va_inst(i64 t, i64 v, uptr fl, i64 line) {
     tk_va_xs = nd_name(p);
     tk_va_lenname = tk_va_len_name(tk_va_xs);
     tk_va_n = v;
+    tk_va_ret = nd_type(c);
     tk_va_frame = tk_gen_frame(mang, fl, line);
     tk_va_walk(nd_b(c));
     tk_va_xs = s_xs;
     tk_va_lenname = s_len;
     tk_va_n = s_n;
+    tk_va_ret = s_ret;
     tk_va_frame = s_frame;
     tk_line = s_line;
     tk_file = s_file;
@@ -446,6 +450,80 @@ i64 tk_va_pack(i64 tail, i64 v) {
     return pack;
 }
 
+// V0, item 1: a `params` list is a list of WORDS. `tk_va_put`/`tk_va_at`
+// (lib/rt.tk) write and read it through `i64` parameters, so a value that
+// travels in the float register file is neither stored nor given back by that
+// pair -- `f64 total(params xs)` called with `total(1.5, 2.5)` answers with
+// whatever the integer bank happened to hold, which is a wrong result nothing
+// reports. Until a list carries an element type (`params T[]`, the surface the
+// core has no `[` in parameter position for), the two ends are refused where
+// the type is VISIBLE, and stay silent where it is not.
+i64 tk_va_is_float(i64 ty) {
+    if (ty < 0) return 0;
+    return type_kind(ty) == TK_FLOAT;
+}
+
+// the type an argument shows the pass by itself: a literal carries its own
+// (`1.5` is an N_INT of type f64, lib/float.mc's fl_lit), a cast the type it
+// names, and anything else answers through the parse-time oracle
+// (teko_struct.tk's tk_pty_of -- a tagged node, a bare local, and since V0
+// item 3 a call whose callee is already declared). -1 is "not known here".
+i64 tk_va_arg_ty(i64 a) {
+    i64 k = nd_kind(a);
+    if (k == N_INT)  return nd_type(a);
+    if (k == N_CAST) return nd_type(a);
+    return tk_pty_of(a);
+}
+
+// the arguments that become the list -- the fixed ones keep their own declared
+// types and are not this check's
+void tk_va_check_float_args(i64 n, i64 tail) {
+    i64 a = tail;
+    loop {
+        if (a == 0) break;
+        if (tk_va_is_float(tk_va_arg_ty(a)))
+            err_at2(nd_file(n), nd_line(n),
+                    "teko: a `params` list holds words; a float argument is not taught yet", nd_name(n));
+        a = nd_next(a);
+    }
+}
+
+// 1 when `e` reads an element of the list this instance was made with, itself
+// or through arithmetic over it (`xs[i]`, `xs[0] + xs[1]`, `0 - xs[0]`). A read
+// that crosses a CALL is not one: the word goes in as the `i64` it is and what
+// comes back is the callee's own type.
+i64 tk_va_reads_list(i64 e) {
+    if (e == 0) return 0;
+    i64 k = nd_kind(e);
+    if (k == N_INDEX) {
+        i64 b = nd_a(e);
+        if (nd_kind(b) != N_IDENT) return 0;
+        return str_eq(nd_name(b), tk_va_xs);
+    }
+    if (k == N_BINARY) return tk_va_reads_list(nd_a(e)) || tk_va_reads_list(nd_b(e));
+    if (k == N_UNARY)  return tk_va_reads_list(nd_a(e));
+    return 0;
+}
+
+// the three destinations that spell a float over an element's word: a float
+// local's initializer, an assignment to one, and the `return` of an instance
+// whose declared return type is float. A float PARAMETER is not among them --
+// `tk_slv_find`'s table never sees one (higiene 3) -- and neither is a read
+// that a call carries, which is the limit this refusal documents rather than
+// guesses at, the same rule tk_check_field_store follows.
+void tk_va_check_float_read(i64 n) {
+    if (tk_va_xs == 0) return;
+    i64 k = nd_kind(n);
+    i64 ty = 0 - 1;
+    if (k == N_VAR)    ty = nd_type(n);
+    if (k == N_ASSIGN) ty = tk_slv_find(nd_name(n));
+    if (k == N_RETURN) ty = tk_va_ret;
+    if (!tk_va_is_float(ty)) return;
+    if (!tk_va_reads_list(nd_a(n))) return;
+    err_at(tk_va_frame, nd_line(n),
+           "teko: a `params` list holds words; its element does not read as a float");
+}
+
 // total(a, b, c) -> total__3(<packed block>). The fixed arguments stay where
 // they are; the tail is cut off the list and becomes the block's contents, and
 // the instance the count names is generated if this is the first site to ask
@@ -474,6 +552,7 @@ void tk_va_lower_call(i64 n) {
     }
     if (k + v > MAXPARAMS)
         err_at2(nd_file(n), nd_line(n), "teko: too many arguments for a `params` list (twelve, the fixed ones included)", nd_name(n));
+    tk_va_check_float_args(n, tail);
     uptr mang = tk_va_inst(t, v, nd_file(n), nd_line(n));
     if (prev) set_nd_next(prev, 0);
     if (!prev) args = 0;
@@ -495,7 +574,9 @@ void tk_va_check_addr(i64 n) {
 // ---- the walk ----
 // Children first, then the node: an argument that is itself a variadic call is
 // rewritten before the call that carries it packs it, and the index expression
-// of `xs[f(1, 2)]` is rewritten before the index is decided.
+// of `xs[f(1, 2)]` is rewritten before the index is decided. The float read of
+// V0 is the one check that runs BEFORE the children, because it reads the
+// `xs[i]` the walk is about to lower away.
 void tk_va_visit(i64 n) {
     i64 k = nd_kind(n);
     if (k == N_IDENT) { tk_va_lower_len(n); return; }
@@ -507,6 +588,7 @@ void tk_va_visit(i64 n) {
 void tk_va_walk(i64 n) {
     loop {
         if (n == 0) break;
+        tk_va_check_float_read(n);
         tk_va_walk(nd_a(n));
         tk_va_walk(nd_b(n));
         tk_va_walk(nd_c(n));
