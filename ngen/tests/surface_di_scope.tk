@@ -1,7 +1,7 @@
-// surface_di_scope.tk -- §58 DI3 (D229): `scope { }` opens a LEXICAL scope,
-// and inside it a Scoped service is one instance per scope, a Transient one
-// per injection, its own Scoped dependency resolved against the SAME scope
-// that asked for it.
+// surface_di_scope.tk -- §58 DI3/DI4 (D229): `scope { }` opens a LEXICAL
+// scope, and inside it a Scoped service is one instance per scope, a
+// Transient one per injection, its own Scoped dependency resolved against
+// the SAME scope that asked for it.
 //
 // What each block of `main` proves, in order:
 //
@@ -13,7 +13,9 @@
 //      own Scoped dependency is the scope's ONE shared instance;
 //   4. a `scope { }` nested inside another builds its OWN instance, freed at
 //      its own `}`, and the outer one is untouched by it;
-//   5. a `return` from inside a `scope { }` still releases what it opened.
+//   5. a `return` from inside a `scope { }` still releases what it opened;
+//   6. DI4: a namespaced Scoped, injected both qualified and bare (via
+//      `using`), is the SAME scope local either way.
 //
 // expect-exit: 42
 
@@ -38,6 +40,23 @@ class Job : IServiceTransient {
 
     public i64 use() { return this.a.hit(); }
 }
+
+namespace mon {
+    interface IProbe {
+        i64 read();
+    }
+
+    class Probe : IProbe, IServiceScoped {
+        i64 n;
+
+        public i64 read() {
+            n = n + 1;
+            return n;
+        }
+    }
+}
+
+using mon;
 
 // a `return` from inside a `scope { }`: the block never reaches its own `}`,
 // so whatever it opened has to be released on the way out instead
@@ -103,6 +122,15 @@ i64 main() {
     if (early_return() != 99) return 23;
     if (rt_live() != 0) return 24;
     if (dtors != 1) return 25;
+
+    scope {
+        mon.IProbe p1 = inject mon.IProbe;
+        IProbe p2 = inject IProbe;                 // bare, via `using mon;` -- the SAME scope local
+        if (p1.read() != 1) return 26;
+        if (p2.read() != 2) return 27;
+        if (rt_live() != 1) return 28;
+    }
+    if (rt_live() != 0) return 29;
 
     return 42;
 }
