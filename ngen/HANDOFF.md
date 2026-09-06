@@ -2165,6 +2165,81 @@ menos das strings de nome de arquivo": o único diff é a linha `#include` do gl
 `331ee075474088484b875fefc2a740bbbb27863852e0109ff24b35c723a2a253` (estável entre duas execuções).
 Detalhe completo em `docs/design/plano-ngen-entrega4.md` §68.
 
+**HIGIENE 2 LANDADO** (plano §69, 2026-09-06, base `4e9c87ea`, três commits): seis dívidas de
+checagem/ergonomia do §5, quatro fechadas, duas registradas com o caminho técnico já mapeado.
+
+- **Item 1 -- argumento via vtable/itab sem checagem de tipo (fechado, `46a0ab63`).**
+  `tk_vcall_args_check` (teko_expr.tk, sobre `decl_param_type` de `decl_find(mt_fn_at(mi))`) e
+  `tk_ifargs_check` (teko_iface.tk, nova coluna `im_prs` na tabela de membros de interface, o
+  MESMO `prs` que já vira `sig`) aplicam `tk_check_compat` no PARSE-TIME call site, onde o
+  método escolhido (`mi`/`k`) já é conhecido -- `tk_rc_call_args` (a checagem de argumento já
+  existente) só alcança uma chamada cujo nó nomeia o símbolo mangled que `decl_find` resolve, e
+  as duas formas de despacho indireto viram `callp`, opaco. Achado no caminho: o oráculo
+  PASS-TIME (`tk_ty_of`) ainda não existe nesse ponto do parse -- `tk_pty_of` (teko_struct.tk: a
+  tag já gravada de um nó, ou o tipo declarado de um local bare via `tk_slv_find`, o mesmo
+  fallback do `use (...)` do K4) alimenta a checagem, ignorando em silêncio o que o parse sozinho
+  não sabe (a mesma regra do `tk_check_field_store`). `types_class.tk` ganha
+  `VShape.useCircle(Circle)`, prova pelo caminho vtable; o caminho itab só por probe.
+- **Item 2 -- `ref`/`out` com tipo apontado errado (fechado, `04588e39`).** `tk_ref_check_pointee`
+  (teko_ref.tk) recusa um apontado diferente, IDÊNTICO apenas -- mais estreito que o
+  deriva/implementa de `tk_row_fits` (C#: `ref`/`out` não é covariante, nem de uma classe pra sua
+  base). `tk_ref_addr`'s branch de local bare passou a gravar o apontado via `tk_slv_find` em vez
+  de descartá-lo (`0 - 1`) -- o mesmo `tk_pty_of`/fallback do item 1. `surface_refout.tk` ganha
+  `gcheck` (uma segunda classe, `Gem`, provando o match idêntico); o mismatch E o
+  derivado-pra-base (também recusado, `ref` não é covariante) só por probe.
+- **Item 3 -- `use (g)` de global (DÍVIDA, não fechada).** Sem tabela de "nomes já declarados como
+  global" acessível no PARSE (não existe hook `on_global`; `top_add` é write-only; `decl_find`/
+  `global_find` só respondem depois -- o segundo em CODEGEN, tarde demais). Corrigir por-mensagem
+  sem essa tabela seria adivinhar. Caminho mapeado, não implementado: um pré-scan tipo O1
+  (`teko_fwd.tk` já tem `skip_ws`/`skip_quoted`/`skip_line`/`skip_block_comment`/`word`/`word_eq`
+  reusáveis) que reconheça `TYPE IDENT (';'|'='|'[')` em profundidade 0, excluindo as palavras que
+  hoje abrem outra coisa (`namespace`/`using`/`import`/`class`/...) -- maior que ~60 linhas feito
+  direito (a exclusão de falsos positivos é o grosso), registrado como dívida em vez de arriscar
+  uma versão frágil.
+- **Item 4 -- `T[]` global em `namespace` fica BARE (DÍVIDA, não fechada).** Confirmado por probe:
+  um global ESCALAR bare dentro de `namespace` já é recusado hoje (`a global is declared outside
+  every namespace`) -- a premissa do item ("se `tk_ns_pass` já qualifica globais escalares") não
+  se sustenta; só um `T[]` atravessa, pela exceção do G1. Qualificar de verdade exige (a)
+  renomear a DECLARAÇÃO no laço do bloco do `namespace` (o mesmo instante que `tk_ns_decl_note`
+  já usa pra função livre) e (b) uma tabela PRÓPRIA (não `hg_*`, que só existe depois do
+  `tk_array_pass`) de "nomes de `T[]` global namespaced vistos até agora", consultada pelo
+  rewrite de identificador (`tk_ns_walk_calls_in`) -- desvia o bloqueio de fase que o G1 registrou
+  (não depende de `hg_*`), mas ainda é tabela nova + hook novo + resolvedor por prefixo/using
+  (o mesmo padrão do `const`) -- feature, não item de higiene. Caminho mapeado, registrado.
+- **Item 5 -- `foreach` sobre `T[]` global (DÍVIDA, não fechada).** MESMA raiz do item 4: `tk_fe_source`
+  resolve TUDO no parse (`tk_hp_find`/`tk_local_find`, tabelas de parâmetro/local); um `T[]`
+  GLOBAL só existe em `hg_*`, PASS-TIME. K5 desenhou `tk_fe_source` deliberadamente SEM forma
+  deferida ("nunca um `parser cannot type -> defer`") -- ensinar isso exigiria uma segunda forma
+  de `foreach` (placeholder + rewrite tardio do `cond`/da carga de elemento, não um load/store
+  isolado) ou o MESMO pré-scan do item 4/3. Registrado, não implementado.
+- **Item 6 -- lambda aninhada, K4c (fechado, `91de53ca`).** Causa raiz achada e corrigida: a
+  tabela de captura `use (...)` (`lc_name`/`lc_ty`/`lc_byref`, indexada por `tk_nlc`) resetava pra
+  0 no INÍCIO e no FIM de `tk_lambda_finish` -- uma lambda construída DENTRO do corpo de outra
+  termina o próprio ciclo (`use`, corpo, limpeza) antes do parse do corpo da lambda ENVOLVENTE
+  retornar, e o reset da INTERNA apagava as capturas da EXTERNA ainda em voo. Reproduzido contra o
+  código pré-fix: `io:25: teko: k is not captured; add it to use (...)` -- o nome de arquivo
+  errado (`io`) é a segunda metade do relato ("localização de erro errada"). `tk_lc_base` faz da
+  tabela uma PILHA (salva/restaura a janela `[tk_lc_base, tk_nlc)` de cada lambda em vez de
+  zerar); os quatro geradores que assumiam índice absoluto 0 (`tk_lambda_prologue`/
+  `tk_lambda_release_fn`/`tk_lambda_alloc_params`/`tk_lambda_alloc_stmts`) calculam o offset do
+  objeto do closure relativo a `tk_lc_base`. `TK_MAXLAMCAP` sobe 8->32 (a tabela agora soma
+  captures de toda lambda em voo, não só uma). `surface_lambda.tk` ganha `nested_check`.
+
+Gate (host macOS/aarch64, `mc` 0.15.5, os três commits juntos): `rm -rf ngen/build`, build do
+zero; `--entry-only` **45/45** (nenhuma fixture nova, três tocadas: `types_class.tk`,
+`surface_refout.tk`, `surface_lambda.tk`); `--dump-ast` das **42 fixtures não tocadas
+byte-idêntico** à base `4e9c87ea` (`same=42`, as 3 diffs são exatamente as tocadas); `mc limits
+ngen` `verdict ok`, `intrin` 8/8 nos dois lados (zero intrínseco novo). Probes (fora de
+`ngen/tests/`, descartados): item 1 vtable (`Square` onde o parâmetro pede `Circle`, através do
+vtable) e itab (idem, através de uma interface) -- as duas recusadas, e a forma correta (mesmo
+tipo) confirmada sem falso positivo; item 2 mismatch (`ref Circle` chamado com `ref Square`) e
+derivado-pra-base (`ref Animal` chamado com `ref Dog`) -- as duas recusadas; item 6, o mesmo
+`nested_check` rodado contra o código PRÉ-fix reproduz o defeito relatado ao pé da letra.
+
+Plano: `docs/design/plano-ngen-entrega4.md` §69 (detalhe completo, incluindo os caminhos técnicos
+mapeados dos itens 3/4/5). Sem PR, sem dreno -- branch `feat/ngen-hygiene2`, forward-only para
+`fix/retirement`.
+
 ## 5.1 Armadilhas já pagas (não repita)
 
 1. **`mc --exe` emite Mach-O SEMPRE.** `minicompiler/mc` `src/main.mc:227` faz

@@ -3922,3 +3922,137 @@ arquivo entram no hash) para
 `331ee075474088484b875fefc2a740bbbb27863852e0109ff24b35c723a2a253`, estável entre duas execuções.
 
 Sem PR, sem dreno — forward-only para `fix/retirement` como o resto do `ngen/`.
+
+## 69. Higiene 2 — seis dívidas de checagem/ergonomia do HANDOFF §5 (2026-09-06)
+
+Crumb independente do desenho da entrega 4 (nenhuma superfície nova): seis dívidas registradas
+pelos verificadores de crumbs anteriores (COMPAT+HIGIENE/D226 item 3; K3/G1/K5 item 4/5; K4c item
+6; itens 1/2 são achados novos deste crumb sobre a mesma checagem do D226). Base `4e9c87ea`, três
+commits, um por item fechado — `46a0ab63` (item 1), `04588e39` (item 2), `91de53ca` (item 6).
+
+**Item 1 — argumento via vtable/itab sem checagem de tipo.** `tk_rc_call_args` (teko_rc.tk, D226)
+já checava o argumento de uma chamada DIRETA (função livre, método não-virtual, construtor) contra
+`decl_param_type`, mas nunca alcançava uma chamada VIRTUAL (`tk_emit_call`'s branch `slot >= 0`)
+nem uma chamada de INTERFACE (`tk_itab_emit`) — as duas rebaixam para `callp`, um nome opaco que
+`decl_find` nunca resolve. `tk_vcall_args_check` (teko_expr.tk) resolve `d = decl_find(mt_fn_at(mi))`
+— o método CONCRETO por trás do slot escolhido — e aplica `tk_check_compat(decl_param_type(d, i),
+...)` por índice, exatamente como `tk_rc_call_args`. Para itab não há um `decl_find`-ável (um
+membro `abstract` de interface não tem função própria) — `im_prs` (teko_iface.tk, nova coluna na
+tabela de membros, o MESMO `prs` que `tk_ifmeth_add`/`tk_iface_accessor` já constroem pra virar
+`sig`) guarda a lista de parâmetros da PRÓPRIA declaração da interface; `tk_ifargs_check` percorre
+essa lista por índice (posição 0 é o receptor, mesma forma que `tk_params`/`tk_prop_params` já
+dão) — válido porque toda implementação é OBRIGADA a bater a mesma assinatura (`im_sig`, a
+checagem de conformidade já compara por string exata).
+
+Achado que forçou uma peça nova: as duas checagens rodam no PARSE (onde `mi`/`k` — o método
+escolhido — ainda está em mãos; guardar essa escolha pra uma pass geraria uma tabela paralela só
+pra recuperar o que o parser já sabia), mas o oráculo de tipo pass-time (`tk_ty_of`,
+`tk_ty_scope_find`) só existe DEPOIS que a árvore inteira foi lida — testado por probe, um
+argumento local simples (`square`) respondia `ety < 0` (desconhecido) e a checagem nunca disparava.
+`tk_pty_of` (teko_struct.tk) é o oráculo PARSE-TIME: a tag já gravada num nó (`tk_xt_ty`, ex. o
+retorno de um `new C()` fresco) ou, pra um `N_IDENT` bare, o tipo declarado do local mais recente
+com esse nome (`tk_slv_find` — a MESMA tabela que o `use (...)` do K4 já consulta pra capturas).
+O que não é nem uma coisa nem outra (um load de campo ainda não tagueado, uma chamada ainda não
+resolvida) responde -1 e a checagem SILENCIOSAMENTE não dispara — a mesma regra que
+`tk_check_field_store` (D226) já dá a uma fonte desconhecida no parse.
+
+Fixture: `types_class.tk` ganha `VShape`/`VSquare`/`Circle`, um método VIRTUAL
+`useCircle(Circle c)` chamado através de um receptor `VShape`-tipado segurando um `VSquare` —
+prova o caminho vtable aceito. O caminho itab só tem prova por probe (uma interface com um método
+de parâmetro de classe, chamada correta E incorreta) — o crumb não pediu fixture nova.
+
+**Item 2 — `ref`/`out` com tipo apontado errado.** `tk_ref_check_call` (teko_ref.tk) já checava a
+FORMA do argumento (`ref` contra `ref`, `out` contra `out`, nenhum contra nenhum), nunca o
+APONTADO — `setIt(ref Circle)` chamado com `ref square` (`Square`, uma classe não relacionada, OU
+uma que DERIVA de `Circle`) compilava calado. `tk_ref_check_pointee` compara os dois apontados por
+IDENTIDADE (`ti != ei`, nunca `tk_row_fits`'s deriva/implementa) — C#'s própria regra: `ref`/`out`
+não é covariante, nem de uma classe pra sua base. O apontado de um `ref`/`out` de um LOCAL bare
+(`tk_ref_addr`'s branch final) não era capturado (`set_pty(pty, 0 - 1)`) — trocado por
+`tk_slv_find(name)`, o MESMO fallback do item 1.
+
+Fixture: `surface_refout.tk` ganha `Gem`/`setGem`/`gcheck`, uma SEGUNDA classe distinta de `Cell`,
+provando que o match idêntico segue aceito (não é um acidente de só existir uma classe no
+arquivo). O mismatch (`ref Circle`/`ref Square`) E o caso derivado-pra-base (`ref Animal`/`ref
+Dog`, também recusado — a prova de que a checagem é IDÊNTICO, não deriva) só têm prova por probe.
+
+**Item 3 — `use (g)` de global: DÍVIDA, caminho mapeado.** A mensagem genérica
+("`use` captures a local; this name is not one") persiste pra um global — D226 já tinha registrado
+isso como dívida ("deferir a rejeição arriscaria a tabela de captura, não vale a melhoria
+cosmética"). Investigado de novo aqui: não é só arriscado, é IMPOSSÍVEL sem uma tabela nova — não
+existe hook `on_global` (só `on_stmt`/`on_source`/etc., `docs/reference/hooks.md`), `top_add` é
+write-only (nenhuma API devolve "o que já foi adicionado à unidade"), e `decl_find`/`global_find`
+(a API que RESOLVERIA um nome) só respondem — o segundo nem existe pro módulo, é interno ao
+CODEGEN (`gen_resolve.mc`), tarde demais pro parse de `use (...)`. Caminho viável: um pré-scan
+estilo O1 (`teko_fwd.tk` — os primitivos `tk_fwd_skip_ws`/`skip_quoted`/`skip_line`/
+`skip_block_comment`/`word`/`word_eq` já são reusáveis, extraídos pro §50 O1) que reconheça
+`TYPE IDENT (';'|'='|'[')` em profundidade 0 e registre `IDENT` numa tabela pequena — mas a parte
+cara é EXCLUIR toda palavra que hoje abre outra coisa em duas posições (`namespace X.Y;`/
+`using X;`/`import X;` leem exatamente "duas palavras terminando em `;`" também) pra não
+mis-ensinar um nome de namespace/using como global. Maior que ~60 linhas feito com essa exclusão
+correta — registrado, não implementado.
+
+**Item 4 — `T[]` global em `namespace` fica BARE: DÍVIDA, premissa corrigida, caminho mapeado.**
+O crumb assumia "`tk_ns_pass` já qualifica globais escalares" — FALSO, confirmado por probe:
+`namespace geo { i64 counter; ... }` é recusado hoje (`a global is declared outside every
+namespace`), a mesma recusa de sempre; só um `T[]` atravessa, pela exceção pontual que o G1 já
+registrou como dívida. Não há "a mesma tabela" pra seguir. Caminho viável (que NÃO esbarra no
+bloqueio de fase que o G1 apontou — "`hg_*` só existe depois de `tk_array_pass`"): qualificar a
+DECLARAÇÃO em si no laço do bloco do `namespace` (`tk_namespace`, o mesmo instante em que
+`tk_ns_decl_note` já qualifica uma função livre) e manter uma tabela PRÓPRIA e pequena — "nomes de
+`T[]` global namespaced vistos até agora" — populada nesse MESMO laço (não depende de `hg_*`),
+consultada pelo rewrite genérico de identificador que já existe pra `const`
+(`tk_ns_rewrite_ident`/`tk_ns_walk_calls_in`). Tecnicamente possível dentro da ordem de fases
+atual — mas é tabela nova + resolvedor por prefixo/using (o padrão do `const`) + wiring em dois
+lugares, feature, não item de higiene de uma linha. Registrado, não implementado.
+
+**Item 5 — `foreach` sobre `T[]` global: DÍVIDA, mesma raiz do item 4.** `tk_fe_source`
+(teko_loop.tk, K5) resolve a fonte inteiramente no PARSE, por desenho deliberado ("nunca um
+`parser cannot type -> defer`", o próprio header do K5) — `tk_hp_find`/`tk_local_find` (parâmetro/
+local) respondem na hora; um `T[]` GLOBAL só existe em `hg_*`, POPULADO NO PASS. Ensinar isso
+exigiria OU o mesmo pré-scan do item 3/4 (pra `tk_fe_bare` responder na hora), OU quebrar a
+promessa de desenho do K5 com uma forma DEFERIDA de `foreach` — não um load/store isolado como as
+outras dívidas desse arquivo, mas reescrever `cond`/a carga do elemento (todo o `once`/`outer`
+desaçucarado) depois que `hg_*` existe. Qualquer um dos dois caminhos é maior que o orçamento
+deste item. Registrado, não implementado.
+
+**Item 6 — lambda aninhada, K4c: FECHADO, causa raiz achada.** A dívida do verificador K4c dizia
+"`use (k)` em dois níveis → `k is not captured`; localização de erro errada" sem investigar a
+causa. Achada: `tk_nlc` (o índice da tabela de captura `lc_name`/`lc_ty`/`lc_byref`) resetava pra 0
+no INÍCIO e no FIM de `tk_lambda_finish` — uma lambda B construída DENTRO do corpo de uma lambda A
+roda o PRÓPRIO ciclo inteiro (`use`, corpo, limpeza) enquanto o PARSE do corpo de A ainda está em
+curso (B é só mais uma expressão dentro desse corpo) — o reset de B, nas duas pontas, apaga as
+capturas de A que ainda estavam "em voo". Reproduzido por probe contra o código PRÉ-fix (`git
+stash` das mudanças, rebuild, mesmo probe): `io:25: teko: k is not captured; add it to use (...)`
+— bate a mensagem relatada, E confirma a segunda metade ("localização errada": `io` não é nome de
+arquivo nenhum do probe).
+
+Fix: `tk_lc_base`, uma janela `[tk_lc_base, tk_nlc)` — cada `tk_lambda_finish` salva a janela da
+lambda ENVOLVENTE, abre a própria em `tk_nlc` (o valor corrente, não 0) e restaura as duas ao
+sair, em vez de zerar. `tk_lc_find`/`tk_lc_dup` buscam só dentro da janela corrente. Os quatro
+geradores que assumiam índice absoluto 0 pro offset dentro do objeto do closure
+(`tk_lambda_prologue`, `tk_lambda_release_fn`, `tk_lambda_alloc_params`, `tk_lambda_alloc_stmts`)
+passam a calcular `i - tk_lc_base` pro offset de byte (o objeto de CADA lambda começa fresco no
+byte 24, não importa o índice absoluto na tabela global); o nome do parâmetro do alocador e o
+`__lamrefN` do prólogo continuam pelo índice ABSOLUTO (preciso — é o mesmo índice que
+`tk_lc_find` devolve e `tk_lam_walk` usa pra montar `tk_lam_refaddr`). `TK_MAXLAMCAP` sobe de 8
+pra 32, já que a tabela agora soma as capturas de TODA lambda em voo, não só uma — sem essa folga,
+uma lambda de 5 capturas dentro de outra de 4 estouraria um teto pensado pra UMA lambda de cada
+vez.
+
+Fixture: `surface_lambda.tk` ganha `nested_check` — `use (k)` nos dois níveis, o cenário exato do
+relato, `outer(1)` fazendo `inner(1)=1+10=11` e retornando `11+10=21`.
+
+**Gate** (host macOS/aarch64, `mc` 0.15.5, os três commits juntos): `rm -rf ngen/build`, build do
+zero; `--entry-only` **45/45** (zero fixture nova, três tocadas); `--dump-ast` das **42 fixtures
+não tocadas byte-idêntico** à base `4e9c87ea` (`same=42`, os 3 diffs restantes são exatamente as
+tocadas); `mc limits ngen` `verdict ok`, `intrin` 8/8 nos dois lados (zero intrínseco novo, as
+duas checagens novas dos itens 1/2 são funções puras de `err_at`, nenhum hook novo). Probes (fora
+de `ngen/tests/`, descartados): item 1 — argumento errado via vtable (`Square` onde `Circle` era
+esperado) e via itab (idem, através de uma interface), as duas recusadas; um itab correto
+(mesmo tipo) confirmado sem falso positivo; item 2 — `ref Circle`/`ref Square` e
+`ref Animal`/`ref Dog` (derivado), as duas recusadas; item 4 — `namespace geo { i64 counter; }`
+confirma a premissa errada do crumb (recusa de sempre, não passa); item 6 — `nested_check` rodado
+contra o código pré-fix (`git stash`) reproduz a mensagem e a localização erradas relatadas, ao pé
+da letra.
+
+Sem PR, sem dreno — branch `feat/ngen-hygiene2`, forward-only para `fix/retirement`.
