@@ -58,6 +58,11 @@ i64 tk_fwd_materialize(i64 fi);
 void tk_check_type_use_from(i64 si, i64 proj, i64 line, uptr fl);
 i64 tk_trait_find(uptr name);
 
+// §58 DI1: a service lifetime names a CLASS, never an interface -- checked
+// here, before this name is looked up as a base at all (`teko_di.mc`, included
+// after this file).
+i64 tk_di_marker(uptr nm);
+
 #define TK_MAXIFMETH 128              // interface methods, summed across all interfaces
 #define TK_MAXIMPL   64               // (class, interface) pairs, summed across all classes
 #define TK_MAXCONF   8                // interfaces named in ONE class's `:` list
@@ -569,6 +574,8 @@ i64 tk_iface_base_name(i64 proj) {
     uptr nm = tk_ns_read_path(seg0mem);
     uptr disp = tk_ns_dotted(nm);
     i64 bare = str_eq(nm, ld64(seg0mem));
+    if (bare && tk_di_marker(nm) >= 0)
+        err_at(fl, line, "teko: a service marker names a class");
     i64 si = 0 - 1;
     if (bare) si = tk_struct_find(nm);
     else si = tk_struct_find_exact(nm);

@@ -174,11 +174,17 @@
 //                                            teko_expr.mc's own field access
 //   Op f = null;   f == null                the null reference, an `N_INT` 0
 //
-// Everything else in docs/design/port-teko-mc.md §3 (types/classes,
-// generics, error-union, `service`/DI, concurrency, the
-// rest of the stdlib) is a later entrega and is not stubbed here: it does
-// not yet have a reserved word to stop on, so it simply is not part of the
-// language this compiler accepts.
+// What §58's DI1 crumb adds (D229) -- a class names its own lifetime in the
+// list after `:`, and `inject` resolves a service with no dependency of its
+// own at comptime, no runtime container (teko_di.mc):
+//   class Clock : IClock, IServiceSingleton { ... }   a NAME, not a base
+//   IClock a = inject IClock;   Clock b = inject Clock;   both the same
+//                                                          instance
+//
+// Everything else in docs/design/port-teko-mc.md §3 (generics, error-union,
+// the rest of DI, concurrency, the rest of the stdlib) is a later entrega and
+// is not stubbed here: it does not yet have a reserved word to stop on, so it
+// simply is not part of the language this compiler accepts.
 
 #include "teko_type.mc"
 #include "teko_prefix.mc"
@@ -193,6 +199,7 @@
 #include "teko_trait.mc"
 #include "teko_generic.mc"
 #include "teko_class.mc"
+#include "teko_di.mc"
 #include "teko_prop.mc"
 #include "teko_this.mc"
 #include "teko_access.mc"
@@ -258,6 +265,7 @@ void user_init() {
     syntax("struct", &tk_struct);
 
     syntax_expr("new", &tk_new);
+    syntax_expr("inject", &tk_inject);
     syntax_expr("this", &tk_this);
     syntax_expr("+", &tk_unary_plus);
     syntax_expr("true", &tk_true);
@@ -305,6 +313,13 @@ void user_init() {
     // header, decision 14) -- placed right after `tk_ns_pass`, before any
     // pass below censuses by name.
     pass(&tk_fwd_pass);
+
+    // §58 DI1: every service in the unit is registered by now (`tk_conf_apply`
+    // runs at parse time, and `tk_partial_pass` above has already closed every
+    // class), so every `inject` -- wherever the source wrote it relative to the
+    // service it names -- resolves here, before any pass below censuses the
+    // tree by name (teko_di.mc's own header).
+    pass(&tk_di_pass);
 
     // ahead of tk_params_pass: a global array's own leftover N_INDEX has to
     // be gone before that walk runs, unconditionally, over every N_INDEX in

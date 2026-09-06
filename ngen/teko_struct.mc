@@ -927,9 +927,16 @@ i64 tk_ctor(uptr name, i64 ty, i64 size, i64 install) {
 // `mesh.Circle` beside `geo.Circle` (two different rows) from a true
 // duplicate `geo.Circle` declared twice with no `partial` (`tk_class`'s own
 // reopen check already took the `partial` case before this is ever reached).
+// §58 DI1: `teko_di.mc` is included after every type declaration in this
+// file, but a service marker's name is reserved from the very first
+// declaration this function ever reads
+i64 tk_di_marker(uptr nm);
+
 uptr tk_newname(uptr what) {
     if (tk_gen_find(p_name()) >= 0)
         err_at2(p_file(), p_line(), "teko: the name is already a generic", p_name());
+    if (tk_di_marker(p_name()) >= 0)
+        err_at(p_file(), p_line(), tk_join3("teko: ", p_name(), " is the service marker"));
     if (p_id() == T_IDENT) return p_ident();
     if (tk_fwd_pending(tk_ns_qualified_name(p_name()))) {
         uptr nm = p_name();
