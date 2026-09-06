@@ -33,6 +33,10 @@
 //      must not taint this one just because the two share a name (K4c).
 //  15. `ternary_check` -- `flag ? add1 : double_it` coerced into `Op`, both
 //      as a `return` and as a plain initializer (K4c).
+//  16. `global_const_free_check` -- a lambda with NO `use (...)` at all reads
+//      a global (live, not frozen), reads a `const`, calls a free function
+//      and WRITES the global back, all visible to the caller afterward
+//      (D226 compat crumb item 3).
 //
 // expect-exit: 42
 
@@ -79,6 +83,14 @@ class Box {
 }
 
 delegate i64 BoxOp();
+
+i64 glob_counter = 0;
+
+const i64 STEP = 5;
+
+i64 bump_free(i64 x) {
+    return x + 1;
+}
 
 namespace geo {
     i64 use_lambda() {
@@ -208,6 +220,18 @@ i64 ternary_check() {
     return 0;
 }
 
+i64 global_const_free_check() {
+    glob_counter = 10;
+    Op f = new Op((i64 x) => bump_free(x) + STEP + glob_counter);
+    if (f(0) != 16) return 1;                      // bump_free(0)=1, STEP=5, glob_counter=10
+    glob_counter = 20;
+    if (f(0) != 26) return 2;                      // reads the LIVE global, not a frozen copy
+    Op inc = new Op((i64 x) => { glob_counter = glob_counter + x; return glob_counter; });
+    if (inc(5) != 25) return 3;                    // writes the global from inside the lambda
+    if (glob_counter != 25) return 4;               // ...and the write reaches the real global
+    return 0;
+}
+
 i64 main() {
     i64 bad = nocap_check();
     if (bad != 0) return 10 + bad;
@@ -267,6 +291,10 @@ i64 main() {
     bad = ternary_check();
     if (bad != 0) return 290 + bad;
     if (rt_live() != 0) return 300;
+
+    bad = global_const_free_check();
+    if (bad != 0) return 310 + bad;
+    if (rt_live() != 0) return 320;
 
     return 42;
 }
