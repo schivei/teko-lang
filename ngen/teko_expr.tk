@@ -321,6 +321,11 @@ void tk_vcall_args_check(i64 mi, i64 args, i64 line, uptr fl) {
 // mangled Owner_method, a virtual one goes through the object's vtable. The
 // virtual form reads the receiver twice, so it is only accepted where
 // re-evaluating it is free.
+//
+// The virtual call is shaped by `tk_callp_ret` (teko_array.tk) at the moment
+// it is built -- the cast that declares its return type has to be the `callp`'s
+// IMMEDIATE parent -- and the `tk_xt_add` below deliberately comes after, so
+// the type lands on the node this returns and not on the call underneath.
 i64 tk_emit_call(i64 left, i64 mi, i64 args, i64 na, i64 line, uptr fl) {
     tk_line = line;
     tk_file = fl;
@@ -335,7 +340,8 @@ i64 tk_emit_call(i64 left, i64 mi, i64 args, i64 na, i64 line, uptr fl) {
         tk_vcall_args_check(mi, args, line, fl);
         i64 vt = tk_call("ld64", tk_clone(left));
         i64 fnp = tk_call("ld64", tk_bin(K_ADD, vt, tk_int((TK_VT_FIXED + slot) * 8)));
-        r = tk_call("callp", list_append(list_append(fnp, left), args));
+        r = tk_callp_ret(mt_ret_at(mi),
+                         tk_call("callp", list_append(list_append(fnp, left), args)));
     }
     i64 rs = tk_struct_by_ty(mt_ret_at(mi));
     if (rs >= 0) tk_xt_add(r, rs, 0);
