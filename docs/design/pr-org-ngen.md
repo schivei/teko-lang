@@ -142,3 +142,9 @@ na **raiz do repo** (`mc.toml` raiz com `[package]` e `lib`/`check`/`files` em `
 depois do R1 do registro); **sem `[project]`** no manifesto do pacote (a caixa roda sobre mc.toml + files);
 validador com mc **pinado** (0.15.12); proposta `[package].mc = ">= x"`. Consequência: `[package]` sai de
 `ngen/mc.toml` (que fica com `[project]`/`[compiler]`/… para `mc build ngen`) e vai para `/mc.toml`.
+
+**R1 do registro (2026-09-06 18:50Z):** kind pelo `[project]` (`ausente`/`obj` = lib; `exe` = tool; presente sem
+kind = recusado; fixo pelo nome na 1ª publicação); `[[permission]]`/`[tools]` validados; subpath `ngen/` via
+admin. Consequência: o manifesto do pacote-biblioteca `teko` NÃO pode carregar o `[project] kind = "exe"` de
+hoje (viraria tool); a ferramenta (binário `teko`) precisa de nome próprio — fork g4 no D230 (proposta: lib
+`teko`, tool `tekoc`).
