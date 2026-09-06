@@ -227,6 +227,20 @@ i64 tk_fwd_skip_decl(i64 fi) {
     return fi;
 }
 
+// §50 O3b: `tk_class`/`tk_interface`, right before calling `tk_fwd_skip_decl`
+// above, already read this declaration's own `public`/`internal`/`abstract`
+// from the real tokens -- `vis`/`abst` here. They can never disagree with
+// what `tk_fwd_materialize` (teko_class.mc) put on the row, since it replayed
+// the very same source text (kwstart now reaches back over the modifiers,
+// §50 O3b); the check stays as a backstop rather than a silent skip.
+void tk_fwd_check_materialized(i64 si, i64 vis, i64 abst, uptr qname) {
+    uptr short_nm = tk_ns_short_of(qname);
+    if (vis != sr_vis_at(si))
+        err_at2(tk_file, tk_line, "teko: the declaration disagrees with its materialized form on `public`/`internal`", short_nm);
+    if (abst != sr_abst_at(si))
+        err_at2(tk_file, tk_line, "teko: the declaration disagrees with its materialized form on `abstract`", short_nm);
+}
+
 // ---- the scanner itself: a byte-level automaton over the raw source, never
 // the parser's own tokens (none has been read yet when it runs) ----
 
@@ -384,13 +398,16 @@ uptr tk_fwd_brace_end(uptr b, uptr end) {
 // (`delegate i64 Op(...)`, teko_deleg.mc's own `p_type()` before
 // `tk_newname`), so that one word is skipped before the name is read.
 //
-// §50 O3: a class/struct/interface's own span, `kwstart` (the keyword itself,
-// modifiers left out) through the byte past its `{ ... }`, is captured for
-// `tk_fwd_materialize` (teko_class.mc) -- UNLESS this is a SECOND scanned
-// occurrence of the same qualified name (`fw_multi`, decision unwritten in
-// §50: a `partial` type split across parts, or a plain duplicate), whose span
-// alone would build an incomplete object. A delegate has no body to capture
-// and is never a base, so it is left exactly as before.
+// §50 O3: a class/struct/interface's own span, `kwstart` (the caller backs
+// this up over any `public`/`internal`/`abstract`/`partial` run that sits
+// right before the keyword -- §50 O3b, `tk_fwd_scan` below -- so the replay
+// reads the very same modifiers the real declaration would) through the byte
+// past its `{ ... }`, is captured for `tk_fwd_materialize` (teko_class.mc) --
+// UNLESS this is a SECOND scanned occurrence of the same qualified name
+// (`fw_multi`, decision unwritten in §50: a `partial` type split across
+// parts, or a plain duplicate), whose span alone would build an incomplete
+// object. A delegate has no body to capture and is never a base, so it is
+// left exactly as before.
 uptr tk_fwd_try_decl(uptr p, uptr end, uptr cur_ns, i64 kind, uptr file, uptr kwstart) {
     p = tk_fwd_skip_ws(p, end);
     if (kind == TK_KDELEG && p < end && is_alpha(ld8(p))) {
@@ -472,6 +489,17 @@ uptr tk_fwd_try_namespace(uptr p, uptr end, i64 depth, uptr pcur_ns, uptr pns_bl
     return p;
 }
 
+// 1 for a word the type-declaration head (`tk_decl_head`, teko_access.mc)
+// itself accepts before `class`/`struct`/`interface`/`delegate` -- the same
+// four, since `static` is not one of them
+i64 tk_fwd_is_modifier(uptr w, i64 wlen) {
+    if (tk_fwd_word_eq(w, wlen, "public"))   return 1;
+    if (tk_fwd_word_eq(w, wlen, "internal")) return 1;
+    if (tk_fwd_word_eq(w, wlen, "abstract")) return 1;
+    if (tk_fwd_word_eq(w, wlen, "partial"))  return 1;
+    return 0;
+}
+
 // the whole scan, over one source: the entry file (`tk_fwd_init`) or a file
 // `import` just pushed (teko_ns.mc's `tk_import`). Namespace state is local
 // to the call -- a file-scoped `namespace A.B;` only ever applies to the
@@ -482,22 +510,31 @@ uptr tk_fwd_try_namespace(uptr p, uptr end, i64 depth, uptr pcur_ns, uptr pns_bl
 // -- 0 with no namespace open or a file-scoped one, `ns_depth` inside an
 // open namespace BLOCK (D220's rule, kept in sync with `ns_block`/`ns_depth`
 // every iteration rather than cached, since either may change mid-scan).
+//
+// §50 O3b: `mod_start` remembers where a contiguous run of `public`/
+// `internal`/`abstract`/`partial` began, so the type keyword's own `kwstart`
+// (what `tk_fwd_try_decl` captures as the span's start) reaches back over it
+// -- otherwise the replay `tk_fwd_materialize` runs is missing exactly the
+// tokens that say the class is abstract or public. Any other token resets
+// the run: a modifier only counts when it sits right before the keyword.
 void tk_fwd_scan(uptr p, uptr end, uptr file) {
     i64 depth = 0;
     uptr cur_ns = 0;
     i64 ns_block = 0;
     i64 ns_depth = 0;
+    uptr mod_start = 0;
     loop {
         p = tk_fwd_skip_ws(p, end);
         if (p >= end) break;
         i64 c = ld8(p);
-        if (c == '"') { p = tk_fwd_skip_quoted(p + 1, end, '"'); continue; }
-        if (c == '\'') { p = tk_fwd_skip_quoted(p + 1, end, '\''); continue; }
-        if (c == '{') { depth = depth + 1; p = p + 1; continue; }
+        if (c == '"') { p = tk_fwd_skip_quoted(p + 1, end, '"'); mod_start = 0; continue; }
+        if (c == '\'') { p = tk_fwd_skip_quoted(p + 1, end, '\''); mod_start = 0; continue; }
+        if (c == '{') { depth = depth + 1; p = p + 1; mod_start = 0; continue; }
         if (c == '}') {
             depth = depth - 1;
             if (ns_block && depth == ns_depth - 1) { cur_ns = 0; ns_block = 0; ns_depth = 0; }
             p = p + 1;
+            mod_start = 0;
             continue;
         }
         if (!is_alpha(c)) { p = p + 1; continue; }
@@ -505,16 +542,24 @@ void tk_fwd_scan(uptr p, uptr end, uptr file) {
         uptr w = tk_fwd_word(p, end, &wlen);
         p = w + wlen;
         if (tk_fwd_word_eq(w, wlen, "namespace")) {
+            mod_start = 0;
             p = tk_fwd_try_namespace(p, end, depth, &cur_ns, &ns_block, &ns_depth);
             continue;
         }
         i64 top_depth = 0;
         if (ns_block) top_depth = ns_depth;
-        if (depth != top_depth) continue;
-        if (tk_fwd_word_eq(w, wlen, "class"))     { p = tk_fwd_try_decl(p, end, cur_ns, TK_KCLASS, file, w); continue; }
-        if (tk_fwd_word_eq(w, wlen, "struct"))    { p = tk_fwd_try_decl(p, end, cur_ns, TK_KSTRUCT, file, w); continue; }
-        if (tk_fwd_word_eq(w, wlen, "interface")) { p = tk_fwd_try_decl(p, end, cur_ns, TK_KIFACE, file, w); continue; }
-        if (tk_fwd_word_eq(w, wlen, "delegate"))  { p = tk_fwd_try_decl(p, end, cur_ns, TK_KDELEG, file, w); continue; }
+        if (depth != top_depth) { mod_start = 0; continue; }
+        if (tk_fwd_is_modifier(w, wlen)) {
+            if (mod_start == 0) mod_start = w;
+            continue;
+        }
+        uptr kwstart = w;
+        if (mod_start != 0) kwstart = mod_start;
+        mod_start = 0;
+        if (tk_fwd_word_eq(w, wlen, "class"))     { p = tk_fwd_try_decl(p, end, cur_ns, TK_KCLASS, file, kwstart); continue; }
+        if (tk_fwd_word_eq(w, wlen, "struct"))    { p = tk_fwd_try_decl(p, end, cur_ns, TK_KSTRUCT, file, kwstart); continue; }
+        if (tk_fwd_word_eq(w, wlen, "interface")) { p = tk_fwd_try_decl(p, end, cur_ns, TK_KIFACE, file, kwstart); continue; }
+        if (tk_fwd_word_eq(w, wlen, "delegate"))  { p = tk_fwd_try_decl(p, end, cur_ns, TK_KDELEG, file, kwstart); continue; }
         if (tk_fwd_word_eq(w, wlen, "trait"))     { p = tk_fwd_try_trait(p, end, cur_ns, file); continue; }
     }
 }

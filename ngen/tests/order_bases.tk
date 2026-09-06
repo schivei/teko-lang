@@ -15,6 +15,14 @@
 // through `using Zoo;` -- a base out of order and a namespace together.
 // `Sq : IShape` sits above `interface IShape`, outside any namespace.
 //
+// §50 O3b: `Circle : Shape` sits above `abstract class Shape`, `Tri :
+// PubBase` above `public class PubBase`, and `Pent : PubIface` above
+// `public interface PubIface` -- the modifier scan backs `kwstart` up over
+// (`abstract`/`public`) so the replay reads the very same tokens the real
+// declaration would, and the materialized row carries the right
+// abstractness/visibility instead of the concrete/internal defaults the
+// bug used to leave it with.
+//
 // expect-exit: 42
 
 #include "../lib/rt.mc"
@@ -53,16 +61,60 @@ namespace Zoo {
     }
 }
 
-interface IShape {
-    i64 area();
-}
-
 class Sq : IShape {
     public i64 side;
 
     public i64 area() {
         return side * side;
     }
+}
+
+interface IShape {
+    i64 area();
+}
+
+class Circle : Shape {
+    public i64 r;
+
+    public override i64 area() {
+        return r * r;
+    }
+}
+
+abstract class Shape {
+    public abstract i64 area();
+}
+
+class Tri : PubBase {
+    public i64 height;
+
+    public Tri(i64 h) : base(h) {
+        height = h;
+    }
+
+    public i64 doubled() {
+        return val * 2;
+    }
+}
+
+public class PubBase {
+    public i64 val;
+
+    public PubBase(i64 v) {
+        val = v;
+    }
+}
+
+class Pent : PubIface {
+    public i64 side;
+
+    public i64 area() {
+        return side * side * 5;
+    }
+}
+
+public interface PubIface {
+    i64 area();
 }
 
 i64 checks() {
@@ -77,6 +129,18 @@ i64 checks() {
     sq.side = 3;
     IShape shp = sq;
     if (shp.area() != 9) return 4;
+
+    Circle c = new Circle;
+    c.r = 5;
+    if (c.area() != 25) return 6;
+
+    Tri t = new Tri(7);
+    if (t.doubled() != 14) return 7;
+
+    Pent p = new Pent;
+    p.side = 2;
+    PubIface pi = p;
+    if (pi.area() != 20) return 8;
 
     return 0;
 }

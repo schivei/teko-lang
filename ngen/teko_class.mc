@@ -1472,9 +1472,15 @@ void tk_class() {
     // §50 O3: a `:` list reaching for this class ahead of its own place
     // already read this whole declaration through `tk_fwd_materialize` --
     // its tokens, still unread in the real source, are skipped rather than
-    // parsed a second time, silently (decision 11)
+    // parsed a second time, silently (decision 11). §50 O3b: `vis`/`abst`,
+    // just read from those very tokens, are checked against the row the
+    // replay already built, a backstop against the two ever disagreeing.
     i64 fwi = tk_fwd_find(qname);
-    if (fwi >= 0 && fw_mat_at(fwi)) { tk_fwd_skip_decl(fwi); return; }
+    if (fwi >= 0 && fw_mat_at(fwi)) {
+        tk_fwd_check_materialized(qsi, vis, abst, qname);
+        tk_fwd_skip_decl(fwi);
+        return;
+    }
     // a row a USE materialized ahead of this declaration (§50 O1, TK_PFWD) is
     // not a genuine first part yet -- it has none of a first part's layout
     // (no vtable slot reserved, no base taken); it falls through to the
