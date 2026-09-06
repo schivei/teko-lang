@@ -16,17 +16,17 @@ D213 (dono 2026-09-04): the mc core already parses functions, primitive types,
 `if`/`loop`/`return` and the whole expression grammar — `examples/lang` does not
 re-teach any of that either, it only adds classes/generics/interfaces on top. So
 the core's own C-flavoured spelling (`i64 name(params) { ... return e; }`) **is**
-the teko-over-mc spelling here, unchanged. `teko.mc` (mirroring `examples/lang/
+the teko-over-mc spelling here, unchanged. `teko.tk` (mirroring `examples/lang/
 lang.mc`) adds only the delta, entrega by entrega:
 
 | hook | word(s) | what it does | entrega |
 |---|---|---|---|
-| `type_alias` | `bool` | the one primitive the core did not already have (`teko_type.mc`) | 1 |
-| `syntax` | `class` `type` `interface` `namespace` `import` `using` | reserved, honest-stop (`teko_class.mc`) | 1 |
-| `syntax_stmt` | `var` `const` `match` `when` | reserved, honest-stop (`teko_stmt.mc`) | 1 |
-| `syntax_expr` | `new` | reserved, honest-stop (`teko_expr.mc`) | 1 |
-| `type_alias` | `char` `byte` `isize` `usize` `ptr` `str` | more aliases over core type ids — no new representation (`teko_type.mc`) | 2 |
-| library `<float>` (M24) | `f32` `f64` | the bundled `<float>` library, wired (not reimplemented) into `f32`/`f64` (`teko_float.mc`) | 2 |
+| `type_alias` | `bool` | the one primitive the core did not already have (`teko_type.tk`) | 1 |
+| `syntax` | `class` `type` `interface` `namespace` `import` `using` | reserved, honest-stop (`teko_class.tk`) | 1 |
+| `syntax_stmt` | `var` `const` `match` `when` | reserved, honest-stop (`teko_stmt.tk`) | 1 |
+| `syntax_expr` | `new` | reserved, honest-stop (`teko_expr.tk`) | 1 |
+| `type_alias` | `char` `byte` `isize` `usize` `ptr` `str` | more aliases over core type ids — no new representation (`teko_type.tk`) | 2 |
+| library `<float>` (M24) | `f32` `f64` | the bundled `<float>` library, wired (not reimplemented) into `f32`/`f64` (`teko_float.tk`) | 2 |
 
 "Honest-stop" means the word is registered (so a `.tk` source that reaches for it
 gets `teko: <word> not taught yet` instead of the core's generic "type expected
@@ -45,10 +45,10 @@ preserve); `str` is the same `uptr` mc's own C-flavoured strings already are.
 `f32`/`f64` are the one case that is not an alias: `<float>` (M24, already
 proven upstream by `mc/tests/float/` and `scripts/check-float.sh`) registers two
 new machine-backed types via `type_new`, spelled `f32`/`f64` in the library
-itself, so `teko_float.mc` only wires `float_init()` and the two derived machine
+itself, so `teko_float.tk` only wires `float_init()` and the two derived machine
 tables — nothing is re-taught.
 
-`lib/rt.mc` is the runtime `mc`-taught teko **programs** link against: a bump
+`lib/rt.tk` is the runtime `mc`-taught teko **programs** link against: a bump
 arena, the print/panic helpers, and — since entrega 2 — the ordinary functions
 the new primitives need that are not parser hooks: `tk_str_len`/`tk_str_slice`
 (pointer arithmetic only, a zero-copy view — DECISION_LOG D197 forbids
@@ -72,7 +72,7 @@ ngen/build/teko-hello   # exits 42
 ```
 
 Two steps come out of `mc build` (`docs/build.md` in the `mc` repository):
-first it links `teko.mc` into a taught compiler (`ngen/build/teko`), then it
+first it links `teko.tk` into a taught compiler (`ngen/build/teko`), then it
 uses THAT binary to compile `ngen/tests/hello.tk` into `ngen/build/teko-hello`.
 Nothing in `mc`'s own `src/` changes, and nothing in this repository's `src/`
 changes either. `.github/workflows/ngen.yml` then uses that same `ngen/build/
@@ -132,8 +132,8 @@ That gap closes in CI, which has network access to fetch the release the same
 way `ngen.yml` does.
 
 **Wiring, with `mc0`.** `mc0` compiling `mc`'s own `src/core.mc` + this
-directory's `host_linux_x86_64.mc` + `teko.mc` (all six hook modules,
-`teko_float.mc` included, `#include <name>` swapped for the equivalent quoted
+directory's `host_linux_x86_64.mc` + `teko.tk` (all six hook modules,
+`teko_float.tk` included, `#include <name>` swapped for the equivalent quoted
 relative path since `mc0` has no Tier 3) into a Mach-O object, exit 0. This is
 a *real* check on entrega 2's own code, not just a syntax check: `type_alias`,
 `float_init`, `machine_arm64_float_init` and `machine_x86_64_float_init` are
@@ -152,7 +152,7 @@ entrega 1's `bool`); locally, the argument splits by whether the new word is a
 (a genuinely new, machine-backed type — only `f32`/`f64` in this entrega):
 
 - **`char`/`byte`/`isize`/`usize`/`ptr`/`str`** (`tests/primitives_scalar.tk`,
-  `primitives_ptr.tk`, `primitives_str.tk`, and `lib/rt.mc`'s `tk_str_len`/
+  `primitives_ptr.tk`, `primitives_str.tk`, and `lib/rt.tk`'s `tk_str_len`/
   `tk_str_slice`): each fixture, compiled by *plain* `mc0`, fails exactly at
   the new word (`type expected at top level` / `in parameter`) — proof the
   fixture genuinely exercises a hook `mc0` alone does not have. Then, since
@@ -161,8 +161,8 @@ entrega 1's `bool`); locally, the argument splits by whether the new word is a
   teko word replaced by its core base (`isize`→`i64`, `usize`→`u64`,
   `byte`→`u8`, `char`→`u32`, `ptr`→`uptr`, `str`→`uptr`) is *the same program*
   once hooked: `mc0` compiles that copy clean, exit 0, for all four fixtures
-  and for `lib/rt.mc`'s two `str` functions in isolation.
-- **`f32`/`f64`** (`tests/primitives_float.tk`, `lib/rt.mc`'s `tk_f64_bits`/
+  and for `lib/rt.tk`'s two `str` functions in isolation.
+- **`f32`/`f64`** (`tests/primitives_float.tk`, `lib/rt.tk`'s `tk_f64_bits`/
   `tk_f64_from_bits`): `type_new` is not an alias — an `f64` is a distinct,
   machine-backed type (SSE2/NEON), so no core substitution preserves its
   semantics, and the wiring check above is as far as `mc0` can independently
