@@ -202,7 +202,19 @@ compilador (S4.4+, fork g3) tornaria o `check` recusado pelo parser de prateleir
 "obrigatório". mc 0.15.9 publicado (só o registro padrão muda para `https://pkg.minicompiler.dev`); o patch
 `TE_RULE` que destrava o S4.2 vem como 0.15.10.
 
-## 3.2 O mc que o CI usa hoje: 0.15.10 (2026-09-06)
+## 3.2 O mc que o CI usa hoje: 0.15.12 (2026-09-06)
+
+**0.15.12 (PR #42, "dieta de globais" do driver): os 12 globais de `src/driver.mc` viraram UM registro de arena
+com acessores** -- `cfg_file` → `cfg_file()`, `drv_lim_mode = 1` → `set_drv_lim_mode(1)` (e `drv_os()`,
+`drv_arch()`, `drv_target()`…). A teko lia dois deles (`teko_access.tk` `tk_access_init`; `teko.tk` `tk_limits`)
+e quebrava com `teko_access.tk:76: unknown name`; corrigido nos dois sítios (o CI resolve `latest`, então a
+quebra seria imediata). Regra: NÃO ler global do driver; sempre o acessor. **0.15.11 (PR #41):** `machine()` só
+vira corrente quando não há nenhuma, nome NOVO, ou substitui o que É corrente -- o re-registro dos 3 nomes pelo
+`teko_float.tk` não move mais; `teko --dump-machine` agora dá `arm64 (current)` e o modo cru lowera no host
+(medido). **A caminho, 0.15.13:** `callp` tipado por cast direto (`(f64) callp(...)`) + conversões single do
+`<float>` (os dois defeitos da higiene 4).
+
+### 3.2b O anterior: 0.15.10
 
 **0.15.10 (PR #40): `TE_RULE`** -- lexema criado por `#rule`/`#token`/`#infix`/`#prefix` nunca é escondido
 pelo `source_claim` (`lex_word_id` devolve o id em qualquer fonte); o handler do módulo sobre esse lexema só
