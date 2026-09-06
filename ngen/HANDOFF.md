@@ -1766,6 +1766,66 @@ nova -- I1b só estendeu três sítios de despacho já existentes).
 Plano: `docs/design/plano-ngen-entrega4.md` §56 (I1b, esta errata). Sem PR, sem dreno -- branch
 `feat/ngen-onsource`, forward-only para `fix/retirement`.
 
+**G1 LANDADO — bloco §50 fechado** (2026-09-06): `T[]` GLOBAL de heap -- `i64[] g;` no topo, sem
+contagem própria, `g = new i64[n];` mais adiante -- fecha a dívida "`T[]` como GLOBAL" que o K3
+registrou e a última fila do §50.
+- **Mesma tabela `hg_*`, dentro do MESMO `tk_array_pass`** (`teko_array.mc`): `tk_hg_collect()`
+  varre `N_GLOBAL` cuja `nd_type` é linha `TK_KARRAY` (`tk_is_ha`) -- ao contrário do array FIXO
+  (`tk_garr_collect`, que chaveia por `nd_val != 0`), um `T[]` global não carrega contagem própria
+  na declaração, então a chave é o TIPO. `tk_hg_find`/`tk_ty_global_ha` (por nome) e `tk_hg_rewrite_index`/
+  `tk_hg_resolve_write` (leitura/escrita) reusam a MESMA plumbing de parse (`tk_bracket` já deixa o
+  `N_INDEX`/o placeholder de escrita, teko_params.mc: zero linha nova) e a MESMA resolução de
+  endereço do K3 -- `tk_ha_load`/`tk_ha_store`/`tk_ha_compound` (`teko_heaparr.mc`), sobre `tk_arr_at`
+  (RUN-TIME checado), nunca o bound compile-time do array fixo (a contagem só existe depois de um
+  `new T[n]`).
+- **Oráculo decide o global (`teko_typeof.mc`):** `tk_ty_of`'s ramo `N_IDENT` cai em
+  `tk_ty_global_ha` quando o escopo não conhece o nome (um global nunca é LOCAL); `tk_pend_emit`
+  ganhou um ramo `tk_is_ha(si)` -> `tk_pend_ha_length` para `g.Length` (só-leitura, a mesma recusa
+  de `teko_heaparr.mc`'s `tk_ha_member_of`, reescrita para o FORM já lido em PARSE time em vez de
+  `p_id()`, que não significa nada numa pass tardia).
+- **Achado que exigiu correção: `cs[i].area()` sobre um GLOBAL.** `cs[i]` nunca entra na árvore que
+  `tk_array_pass` percorre -- o `.` que segue DEFERE `cs[i]` inteiro como RECEPTOR
+  (`tk_defer_member`), e o nó vira órfão, alcançável só por `pd_recv`, nunca por `nd_next`/`nd_a`
+  (o MESMO formato de uma cadeia `p.inner.x`). `tk_pend_do` já persegue essa cadeia para o `.`
+  encadeado (`tk_pend_at(recv)`); G1 usa o MESMO ponto para também rodar
+  `tk_array_maybe_rewrite_index(recv)` quando `recv` ainda é `N_INDEX`, ANTES de perguntar o tipo --
+  sem isso, `total + cs[i].area()` compilava até o `N_INDEX` cru chegar ao codegen e morrer com
+  `expression with no codegen` (achado por build real, não hipotético).
+- **`T[]` global em `namespace` (`teko_ns.mc`):** a proibição de global-dentro-de-namespace
+  (`tk_ns_reject_topkind`, "a global is declared outside every namespace") ganhou UMA exceção,
+  `tk_ns_topglobal_ha`, para uma linha `TK_KARRAY` -- deixada **sem renomear** (dívida honesta,
+  registrada no próprio comentário): qualificar cada uso BARE de um global mutável como
+  `tk_ns_rewrite_ident` qualifica uma CONST pediria consultar `hg_*`, e `tk_ns_pass` roda ANTES de
+  `tk_array_pass` popular essa tabela. Um `T[]` global declarado dentro de um `namespace geo { }`
+  compila e roda, usado BARE de dentro do próprio namespace; colisão de nome entre dois namespaces
+  cada um com seu próprio `T[]` global fica sem resolver, mesma classe das outras dívidas de
+  qualificação que este arquivo já lista.
+- **Fixture** `ngen/tests/surface_array_global.tk` (exit 42): `i64[] g;` com `n` de runtime,
+  `g[i]`/`g[i] = e`/`+=`/`-=`/`++`, `g.Length` em `while` E em `for`; `u8[]`/`i32[]` globais provando
+  largura e sinal; `Circle[] cs` global -- um ROOT, `rt_live()` medido ANTES do `circlecheck()` (os
+  outros globais heap já são roots por si, então o piso muda antes dele) sobe `+4` e NUNCA volta;
+  `T[]` global (`pts`) dentro de `namespace geo { }`, usado bare de dentro de `geo.sum_pts`, chamado
+  de fora por `geo.sum_pts(4)`. Probes (fora de `tests/`, descartados): `g.Length = 3` ->
+  `teko: is read-only: Length`; índice além do fim (`g[n]` com `n == g.Length`) -> `teko: index past
+  the end of an array`, exit 70; `foreach (i64 x in g)` sobre o global -> `teko: not a known array: g`
+  (a dívida já registrada do K3/§50, recusa clara, sem tabela nova).
+
+Gate: `rm -rf ngen/build`, build do zero; `--entry-only` **43/43** (as 42 anteriores + a nova);
+`--dump-ast` das **42 anteriores byte-idêntico** ao compilador da base `20d78560` (`same=42
+diff=0`); `mc limits` `verdict ok`, `intrin` sem crescimento, `passes` sem pass nova (G1 só estendeu
+`tk_array_pass`, já registrado).
+
+Plano: `docs/design/plano-ngen-entrega4.md` §50 (G1, última fila do bloco), §57 tem a errata. Sem
+PR, sem dreno -- branch `feat/ngen-g1-global`, forward-only para `fix/retirement`.
+
+**Dívidas consolidadas do bloco §50 (G1 fecha a fila; o que sobra, tree-wide):** `#include "x.tk"`
+cru não varrido (use `import`); base ou interface QUALIFICADA declarada abaixo, e base de OUTRO
+namespace; lambda contextual contra um `delegate` declarado abaixo; `foreach` sobre `T[]` (local,
+parâmetro OU global) e sobre um forward; `b.x += 1` sobre receptor deferido; tipo aninhado (D220);
+`T[]` global nunca liberado (raiz, decisão 16); `T[]` global namespaced fica BARE, sem qualificação
+de nome (este crumb); `params T[]`, `T[][]`, `ref`/`out T[]`; covariância de interface e `I1 x =
+<valor I2>` em posição de ARGUMENTO sobrecarregado.
+
 ## 5.1 Armadilhas já pagas (não repita)
 
 1. **`mc --exe` emite Mach-O SEMPRE.** `minicompiler/mc` `src/main.mc:227` faz
