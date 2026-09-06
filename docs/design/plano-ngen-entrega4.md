@@ -2723,3 +2723,56 @@ achado que o (b2) não previa:
 Gate: `--entry-only` 40/40 (nenhuma fixture nova, `order_types.tk` cresceu); `--dump-ast` das 39
 anteriores byte-idêntico (`same=39 diff=0`); `mc limits` `verdict ok`, `intrin` 8/16 nos dois lados
 (zero intrínseco novo), `passes` 14/13 — a mesma `tk_fwd_pass` do O1, sem `pass()` nova.
+
+## 53. Errata — O3 landed (2026-09-06)
+
+O crumb O3 (§50 (c)) landou como desenhado, com um ponto que o (a)/(b2) deixavam em aberto (decisão
+6, partial) resolvido e registrado, e um achado de posicionamento de código que o (c) não previa:
+
+1. **A varredura ganhou o SPAN, não só a palavra (extensão aditiva sobre a decisão 2).** A decisão 2
+   dizia que a LINHA (o row do type table) nasce tarde, para não reordenar o índice que `tk_itab`
+   emite — isso continua intocado. O que o O3 acrescenta é ORTOGONAL: o SPAN de texto de cada
+   `class`/`struct`/`interface` escaneada (`kwstart` até o byte depois do `}` que fecha o corpo,
+   reaproveitando o mesmo `tk_fwd_brace_end` que `tk_fwd_try_trait` já usava para um trait) é
+   capturado no MESMO passe da varredura, sem criar nenhuma linha — só o texto, guardado à parte
+   (`fw_span`/`fw_spanlen`), para `tk_fwd_materialize` reler depois. Uma SEGUNDA ocorrência escaneada
+   do mesmo nome qualificado (`fw_multi`) marca o candidato como não-materializável, em vez de
+   sobrescrever o span com a parte errada.
+2. **Decisão 6 (`partial` + forward) resolvida: materializa só com UMA parte; duas ou mais recusam.**
+   Um `partial class Foo` com uma só parte no arquivo inteiro materializa normal — o span dessa parte
+   É a declaração inteira, e a palavra `partial` em si vira um no-op no replay (ela nunca é lida:
+   o texto pushado começa em `class`, não no modificador). Duas ou mais partes ESCANEADAS
+   (`fw_multi`) recusam a materialização com uma mensagem dedicada (`a partial base is not
+   forward-declarable yet`) — juntar os spans de partes espalhadas pelo arquivo não tem um único
+   lugar para apontar erros, e a decisão foi não inventar essa costura agora. Dívida estreita e
+   honesta, do mesmo jeito que a decisão 12 já trata o nome qualificado/de outro namespace.
+3. **`tk_fwd_materialize` não mora em `teko_fwd.mc` — mora em `teko_class.mc`, achado que o (b1)/(c)
+   não previram.** O estado que o save/restore ao redor do `p_push_source` precisa
+   (`tk_own_methods`/`tk_nconf`/`tk_ntu`/`tk_nud`/`tu_tr`/`ud_tr`, de `teko_trait.mc`) só existe a
+   partir do include de `teko_trait.mc`, que vem DEPOIS de `teko_fwd.mc` na cadeia de `teko.mc`. Uma
+   função forward-se-declara neste código (o padrão já usado por `tk_trait_scan`/`tk_ns_register`),
+   mas uma variável global não — então a função que precisa delas tem de morar textualmente depois de
+   onde elas nascem. `teko_class.mc` é o primeiro arquivo da cadeia onde isso já vale, e é também
+   onde o único chamador (`tk_conf_name`) mora, então a função entrou ali; a tabela do scanner
+   (`fw_*`) e o que não depende desse estado (`tk_fwd_skip_decl`, a pilha de voo
+   `tk_fwd_in_flight`/`tk_fwd_flight_push`/`tk_fwd_flight_pop`) continuam em `teko_fwd.mc`.
+4. **O ciclo termina, mas não pelo caminho mais curto (risco 4 do §50(e), confirmado).** Para `class
+   A : B` / `class B : A`, a materialização de `B` (a partir do uso de `A`) recursa na materialização
+   de `A` — que ainda não tem uma linha (o `tk_type_add` de `A` só roda depois que a lista `:` dela
+   termina de ser lida), então essa segunda materialização de `A` REENTRA de verdade, e é só na
+   materialização de `B` que ela dispara (`B` já está em voo nesse ponto) que o ciclo é detectado.
+   Termina (a pilha da decisão 14 limita pela profundidade do ciclo, não estoura), mas com uma
+   passada a mais do que o mínimo teórico — aceitável, já que o programa nunca compilaria de outra
+   forma, e é exatamente o modo de falha que o risco 4 já havia previsto.
+5. **O item pequeno da ressalva do O2 (§52 nota final) fechou ensinando, não recusando.** `h.items[0]
+   = 9` sobre um campo-array alcançado por um receptor cujo tipo só o pass conhece (parâmetro/local
+   de tipo PFWD) ganhou `TK_PIXLOAD`/`TK_PIXSTORE` em `teko_typeof.mc`, lendo o índice no mesmo ponto
+   que a chamada/atribuição já eram lidas em `tk_defer_member`, e reaproveitando `tk_ax_index`/
+   `type_width` (teko_struct.mc) em `tk_pend_field` para o endereço e o guard — as três recusas do
+   caminho estático (não é array / lido um elemento por vez / atribuído um elemento por vez)
+   reproduzidas sem linha de runtime nova. Coube em bem menos que 40 linhas.
+
+Gate: `rm -rf ngen/build`, build do zero; `--entry-only` **41/41** (as 40 anteriores + `order_bases`);
+`--dump-ast` das **40 anteriores byte-idêntico** ao compilador da base `7113acbd` (`same=40 diff=0`);
+`mc limits` `verdict ok`, `intrin`/`passes`/`syntax` idênticos nos dois lados (zero intrínseco, zero
+pass, zero palavra nova).

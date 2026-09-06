@@ -1583,6 +1583,76 @@ do O1, sem pass nova -- O2 estendeu o corpo dela).
 Plano: `docs/design/plano-ngen-entrega4.md` §50 (O2 desta série; O3/I1/G1 seguem na fila; §52 tem a
 errata). Sem PR, sem dreno -- branch `feat/ngen-o2-defer`, forward-only para `fix/retirement`.
 
+**O3 LANDADO** (§50, 2026-09-06): `class Dog : Animal`/`class Sq : IShape` declarados ACIMA de
+`Animal`/`IShape` -- a última ressalva do C6, base/interface fora de ordem.
+- `teko_fwd.mc`: a varredura (`tk_fwd_try_decl`) passa a capturar o SPAN inteiro (`class`/`struct`/
+  `interface` até o `}` de fechamento, `fw_span`/`fw_spanlen`) de todo tipo escaneado, além do nome
+  já registrado pelo O1 -- refatorado para compartilhar `tk_fwd_brace_end` com `tk_fwd_try_trait`
+  (que já andava esse mesmo laço). Uma SEGUNDA ocorrência escaneada do mesmo nome (`fw_multi`) marca
+  o candidato como não-materializável -- é um `partial` em duas ou mais partes, cujo span isolado
+  construiria um objeto incompleto. `tk_fwd_skip_decl(fi)` -- a declaração real, alcançada depois de
+  materializada, é PULADA (nome, `: lista` opcional via `tk_ns_read_path`, corpo via
+  `p_skip_balanced`), sem mensagem. `tk_fwd_in_flight`/`tk_fwd_flight_push`/`tk_fwd_flight_pop` --
+  a pilha de nomes em materialização, para o ciclo `A : B`/`B : A`.
+- `teko_class.mc`: `tk_fwd_materialize(fi)` (novo, ao lado de `tk_conf_name` -- precisa de
+  `tk_own_methods`/`tk_nconf`/`tk_ntu`/`tk_nud`/`tu_tr`/`ud_tr`, do `teko_trait.mc` incluído ANTES
+  dele, e não caberia de volta em `teko_fwd.mc`, incluído antes desse) empurra o span capturado com
+  `p_push_source` e chama `parse_top()` UMA vez, salvando/restaurando o mesmo estado que
+  `tk_gen_replay` (teko_generic.mc) já salva/restaura ao redor do seu próprio push -- uma base fora
+  de ordem pode derivar de outra também fora de ordem, recursão real (a cadeia de três níveis do
+  fixture). O token que o contrato do push gasta (hooks.md §4) não é o nome da base -- é o que quer
+  que o `:`-list estivesse prestes a ler a seguir (uma `,` antes de outra interface, ou o `{` do
+  corpo da classe DERIVADA) -- regenerado como um token extra ao fim do texto empurrado
+  (`p_name()` do token corrente, colado depois do span com um espaço), que sai de volta do frame
+  assim que a declaração materializada termina de ser lida. `tk_conf_name` tenta a materialização
+  só quando o nome é BARE e resolve para o MESMO namespace do uso (`tk_ns_qualified_name`, decisão
+  12 do §50) -- qualificado (`geo.Base`) ou só alcançável por `using` continuam a recusa de hoje.
+  `tk_class()` ganhou o espelho -- checa `fw_mat_at` antes de `tk_newname`, e pula com
+  `tk_fwd_skip_decl` quando já materializado.
+- `teko_iface.mc`: `tk_interface()` ganhou o MESMO espelho de `tk_class()` (só o lado do pulo --
+  `interface` ainda não tem `:` própria, D216-adjacente à espera do crumb I1).
+- **Item pequeno da ressalva do O2** (`teko_typeof.mc`): `h.items[0] = 9` sobre um campo-array
+  alcançado por um receptor que só o pass tipa (parâmetro/local de tipo PFWD) ganhou o ramo que
+  faltava -- `TK_PIXLOAD`/`TK_PIXSTORE` ao lado de `TK_PLOAD`/`TK_PSTORE`/`TK_PCALL`, o índice lido
+  em `tk_defer_member` (o mesmo `parse_expr(0)` que `tk_array_index`, teko_struct.mc, já lê),
+  carregado em `pd_na` (ocioso nas outras formas), e `tk_pend_field` reaproveitando `tk_ax_index` +
+  `type_width` para o endereço e o guard -- as mesmas três recusas do caminho estático (`is not an
+  array`, `is read one element at a time`, `is assigned one element at a time`), sem linha nova de
+  runtime.
+- **Decisão registrada -- `partial` como base fora de ordem:** um `partial` com uma parte SÓ
+  materializa normal (o span dessa única parte já é a declaração inteira -- `partial` na palavra vira
+  um no-op no replay, e a real, alcançada depois, é pulada). Duas ou mais partes ESCANEADAS RECUSAM
+  na hora da materialização (`fw_multi`, "teko: a partial base is not forward-declarable yet") -- o
+  span de UMA parte só nunca é o objeto inteiro, e materializar todas juntaria texto de lugares
+  diferentes do arquivo sem um span único onde apontar erros. Dívida estreita, não silêncio.
+- **Fixture** `order_bases.tk` (novo, exit 42): `GrandDog : Dog : Animal` -- três níveis fora de
+  ordem, recursão real da materialização -- dentro de `namespace Zoo`, com `: base(n)` encadeando o
+  construtor de `Animal`, `override`/`base.speak()` em dois níveis, e `using Zoo;` alcançando os três
+  de fora do namespace; `Sq : IShape` acima de `interface IShape`, fora de qualquer namespace;
+  `rt_live()` de volta ao piso (a checagem em `checks()`, função à parte, para os locais morrerem
+  antes do `return`). Probes (fora de `tests/`, descartados): ciclo `A : B`/`B : A` -- `teko: cyclic
+  base: B` (a mensagem sai da materialização ANINHADA que de fato encontra o ciclo, não da primeira
+  tentativa -- ver a nota abaixo); base qualificada abaixo (`: geo.Base`) -- `unknown base class or
+  interface: geo.Base`; base só alcançável por `using` (outro namespace) -- mesma mensagem; `partial`
+  em duas partes como base -- `a partial base is not forward-declarable yet`; `partial` em UMA parte
+  só como base -- materializa e roda normal (exit 42); os quatro probes do item pequeno (`h.items[0]
+  = 9` deferido, índice não-literal com `+`, campo não-array indexado, leitura de array sem `[`,
+  índice literal fora do limite) -- todos com a mesma mensagem do caminho estático.
+- **Nota de custo do ciclo:** a materialização de `A` (dentro de `B`, dentro do uso original de `A`)
+  reentra em `A` uma SEGUNDA vez antes de `B` reaparecer como já-em-voo e disparar o erro -- porque a
+  linha de `A` ainda não existe (o `tk_type_add` dela só roda depois que a lista `:` termina de ser
+  lida) no momento em que `B` tenta achá-la. A pilha da decisão 14 ainda TERMINA (profundidade
+  limitada pelo tamanho do ciclo, não infinita) e a mensagem sai correta; só não é o caminho mais
+  curto possível -- aceitável, já que é um programa que nunca compilaria de qualquer forma.
+
+Gate: `rm -rf ngen/build`, build do zero; `--entry-only` **41/41** (as 40 anteriores + `order_bases`);
+`--dump-ast` das **40 anteriores byte-idêntico** ao compilador da base `7113acbd` (`same=40 diff=0`);
+`mc limits` `verdict ok`, `intrin` 8/8 nos dois lados (zero intrínseco novo), `passes`/`syntax` 14/14
+(nenhuma pass/palavra nova -- O3 só estendeu corpos já registrados por O1/O2).
+
+Plano: `docs/design/plano-ngen-entrega4.md` §50 (O3 desta série; I1/G1 seguem na fila; §53 tem a
+errata). Sem PR, sem dreno -- branch `feat/ngen-o3-bases`, forward-only para `fix/retirement`.
+
 ## 5.1 Armadilhas já pagas (não repita)
 
 1. **`mc --exe` emite Mach-O SEMPRE.** `minicompiler/mc` `src/main.mc:227` faz
@@ -1753,6 +1823,17 @@ errata). Sem PR, sem dreno -- branch `feat/ngen-o2-defer`, forward-only para `fi
     tabela de forward ser consultada. Correção: a VARREDURA (`tk_fwd_try_namespace`, teko_fwd.mc)
     chama `tk_ns_seg_register` no MESMO instante em que reconhece o cabeçalho `namespace A.B { ... }`
     -- idempotente, mesma função que a declaração real chama, sem tabela paralela.
+23. **`#include` sequencial dentro de `teko.mc` também é declare-before-use para uma VARIÁVEL global,
+    não só para função (§50 O3).** `tk_own_methods`/`tk_nconf`/`tk_ntu`/`tk_nud`/`tu_tr`/`ud_tr`
+    (o estado que um `use`/trait em voo mantém) só existem a partir de `teko_trait.mc`, incluído
+    DEPOIS de `teko_fwd.mc` -- uma função que precisa deles (o save/restore que `tk_fwd_materialize`
+    tem de fazer ao redor do seu próprio `p_push_source`, no molde de `tk_gen_replay`) não cabe em
+    `teko_fwd.mc`, mesmo com um protótipo à frente: função forward-se-declara (o resto do arquivo já
+    faz isso com `tk_trait_scan`/`tk_ns_register`/etc.), mas uma GLOBAL não tem essa forma aqui. A
+    tabela do scanner (`fw_*`) e o que não depende desse estado (`tk_fwd_skip_decl`,
+    `tk_fwd_in_flight`, a pilha de voo) ficam em `teko_fwd.mc`; `tk_fwd_materialize` em si mora em
+    `teko_class.mc`, ao lado de `tk_conf_name` -- o único chamador, e o primeiro arquivo da cadeia de
+    include onde o estado do trait já é visível.
 
 ## 5.2 Canal com a sessão do mc
 
