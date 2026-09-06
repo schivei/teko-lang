@@ -48,6 +48,16 @@
 // dispatches through the itab, so a class that redeclares one is the one that
 // answers -- to the site AND to the default that called it.
 
+// §50 I1: interfaces defined in files included after this one -- the forward
+// row a `:` list materializes ahead of its place (teko_class.mc), the project
+// visibility check every type use goes through (teko_access.mc), and the
+// registry a `use` of a trait is refused against (teko_trait.mc). Declared
+// here because `tk_iface_base_name` below, read this early in the unit,
+// needs all three before their own files define them.
+i64 tk_fwd_materialize(i64 fi);
+void tk_check_type_use_from(i64 si, i64 proj, i64 line, uptr fl);
+i64 tk_trait_find(uptr name);
+
 #define TK_MAXIFMETH 128              // interface methods, summed across all interfaces
 #define TK_MAXIMPL   64               // (class, interface) pairs, summed across all classes
 #define TK_MAXCONF   8                // interfaces named in ONE class's `:` list
@@ -65,6 +75,9 @@ i64  tk_nifmeth = 0;
 
 i64  ci_if[TK_MAXIMPL];               // the interface row of one implementation
 i64  ci_cls[TK_MAXIMPL];              // ...and the class that implements it
+i64  ci_via[TK_MAXIMPL];              // §50 I1: -1 when `ci_cls` named it directly in its own
+                                       // `:` list, or the interface that named it and pulled
+                                       // this one in through its own inheritance instead
 i64  tk_nimpl = 0;
 
 i64  conf_if[TK_MAXCONF];             // scratch: the `:` list of the class being read
@@ -82,6 +95,7 @@ i64  im_prop_at(i64 i) { return ld64(im_prop + i * 8); }
 uptr im_def_at(i64 i)  { return ld64(im_def + i * 8); }
 i64  ci_if_at(i64 i)   { return ld64(ci_if + i * 8); }
 i64  ci_cls_at(i64 i)  { return ld64(ci_cls + i * 8); }
+i64  ci_via_at(i64 i)  { return ld64(ci_via + i * 8); }
 i64  conf_if_at(i64 i) { return ld64(conf_if + i * 8); }
 
 void set_im_name_at(i64 i, uptr v) { st64(im_name + i * 8, v); }
@@ -95,6 +109,7 @@ void set_im_prop_at(i64 i, i64 v)  { st64(im_prop + i * 8, v); }
 void set_im_def_at(i64 i, uptr v)  { st64(im_def + i * 8, v); }
 void set_ci_if_at(i64 i, i64 v)    { st64(ci_if + i * 8, v); }
 void set_ci_cls_at(i64 i, i64 v)   { st64(ci_cls + i * 8, v); }
+void set_ci_via_at(i64 i, i64 v)   { st64(ci_via + i * 8, v); }
 
 // where the class's k-th implemented interface sits in the list, under the same
 // ownership rule the fields and the slots follow (teko_class.mc's
@@ -303,8 +318,36 @@ void tk_impl_add(i64 ci, i64 fi) {
     if (tk_nimpl == TK_MAXIMPL) err_at(tk_file, tk_line, "teko: too many implemented interfaces");
     set_ci_if_at(tk_nimpl, fi);
     set_ci_cls_at(tk_nimpl, ci);
+    set_ci_via_at(tk_nimpl, 0 - 1);
     tk_nimpl = tk_nimpl + 1;
     set_sr_ni_at(ci, sr_ni_at(ci) + 1);
+}
+
+// the row of the (ci, fi) pair, or -1: what `tk_impl_via` and its setter both
+// need, kept apart from `tk_impl_index` (teko_class.mc's own ownership order)
+// because this one is asked for a KNOWN interface, not a position
+i64 tk_impl_row(i64 ci, i64 fi) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nimpl) break;
+        if (ci_cls_at(i) == ci && ci_if_at(i) == fi) return i;
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+// -1 when `ci` named `fi` itself, or the interface that pulled `fi` in
+// through its own `:` list (§50 I1) -- `tk_conform_missing` reads this to
+// say WHICH of the class's own interfaces owes the method it never wrote
+i64 tk_impl_via(i64 ci, i64 fi) {
+    i64 row = tk_impl_row(ci, fi);
+    if (row < 0) return 0 - 1;
+    return ci_via_at(row);
+}
+
+void tk_impl_via_set(i64 ci, i64 fi, i64 via) {
+    i64 row = tk_impl_row(ci, fi);
+    if (row >= 0) set_ci_via_at(row, via);
 }
 
 // the base's interfaces are the derived class's too: they are copied rather
@@ -320,6 +363,63 @@ void tk_impls_inherit(i64 ci, i64 base) {
         tk_impl_add(ci, ci_if_at(tk_impl_index(base, i)));
         i = i + 1;
     }
+}
+
+// how many interfaces `si` -- a class OR an interface, the table owns neither
+// exclusively (decision 15) -- conforms to, and the one at position `k`: the
+// same slice a class reads to fill its own itab, reused here to walk an
+// interface's OWN bases, direct or pulled in by them (§50 I1)
+i64 tk_iface_nbase(i64 si) { return sr_ni_at(si); }
+i64 tk_iface_base_at(i64 si, i64 k) { return ci_if_at(tk_impl_index(si, k)); }
+
+// `fi` joins `ci`'s own conformance set, named directly in a `:` list --
+// `interface I2 : I1`'s or a class's own -- and every interface `fi` itself
+// extends comes along, flattened rather than followed at dispatch time
+// (decision 15): each becomes its own itab entry, `via fi` when `ci` never
+// named it itself, so a class conforming to `I2` alone still owes every
+// method `I1` declares and still answers `I1 x = <the I2 value>`.
+//
+// The cycle a mutual `interface I1 : I2` / `interface I2 : I1` closes is
+// caught here, not by the in-flight stack `tk_fwd_materialize` keeps (that
+// one only guards a span replayed twice): whichever of the two is read
+// SECOND finds the other already conforming to it, because closing the
+// first already flattened the whole chain into its own slice.
+void tk_iface_conf_close(i64 ci, i64 fi) {
+    if (tk_impl_has(fi, ci))
+        err_at2(tk_file, tk_line, "teko: cyclic interface base", tk_ns_dotted(sr_name_at(fi)));
+    tk_impl_add(ci, fi);
+    i64 n = tk_iface_nbase(fi);
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 base = tk_iface_base_at(fi, i);
+        i64 isnew = !tk_impl_has(ci, base);
+        tk_impl_add(ci, base);
+        if (isnew) tk_impl_via_set(ci, base, fi);
+        i = i + 1;
+    }
+}
+
+// the position of `name` in `si` OR in a base it extends (§50 I1), and the
+// interface that actually declares it in `pdecl`: a receiver of interface
+// type `I2` (`interface I2 : I1`) reaches an `I1` member without redeclaring
+// it, and dispatch has to go through `I1`'s OWN itab entry, whichever
+// interface's `:` list the receiver's declared type happened to be
+i64 tk_ifmeth_find_deep(i64 si, uptr m, uptr pdecl) {
+    i64 j = tk_ifmeth_find(si, m);
+    if (j >= 0) {
+        st64(pdecl, si);
+        return j;
+    }
+    i64 n = tk_iface_nbase(si);
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        j = tk_ifmeth_find_deep(tk_iface_base_at(si, i), m, pdecl);
+        if (j >= 0) return j;
+        i = i + 1;
+    }
+    return 0 - 1;
 }
 
 // the interfaces named in the `:` list of the class being read
@@ -456,6 +556,45 @@ void tk_iface_member(i64 si) {
     if (def) tk_member_body(si, rty, def, params, 0);
 }
 
+// one name of `interface I2 : I1, I0`'s own list, read the same way a
+// class's `:` list reads one (`tk_conf_name`, teko_class.mc): a bare name
+// resolves through the search order, a qualified one only exact, and one
+// declared further down (§50 O3) materializes on the spot through the same
+// `tk_fwd_materialize` a class base does -- an interface base out of order
+// works for the same reason a class base out of order does.
+i64 tk_iface_base_name(i64 proj) {
+    i64 line = p_line();
+    uptr fl = p_file();
+    uptr seg0mem = xalloc(8);
+    uptr nm = tk_ns_read_path(seg0mem);
+    uptr disp = tk_ns_dotted(nm);
+    i64 bare = str_eq(nm, ld64(seg0mem));
+    i64 si = 0 - 1;
+    if (bare) si = tk_struct_find(nm);
+    else si = tk_struct_find_exact(nm);
+    if (si >= 0 && sr_part_at(si) == TK_PFWD) si = 0 - 1;
+    if (si < 0 && bare) {
+        i64 fi = tk_fwd_find(tk_ns_qualified_name(nm));
+        if (fi >= 0) si = tk_fwd_materialize(fi);
+    }
+    if (si < 0 && tk_trait_find(nm) >= 0)
+        err_at2(fl, line, "teko: a trait is not an interface; use `use`", disp);
+    if (si < 0) err_at2(fl, line, "teko: unknown base interface", disp);
+    tk_check_type_use_from(si, proj, line, fl);
+    if (!tk_is_iface(si))
+        err_at2(fl, line, "teko: an interface extends another interface, not a class or a struct", disp);
+    return si;
+}
+
+// `interface I2 : I1, I0` -- every name is another interface, closed into
+// `si`'s own conformance set as it is read (§50 I1)
+void tk_iface_conf(i64 si, i64 proj) {
+    loop {
+        tk_iface_conf_close(si, tk_iface_base_name(proj));
+        if (!p_accept(K_COMMA)) break;
+    }
+}
+
 // ---- interface Name { T method(...); ... } ----
 void tk_interface() {
     tk_line = p_line();
@@ -482,6 +621,12 @@ void tk_interface() {
     uptr name = tk_ns_qualify(tk_newname("interface"));   // the current namespace, if any
     i64 ty = tk_type_word(name);                 // a name of its own type parses
     i64 si = tk_type_add(name, ty, 0 - 1, TK_KIFACE, vis, proj);
+    // §50 I1: `: I1, I0` reads BEFORE `sr_m0_at` marks where this interface's
+    // OWN signatures start -- a base declared below materializes here and
+    // appends ITS signatures to the same shared `im_*` table (teko_class.mc's
+    // `tk_fwd_materialize`), and marking the watermark first would fold that
+    // base's own range into this interface's, corrupting both.
+    if (p_accept(K_COLON)) tk_iface_conf(si, proj);
     set_sr_m0_at(si, tk_nifmeth);
     p_expect(K_LBRACE, "expected { in the interface body");
     loop {
@@ -495,5 +640,6 @@ void tk_interface() {
     p_accept(K_SEMI);
     tk_line = head_line;                         // back to the interface's own level
     tk_file = head_file;
-    if (sr_mn_at(si) == 0) err_at2(tk_file, tk_line, "teko: interface with no methods", name);
+    if (sr_mn_at(si) == 0 && tk_iface_nbase(si) == 0)
+        err_at2(tk_file, tk_line, "teko: interface with no methods", name);
 }

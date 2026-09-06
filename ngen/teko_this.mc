@@ -374,14 +374,16 @@ void tk_this_call(i64 n) {
 // another member is not a call to itself.
 void tk_this_iface_call(i64 n) {
     uptr m = nd_name(n);
-    if (tk_ifmeth_find(tk_pass_class, m) < 0) return;
+    uptr pdecl = xalloc(8);                      // §50 I1: `m` may live in a base interface
+    if (tk_ifmeth_find_deep(tk_pass_class, m, pdecl) < 0) return;
+    i64 di = ld64(pdecl);
     tk_this_at(n);
     i64 na = tk_arg_count(nd_a(n));
-    i64 j = tk_ifmeth_pick(tk_pass_class, m, na);
+    i64 j = tk_ifmeth_pick(di, m, na);
     if (j < 0) tk_pick_refuse(j, m, tk_line, tk_file);
-    i64 k = sr_m0_at(tk_pass_class) + j;
+    i64 k = sr_m0_at(di) + j;
     i64 args = tk_fill_defaults(nd_a(n), na, im_np_at(k), im_nreq_at(k), im_d0_at(k));
-    tk_node_replace(n, tk_itab_emit(tk_this_recv(), tk_pass_class, j, args, m, tk_line, tk_file));
+    tk_node_replace(n, tk_itab_emit(tk_this_recv(), di, j, args, m, tk_line, tk_file));
     tk_xt_put(n, tk_struct_by_ty(im_ret_at(k)), im_ret_at(k), 0);
 }
 

@@ -626,15 +626,26 @@ i64 tk_vt_slots(i64 ci, uptr vt) {
     return stmts;
 }
 
+// the "(via `I2`)" a not-implemented message gets when the interface that
+// wants the method is not one `ci`'s own `:` list named, but one it reaches
+// only because `ci` extends the interface that names it (§50 I1)
+uptr tk_conform_via_suffix(uptr msg, i64 via) {
+    if (via < 0) return msg;
+    return tk_join(msg, tk_join3(" (via `", sr_name_at(via), "`)"));
+}
+
 // the member the class never declared, named the way the source named it: an
 // accessor is one half of a PROPERTY, so the message says which half of which
 // property is missing rather than the `get_X` nothing was written as
-void tk_conform_missing(i64 k, uptr iname, uptr m) {
-    if (im_prop_at(k) == 0)
-        err_at2(tk_file, tk_line, tk_join3("teko: method of `", iname, "` not implemented"), m);
+void tk_conform_missing(i64 k, uptr iname, uptr m, i64 via) {
+    if (im_prop_at(k) == 0) {
+        err_at2(tk_file, tk_line,
+                tk_conform_via_suffix(tk_join3("teko: method of `", iname, "` not implemented"), via), m);
+        return;
+    }
     uptr half = "teko: the `get` of a property of `";
     if (im_prop_at(k) == 2) half = "teko: the `set` of a property of `";
-    err_at2(tk_file, tk_line, tk_join3(half, iname, "` not implemented"),
+    err_at2(tk_file, tk_line, tk_conform_via_suffix(tk_join3(half, iname, "` not implemented"), via),
             xstrdup(m + 4, cstrlen(m) - 4));
 }
 
@@ -645,7 +656,7 @@ void tk_conform_missing(i64 k, uptr iname, uptr m) {
 // nothing about it, and a `static abstract` one has to be answered by a static
 // method of the type. This is where "interface method not implemented" comes
 // from, and the signature checks with it.
-uptr tk_conform(i64 ci, i64 k, uptr iname) {
+uptr tk_conform(i64 ci, i64 k, uptr iname, i64 via) {
     uptr m = im_name_at(k);
     i64 mi = tk_method_sig_find(ci, m, im_sig_at(k));
     if (mi >= 0) {
@@ -661,7 +672,7 @@ uptr tk_conform(i64 ci, i64 k, uptr iname) {
     }
     if (im_def_at(k)) return im_def_at(k);       // the interface's own body answers for it
     mi = tk_method_named_find(ci, m);            // the name is there: say what differs
-    if (mi < 0) tk_conform_missing(k, iname, m);
+    if (mi < 0) tk_conform_missing(k, iname, m, via);
     if (mt_np_at(mi) != im_np_at(k))
         err_at2(tk_file, tk_line, "teko: method with an arity different from the interface", m);
     if (mt_ret_at(mi) != im_ret_at(k))
@@ -677,6 +688,7 @@ uptr tk_conform(i64 ci, i64 k, uptr iname) {
 // no receiver, so there is nothing for a table of this shape to hold.
 i64 tk_mt_fill(i64 ci, uptr cls, i64 fi) {
     uptr iname = sr_name_at(fi);
+    i64 via = tk_impl_via(ci, fi);                // §50 I1: -1 unless `ci` reaches `fi` through it
     uptr mt = tk_mt_name(cls, iname);
     i64 bytes = tk_ifinst(fi) * 8;
     if (bytes == 0) bytes = 8;
@@ -687,7 +699,7 @@ i64 tk_mt_fill(i64 ci, uptr cls, i64 fi) {
     loop {
         if (j >= sr_mn_at(fi)) break;
         i64 k = sr_m0_at(fi) + j;
-        uptr fn = tk_conform(ci, k, iname);
+        uptr fn = tk_conform(ci, k, iname, via);
         if (!im_static_at(k)) {
             i64 dst = tk_bin(K_ADD, tk_id(mt), tk_int(slot * 8));
             stmts = list_append(stmts, tk_stmt(tk_call2("st64", dst, tk_addr(fn))));
@@ -1388,12 +1400,13 @@ void tk_base_take(i64 ci, i64 base) {
     }
 }
 
-// the interfaces the `:` list of the part being read named
+// the interfaces the `:` list of the part being read named -- closed, not
+// just added (§50 I1): each one's own bases join `ci`'s conformance set too
 void tk_conf_apply(i64 ci) {
     i64 c = 0;
     loop {
         if (c >= tk_nconf) break;
-        tk_impl_add(ci, conf_if_at(c));
+        tk_iface_conf_close(ci, conf_if_at(c));
         c = c + 1;
     }
 }
