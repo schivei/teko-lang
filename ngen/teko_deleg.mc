@@ -39,6 +39,11 @@
 
 #define TK_MAXLAMCAP 8                 // `use (...)` names, one lambda
 #define TK_MAXLAMREF 64                // lambdas that capture at least one name by reference
+#define TK_MAXLAMGLOB 64               // D226 compat crumb: lambda-body names a global read
+                                       // might be, resolved once teko_array.mc's own `N_GLOBAL`
+                                       // rows exist -- there is no hook over a top-level
+                                       // declaration (teko_array.mc's own header), so a name
+                                       // this early check cannot place waits for `tk_deleg_pass`
 
 // K4 (D221/§41): lambda, local named function, `use (a, &b)` -- the same
 // object K1 wraps a plain function into, built inline where `new Op(...)`
@@ -673,15 +678,32 @@ void tk_lam_replace(i64 n, i64 repl) {
 // that), a plain `uptr` holding the address the prologue loaded
 uptr tk_lam_refaddr(i64 ci) { return tk_join("__lamref", tk_num(ci)); }
 
+// D226 compat crumb: a name a global might still turn out to be -- teko_array.mc's
+// own header explains why the answer waits for a pass (no hook exists over a
+// top-level declaration): `n` is recorded here and `tk_deleg_pass`, once the
+// whole unit's `N_GLOBAL` rows exist, is what actually accepts or refuses it.
+i64  lg_node[TK_MAXLAMGLOB];
+i64  tk_nlg = 0;
+
+void tk_lg_add(i64 n) {
+    if (tk_nlg == TK_MAXLAMGLOB) err_at(nd_file(n), nd_line(n), "teko: too many unresolved names in one lambda");
+    st64(lg_node + tk_nlg * 8, n);
+    tk_nlg = tk_nlg + 1;
+}
+
 // a name that is neither a param, a local the body itself declares, a
-// capture, nor a global -- D221's own wording for it
+// capture, a function nor a type -- C#'s own rule keeps every one of the
+// program's STATICS (a top-level global, a `const`, a free function) visible
+// with no `use (...)` at all; only a name none of those turns out to be is
+// truly `D221`'s own wording for it, and that answer waits on `tk_deleg_pass`
+// below (`tk_lg_add`), the one point a global's own row is knowable.
 void tk_lam_check_name(i64 n) {
     uptr name = nd_name(n);
     if (tk_ty_scope_find(name) >= 0) return;
     if (tk_lc_find(name) >= 0) return;
     if (decl_find(name) >= 0) return;
     if (tk_struct_find(name) >= 0) return;
-    err_at(nd_file(n), nd_line(n), tk_join3("teko: ", name, " is not captured; add it to use (...)"));
+    tk_lg_add(n);
 }
 
 // the freshly built body of ONE lambda: a by-reference capture's every read
@@ -1035,6 +1057,35 @@ i64 tk_any_deleg() {
     return 0;
 }
 
+// D226 compat crumb: 1 when `name` names an `N_GLOBAL` of the unit -- the
+// same kind of root scan `teko_array.mc`'s own `tk_array_pass` runs for a
+// heap array's row, here over every global regardless of its type
+i64 tk_global_find(i64 root, uptr name) {
+    i64 f = root;
+    loop {
+        if (f == 0) break;
+        if (nd_kind(f) == N_GLOBAL && str_eq(nd_name(f), name)) return 1;
+        f = nd_next(f);
+    }
+    return 0;
+}
+
+// the names `tk_lam_check_name` could not place while a lambda's own body was
+// still being read: with the whole unit here, a global answers for itself,
+// and a name that still answers for nothing is genuinely `is not captured`
+void tk_lam_resolve_globals(i64 root) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nlg) break;
+        i64 n = ld64(lg_node + i * 8);
+        if (!tk_global_find(root, nd_name(n)))
+            err_at(nd_file(n), nd_line(n),
+                   tk_join3("teko: ", nd_name(n), " is not captured; add it to use (...)"));
+        i = i + 1;
+    }
+    tk_nlg = 0;
+}
+
 i64 tk_deleg_pass(i64 root) {
     if (!tk_any_deleg()) return root;
     tk_deleg_root = root;
@@ -1055,5 +1106,6 @@ i64 tk_deleg_pass(i64 root) {
     tk_deleg_cur_ns = 0;
     tk_deleg_cur_ret = 0 - 1;
     tk_cur_fn_name = 0;
+    tk_lam_resolve_globals(root);
     return root;
 }
