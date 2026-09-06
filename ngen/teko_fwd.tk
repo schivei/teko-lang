@@ -587,6 +587,45 @@ i64 tk_fwd_is_source_name(uptr name) {
     return ld8(name + n - 3) == '.' && ld8(name + n - 2) == 't' && ld8(name + n - 1) == 'k';
 }
 
+// S4.2 (mc 0.15.8's `source_claim`, docs/reference/hooks.md § source_claim):
+// 1 while teko is pushing a source of its OWN making -- a generic
+// instantiation, a trait body, a forward-materialized declaration, the loop
+// prelude, a `params` instance. Those frames carry teko source under a frame
+// NAME (`Box__Circle__4 instantiated from f.tk:12`, `<teko-loop-prelude>`),
+// not a file name, so the `.tk` suffix alone would answer 0 for them and the
+// replay would be read with the core's vocabulary -- `class`, `str`, `public`
+// lexing as ordinary identifiers in text teko itself wrote. Every push teko
+// makes goes through `tk_push_source` below, which is what sets this.
+i64 tk_claim_own = 0;
+
+// S4.2: the `source_claim` handler -- which sources this dialect's words
+// apply in. A word a module registers (`syntax`/`syntax_stmt`/`syntax_expr`/
+// `type_alias`/`type_new` -> `word_add`) is reserved PROGRAM-WIDE without
+// this hook, and a self-hosted teko has to read the core's own `.mc` files,
+// where `type`, `out` and `params` are parameter names. So: the `.tk` sources
+// (a program, a fixture, `lib/rt.tk`, the 31 modules of the `teko` package
+// when the compiler compiles ITSELF) plus teko's own pushed frames, and
+// nothing else -- `<mc/host>`, `<mc/objmodel>`, `<sys>`, `<prelude>` and
+// every `.mc` are read with the core's vocabulary, exactly as the untaught
+// `mc` reads them.
+i64 tk_source_claim(uptr name) {
+    if (tk_claim_own) return 1;
+    return tk_fwd_is_source_name(name);
+}
+
+// S4.2: the ONE road teko pushes a source through, so the claim above answers
+// 1 for it. The flag is set for the duration of the push and cleared right
+// after: `source_claim` is asked once per frame, INSIDE `lex_push_mem`
+// (hooks.md § source_claim: "asked once per frame, at push time"), so the
+// window is exactly this call. Clearing it afterwards is what keeps a nested
+// push -- a generic instantiated from inside a trait body -- honest: each one
+// sets the flag for its own push.
+void tk_push_source(uptr name, uptr text, i64 len) {
+    tk_claim_own = 1;
+    p_push_source(name, text, len);
+    tk_claim_own = 0;
+}
+
 // §55: the single `on_source` handler, replacing the two sites this module
 // used to scan from by hand -- the entry file's own line at the top of
 // `user_init`, and `tk_import`'s call right after `lex_include`
@@ -601,11 +640,20 @@ void tk_fwd_on_source(uptr name, uptr src, i64 len) {
     tk_fwd_scan(src, src + len, name);
 }
 
-// registers the callback above. Order no longer matters against
+// registers the two lexer-side callbacks. Order no longer matters against
 // `tk_loop_init`'s own prelude push (the old §50 (a).4 note): the callback
 // runs once per source regardless of when it is pushed, and the name filter
 // throws the prelude's own announcement away on its own.
+//
+// S4.2: `source_claim` registers FIRST and, because `teko_init` calls this
+// function ahead of every `syntax`/`type_alias` registration, it is in place
+// before a single word is reserved. Registration order is not what makes it
+// correct -- the hook re-asks every frame already open when a handler
+// registers (hooks.md § source_claim, the replay rule) -- but it keeps the
+// reading of `teko_init` honest: the scope is declared before the vocabulary
+// it scopes.
 void tk_fwd_init() {
+    source_claim(&tk_source_claim);
     on_source(&tk_fwd_on_source);
 }
 
