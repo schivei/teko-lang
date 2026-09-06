@@ -55,6 +55,7 @@ uptr tr_text[TK_MAXTRAIT];            // the recorded body, braces included
 i64  tr_len[TK_MAXTRAIT];
 i64  tr_vis[TK_MAXTRAIT];             // TK_TPUBLIC or TK_TINTERNAL, as for a type
 i64  tr_proj[TK_MAXTRAIT];            // 1 when the project itself declared it
+i64  tr_declared[TK_MAXTRAIT];        // 1 once the real `trait Name { ... }` has been read (§50 O1)
 i64  tk_ntrait = 0;
 
 i64  tu_tr[TK_MAXUSE];                // queued by `use`, not yet flattened
@@ -69,23 +70,25 @@ i64  tk_nflat = 0;
 i64  tk_own_methods = 0;              // methods the class declared in its OWN body
 
 // ---- table accessors (no raw ld64/st64 outside this section) ----
-uptr tr_name_at(i64 i) { return ld64(tr_name + i * 8); }
-uptr tr_text_at(i64 i) { return ld64(tr_text + i * 8); }
-i64  tr_len_at(i64 i)  { return ld64(tr_len + i * 8); }
-i64  tr_vis_at(i64 i)  { return ld64(tr_vis + i * 8); }
-i64  tr_proj_at(i64 i) { return ld64(tr_proj + i * 8); }
-i64  tu_tr_at(i64 i)   { return ld64(tu_tr + i * 8); }
-i64  ud_tr_at(i64 i)   { return ld64(ud_tr + i * 8); }
-i64  fl_tr_at(i64 i)   { return ld64(fl_tr + i * 8); }
+uptr tr_name_at(i64 i)     { return ld64(tr_name + i * 8); }
+uptr tr_text_at(i64 i)     { return ld64(tr_text + i * 8); }
+i64  tr_len_at(i64 i)      { return ld64(tr_len + i * 8); }
+i64  tr_vis_at(i64 i)      { return ld64(tr_vis + i * 8); }
+i64  tr_proj_at(i64 i)     { return ld64(tr_proj + i * 8); }
+i64  tr_declared_at(i64 i) { return ld64(tr_declared + i * 8); }
+i64  tu_tr_at(i64 i)       { return ld64(tu_tr + i * 8); }
+i64  ud_tr_at(i64 i)       { return ld64(ud_tr + i * 8); }
+i64  fl_tr_at(i64 i)       { return ld64(fl_tr + i * 8); }
 
-void set_tr_name_at(i64 i, uptr v) { st64(tr_name + i * 8, v); }
-void set_tr_text_at(i64 i, uptr v) { st64(tr_text + i * 8, v); }
-void set_tr_len_at(i64 i, i64 v)   { st64(tr_len + i * 8, v); }
-void set_tr_vis_at(i64 i, i64 v)   { st64(tr_vis + i * 8, v); }
-void set_tr_proj_at(i64 i, i64 v)  { st64(tr_proj + i * 8, v); }
-void set_tu_tr_at(i64 i, i64 v)    { st64(tu_tr + i * 8, v); }
-void set_ud_tr_at(i64 i, i64 v)    { st64(ud_tr + i * 8, v); }
-void set_fl_tr_at(i64 i, i64 v)    { st64(fl_tr + i * 8, v); }
+void set_tr_name_at(i64 i, uptr v)     { st64(tr_name + i * 8, v); }
+void set_tr_text_at(i64 i, uptr v)     { st64(tr_text + i * 8, v); }
+void set_tr_len_at(i64 i, i64 v)       { st64(tr_len + i * 8, v); }
+void set_tr_vis_at(i64 i, i64 v)       { st64(tr_vis + i * 8, v); }
+void set_tr_proj_at(i64 i, i64 v)      { st64(tr_proj + i * 8, v); }
+void set_tr_declared_at(i64 i, i64 v)  { st64(tr_declared + i * 8, v); }
+void set_tu_tr_at(i64 i, i64 v)        { st64(tu_tr + i * 8, v); }
+void set_ud_tr_at(i64 i, i64 v)        { st64(ud_tr + i * 8, v); }
+void set_fl_tr_at(i64 i, i64 v)        { st64(fl_tr + i * 8, v); }
 
 i64 tk_trait_find(uptr name) {
     i64 i = 0;
@@ -175,6 +178,23 @@ uptr tk_frame(i64 mark, i64 end, uptr cls) {
 // ---- trait Name { fields and methods } ----
 // The body is RECORDED and not parsed: a trait has no layout of its own, so
 // there is nothing to lay out until a class uses it.
+// pre-registers a trait's body from the forward scan (teko_fwd.mc, §50 O1),
+// so `use T;` above `trait T { ... }` resolves before the real declaration
+// is ever reached. Filed under the same table `tk_trait()` below fills, not
+// declared yet (`tr_declared_at` stays 0): a name already scanned once is
+// left alone, matching the scan's own "only ADD, never refuse" rule.
+void tk_trait_scan(uptr name, uptr text, i64 len, i64 vis, i64 proj) {
+    if (tk_trait_find(name) >= 0) return;
+    if (tk_ntrait == TK_MAXTRAIT) err_at(tk_file, tk_line, "teko: too many traits");
+    set_tr_name_at(tk_ntrait, name);
+    set_tr_text_at(tk_ntrait, text);
+    set_tr_len_at(tk_ntrait, len);
+    set_tr_vis_at(tk_ntrait, vis);
+    set_tr_proj_at(tk_ntrait, proj);
+    set_tr_declared_at(tk_ntrait, 0);
+    tk_ntrait = tk_ntrait + 1;
+}
+
 void tk_trait() {
     tk_line = p_line();
     tk_file = p_file();
@@ -182,18 +202,23 @@ void tk_trait() {
     i64 vis = tk_take_decl_vis();                // the `public`/`internal` before the word
     i64 proj = tk_take_decl_proj();
     uptr name = tk_ns_qualify(tk_newname("trait"));   // the current namespace, if any
-    if (tk_trait_find(name) >= 0) err_at2(tk_file, tk_line, "teko: duplicate trait", name);
+    i64 ti = tk_trait_find(name);
+    if (ti >= 0 && tr_declared_at(ti)) err_at2(tk_file, tk_line, "teko: duplicate trait", name);
     if (tk_struct_find(name) >= 0) err_at2(tk_file, tk_line, "teko: the name is already a type", name);
-    if (tk_ntrait == TK_MAXTRAIT) err_at(tk_file, tk_line, "teko: too many traits");
     if (p_id() != K_LBRACE) err_at2(p_file(), p_line(), "teko: expected { in the trait body", name);
     i64 len = 0;
     uptr text = p_skip_balanced(K_LBRACE, K_RBRACE, &len);
-    set_tr_name_at(tk_ntrait, name);
-    set_tr_text_at(tk_ntrait, text);
-    set_tr_len_at(tk_ntrait, len);
-    set_tr_vis_at(tk_ntrait, vis);
-    set_tr_proj_at(tk_ntrait, proj);
-    tk_ntrait = tk_ntrait + 1;
+    if (ti < 0) {
+        if (tk_ntrait == TK_MAXTRAIT) err_at(tk_file, tk_line, "teko: too many traits");
+        ti = tk_ntrait;
+        set_tr_name_at(ti, name);
+        tk_ntrait = tk_ntrait + 1;
+    }
+    set_tr_text_at(ti, text);                    // the authoritative span, over the scan's own copy
+    set_tr_len_at(ti, len);
+    set_tr_vis_at(ti, vis);
+    set_tr_proj_at(ti, proj);
+    set_tr_declared_at(ti, 1);
     p_accept(K_SEMI);                            // a C programmer's trailing ;
 }
 

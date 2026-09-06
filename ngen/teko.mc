@@ -187,6 +187,7 @@
 #include "teko_array.mc"
 #include "teko_const.mc"
 #include "teko_ns.mc"
+#include "teko_fwd.mc"
 #include "teko_ref.mc"
 #include "teko_iface.mc"
 #include "teko_trait.mc"
@@ -210,9 +211,20 @@
 #include "teko_switch.mc"
 
 void user_init() {
+    // `tk_access_init` first: it reads `cfg_file`/`lex_file()` and touches
+    // nothing the lexer is reading FROM (no push, no cursor move), so it is
+    // safe ahead of the forward scan below and gives it a working
+    // `tk_origin_of_file` for a trait's own placeholder (§50 O1).
+    tk_access_init();
+
+    // §50 O1: the forward scan runs before every OTHER init -- in
+    // particular before `tk_loop_init` below pushes its own prelude source,
+    // the point past which `p_cp()`/`p_src_end()` answer for the prelude and
+    // not for the entry file (teko_fwd.mc's own header).
+    tk_fwd_init();
+
     tk_types_init();
     tk_float_init();
-    tk_access_init();
     tk_loop_init();
     tk_ns_init();
     tk_ref_init();
@@ -286,6 +298,13 @@ void user_init() {
     // pass that censuses by name -- `params`, the oracle, overload
     // mangling and defaults all have to see the FINAL symbol.
     pass(&tk_ns_pass);
+
+    // §50 O1: every forward-scanned name the unit is now fully parsed with
+    // has either been adopted by its real declaration or never used at all;
+    // this is the backstop for a scan false positive (teko_fwd.mc's own
+    // header, decision 14) -- placed right after `tk_ns_pass`, before any
+    // pass below censuses by name.
+    pass(&tk_fwd_pass);
 
     // ahead of tk_params_pass: a global array's own leftover N_INDEX has to
     // be gone before that walk runs, unconditionally, over every N_INDEX in
