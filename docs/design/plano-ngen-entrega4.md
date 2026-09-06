@@ -4876,3 +4876,20 @@ como rumo futuro, não em `ngen/mc.toml` (mexer no `[package]` muda o hash de á
 Gate: `ngen.yml` (5 pernas + `fixpoint`×2) verde na branch, com o log mostrando `pinned
 minicompiler/mc v0.15.12` (não `resolved minicompiler/mc latest`); `sh ngen/scripts/bootstrap.sh`
 local → `FIXPOINT OK`; `ngen/*.tk`, `ngen/mc.toml` e `ngen/tests/` intocados.
+
+### (b) Item 2 — `ngen/README.md` reescrito
+
+O README estava stale desde a migração de org (§3.1a): apontava `github.com/schivei/mc` e não
+citava `ngen/MC_VERSION`, o registro `https://pkg.minicompiler.dev` nem a forma real de consumo
+(`[deps] teko`/`#include <teko>`, D230). Reescrito curto (106 linhas): o que é o `ngen/`, como
+buildar (`mc build ngen`), como rodar as fixtures e o `bootstrap.sh`, a versão pinada (aponta para
+o item (a)), como será consumido, e a lista curta do que fica FORA da v0.1.0 (`Func<>`/`Action<>`,
+multicast de delegate, `params T[]` embalando lambda, `T[][]`, namespace aninhado, DI genérica por
+função — a forma por marcador de interface É implementada, D229 —, float em `params` — recusado
+desde o V0 §76 — e `when` no braço `_` final — idem). O conteúdo antigo (a tabela hook-por-hook das
+entregas 1-2, o discurso de "por que primitivo X é alias", a seção de validação offline sem rede)
+não é história que o README deva carregar — mora nos §§ deste plano e no HANDOFF; o README aponta
+para lá em vez de duplicar.
+
+Gate: mesmo do item (a) — o README não toca código, então o gate é o mesmo run de CI que prova o
+item (a); revisão de conteúdo (≤120 linhas, sem link `github.com/schivei/mc`) é o critério próprio.
