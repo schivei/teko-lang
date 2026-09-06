@@ -3205,3 +3205,32 @@ explícita e serviço com chave (`[FromKeyedServices]`); `inject` em inicializad
    não `tk_struct_find` + `tk_fwd_row` manual.** O crumb já pede TK_PFWD aceito (decisão 5); o par
    pronto que a base já dava para field/param/return/local materializa o placeholder sozinho e
    poupa uma reimplementação.
+
+## 60. Errata — DI2 landado (2026-09-06)
+
+1. **`nd_type(p)` de um PARÂMETRO é o id do `type_new` do NÚCLEO, não a linha da tabela de structs
+   que `sv_cls_at`/`ci_if_at`/`ci_cls_at` indexam.** Medido ao vivo (probe fora de `tests/`): para um
+   parâmetro `IDb db`, `nd_type(p)` deu `9` enquanto `tk_struct_find("IDb")` deu `1` -- dois espaços
+   de numeração distintos, exatamente o que `tk_struct_by_ty(ty)` (teko_struct.mc:516, já em uso por
+   `tk_field_use`/`tk_is_counted`/`tk_ha_index` para o mesmo problema) já converte. `tk_di_key_exists`/
+   `tk_di_ctor_satisfiable`/`tk_di_ctor_args` chamam `tk_struct_by_ty(nd_type(p))` antes de comparar
+   contra qualquer chave de serviço -- sem essa conversão, NENHUM parâmetro de tipo-serviço é
+   reconhecido e todo construtor com dependência cai na mensagem "no constructor... takes only
+   services", mesmo com o serviço registrado e a dependência correta.
+2. **A recusa de "duas implementações" e de "sem implementação" de um parâmetro de construtor usa a
+   LINHA DO PARÂMETRO (`nd_line(p)`/`nd_file(p)`), não a linha do sítio `inject` que disparou a
+   cadeia.** É o que o §58 (c) já pedia ("na LINHA do construtor que a pede") e o que faz o erro
+   apontar para `Repo(IDb db)` mesmo quando quem pediu `Repo` foi um `Svc` três níveis acima --
+   confirmado por probe: duas implementações de `IDb` apontam para a linha do PARÂMETRO de `Repo`,
+   não para o `inject Repo` de `main`.
+3. **O item herdado (decisão 17) não precisou de tabela nova.** `ds_node`/`tk_nds` (já existentes
+   desde o DI1, para o placeholder de cada `inject`) já são exatamente o conjunto "nós que um
+   `inject` produziu" -- `tk_di_is_inject(n)` é uma busca sobre essa mesma tabela, e sobrevive ao
+   `node_assign` de `tk_di_pass` porque este substitui o CONTEÚDO do nó, nunca seu índice. Nenhuma
+   marcação nova em `xt_*` foi necessária.
+4. **A posse da cadeia não precisou de regra nova no RC**, confirmando a decisão (e) do §58: `Svc_new`
+   recebendo `Repo_di_get()`/`Clock_di_get()` como argumento é reconhecido pelo `tk_rc_call_owned`
+   genérico (teko_rc.mc) puramente pelo TIPO DE RETORNO DECLARADO da função chamada -- `uptr` para um
+   getter é emprestado, o tipo da própria classe para um alocador é próprio -- o mesmo mecanismo que
+   já cobre qualquer `new X(new Y())` escrito à mão. `rt_live() == 4` na fixture (Clock, Db, Repo, Svc)
+   prova que nada vazou nem foi contado em dobro.

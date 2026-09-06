@@ -1867,11 +1867,61 @@ um singleton sem dependência.
   honest-stops de topo) já domina `syntax_expr()` (8->9 com `inject`); a leitura correta do gate é
   "verdict ok", não o número aparecer.
 
-**Fila DI2->DI4** (plano §58 (f)): DI2 -- injeção por CONSTRUTOR com dependência (o grafo,
-`tk_di_ctor_pick`, ciclo `A -> B -> A`); DI3 -- `syntax_stmt("scope")`, Scoped e Transient com seu
+**DI2 LANDADO** (D229, plano §58; 44 fixtures): injeção por CONSTRUTOR, o grafo de dependências, o
+ciclo, e a emissão do singleton em cadeia -- mais o item herdado do verificador do DI1.
+- **`tk_di_ctor_pick(ci)`** (`teko_di.mc`) escolhe, entre os construtores da própria classe
+  (`ctr_*`, teko_class.mc), o de MAIS parâmetros satisfazíveis (C# §12.6.4): cada parâmetro é OU um
+  tipo de serviço registrado (`tk_di_key_exists`, sobre `tk_struct_by_ty(nd_type(p))` -- o tipo bruto
+  de um parâmetro é o id do `type_new` do núcleo, não a linha da tabela de structs que `sv_cls_at`/
+  `ci_if_at` indexam, e a conversão é exatamente o que `tk_struct_by_ty` já existe para fazer) OU tem
+  DEFAULT (`tk_fill_defaults`, a máquina do C1/C6) -- um serviço injetável sempre vence seu próprio
+  default quando tem os dois. Sem candidato satisfazível: a mensagem do DI1 (`no constructor of this
+  service takes only services`), agora cobrindo o caso misto (um parâmetro `i64` sem default no meio
+  de outros injetáveis). Dois candidatos satisfazíveis empatados na contagem: `teko: two constructors
+  of this service take the same number of injectable parameters`.
+- **`tk_di_ctor_args(i)`** constrói a lista de argumentos do construtor escolhido, na ordem
+  declarada: um parâmetro de tipo-serviço recursa em `tk_di_find_impl` + `tk_di_resolve` NA LINHA
+  DAQUELE PARÂMETRO (não do sítio de `inject` que disparou a cadeia) -- "o construtor que pede",
+  então uma chave sem implementação ou ambígua aponta exatamente para o parâmetro que a pede, em
+  qualquer profundidade da cadeia. Um parâmetro sem chave clona o default que `tk_di_ctor_pick` já
+  confirmou existir.
+- **Ciclo** (`di_stk`/`tk_di_push`/`tk_di_pop`, decisão 18): `tk_di_new_call` empilha o serviço ANTES
+  de escolher/montar seu construtor e desempilha ao fim; achar o mesmo serviço já na pilha é
+  exatamente a recursão infinita que o COMPILADOR faria ao tentar construir um singleton que depende
+  dele mesmo (direto ou por uma cadeia), pega ANTES de estourar a pilha do compilador --
+  `teko: cyclic service: A -> B -> A`, com a cadeia inteira.
+- **Emissão em cadeia**: nenhuma regra nova. `Svc_di_get()` (Singleton) chama `Svc_new(args)` cujos
+  argumentos são `Repo_di_get()`/`Clock_di_get()` -- a MESMA máquina do getter memoizado do DI1,
+  recursiva; `tk_rc_call_owned` (teko_rc.mc) já deriva posse pelo tipo de retorno DECLARADO da função
+  chamada (`uptr` para um getter = emprestado; o tipo da classe para um alocador = próprio), então
+  nenhuma das duas peças precisou de marcação de posse nova -- só o `<cls>_di_get`/`<cls>_new__sig`
+  que já existiam.
+- **Item herdado (decisão 17, verificador DI1): `inject T.m()` direto agora é recusado em TODA
+  rota**, não só na vtable/itab. `tk_di_is_inject(n)` (`teko_di.mc`) responde 1 para o MESMO índice de
+  nó que `tk_inject()` criou -- sobrevive ao `node_assign` de `tk_di_pass` porque este reescreve o
+  CONTEÚDO do nó, nunca seu índice -- e `tk_dot` (teko_expr.mc) recusa `.` sobre ele ANTES de
+  despachar para qualquer rota (método comum, virtual ou itab): `teko: bind the injected service to a
+  variable before calling it`. A recusa antiga (`tk_pure`, "a virtual call needs a name or a field on
+  the left") só cobria a dupla leitura da vtable; um método comum (`slot < 0` em `tk_emit_call`) nunca
+  a consultava, e `inject Widget.tag()` compilava.
+- **Fixture** `ngen/tests/surface_di.tk` cresce para a cadeia de três níveis `Svc(IRepo, IClock) <-
+  Repo(IDb) <- Db`: `Db(i64 seed = 5)` (construtor com um parâmetro default preenchido, sem
+  dependência nenhuma), `Repo(IDb db)` e `Svc(IRepo repo, IClock clock)` (cada um injetado por
+  construtor), uma chamada através da interface (`IRepo r = inject IRepo; r.load()`, provando o
+  itab), e `rt_live() == 4` no fim (Clock, Db, Repo, Svc -- os quatro singletons, nunca mais). Probes
+  (fora de `tests/`, descartados): ciclo `A -> B -> A`; duas implementações da chave pedida por um
+  construtor; construtor que pede `i64` sem default; dois construtores com a mesma contagem
+  injetável; `inject Widget.tag()` sobre método comum.
+- Gate: `rm -rf ngen/build`, build do zero; `--entry-only` **44/44**; `--dump-ast` das **43 fixtures
+  não tocadas byte-idêntico** ao compilador da base `39a75156` (`same=43 diff=0`); `mc limits ngen`
+  `verdict ok`, zero linha `grew` (`intrin` 8->8, `passes` 15->15, `syntax` 14->14 -- DI2 não abre
+  hook novo, só cresce funções dentro de `teko_di.mc`/`teko_expr.mc`).
+
+**Fila DI3->DI4** (plano §58 (f)): DI3 -- `syntax_stmt("scope")`, Scoped e Transient com seu
 próprio ciclo de vida; DI4 -- namespaces como chave, interface-base como chave, o Singleton que
 recebe um Scoped (decisão 11, o escopo PRÓPRIO do singleton). Fora do escopo do port por ora
-(dívida declarada, plano §58 (g)): genérico como chave, `inject T.m()` direto, `delegate`/`struct`
+(dívida declarada, plano §58 (g)): genérico como chave, `inject T.m()` direto (hoistar o sítio
+automaticamente é crumb futuro -- por ora a recusa é o comportamento correto), `delegate`/`struct`
 como serviço, `IDisposable`, factory/decoração de registro.
 
 ## 5.1 Armadilhas já pagas (não repita)
