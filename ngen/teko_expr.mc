@@ -41,10 +41,93 @@ uptr tk_new_pick(i64 si, uptr name, uptr pargs, i64 na, i64 line, uptr fl) {
     return tk_new_sym(name, mt_sig_at(mi));
 }
 
+// ---- §50 O2: `new Name(args)` on a type only the forward scan has seen so
+// far (teko_fwd.mc's own `TK_PFWD`) -- the constructor pick, the `abstract`
+// refusal and `tk_close_open` all need the row WHOLE, which is exactly what
+// is missing until the real declaration is read. The arguments are read at
+// PARSE time regardless, because the parser is what has the tokens; the row
+// `tk_fwd_row` reserved is already this node's own type (`tk_xt_add` below),
+// so the oracle and the reclaim pass see a `Box` from the very first read --
+// only the constructor's OWN symbol waits for `tk_fwd_resolve_all_new`.
+#define TK_MAXNFWD 32
+
+i64  nf_node[TK_MAXNFWD];
+i64  nf_si[TK_MAXNFWD];
+i64  nf_arg[TK_MAXNFWD];
+i64  nf_na[TK_MAXNFWD];
+i64  nf_line[TK_MAXNFWD];
+uptr nf_file[TK_MAXNFWD];
+i64  tk_nnf = 0;
+
+i64  nf_node_at(i64 i)  { return ld64(nf_node + i * 8); }
+i64  nf_si_at(i64 i)    { return ld64(nf_si + i * 8); }
+i64  nf_arg_at(i64 i)   { return ld64(nf_arg + i * 8); }
+i64  nf_na_at(i64 i)    { return ld64(nf_na + i * 8); }
+i64  nf_line_at(i64 i)  { return ld64(nf_line + i * 8); }
+uptr nf_file_at(i64 i)  { return ld64(nf_file + i * 8); }
+
+void set_nf_node_at(i64 i, i64 v)  { st64(nf_node + i * 8, v); }
+void set_nf_si_at(i64 i, i64 v)    { st64(nf_si + i * 8, v); }
+void set_nf_arg_at(i64 i, i64 v)   { st64(nf_arg + i * 8, v); }
+void set_nf_na_at(i64 i, i64 v)    { st64(nf_na + i * 8, v); }
+void set_nf_line_at(i64 i, i64 v)  { st64(nf_line + i * 8, v); }
+void set_nf_file_at(i64 i, uptr v) { st64(nf_file + i * 8, v); }
+
+void tk_nf_add(i64 n, i64 si, i64 args, i64 na, i64 line, uptr fl) {
+    if (tk_nnf == TK_MAXNFWD) err_at(fl, line, "teko: too many `new` on a type declared below");
+    set_nf_node_at(tk_nnf, n);
+    set_nf_si_at(tk_nnf, si);
+    set_nf_arg_at(tk_nnf, args);
+    set_nf_na_at(tk_nnf, na);
+    set_nf_line_at(tk_nnf, line);
+    set_nf_file_at(tk_nnf, fl);
+    tk_nnf = tk_nnf + 1;
+}
+
+i64 tk_fwd_defer_new(i64 si, i64 args, i64 na, i64 line, uptr fl) {
+    tk_line = line;
+    tk_file = fl;
+    i64 n = tk_call("tk_unresolved_new", 0);
+    tk_nf_add(n, si, args, na, line, fl);
+    tk_xt_add(n, si, 0);                          // owned, same as a resolved `new` (RC: pure=0)
+    return n;
+}
+
+// every deferred `new`, once `tk_fwd_pass`'s own backstop has confirmed the
+// unit declares every type it scanned: the same pick `tk_new()` makes for a
+// type it already knew, rewritten in place over the placeholder -- the node
+// index, and the type this module already put on it, never move.
+void tk_fwd_resolve_all_new() {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nnf) break;
+        i64 si = nf_si_at(i);
+        i64 line = nf_line_at(i);
+        uptr fl = nf_file_at(i);
+        uptr name = sr_name_at(si);
+        if (sr_abst_at(si)) err_at2(fl, line, "teko: an abstract class is not instantiated", name);
+        tk_check_type_use(si, line, fl);
+        tk_close_open(si);
+        tk_line = line;
+        tk_file = fl;
+        i64 args = nf_arg_at(i);
+        uptr fn = tk_new_pick(si, name, &args, nf_na_at(i), line, fl);
+        i64 r = tk_call(fn, args);
+        i64 n = nf_node_at(i);
+        i64 keep = nd_next(n);
+        node_assign(n, r);
+        set_nd_next(n, keep);
+        i = i + 1;
+    }
+}
+
 // new Name  /  new Name(args)  /  new geo.Name(args)  -- the allocation is the
 // generated allocator's, so nothing here knows the type's size; `new` only
 // names it. A qualified name (§31 N1) is walked by `tk_ns_walk`, which is a
-// no-op the instant the first segment already names a plain type.
+// no-op the instant the first segment already names a plain type. §50 O2: a
+// type only the forward scan has seen so far (`sr_part_at(si) == TK_PFWD`,
+// whether materialized here or by an earlier identity-only use) defers
+// instead of picking a constructor over an empty placeholder.
 i64 tk_new() {
     i64 line = p_line();
     uptr fl = p_file();
@@ -61,15 +144,18 @@ i64 tk_new() {
     i64 si = tk_struct_find(name);
     if (si < 0 && tk_trait_find(name) >= 0)
         err_at2(fl, line, "teko: a trait is not a type; `new` needs a struct or a class", name);
+    if (si < 0) si = tk_fwd_row(name);            // §50 O2: declared below, never used before
     if (si < 0) err_at2(fl, line, "teko: unknown struct or class after `new`", name);
     name = sr_name_at(si);                        // the real, qualified name: what a symbol is built from
     if (tk_is_iface(si)) err_at2(fl, line, "teko: an interface has no object to allocate", name);
-    if (sr_abst_at(si)) err_at2(fl, line, "teko: an abstract class is not instantiated", name);
-    tk_check_type_use(si, line, fl);
-    tk_close_open(si);                           // `new` is what the constructor is emitted for
+    if (tk_is_deleg(si)) err_at2(fl, line, "teko: a delegate declared below `new` is not taught yet", name);
     i64 na = 0;
     i64 args = 0;
     if (p_id() == K_LPAR) args = tk_args(&na);
+    if (sr_part_at(si) == TK_PFWD) return tk_fwd_defer_new(si, args, na, line, fl);
+    if (sr_abst_at(si)) err_at2(fl, line, "teko: an abstract class is not instantiated", name);
+    tk_check_type_use(si, line, fl);
+    tk_close_open(si);                           // `new` is what the constructor is emitted for
     tk_line = line;
     tk_file = fl;
     uptr fn = tk_new_pick(si, name, &args, na, line, fl);
@@ -323,6 +409,13 @@ i64 tk_member_of(i64 left, i64 si, uptr m, i64 line, uptr fl) {
 // only after the oracle has answered that it does not know the type -- a global,
 // or an expression whose type nothing reports.
 //
+// §50 O2: a receiver whose type IS known but is still `TK_PFWD` (identity
+// materialized ahead of the real declaration -- a local of a type declared
+// below, a field of one, a call returning one) is the SAME "not known yet"
+// case -- its field/method tables are still empty -- so it defers exactly as
+// a parameter already does, and resolves once the oracle types the receiver
+// for real (teko_typeof.mc's `tk_pend_do`, once `class Box` has been read).
+//
 // `.` sinks through a leading `- ! ~` first (teko_prefix.mc): `-a.x` is not
 // `(-a).x`, it is `-(a.x)`.
 i64 tk_dot(i64 left) {
@@ -341,6 +434,7 @@ i64 tk_dot(i64 left) {
         if (pty >= 0) return tk_member_of(left, tk_struct_by_ty(pty), m, line, fl);
     }
     i64 si = tk_struct_of_expr(left);
+    if (si >= 0 && sr_part_at(si) == TK_PFWD) return tk_defer_member(left, m, line, fl);
     if (si >= 0) return tk_member_of(left, si, m, line, fl);
     i64 ty = tk_xt_ty(left);                      // a scalar this module already typed:
     if (ty >= 0) {                                // a field load, not a struct/class/interface
