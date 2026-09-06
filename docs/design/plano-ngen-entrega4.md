@@ -3678,3 +3678,35 @@ deixa de ser opcional e vira 31 crumbs obrigatórios — dizer qual.
    **byte-idêntico** ao que o mc estoque produz — a transparência vira fato medido, não promessa.
 6. **Baixos:** a troca `mc-teko`→`teko` toca 4 lugares do workflow (falha barulhenta); e a
    publicação do pacote depende do registro do mc abrir (tudo menos o PR é fazível hoje).
+
+## 65. Errata do §64 — S1/S1m landados (2026-09-06)
+
+**S1 landado** (`ngen/core_teko.mc` novo, `ngen/mc.toml` `[compiler]` com `core`/`modules`):
+compilador construído a partir de `<mc/core_min>` + as quatro partes de D64.1 (`core_teko.mc`)
++ `teko.mc`, `mc_build_init()` ainda chamado (S1 = só menos partes, D64.3 tira na S2). Medido
+no host macOS/aarch64, `mc` 0.15.5:
+
+| | antes (bundle) | depois (partes) | Δ |
+|---|---|---|---|
+| tamanho (`wc -c`) | 1 588 681 B | 1 489 364 B | **−99 317 (−6,25 %)** |
+| `__TEXT,__text` | 782 140 | 699 404 | −82 736 |
+| `__TEXT,__cstring` | 44 022 | 38 603 | −5 419 |
+| `__DATA,__data` | 570 600 | 569 576 | −1 024 |
+| `mc limits` `nodes`/`funcs`/`ins`/`symbols`/`heap` (compilação do próprio `teko.mc`) | maiores | menores, mesmo `verdict ok`, `grow 0` | menos fonte no pré-scan (D64.1 §(h) risco 3, sem regressão) |
+| usage sem argumento | 6 linhas de `mc build\|limits\|sysroot` **+** 5 de `pkg`/`update`/`sandbox` | as mesmas 6, **sem** as 5 de `pkg`/`update`/`sandbox` | `<mc/core_pkg>`/`<mc/core_sandbox>` de fato ausentes (D64.1 §(h) risco 2) |
+
+`--dump-ast` das 45 fixtures contra o compilador da base `63e28f90`: **`same=45 diff=0`**
+(menos partes não mudou a árvore de nenhuma). `--entry-only` **45/45**, exit codes batendo com
+`// expect-exit:`. A derivação do config por perna (`.github/workflows/ngen.yml`, o `awk`/`sed`
+que remove `[linker]` e troca `[target]`) foi conferida contra o `mc.toml` novo: `[compiler]`
+(agora com `core`+`modules`) atravessa intacto — a regra de espaçamento do `sed` (`out   = ` com
+3 espaços, só o `[project].out`) não toca o `out     = ` de 5 espaços do `[compiler]`. Nenhuma
+mudança em `ngen/mc.toml` além do bloco `[compiler]`; nenhuma mudança em `.github/workflows/ngen.yml`.
+
+**S1m landado** (`ngen/scripts/measure.sh` novo): dado o binário e o config, imprime bytes,
+seções (`--dump-syms` sobre o `.mc` gerado, mesma técnica de `scripts/check-parts.sh` do mc,
+mas sem nome de seção hardcoded — Mach-O/ELF/COFF nomeiam diferente) e `mc limits DIR --config
+CONFIG`. POSIX `sh`, sem bashismo; roda local hoje, não ligado ao CI ainda (S4.3 decide isso).
+
+Nada no §64(f) mudou de rumo; isto só registra os números que a tabela da etapa 1 previu como
+"medição feita nesta sessão" — a mesma sessão que agora landou o crumb.
