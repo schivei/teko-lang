@@ -957,18 +957,24 @@ i64 tk_slv_find(uptr name) {
 }
 
 // higiene 2, item 1: a node's type as far as PARSING it alone can tell -- an
-// already-tagged node's own tag (`tk_xt_ty`, e.g. a fresh `new C()`), or a
-// bare local's declared type (`tk_slv_find`, the same fallback K4's own
-// `use (...)` already trusts). Anything else (a field load not yet tagged, a
-// call not yet resolved) answers -1, silently skipped by `tk_check_compat`
-// rather than guessed at -- a vtable/itab call's own arguments are checked at
-// the PARSE-TIME call site (teko_expr.tk's `tk_vcall_args_check`,
-// teko_iface.tk's `tk_ifargs_check`), before the pass-time scope table
-// (`tk_ty_scope_find`) exists.
+// already-tagged node's own tag (`tk_xt_ty`, e.g. a fresh `new C()`), a bare
+// local's declared type (`tk_slv_find`, the same fallback K4's own `use (...)`
+// already trusts), or, since V0 item 3, the declared RETURN TYPE of a call
+// whose callee the unit has already declared (`decl_find`/`decl_ret`, the very
+// pair the pass-time oracle `tk_ty_of` reads for the same node -- so an
+// argument position now answers what an initializer position already did).
+// Anything else (a field load not yet tagged, a callee declared further down,
+// an indirect `callp` no declaration names) answers -1, silently skipped by
+// `tk_check_compat` rather than guessed at -- a vtable/itab call's own
+// arguments are checked at the PARSE-TIME call site (teko_expr.tk's
+// `tk_vcall_args_check`, teko_iface.tk's `tk_ifargs_check`), before the
+// pass-time scope table (`tk_ty_scope_find`) exists.
 i64 tk_pty_of(i64 n) {
     i64 t = tk_xt_ty(n);
     if (t >= 0) return t;
-    if (nd_kind(n) == N_IDENT) return tk_slv_find(nd_name(n));
+    i64 k = nd_kind(n);
+    if (k == N_IDENT) return tk_slv_find(nd_name(n));
+    if (k == N_CALL)  return decl_ret(decl_find(nd_name(n)));
     return 0 - 1;
 }
 
