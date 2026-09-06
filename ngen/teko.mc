@@ -240,6 +240,7 @@ void user_init() {
     syntax_stmt("while",  &tk_while);
     syntax_stmt("do",     &tk_do);
     syntax_stmt("for",    &tk_for);
+    syntax_stmt("foreach", &tk_foreach);
     syntax_stmt("switch", &tk_switch_stmt);
 
     syntax("struct", &tk_struct);

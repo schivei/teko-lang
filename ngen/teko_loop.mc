@@ -57,6 +57,7 @@ i64 tk_pluseq_tok = 0;
 i64 tk_minuseq_tok = 0;
 i64 tk_plus_tok = 0;
 i64 tk_minus_tok = 0;
+i64 tk_fe_this_tok = 0;                // K5's own `this` recognition, ahead of `foreach`'s use
 
 // registers the four compound-assignment tokens and pushes the `#rule` text
 // that lowers the free-standing statement form; called once, from
@@ -68,6 +69,7 @@ void tk_loop_init() {
     tk_decr_tok = word_add("--");
     tk_plus_tok = word_add("+");
     tk_minus_tok = word_add("-");
+    tk_fe_this_tok = word_add("this");
     uptr text = tk_loop_rule_text();
     p_push_source("<teko-loop-prelude>", text, cstrlen(text));
 }
@@ -278,4 +280,213 @@ i64 tk_for() {
     i64 outer = tk_loop_of(tk_blk(head));
     if (init == 0) return outer;
     return tk_blk(list_append(init, outer));      // the init's own scope: this block, and no more
+}
+
+// ---- foreach (T x in xs) stmt (K5, D221/§41 decision 23) ----
+//
+// Sugar over the SAME `for`-with-an-index shape `tk_for` already lowers to,
+// on the three sources whose length is known without an oracle: a `T[]` of
+// heap (K3, `Length` read from the object header at RUN time), a local
+// FIXED array (`N` known at compile time, teko_array.mc's `av_*`), and an
+// inline array FIELD reached through `this.`/a local receiver (`N` known at
+// compile time too, teko_struct.mc's `fd_*`):
+//
+//   foreach (T x in xs) stmt
+//     ->  { i64 __feN = 0;
+//           loop { if (!(__feN < <length>)) break;
+//                  loop { T x = xs[__feN]; stmt break; }
+//                  __feN = __feN + 1; } }
+//
+// `xs` is read by `tk_fe_source`, never by a generic `parse_expr`: an inline
+// array field alone (no `[`/`=` right after it) is refused by
+// `tk_array_of` (teko_struct.mc), which every OTHER caller of `.` relies on
+// to catch a bare `p.items;` statement -- so a dedicated, small parser reads
+// a bare name or a `name.member` pair itself and resolves it the same early
+// way `[`/`.` already do for each of the three forms, one table lookup
+// each. `in` is read as the identifier it is (`tk_kw`, teko_class.mc): a
+// contextual word, never reserved, so it stays usable as an ordinary name
+// everywhere else.
+//
+// `T x = xs[__feN];` is a REAL declaration, built and registered with
+// `tk_on_stmt` exactly as the core's own parser would have (teko_struct.mc):
+// `x` answers `.`/`[` inside `stmt` at parse time, and a counted `T` is
+// wrapped in `rt_own`/released at the one-shot loop's own close by
+// `teko_rc.mc`'s ordinary block machinery -- no reclaim code of its own.
+// The one-shot inner `loop` and `tk_loop_rewrite_stmt(stmt, 0)` are the
+// EXACT mechanism `tk_for`'s own body already uses (this header's own
+// desugaring above is `tk_for`'s, word for word): a `break`/`continue`
+// written inside `stmt`, however deeply nested in further `for`/`foreach`
+// loops, comes out counting the right number of lowered `loop`s because
+// every wrapping crumb -- this one included -- applies the SAME `+1` at its
+// own level.
+
+#define TK_FEHEAP  0                   // a `T[]` of heap: Length read at run time
+#define TK_FELOCAL 1                   // a local fixed array: N known at compile time
+#define TK_FEFIELD 2                   // an inline array field: N known at compile time
+
+i64 tk_nfe = 0;                        // the loop counter's own gensym, unique over the unit
+
+uptr tk_fe_gensym() {
+    uptr nm = tk_join("__fe", tk_num(tk_nfe));
+    tk_nfe = tk_nfe + 1;
+    return nm;
+}
+
+// the source's own base address, built FRESH every time it is needed (once
+// for the length, once per element load) rather than shared -- a node lives
+// in only one sibling list, the same reason `tk_ha_len`'s own header gives.
+// `srcname`/`off` are what `tk_fe_source` resolved: a bare name IS the base
+// (a local fixed array, or a heap array held directly by a local/parameter);
+// `off` past a receiver name is a field's own offset, and a `T[]` FIELD
+// needs one more load to reach the object the field only POINTS to.
+i64 tk_fe_base(i64 kind, uptr srcname, i64 off) {
+    if (kind == TK_FEFIELD) return tk_bin(K_ADD, tk_id(srcname), tk_int(off));
+    if (kind == TK_FEHEAP && off != 0)
+        return tk_call(tk_ldn(TY_UPTR), tk_bin(K_ADD, tk_id(srcname), tk_int(off)));
+    return tk_id(srcname);
+}
+
+i64 tk_fe_len(i64 base) { return tk_call("ld64", tk_bin(K_ADD, base, tk_int(16))); }
+
+// the loop's own upper bound: a compile-time constant for the two fixed
+// forms, `xs.Length` read fresh every pass of the outer loop for a heap one
+// -- the same re-evaluation `while`/`for`'s own condition already gets.
+i64 tk_fe_bound(i64 kind, i64 nel, uptr srcname, i64 off) {
+    if (kind != TK_FEHEAP) return tk_int(nel);
+    return tk_fe_len(tk_fe_base(kind, srcname, off));
+}
+
+// `xs[idx]`, read through the guarded heap accessor for a `T[]` and through
+// the plain address/load pair (teko_array.mc) for the two compile-time-sized
+// forms -- an element of a counted type is never taught for either of those
+// (teko_array.mc's own header, teko_struct.mc's field declaration shares the
+// restriction), so only `tk_ha_load`'s own tagging ever matters here.
+i64 tk_fe_elem(i64 kind, i64 ety, uptr srcname, i64 off, i64 idx) {
+    i64 base = tk_fe_base(kind, srcname, off);
+    if (kind == TK_FEHEAP) return tk_ha_load(base, ety, idx);
+    return tk_arr_load(ety, tk_arr_addr(base, ety, idx));
+}
+
+// `T x` declared narrower than the element widens the element's own load
+// implicitly (`i64 x in u8[]`, the core's own safe direction); anything else
+// -- narrower, or the same width but a different base -- is refused rather
+// than silently truncated or reinterpreted (D131/D132's own rule, applied
+// here to the one place this crumb has to decide it).
+i64 tk_fe_coerce(i64 ty, i64 ety, i64 e, i64 line, uptr fl) {
+    if (ty == ety) return e;
+    if (type_width(ty) > type_width(ety)) return tk_cast(ty, e);
+    err_at(fl, line, "teko: the foreach variable's type does not fit the array element");
+    return e;
+}
+
+// `name.member`: the receiver is a local the parser already types -- `this`
+// included, registered into the very same table (teko_class.mc, D219) -- so
+// a parameter as a receiver is the same dívida `p.items[i]` already carries
+// (§45), not a silent guess.
+void tk_fe_field(uptr recvname, uptr m, i64 line, uptr fl, uptr pkind, uptr pety, uptr pnel, uptr psrc, uptr poff) {
+    i64 si = tk_local_find(recvname);
+    if (si < 0) err_at2(fl, line, "teko: not a known array or object", recvname);
+    i64 fi = tk_field_find(si, m);
+    if (fi < 0) err_at2(fl, line, "teko: unknown member of foreach source", m);
+    st64(psrc, recvname);
+    st64(poff, fd_off_at(fi));
+    i64 nel = fd_nel_at(fi);
+    i64 fty = fd_ty_at(fi);
+    if (nel > 0) {
+        st64(pkind, TK_FEFIELD);
+        st64(pnel, nel);
+        st64(pety, fty);
+        return;
+    }
+    i64 esi = tk_struct_by_ty(fty);
+    if (!tk_is_ha(esi)) err_at2(fl, line, "teko: not an array", m);
+    st64(pkind, TK_FEHEAP);
+    st64(pnel, 0);
+    st64(pety, ha_ety_at(esi));
+}
+
+// a bare name: a local fixed array (`av_*`), or a `T[]` of heap held by a
+// local or a parameter (`tk_hp_find`, `tk_local_find` -- K3's own two early
+// tables, exactly what `tk_dot`'s own `N_IDENT` branch already consults).
+void tk_fe_bare(uptr name, i64 line, uptr fl, uptr pkind, uptr pety, uptr pnel, uptr psrc, uptr poff) {
+    st64(psrc, name);
+    st64(poff, 0);
+    i64 ai = tk_arr_find(name);
+    if (ai >= 0) {
+        st64(pkind, TK_FELOCAL);
+        st64(pnel, av_nel_at(ai));
+        st64(pety, av_ty_at(ai));
+        return;
+    }
+    i64 hty = tk_hp_find(name);
+    i64 si = 0 - 1;
+    if (hty >= 0) si = tk_struct_by_ty(hty);
+    else si = tk_local_find(name);
+    if (!tk_is_ha(si)) err_at2(fl, line, "teko: not a known array", name);
+    st64(pkind, TK_FEHEAP);
+    st64(pnel, 0);
+    st64(pety, ha_ety_at(si));
+}
+
+// the source after `in`: a bare name, or `name.member` -- `this` reads as
+// the reserved word it is (teko_this.mc), an ordinary name otherwise. Never
+// a generic `parse_expr`: see this section's own header for why.
+void tk_fe_source(uptr pkind, uptr pety, uptr pnel, uptr psrc, uptr poff) {
+    i64 line = p_line();
+    uptr fl = p_file();
+    uptr name;
+    if (p_id() == tk_fe_this_tok) { p_next(); name = tk_this_name(); }
+    else if (p_id() == T_IDENT) name = p_ident();
+    else { err_at(fl, line, "teko: expected a name after in"); return; }
+    if (p_accept(tk_dot_tok)) {
+        if (p_id() != T_IDENT) err_at(fl, line, "teko: expected a field name after .");
+        uptr m = p_ident();
+        tk_fe_field(name, m, line, fl, pkind, pety, pnel, psrc, poff);
+        return;
+    }
+    tk_fe_bare(name, line, fl, pkind, pety, pnel, psrc, poff);
+}
+
+i64 tk_fe_incr(uptr name) {
+    i64 n = tk_nd(N_ASSIGN);
+    set_nd_name(n, name);
+    set_nd_a(n, tk_bin(K_ADD, tk_id(name), tk_int(1)));
+    return n;
+}
+
+i64 tk_foreach() {
+    i64 line = p_line();
+    uptr fl = p_file();
+    p_next();                                     // `foreach`
+    p_expect(K_LPAR, "expected ( after foreach");
+    i64 ty = tk_gen_ty();
+    if (ty == TY_VOID) err_at(p_file(), p_line(), "teko: parameter of type void");
+    if (p_id() != T_IDENT) err_at(p_file(), p_line(), "teko: expected the foreach variable's name");
+    uptr name = p_ident();
+    if (!tk_kw("in")) err_at(p_file(), p_line(), "teko: expected in after the foreach variable");
+    p_next();                                     // `in`
+    i64 kind = 0;
+    i64 ety = 0;
+    i64 nel = 0;
+    uptr srcname = 0;
+    i64 off = 0;
+    tk_fe_source(&kind, &ety, &nel, &srcname, &off);
+    p_expect(K_RPAR, "expected ) after the foreach source");
+    uptr ctr = tk_fe_gensym();
+    i64 elem = tk_fe_coerce(ty, ety, tk_fe_elem(kind, ety, srcname, off, tk_id(ctr)), line, fl);
+    i64 varDecl = tk_var(ty, name, elem);
+    i64 lmark = tk_nlocal;
+    tk_on_stmt(varDecl);
+    i64 stmt = parse_stmt();
+    tk_nlocal = lmark;
+    tk_loop_rewrite_stmt(stmt, 0);
+    tk_line = line;
+    tk_file = fl;
+    i64 once = tk_loop_of(tk_blk(list_append(list_append(varDecl, stmt), tk_break_lvl(1))));
+    i64 cond = tk_bin(K_LT, tk_id(ctr), tk_fe_bound(kind, nel, srcname, off));
+    i64 head = list_append(tk_loop_guard(cond), once);
+    head = list_append(head, tk_fe_incr(ctr));
+    i64 outer = tk_loop_of(tk_blk(head));
+    i64 initv = tk_var(TY_I64, ctr, tk_int(0));
+    return tk_blk(list_append(initv, outer));
 }
