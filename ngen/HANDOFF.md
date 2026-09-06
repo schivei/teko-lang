@@ -2102,6 +2102,40 @@ Detalhe completo em `docs/design/plano-ngen-entrega4.md` §66.
 conectados; `i32`/`ld64`/`st64`/`ld8`/`st8`/`ld32`/`callp` são usados pelas fixtures E pelos fontes
 do núcleo (desabilitar qualquer um quebraria a auto-hospedagem da etapa 4). Nenhum código muda.
 
+**S3 LANDADO** (`ngen/teko.mc`, `ngen/user.mc` (novo), `ngen/mc.toml` — plano §64(d)/§67, D64.7):
+o pacote `teko`, "ambos" (módulo + runtime versionados juntos). `teko.mc` para de definir
+`user_init` e passa a exportar `void teko_init()` — mesmo corpo, só o nome, seguindo
+`docs/reference/packages.md` §3 ("um pacote nunca define `user_init`; exporta `<nome>_init()` e o
+projeto o chama") e o precedente `tests/pkg/src/teach-1.0.0` do mc (`module = "mc_teach.mc"`,
+exporta `teach_init()`). `ngen/user.mc` é NOVO, do PROJETO — não do pacote —, seis linhas:
+`void user_init() { teko_init(); }`. `ngen/mc.toml`'s `[compiler].modules` ganha `"user.mc"` no
+fim (depois de `"teko.mc"`, para `teko_init()` já estar declarado). `[package]` novo: `name =
+"teko"`, `lib = "lib/rt.mc"` (o que um PROGRAMA inclui), `module = "teko.mc"` (o que um COMPILADOR
+inclui), `files` = os 30 `teko_*.mc` irmãos + `teko.mc` + `lib/rt.mc` (**`core_teko.mc` e
+`user.mc` FICAM DE FORA** — são deste repositório, não do pacote: mesmo precedente
+`teach-1.0.0`, cujo `files` só lista `mc_teach.mc`, nunca o `user.mc`/driver que o consome), `check
+= ["teko.mc", "lib/rt.mc"]` (as duas unidades que `[package]`'s "ambos" produz; toda entrada já
+está em `files`). Nenhuma outra chave de `ngen/mc.toml` muda.
+
+Gate: `rm -rf ngen/build`; build do zero (host macOS/aarch64, `mc` 0.15.5); `--entry-only`
+**45/45**; `--dump-ast` das 45 contra o compilador da base `faac4d56` — `same=45 diff=0`; `mc
+limits ngen` `verdict ok` (mesma régua de S1/S2 — `teko limits ngen`, diretório, recompila o
+próprio `build/teko.mc` PELO teko taughtado e bate na colisão de palavra `type` do §64(e)/S4 —
+esperado, fora de escopo aqui, não é regressão de S3: o comando certo para esta medição é sempre `mc
+limits ngen`, o binário de RELEASE, como S1/S2 já faziam); `teko limits ngen/tests/hello.tk`
+inalterado (exit 3, "grew", mesmo de sempre). `mc pkg hash ngen` **estável** entre dois runs —
+`0f85d3fbbced52f69716fd36366c9209cea99a706121de3962061e1a8435fce4` — e **idêntico** rodando de
+dentro de `ngen/` com `mc pkg hash .` (confirma a correção do `dep_under` do mc 0.15.4 para
+`dir == "."`). Offline: `mc pkg verify ngen` roda e devolve "verified 0 packages against
+mc.lock" (sem `[deps]`, sem lock, exit 0); `mc pkg check` não se aplica aqui — lê um `index/
+<nome>.toml` de REGISTRO, não uma árvore local, e o registro segue fechado (§64(d) mesmo
+bloqueio: "tudo menos a publicação pode ser feito hoje"). `.github/workflows/ngen.yml` **não
+muda**: o `awk`/`sed` que deriva `ngen/mc.ci.toml` só corta a seção `[linker]` e reescreve
+`[target]`/`entry`/`out` — `[package]` (sem `out`, sem `[linker]`) atravessa intacto, inerte, como
+qualquer outra seção nova já demonstrou em S1 com `[compiler]`. Publicação (Release + tree hash +
+PR em `minicompiler/mc-registry`) fica de fora, como o crumb previu — o registro do mc ainda não
+abriu para o `teko`.
+
 ## 5.1 Armadilhas já pagas (não repita)
 
 1. **`mc --exe` emite Mach-O SEMPRE.** `minicompiler/mc` `src/main.mc:227` faz
