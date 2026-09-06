@@ -22,6 +22,11 @@
 //      `return f(x)` from a function declared to answer `Cell`, `f(x)` as an
 //      argument (parked and swept with the statement), and a delegate whose
 //      own return is ANOTHER delegate (`Chooser`, itself counted).
+//   6. `fdcheck` -- a delegate whose RETURN is a float (V1): the indirect call
+//      carries the cast that declares its return type to the core, so
+//      `1.0 + d(2.0)` is 5.0 and not the 3.0 the untyped `callp` left in the
+//      register; the same by `new Scale(dbl)`, from a class field, and in
+//      `f32`, where the value travels in the single-precision half.
 //
 // `rt_live()` is back to its floor after every helper returns: the reclaim
 // (teko_rc.tk) already scopes a delegate value exactly as it scopes a class
@@ -58,6 +63,21 @@ class H {
     public Op cb;
 }
 
+delegate f64 Scale(f64 x);
+delegate f32 Scale32(f32 x);
+
+f64 dbl(f64 x) {
+    return x * 2.0;
+}
+
+f32 half32(f32 x) {
+    return x * 0.5f;
+}
+
+class FH {
+    public Scale cb;
+}
+
 i64 dcheck() {
     Op f = add;
     if (f(3, 4) != 7) return 1;
@@ -88,6 +108,25 @@ i64 ncheck() {
     Op maybe = null;
     if (maybe == null) return 0;
     return 1;
+}
+
+i64 fdcheck() {
+    Scale d = dbl;
+    if (d(2.0) != 4.0) return 1;
+    if (1.0 + d(2.0) != 5.0) return 2;            // the nested form, at a moved depth
+    if (1.0 + (2.0 + (4.0 + d(8.0))) != 23.0) return 3;
+
+    Scale g = new Scale(dbl);
+    if (1.0 + g(3.0) != 7.0) return 4;
+
+    FH h = new FH;
+    h.cb = d;
+    if (1.0 + h.cb(2.0) != 5.0) return 5;         // the same call from a class FIELD
+
+    Scale32 s = half32;
+    if (1.0f + s(3.0f) != 2.5f) return 6;
+
+    return 0;
 }
 
 namespace geo {
@@ -176,6 +215,10 @@ i64 main() {
     bad = ncheck();
     if (bad != 0) return 50 + bad;
     if (rt_live() != 0) return 60;
+
+    bad = fdcheck();
+    if (bad != 0) return 120 + bad;
+    if (rt_live() != 0) return 130;
 
     if (geo.use_gop() != 30) return 70;
     if (rt_live() != 0) return 80;
