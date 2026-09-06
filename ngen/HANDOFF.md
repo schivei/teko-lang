@@ -323,7 +323,7 @@ do próprio `mc` (`check = ["src/mc_linux_x86_64.mc"]` + o `src/user.mc` que ela
 Hash de árvore do pacote (`mc pkg hash ngen`), depois da mudança:
 
 ```
-057e7aed61f2f244d52a53b522b06fb84eaf88d552247e37060ea651761424d5   (antes: d41a0c80…1a7ada)
+9318b19cb5b76629c03ca1b354d0d93bc3860e8a4f7747945cd19e235a5e5004   (antes: d41a0c80…1a7ada)
 ```
 
 A ressalva do adendo continua **viva**: teko-ificar o compilador (S4.4+, fork g3) torna `mc_teko.tk`
