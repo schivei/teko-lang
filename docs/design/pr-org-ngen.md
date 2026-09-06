@@ -26,8 +26,8 @@ estado `disabled_manually` não viaja entre repositórios.
 Hoje nenhum ruleset ativo da org exige status check. Os contexts que os workflows vivos produzem:
 `ngen (linux/x86_64)`, `ngen (linux/aarch64)`, `ngen (macos/aarch64)`, `ngen (windows/x86_64)`,
 `ngen (windows/aarch64)`, `fixpoint (linux/x86_64)`, `fixpoint (macos/aarch64)`, o agregador
-**`mc build ngen && run`** (o que o ruleset deve exigir), `Branch policy gate`, `Analyze (c-cpp)`,
-`Analyze (actions)`.
+**`mc build ngen && run`** (o que o ruleset deve exigir), `Branch policy gate` e `Analyze (actions)`
+(o CodeQL perdeu a perna `c-cpp` no R1: compilava o `src/runtime/teko_rt.c` congelado).
 
 ## 3. Workflows: org × fork
 
@@ -98,7 +98,7 @@ nem pelo trabalho seguinte. Fica no repositório como registro.
 | `ngen (<os>/<arch>)` ×5 | cada perna no runner do próprio SO e arquitetura, `mc --host` asserido, 45 fixtures executadas — nada cross-compilado e deixado sem rodar |
 | `mc build ngen && run` | agregador das cinco pernas; o nome que o ruleset deve exigir |
 | `fixpoint (linux/x86_64)`, `fixpoint (macos/aarch64)` | teko0→teko1→teko2→teko3 sobre `ngen/mc_teko.tk`: `cmp` dos objetos, `--dump-asm` idêntico, 45 fixtures |
-| `Branch policy gate`, `Analyze (c-cpp)`, `Analyze (actions)` | inalterados |
+| `Branch policy gate`, `Analyze (actions)` | inalterados (CodeQL sem a perna `c-cpp`) |
 
 ## Releases
 

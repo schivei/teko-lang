@@ -462,7 +462,7 @@ ruleset pode exigir é decisão do dono, não do implementador.
 
 `scripts/**` (a maquinaria shell/PowerShell da escada velha: `produce_assets.sh`,
 `nightly_tag.sh`, `fixpoint_gate.sh`, `ci_producer_matrix.sh`, `win/*.ps1`, …) e os dois arquivos
-de dados que só o `pr.yml` lia — `.github/ci-lane-exceptions.txt` e `.github/sast-baseline.txt` —
+de dados que só o `pr.yml` lia — `.github/ci-lane-exceptions.txt` e `.github/sast-baseline.txt` e `.github/lsan-suppressions.txt` —
 não têm mais nenhum leitor. Nenhum dos quatro workflows sobreviventes os referencia. Apagá-los é
 varredura de `src/` congelado, fora do escopo desta entrega.
 
