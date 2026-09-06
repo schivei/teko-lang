@@ -817,55 +817,64 @@ i64 tk_lambda_release_fn(uptr relname, i64 objsize) {
     return tk_func(TY_VOID, relname, param_new(TY_UPTR, tk_this_name()), tk_blk(st));
 }
 
-// one parameter per capture -- the raw address for a by-reference one, the
-// captured type itself for a by-value one -- which is what the call site
-// (`tk_lambda_build` below) feeds with the value/address taken AT THAT
-// INSTANT, the "frozen copy" D221 decision 20 asks a by-value capture for
-i64 tk_lambda_alloc_params() {
-    i64 prs = 0;
-    i64 i = tk_lc_base;
-    loop {
-        if (i >= tk_nlc) break;
-        i64 pty = TY_UPTR;
-        if (!lc_byref_at(i)) pty = lc_ty_at(i);
-        prs = list_append(prs, param_new(pty, tk_join("p", tk_num(i))));
-        i = i + 1;
-    }
-    return prs;
-}
-
-// the allocator's own body: a fresh object (K1's own three-word head), then
-// one store per capture -- a by-value COUNTED one is `rc_inc`ed first, since
-// the closure now holds a reference of its own alongside the caller's
-i64 tk_lambda_alloc_stmts(uptr vtname, uptr relname, uptr lamname, i64 objsize) {
-    i64 st = tk_var(TY_UPTR, "p", tk_call("rt_alloc", tk_int(objsize)));
-    st = list_append(st, tk_stmt(tk_call2("st64", tk_id(vtname), tk_addr(relname))));
+// the allocator's own body: K1's own three-word head written into the object
+// the CALLER hands over, already carrying every capture (`tk_lambda_capture_
+// chain` below). higiene 3, item B: the captures used to arrive as one
+// PARAMETER each, which put the mc ABI's own `MAXPARAMS` (12) in front of
+// `TK_MAXLAMCAP` -- a `use (...)` of thirteen names died on the CORE's own
+// `at most 12 parameters`, in a file it named wrong, instead of this
+// module's own ceiling. The object is one parameter no matter how many
+// names a lambda closes over.
+i64 tk_lambda_alloc_stmts(uptr vtname, uptr relname, uptr lamname) {
+    i64 st = tk_stmt(tk_call2("st64", tk_id(vtname), tk_addr(relname)));
     st = list_append(st, tk_stmt(tk_call2("st64", tk_id("p"), tk_id(vtname))));
     st = list_append(st, tk_stmt(tk_call2("st64", tk_bin(K_ADD, tk_id("p"), tk_int(8)), tk_int(1))));
     st = list_append(st, tk_stmt(tk_call2("st64", tk_bin(K_ADD, tk_id("p"), tk_int(16)), tk_addr(lamname))));
-    i64 i = tk_lc_base;
-    loop {
-        if (i >= tk_nlc) break;
-        uptr pname = tk_join("p", tk_num(i));
-        i64 addr = tk_bin(K_ADD, tk_id("p"), tk_int(24 + 8 * (i - tk_lc_base)));
-        if (lc_byref_at(i)) {
-            st = list_append(st, tk_stmt(tk_call2("st64", addr, tk_id(pname))));
-        } else {
-            if (tk_is_counted(lc_ty_at(i)))
-                st = list_append(st, tk_stmt(tk_call("rc_inc", tk_id(pname))));
-            st = list_append(st, tk_stmt(tk_call2(tk_stn(lc_ty_at(i)), addr, tk_id(pname))));
-        }
-        i = i + 1;
-    }
     return st;
 }
 
-i64 tk_lambda_alloc_fn(i64 si, uptr allocname, uptr vtname, uptr relname, uptr lamname, i64 objsize) {
-    i64 st = tk_lambda_alloc_stmts(vtname, relname, lamname, objsize);
+i64 tk_lambda_alloc_fn(i64 si, uptr allocname, uptr vtname, uptr relname, uptr lamname) {
+    i64 st = tk_lambda_alloc_stmts(vtname, relname, lamname);
     i64 r = tk_id("p");
     tk_xt_add(r, si, 0);
     st = list_append(st, tk_ret(r));
-    return tk_func(sr_ty_at(si), allocname, tk_lambda_alloc_params(), tk_blk(st));
+    return tk_func(sr_ty_at(si), allocname, param_new(TY_UPTR, "p"), tk_blk(st));
+}
+
+// the object the allocator is handed: a fresh block with one `tk_cap_put`
+// link per capture (lib/rt.tk), each writing the value or the ADDRESS taken
+// AT THAT INSTANT -- the "frozen copy" D221 decision 20 asks a by-value
+// capture for, now written at the creation site instead of passed inward.
+// A capture of counted type goes through `tk_cap_own`, which takes the
+// closure's own reference the way the allocator's `rc_inc` used to.
+i64 tk_lambda_capture_chain(i64 objsize) {
+    i64 blk = tk_call("rt_alloc", tk_int(objsize));
+    i64 i = tk_lc_base;
+    loop {
+        if (i >= tk_nlc) break;
+        i64 off = tk_int(24 + 8 * (i - tk_lc_base));
+        if (lc_byref_at(i)) {
+            blk = tk_call3("tk_cap_put", blk, off, tk_addr(lc_name_at(i)));
+        } else if (tk_is_counted(lc_ty_at(i))) {
+            blk = tk_call3("tk_cap_own", blk, off, tk_id(lc_name_at(i)));
+        } else {
+            blk = tk_call3("tk_cap_put", blk, off, tk_id(lc_name_at(i)));
+        }
+        i = i + 1;
+    }
+    return blk;
+}
+
+// 1 when at least one capture is taken by reference -- the escape D221
+// decision 21 tracks through `tk_lamref_add`
+i64 tk_lambda_has_byref() {
+    i64 i = tk_lc_base;
+    loop {
+        if (i >= tk_nlc) break;
+        if (lc_byref_at(i)) return 1;
+        i = i + 1;
+    }
+    return 0;
 }
 
 // a name unique over the whole unit, namespace-qualified exactly as a named
@@ -924,18 +933,9 @@ i64 tk_lambda_finish(i64 si, uptr name, uptr saved, i64 prs, i64 line, uptr fl) 
     uptr allocname = tk_join(name, "__new");
     top_add(tk_glb(TY_U8, vtname, TK_VT_FIXED * 8));
     top_add(tk_lambda_release_fn(relname, objsize));
-    top_add(tk_lambda_alloc_fn(si, allocname, vtname, relname, name, objsize));
-    i64 hasref = 0;
-    i64 args = 0;
-    i64 i = tk_lc_base;
-    loop {
-        if (i >= tk_nlc) break;
-        if (lc_byref_at(i)) { args = list_append(args, tk_addr(lc_name_at(i))); hasref = 1; }
-        else                args = list_append(args, tk_id(lc_name_at(i)));
-        i = i + 1;
-    }
-    if (hasref) tk_lamref_add(allocname);
-    i64 call = tk_call(allocname, args);
+    top_add(tk_lambda_alloc_fn(si, allocname, vtname, relname, name));
+    if (tk_lambda_has_byref()) tk_lamref_add(allocname);
+    i64 call = tk_call(allocname, tk_lambda_capture_chain(objsize));
     tk_xt_add(call, si, 0);
     tk_nlc = tk_lc_base;                          // higiene 2, item 6: pop THIS lambda's own window
     tk_lc_base = saved_lc_base;
