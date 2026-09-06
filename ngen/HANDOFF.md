@@ -18,6 +18,23 @@ pacote (D64.7).
 Contexto completo: `docs/design/port-teko-mc.md` e as entradas **D211, D212,
 D213, D214** do `DECISION_LOG.md`. Leia-as — são leis, não sugestões.
 
+### 1.1 Corte v0.1.0 (dono 2026-09-06)
+
+**v0.1.0 é release INTERMEDIÁRIA** — o port continua até o mc chegar a 1.0.0 (§7
+segue valendo). O corte fecha com: zero resultado errado silencioso, recusas V0
+para o que ainda não é ensinado, `mc` pinado por `ngen/MC_VERSION`, fixpoint
+provado nas cinco pernas, `release.yml` publicando os assets, e a publicação no
+registro do mc gated por variável (D230 adendo 2). Sequência decidida:
+1. Squash de `fix/retirement` na `main` do fork `schivei/teko-lang`.
+2. PR do fork para `teko-org/teko-lang`.
+3. Já na org: remover o legado (`src/`, workflows do compilador antigo) e
+   rebasear `ngen/` para a raiz do repositório.
+Consequência da mudança de raiz: o manifesto do pacote (`[package]`) migra para
+o `mc.toml` da raiz, **sem `[project]`** (regra do registro, D230 adendo 2);
+`ngen/mc.toml` (ou o que restar dele na raiz) fica só com `[project]`/
+`[compiler]`/`[target]`/… para o `mc build`. Detalhe completo em
+`docs/design/pr-org-ngen.md` §7 e `DECISION_LOG.md` D230.
+
 ## 2. Leis que valem aqui (resumo do que mais pega)
 
 - **Comunicação com o dono é sempre em PT-BR.** Nunca use menu de opções/quiz;
@@ -3267,3 +3284,6 @@ O port **começou** (o gatilho M24/floats do mc disparou), mas **só fecha quand
 o mc chegar a 1.0.0** — o cálculo automático de arena (M13) e o restante da fila
 do mc vêm antes. Até lá: crescer o ensino da superfície, sempre por baixo,
 sempre com o CI verde.
+
+**Errata (dono 2026-09-06):** este gate NÃO bloqueia a v0.1.0 — v0.1.0 é um
+corte INTERMEDIÁRIO (§1.1) na estrada até aqui, não uma antecipação do fecho.
