@@ -147,9 +147,13 @@ rodando as 45 fixtures. As pernas provam "a fixture sai 42"; esta prova "o compi
 reproduz". O script imprime o tempo de CADA estágio e o tamanho de cada objeto/binário.
 
 **O que o job reporta e NÃO barra:** o passo de `summary` publica tamanho e **`sha256` de
-`teko1.o`/`teko2.o`**. O `cmp` dentro do run já prova o ponto fixo; se o `teko2.o` é
-byte-idêntico ENTRE runs e ENTRE máquinas é outra afirmação — imprimir é o que permite
-conferi-la antes de pinar. Quando estabilizar, vira golden versionado, no molde do
+`teko0`/`teko1.o`/`teko2.o`/`teko3.o`** (o `teko0` entrou na higiene 4: é o único estágio que o
+`mc` de prateleira escreve, então é ele que separa "não-determinismo do compilador" de "entrada
+diferente"), e o próprio `bootstrap.sh` imprime a mesma provenance com a versão do `mc`. Quando
+`teko1.o != teko2.o`, o job arquiva por 14 dias o `--dump-asm` do teko0 e o do teko1 sobre
+`mc_teko.tk` com o `diff` — a forma legível que um objeto não dá. O `cmp` dentro do run já prova o
+ponto fixo; se o `teko2.o` é byte-idêntico ENTRE runs e ENTRE máquinas é outra afirmação — imprimir
+é o que permite conferi-la antes de pinar. Quando estabilizar, vira golden versionado, no molde do
 `tests/golden/mc2.sha256` do mc.
 
 **O agregador NÃO mudou.** `mc build ngen && run` continua dependendo só da matriz `leg` —
@@ -2563,6 +2567,33 @@ ampliou (`ref f64`, campo `f64`).
   incluem `lib/rt.tk`) e **42 com o MESMO diff** (mesmo sha256 nos 42: as 26 linhas das duas
   declarações novas de `lib/rt.tk`, nada mais), a mesma partição estrutural que a higiene 3 explicou.
 
+**HIGIENE 4 item B — `teko1.o` não determinístico: NÃO REPRODUZ** (plano §74(c), 2026-09-06). A
+dívida que o verificador do S4.3 registrou (logo abaixo) foi caçada em **44 corridas** nesta
+máquina (macOS/aarch64, mc 0.15.10, `ngen/build` apagado antes de cada uma) e **não apareceu uma
+vez**: 10 escadas completas na árvore do tip (`teko1.o == teko2.o == teko3.o`, sempre o mesmo
+`sha256`), **4 escadas na árvore da BASE `55ec9ffe`**, que reproduzem o `689dc9a6…` publicado nas
+quatro (o controle: o número documentado É o que esta máquina produz), 20 recompilações de
+`mc_teko.tk` pelo MESMO teko0, 6 estágios 0+1 completos, mais ambiente perturbado (env de +4 KB e
++60 KB, dois `TMPDIR`, sob carga), duas cópias da árvore compilando EM PARALELO fora do
+repositório, e um estágio 1 com o config em caminho ABSOLUTO -- todos o mesmo objeto.
+- **Descartado com medição:** versão do mc (só a 0.15.10 chega a escrever um `teko1.o` neste
+  commit — com a 0.15.8 o estágio 1 morre no bloqueio `TE_RULE` do §70(f) sem emitir objeto);
+  endereço/ASLR (a `heap[]` da arena do mc é BSS num binário PIE e os chunks vêm de `mmap(0,…)`:
+  um ponteiro vazado para a saída teria divergido nas 44); slot de tabela lido além de `n` (BSS e
+  `mmap` anônimo são ZERADOS — a leitura fora de `n` é errada, se houver, mas determinística);
+  caminho/cwd (as cópias em `/tmp` e o config absoluto dão o mesmo objeto).
+- **A instrumentação é o entregável.** `ngen/scripts/bootstrap.sh` passou a imprimir um bloco
+  `provenance` (não-gated) com `mc --version` e o `sha256` de **teko0** (`ngen/build/teko`, que
+  nenhum relatório tinha), `teko1.o`, `teko2.o` e `teko3.o`, mais a resposta explícita de
+  `teko1.o == teko2.o`; e o job `fixpoint` do CI publica `teko0`/`teko3.o` no `summary` e, **só
+  quando `teko1.o != teko2.o`**, arquiva por 14 dias o `--dump-asm` do teko0 e o do teko1 sobre
+  `mc_teko.tk` com o `diff` dos dois. Assim a PRÓXIMA divergência é atribuível sem rerodar nada:
+  teko0 igual + `teko1.o` diferente = não-determinismo do compilador; teko0 diferente = entrada
+  diferente (mc, árvore, ou `ngen/build` sujo).
+- Gate (host macOS/aarch64, `mc` 0.15.10): `rm -rf ngen/build`; `sh ngen/scripts/bootstrap.sh` →
+  `FIXPOINT OK`, 45/45, 38,5 s, `teko2.o == teko3.o`, `--dump-asm` 221 316 linhas diff vazio;
+  `ngen/mc.toml` e `ngen/tests/` intocados neste commit.
+
 **S4.3 LANDADO** (plano §64(f)/§73, 2026-09-06, base `e50ab97b`, branch `feat/ngen-s43-ci`,
 dois commits): a escada do fixpoint virou a **SEXTA** perna do CI — job `fixpoint`, matriz
 própria de dois runners, `fixpoint (linux/x86_64)` e `fixpoint (macos/aarch64)`, rodando
@@ -2587,10 +2618,13 @@ Descrição no §3.1 acima; detalhe e medições no plano §73.
   `teko1.o == teko2.o` = 1 714 920 B, `sha256` `689dc9a6…` — **byte-idêntico ao objeto do host
   local**, primeira evidência de reprodutibilidade entre máquinas; e dois runs consecutivos da
   branch deram o MESMO `sha256` nos dois pares (evidência entre runs).
-- **`teko1.o` NÃO é determinístico entre corridas (verificador do S4.3):** mesma máquina/commit, duas
-  escadas: numa `teko1.o` (`90485ed5…`) ≠ `teko2.o`; noutra os três iguais. `teko2.o == teko3.o` e o hash
-  final (`689dc9a6…`) fecharam sempre. Causa a caçar do lado do teko0 (leitura de memória não inicializada
-  em tabela/pass? ordem dependente de endereço?) -- dívida da higiene 4, pré-requisito do golden.
+- **`teko1.o` NÃO é determinístico entre corridas (verificador do S4.3) -- NÃO REPRODUZIU na higiene 4:**
+  mesma máquina/commit, duas escadas: numa `teko1.o` (`90485ed5…`) ≠ `teko2.o`; noutra os três iguais.
+  `teko2.o == teko3.o` e o hash final (`689dc9a6…`) fecharam sempre. A higiene 4 (bloco acima, plano
+  §74(c)) rodou 44 corridas -- inclusive 4 escadas da árvore DESTE commit, que dão `689dc9a6…` nas
+  quatro -- sem uma divergência, e descartou versão do mc, endereço/ASLR, leitura além de `n` e
+  caminho/cwd; o que ficou foi a instrumentação de provenance no `bootstrap.sh` e no CI, para a
+  próxima divergência ser atribuível. Segue pré-requisito do golden.
 - **Não é gate (ainda):** o `sha256` é impresso no `summary`, não comparado; vira golden
   versionado quando estabilizar (molde do `tests/golden/mc2.sha256` do mc). O agregador
   `mc build ngen && run` segue dependendo só da matriz `leg`.

@@ -134,6 +134,16 @@ size_of() {
     wc -c < "$1" | tr -d ' '
 }
 
+# `sha256sum` on Linux, `shasum -a 256` on macOS -- the same pair the CI's own
+# summary step keeps, so a hash printed here is comparable with the one there
+sha256_of() {
+    if command -v sha256sum > /dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    else
+        shasum -a 256 "$1" | cut -d' ' -f1
+    fi
+}
+
 # step DESCRIPTION CMD... -- runs CMD, times it, and stops the whole script
 # with the command's own output when it fails
 step() {
@@ -186,6 +196,26 @@ if ! cmp ngen/build/teko2.o ngen/build/teko3.o; then
     exit 1
 fi
 echo "  ok: teko2.o == teko3.o"
+
+# Provenance of the run, printed and NOT gated (higiene 4 item B). A divergence
+# of `teko1.o` between two runs of this script was reported once and has not
+# reproduced since; the four hashes plus the compiler that seeded the ladder are
+# what makes the NEXT one attributable without rerunning anything: teko0 is the
+# only stage the stock `mc` writes, so an identical teko0 with a different
+# teko1.o is a compiler nondeterminism, a different teko0 is a different input
+# (mc version, tree, or a stale ngen/build), and teko1.o == teko2.o says the
+# ladder was already at the fixed point on its first turn.
+echo "-- provenance (reported, not gated) --"
+echo "  mc:       $(mc --version 2>&1 | head -1)"
+echo "  teko0:    $(sha256_of ngen/build/teko)"
+echo "  teko1.o:  $(sha256_of ngen/build/teko1.o)"
+echo "  teko2.o:  $(sha256_of ngen/build/teko2.o)"
+echo "  teko3.o:  $(sha256_of ngen/build/teko3.o)"
+if cmp -s ngen/build/teko1.o ngen/build/teko2.o; then
+    echo "  teko1.o == teko2.o: yes (fixed point on the first turn)"
+else
+    echo "  teko1.o == teko2.o: no (the stock mc's codegen differs from teko1's own)"
+fi
 
 echo "-- criterion 2: --dump-asm of teko2 vs teko3 --"
 ngen/build/teko2 --dump-asm ngen/mc_teko.tk > "$asm2" 2>&1

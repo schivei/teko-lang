@@ -456,7 +456,7 @@ jobs:
             printf '### fixpoint (%s/%s), mc %s\n\n' \
               "${{ matrix.os }}" "${{ matrix.arch }}" "${{ steps.mc.outputs.version }}"
             printf '| object | bytes | sha256 |\n|---|---:|---|\n'
-            for o in teko1.o teko2.o; do
+            for o in teko teko1.o teko2.o teko3.o; do
               f="ngen/build/$o"
               if [ -f "$f" ]; then
                 printf '| `%s` | %s | `%s` |\n' "$o" "$(wc -c <"$f" | tr -d ' ')" "$(sha256 "$f")"
@@ -467,6 +467,36 @@ jobs:
             printf '\nThe sha256 is reported, not gated.\n'
           } >>"$GITHUB_STEP_SUMMARY"
           cat "$GITHUB_STEP_SUMMARY"
+
+      # higiene 4 item B: `teko1.o` was once seen differing between two runs of
+      # the ladder on one machine, and it has not reproduced (44 runs, plano
+      # §74(c)). `teko0` (`ngen/build/teko`, the binary the stock mc writes) is
+      # in the table above for that reason -- an identical teko0 with a
+      # different teko1.o is the compiler's own nondeterminism, a different one
+      # is a different input. When stage 1 and stage 2 disagree, the readable
+      # form of both objects is archived: the diff of the two dumps localizes
+      # WHAT moved, which an object cannot.
+      - name: archive the stage-1 dumps when teko1.o != teko2.o
+        if: always()
+        id: dumps
+        run: |
+          set -eu
+          if [ ! -f ngen/build/teko1.o ] || [ ! -f ngen/build/teko2.o ]; then exit 0; fi
+          if cmp -s ngen/build/teko1.o ngen/build/teko2.o; then exit 0; fi
+          mkdir -p ngen/build/dumps
+          ngen/build/teko  --dump-asm ngen/mc_teko.tk >ngen/build/dumps/teko0-asm.txt 2>&1 || true
+          ngen/build/teko1 --dump-asm ngen/mc_teko.tk >ngen/build/dumps/teko1-asm.txt 2>&1 || true
+          diff ngen/build/dumps/teko0-asm.txt ngen/build/dumps/teko1-asm.txt \
+            >ngen/build/dumps/diff.txt 2>&1 || true
+          echo "archive=yes" >>"$GITHUB_OUTPUT"
+
+      - name: upload the dumps
+        if: always() && steps.dumps.outputs.archive == 'yes'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fixpoint-dumps-${{ matrix.os }}-${{ matrix.arch }}
+          path: ngen/build/dumps
+          retention-days: 14
 
   # The required check on `main` -- the name the ruleset asks for, kept while
   # the work moved into a five-way matrix. `needs.leg.result` is the matrix's
