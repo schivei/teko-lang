@@ -1071,6 +1071,12 @@ i64 tk_conf_name(i64 base, i64 proj) {
     i64 si = 0 - 1;
     if (str_eq(nm, ld64(seg0mem))) si = tk_struct_find(nm);
     else si = tk_struct_find_exact(nm);
+    // §50 O2 ressalva 3: a row a use materialized ahead of its real
+    // declaration (`TK_PFWD`) has no base/slots/itab yet -- deriving from it
+    // now would lay the derived class out wrong. A base declared below is
+    // O3's own debt, untaught here; this is the same "not found" a base that
+    // is never declared at all already gets.
+    if (si >= 0 && sr_part_at(si) == TK_PFWD) si = 0 - 1;
     if (si < 0 && tk_trait_find(nm) >= 0)
         err_at2(fl, line, "teko: a trait is not a base class nor an interface; use `use`", disp);
     if (si < 0) err_at2(fl, line, "teko: unknown base class or interface", disp);
