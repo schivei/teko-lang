@@ -438,6 +438,8 @@ i64 tk_dot(i64 left) {
     tk_line = line;
     tk_file = fl;
     if (tk_is_base(left)) return tk_base_call(line, fl);
+    if (tk_di_is_inject(left))
+        err_at(fl, line, "teko: bind the injected service to a variable before calling it");
     uptr m = p_ident();                          // the member name, on the right
     if (nd_kind(left) == N_IDENT) {
         i64 ai = tk_arr_find(nd_name(left));      // a LOCAL array (teko_array.mc): only `.Length`
