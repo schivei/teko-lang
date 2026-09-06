@@ -4177,3 +4177,117 @@ de (f), imprimindo a mensagem do compilador. S4.3 (a perna de fixpoint no CI) fi
 patch do `mc`.
 
 Sem PR, sem dreno — forward-only para `fix/retirement`.
+
+## 71. Higiene 3 — as duas dívidas que o verificador da higiene 2 achou (2026-09-06)
+
+Crumb independente do desenho da entrega 4 (nenhuma superfície nova). Base: o tip de
+`fix/retirement` em `0fd12888`; dois commits, um por item — `4052205f` (item A), `6ef10a24`
+(item B).
+
+### (a) Item A — `ref`/`out` de ESCALAR agora é checado
+
+`tk_ref_check_pointee` (teko_ref.tk, higiene 2 item 2) saía cedo quando `tk_struct_by_ty(pty)`
+não respondia, ou seja para TODO apontado escalar: `void bumpi(ref i64 x)` chamado com um `u8`
+compilava e escrevia oito bytes através de um slot de um. C# recusa `ref` de tipos distintos
+sejam eles escalares ou não, e a checagem passa a valer para todo tipo — **identidade** do
+apontado decide (nunca `tk_row_fits`, que é deriva/implementa: `ref` não é covariante).
+
+O que a extensão exigiu foi trocar a FONTE do apontado do argumento. A tag de parse
+(`tk_rfarg_pointee`) cai em `tk_slv_find`, tabela unit-wide "o mais recente vence" que **nunca vê
+um PARÂMETRO** — e o repass `lvl_c(ref x)` dentro de `lvl_b(ref i64 x)`
+(`surface_refout.tk`'s `chaincheck`) responderia com o `Box x` que `outcheck` declara páginas
+antes, recusando uma fixture correta. Com classe-contra-classe isso nunca aparecia (o `pty`
+escalar saía antes do lookup); com escalar, aparece na primeira volta. `tk_ref_arg_pointee`
+(teko_ref.tk) pergunta à DECLARAÇÃO que a pass está percorrendo (`tk_ref_cur_fn`, já existente):
+a lista de parâmetros primeiro (`tk_ref_param_ty`), depois o `N_VAR` que o corpo declara
+(`tk_ref_scan_local`, que pula array pelo mesmo `nd_val != 0` do `on_stmt`). Um nome que não é
+nem um nem outro (um global) responde -1; dois blocos irmãos declarando o mesmo nome sob tipos
+diferentes também (ambiguidade não se adivinha) — e -1 é silêncio, a mesma regra que
+`tk_check_field_store` dá a uma fonte desconhecida.
+
+Limite documentado: os apelidos de um mesmo primitivo (`bool`/`byte`/`u8`, `char`/`u32`,
+`str`/`ptr`/`uptr`) são o MESMO apontado aqui, porque `type_alias` é identidade pura (entrega 2)
+— como em todo o resto do port.
+
+Fixture: `surface_refout.tk` ganha `scopecheck` (um local de bloco interno e um do corpo, os
+dois `ref i64`); o mismatch é probe.
+
+### (b) Item B — as capturas de uma lambda não custam mais um parâmetro cada
+
+`tk_lambda_alloc_params`/`tk_lambda_alloc_stmts` (teko_deleg.tk, K4) geravam o alocador do
+closure com UM parâmetro real por captura, então o `MAXPARAMS` do ABI do mc (12) ficava NA
+FRENTE do `TK_MAXLAMCAP` (32, higiene 2 item 6): treze capturas morriam na mensagem do NÚCLEO
+(`io:25: at most 12 parameters`, com nome de arquivo que o programa nunca escreveu) e só a 33ª
+alcançava a recusa própria da teko.
+
+Desenho novo: **o alocador recebe o OBJETO e nada mais** (`uptr p`), e o bloco é alocado no
+SÍTIO DE CRIAÇÃO já carregando as capturas — `tk_lambda_capture_chain` encadeia um
+`tk_cap_put`/`tk_cap_own` (lib/rt.tk, duas funções novas de runtime) por captura sobre
+`rt_alloc(objsize)`, cada elo devolvendo o bloco ao seguinte. É a mesma forma que a lista de um
+`params` já usa (`tk_va_put`) e pela mesma razão: um store é instrução e o closure inteiro tem de
+ser UMA expressão. `tk_cap_own` toma a referência própria do closure para uma captura de tipo
+contado, exatamente onde o `rc_inc` do alocador tomava.
+
+O que NÃO mudou, de propósito: o layout do objeto (`{vt, rc@+8, code@+16, captures@+24…}`), o
+prólogo (`tk_lambda_prologue` segue lendo `ld*(env + 24 + 8*i)`), a função de release, e — o
+ponto que preserva a maquinaria em volta — **o nó mais externo do inicializador continua sendo a
+CHAMADA ao alocador**, com a cadeia como seu único argumento. Por isso `tk_lam_escapes`
+(D221 decisão 21, que lê `nd_name` de um `N_CALL`), a coerção de delegate e a tag
+`tk_xt_add(call, si, 0)` seguem lendo o que sempre leram, sem uma linha de mudança. A captura por
+referência continua passando `&nome`; a por valor, o valor congelado no instante da criação
+(D221 decisão 20).
+
+Slot de captura é uma PALAVRA, qualquer que seja a largura do tipo capturado: `tk_cap_put` grava
+com `st64` e o prólogo lê de volta com `tk_ldn` (`ld8`/`ld16`/`ld32`/`ld64`), que é onde a captura
+mais estreita volta ao tamanho — o mesmo valor que o par `st8`/`ld8` anterior produzia. Medido
+também para `f64` (probe): o mc move a palavra sem converter, então uma captura de ponto
+flutuante atravessa o parâmetro `i64` de `tk_cap_put` bit a bit.
+
+Teto real depois disso: `TK_MAXLAMCAP` sozinho — 32 linhas somadas sobre as lambdas EM VOO
+(a tabela é uma pilha desde a higiene 2), com a mensagem própria da teko
+(`too many captures in one lambda`) e arquivo/linha certos. Medido: 14, 20, 31 e 32 capturas
+compilam e rodam; 33 é recusada.
+
+Fixture: `surface_lambda.tk` ganha `manycap_check`, quinze capturas num só `use (...)`
+(catorze por valor, uma por referência).
+
+### (c) Gate
+
+`rm -rf ngen/build`, build do zero (host macOS/aarch64, `mc` 0.15.8); `--entry-only` **45/45**
+(nenhuma fixture nova; duas tocadas: `surface_refout.tk`, `surface_lambda.tk`);
+`mc limits ngen --config` `verdict ok`, `intrin 8/8` (zero intrínseco novo), `ngen/mc.toml`
+intocado.
+
+`--dump-ast` das 45 contra o compilador da base `0fd12888`: **3 byte-idênticas** (`hello`,
+`primitives_ptr`, `primitives_scalar` — as três que não incluem `lib/rt.tk`), **40 com um diff
+byte-idêntico entre si** (hash igual, 29 linhas: exatamente as duas declarações novas
+`tk_cap_put`/`tk_cap_own` que `lib/rt.tk` passou a exportar, inseridas no mesmo ponto), e **2 com
+diff próprio** — as duas fixtures tocadas. Ou seja: fora das duas tocadas, nenhuma árvore muda de
+FORMA; o que entra é a superfície nova de runtime, que toda unidade que inclui `lib/rt.tk`
+enxerga por construção. (O critério "43 byte-idênticas" do crumb só valeria se os dois helpers
+não morassem em `lib/rt.tk`; a alternativa era reaproveitar o `tk_va_put` do `params` para
+closure, que economiza o diff mas acopla duas features por um nome que mente. Preferiu-se a
+superfície própria e a prova mecânica do diff.)
+
+Probes (em `ngen/_probe/`, fora de `ngen/tests/`, descartados): item A — `ref i64` recebendo um
+`ref u8` recusado (`teko: a value of type u8 does not convert to i64`), `ref i64` com `ref i64`
+(direto, repassado e de bloco interno) aceito, mismatch de classe (`Square` para `ref Circle`) e
+derivado-para-base (`Dog` para `ref Animal`) recusados como antes; item B — 14/20/31/32 capturas
+compilam e rodam, 33 recusada com a mensagem da teko, lambda aninhada em três níveis com captura
+nos três níveis e RC fechando em zero, captura de `f64` preservada.
+
+### (d) Dívida ADJACENTE achada (não é deste crumb)
+
+**`ref T`/`out T` de um escalar mais ESTREITO que uma palavra é quebrado em runtime, desde o K2.**
+Um parâmetro `ref T` é declarado com o tipo do APONTADO (desenho do K2: é o que faz o oráculo e o
+overload verem `T` sem mudança nenhuma), mas o que ele carrega é um ENDEREÇO — e o mc trunca um
+ponteiro passado a um parâmetro de largura 1/2/4. Medido nos dois níveis: `void bumpb(ref u8 x)`
+com `u8 b` segfalta (139), e o mesmo em dialeto mc puro (`void poke(u8 x) { st8(x, 5); }` chamado
+com `&b`) segfalta igual — não é a teko errando o lowering, é a consequência direta do tipo
+declarado do parâmetro. `ref i64`/`ref uptr`/`ref` de classe (largura 8) não são afetados, e é o
+que todas as fixtures usam. Corrigir exige o parâmetro nascer com largura de ponteiro e todo
+consumidor de `nd_type(p)` (mangling `tk_ty_sfx`, `tk_arr_load`/`tk_arr_store` do deref,
+`tk_is_counted` do prólogo de `out`, `tk_rc_assign`, o oráculo `tk_ty_scope_params`) passar a ler
+o apontado da tabela lateral (`tk_rp_pointee`) — redesenho do K2, não higiene. Registrado aqui e
+no HANDOFF §5; a checagem do item A NÃO o mascara (ela recusa a MISTURA de larguras, não o uso
+correto de um `ref u8`).
