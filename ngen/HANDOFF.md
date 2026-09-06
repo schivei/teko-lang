@@ -344,7 +344,7 @@ A ressalva do adendo continua **viva**: teko-ificar o compilador (S4.4+, fork g3
 ilegível para o parser de prateleira e o pacote perde o `check`. Não há hoje uma segunda unidade
 candidata — `lib/rt.tk` só voltaria a ser `check` se `panic` deixasse de usar `str` na assinatura.
 
-## 3.2 O mc que o CI usa hoje: 0.15.12 (2026-09-06)
+## 3.2 O mc que o CI usa hoje: 0.15.13 (2026-09-06)
 
 **Fonte da verdade: `ngen/MC_VERSION` (V2, 2026-09-06).** O CI não resolve mais `latest` por
 padrão — `.github/actions/setup-mc` lê `ngen/MC_VERSION` (uma linha, sem `v`) quando o chamador
@@ -361,6 +361,19 @@ o `mc` novo tem que fechar `FIXPOINT OK`; **só depois** dos dois verdes (3) tro
 parágrafos abaixo. Nunca trocar o arquivo primeiro e validar depois — é o mesmo acidente do
 `latest` sem aviso, só que manual.
 
+**0.15.13 (PR #43): um cast DIRETAMENTE sobre um `callp` declara o tipo de retorno da chamada indireta.**
+`res_expr`, arm `N_CAST` (`mc/src/gen_resolve.mc`): quando o filho imediato é o `callp` (`nd_kind(a) ==
+N_CALL && res_kind(a) == RK_INTRIN && res_decl(a) == IN_CALLP`), o tipo do cast desce para o nó do `callp`
+(`set_res_type(a, nd_type(n))`) — `(f64) callp(&dbl, 2.0)` tipa o nó como f64, `walk_ret_type()` responde
+float e o `fa_result` do `<float>` move `d0`/`xmm0` para o destino. Sem cast, segue `TY_I64` como antes; um
+cast EXTERNO (que não é pai imediato) vira identidade; `(i32) callp(...)` recebe o estreitamento M45 e o cast
+repete um `sxtw` idempotente. É o contrato que o V1 consome nos cinco construtores de `callp` da teko (§5,
+bloco V1) — fecha o item 1 do §74(b). Também na release: as conversões single do `<float>` no arm64
+(`FI_SCVTF_D..FI_UCVTF_D`, `FI_FCVTZS_D..FI_FCVTZU_D` com `+2` — item 2 do §74(b)) e a ordem
+resultado/restauração no Win64. Bump validado nesta máquina ANTES de trocar o arquivo, na ordem do parágrafo
+acima: 45/45 com o `mc` novo e `sh ngen/scripts/bootstrap.sh` `FIXPOINT OK` (`teko1.o == teko2.o == teko3.o`,
+`b45a0446…`), sobre a árvore da base `a66b80c9`.
+
 **0.15.12 (PR #42, "dieta de globais" do driver): os 12 globais de `src/driver.mc` viraram UM registro de arena
 com acessores** -- `cfg_file` → `cfg_file()`, `drv_lim_mode = 1` → `set_drv_lim_mode(1)` (e `drv_os()`,
 `drv_arch()`, `drv_target()`…). A teko lia dois deles (`teko_access.tk` `tk_access_init`; `teko.tk` `tk_limits`)
@@ -368,8 +381,7 @@ e quebrava com `teko_access.tk:76: unknown name`; corrigido nos dois sítios (o 
 quebra seria imediata). Regra: NÃO ler global do driver; sempre o acessor. **0.15.11 (PR #41):** `machine()` só
 vira corrente quando não há nenhuma, nome NOVO, ou substitui o que É corrente -- o re-registro dos 3 nomes pelo
 `teko_float.tk` não move mais; `teko --dump-machine` agora dá `arm64 (current)` e o modo cru lowera no host
-(medido). **A caminho, 0.15.13:** `callp` tipado por cast direto (`(f64) callp(...)`) + conversões single do
-`<float>` (os dois defeitos da higiene 4).
+(medido).
 
 ### 3.2b O anterior: 0.15.10
 
