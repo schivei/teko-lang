@@ -37,6 +37,12 @@
 //      a global (live, not frozen), reads a `const`, calls a free function
 //      and WRITES the global back, all visible to the caller afterward
 //      (D226 compat crumb item 3).
+//  17. `nested_check` (higiene 2, item 6) -- a lambda literal built INSIDE
+//      another one's own body, `use (k)` at BOTH levels: the shared capture
+//      table used to reset to 0 at either end of the INNER lambda's own
+//      `tk_lambda_finish`, wiping out the OUTER's still-in-progress capture
+//      of the same name (`k`) and refusing it as "not captured" once the
+//      outer's own body walk ran.
 //
 // expect-exit: 42
 
@@ -232,6 +238,16 @@ i64 global_const_free_check() {
     return 0;
 }
 
+i64 nested_check() {
+    i64 k = 10;
+    Op outer = new Op((i64 x) use (k) => {
+        Op inner = new Op((i64 y) use (k) => y + k);
+        return inner(x) + k;
+    });
+    if (outer(1) != 21) return 1;                   // inner(1)=1+10=11, +k=10 -> 21
+    return 0;
+}
+
 i64 main() {
     i64 bad = nocap_check();
     if (bad != 0) return 10 + bad;
@@ -295,6 +311,10 @@ i64 main() {
     bad = global_const_free_check();
     if (bad != 0) return 310 + bad;
     if (rt_live() != 0) return 320;
+
+    bad = nested_check();
+    if (bad != 0) return 330 + bad;
+    if (rt_live() != 0) return 340;
 
     return 42;
 }
