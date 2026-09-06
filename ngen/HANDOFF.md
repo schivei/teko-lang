@@ -173,7 +173,8 @@ num runner glibc o `ngen/build/teko` existe e mesmo assim não executa (`not fou
 musl não anexa nada. (As pernas não sofriam: elas já traziam `interp`/`libc` na matriz.)
 
 O passo que baixa e verifica o `mc` é o MESMO nas seis: `.github/actions/setup-mc` (action
-composta) resolve o `latest` de `minicompiler/mc`, baixa o asset do par, confere o
+composta) resolve a versão **PINADA por `ngen/MC_VERSION`** (§3.2) — `latest` só se o
+chamador pedir explicitamente por `inputs.version` —, baixa o asset do par, confere o
 `.sha256` e assere `mc --host` — nenhum job pode testar um compilador diferente do outro.
 
 ### Cortar uma versão: `release.yml` (R1, 2026-09-06)
@@ -289,6 +290,21 @@ ilegível para o parser de prateleira e o pacote perde o `check`. Não há hoje 
 candidata — `lib/rt.tk` só voltaria a ser `check` se `panic` deixasse de usar `str` na assinatura.
 
 ## 3.2 O mc que o CI usa hoje: 0.15.12 (2026-09-06)
+
+**Fonte da verdade: `ngen/MC_VERSION` (V2, 2026-09-06).** O CI não resolve mais `latest` por
+padrão — `.github/actions/setup-mc` lê `ngen/MC_VERSION` (uma linha, sem `v`) quando o chamador
+não passa `inputs.version`, e pina exatamente essa release; `latest` só entra se pedido
+explicitamente. "O mc que o CI usa" é sempre `cat ngen/MC_VERSION` — não é preciso ler o log de
+um run para saber. Motivo (medido, 0.15.12): `latest` quebrou o CI sem aviso quando os 12
+globais de `src/driver.mc` viraram acessores (parágrafo abaixo) — um patch release do mc, hoje,
+entraria no gate de todo PR aberto ANTES de qualquer um destes textos ser atualizado.
+
+**Como subir a versão pinada.** (1) baixar a release nova e rodar o baseline local (§4) — as
+45 fixtures têm que fechar 45/45 contra o `mc` novo; (2) `sh ngen/scripts/bootstrap.sh` contra
+o `mc` novo tem que fechar `FIXPOINT OK`; **só depois** dos dois verdes (3) trocar o conteúdo de
+`ngen/MC_VERSION` para a versão nova e registrar o que mudou nesta seção, no mesmo padrão dos
+parágrafos abaixo. Nunca trocar o arquivo primeiro e validar depois — é o mesmo acidente do
+`latest` sem aviso, só que manual.
 
 **0.15.12 (PR #42, "dieta de globais" do driver): os 12 globais de `src/driver.mc` viraram UM registro de arena
 com acessores** -- `cfg_file` → `cfg_file()`, `drv_lim_mode = 1` → `set_drv_lim_mode(1)` (e `drv_os()`,
@@ -485,16 +501,17 @@ de `minicompiler/mc` — **nada de submodule**, e **não se usa binário de dent
 mc** (pode estar à frente do que o CI usa). Troque `macos-arm64` pelo seu alvo:
 
 ```sh
-tag=$(gh api repos/minicompiler/mc/releases/latest --jq .tag_name); ver=${tag#v}
+ver=$(cat ngen/MC_VERSION); tag="v$ver"
 gh release download "$tag" --repo minicompiler/mc --pattern "mc-$ver-macos-arm64.tar.gz*"
 shasum -a 256 -c "mc-$ver-macos-arm64.tar.gz.sha256"
 mkdir -p ~/.local/mc && tar xzf "mc-$ver-macos-arm64.tar.gz" -C ~/.local/mc
 ln -sf ~/.local/mc/mc-$ver-macos-arm64/mc ~/.local/bin/mc
 ```
 
-O CI resolve a release **`latest`** dinamicamente (`.github/workflows/ngen.yml:40`),
-não uma versão fixa — então release nova entra no gate sozinha, e o local precisa
-acompanhar (§6).
+O CI PINA a release em `ngen/MC_VERSION` (§3.2) — não resolve `latest` por padrão —, então
+uma release nova do mc só entra no gate quando o arquivo mudar (o processo de bump está no
+§3.2). O binário local segue o mesmo arquivo, para nunca validar contra um `mc` diferente do
+que o CI usa.
 
 **Config de host.** O `ngen/mc.toml` versionado mira `linux/x86_64`, o alvo do CI, e
 não linka neste host. Deriva-se um config em scratch — `os = "macos"`,
