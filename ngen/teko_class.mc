@@ -1370,7 +1370,12 @@ void tk_class() {
     i64 abst = tk_take_decl_abst();
     i64 part = tk_take_decl_part();
     uptr qname = tk_ns_qualified_name(p_name());   // exact reopen check: never the `using` search
-    if (part && tk_struct_find_exact(qname) >= 0) {
+    i64 qsi = tk_struct_find_exact(qname);
+    // a row a USE materialized ahead of this declaration (§50 O1, TK_PFWD) is
+    // not a genuine first part yet -- it has none of a first part's layout
+    // (no vtable slot reserved, no base taken); it falls through to the
+    // ordinary declaration below, whose `tk_type_add` adopts it in place
+    if (part && qsi >= 0 && sr_part_at(qsi) != TK_PFWD) {
         i64 si = tk_class_reopen(qname, vwritten, abst, head_line, head_file);
         p_next();                                // the class's own name
         if (p_accept(K_COLON)) tk_class_reconf(si, proj, head_line, head_file);

@@ -352,7 +352,7 @@ i64 tk_type_stmt() {
     uptr fl = p_file();
     if (!tk_dot_follows()) {
         uptr nm = p_name();
-        i64 si = tk_struct_find(nm);
+        i64 si = tk_struct_find_fwd(nm);              // a local's type: identity is enough (§50 O1)
         if (si < 0) err_at2(fl, line, "teko: unresolved name", nm);
         if (tk_is_deleg(si) && !tk_bracket_follows()) return tk_deleg_var_stmt(si, line, fl);
         return parse_var(line, fl, sr_ty_at(si));
@@ -428,8 +428,14 @@ void tk_internal() { tk_decl_head(TK_TINTERNAL, 0, 0); }
 void tk_abstract() { tk_decl_head(0 - 1, 1, 0); }
 void tk_partial()  { tk_decl_head(0 - 1, 0, 1); }
 
-// a type's name is a word of the language in three positions at once
+// a type's name is a word of the language in three positions at once --
+// idempotent (§50 O1): the forward scan (teko_fwd.mc) may already have
+// reserved it ahead of this very declaration, and registering `type_new`
+// twice on one name would silently orphan the first id (mc's own
+// `alias_add` never refuses a second registration of a taken word).
 i64 tk_type_word(uptr name) {
+    i64 fi = tk_fwd_find(name);
+    if (fi >= 0) return tk_fwd_ty(fi);
     i64 ty = type_new(name, 8, 8, TK_INT);
     syntax_expr(name, &tk_type_expr);
     syntax_stmt(name, &tk_type_stmt);

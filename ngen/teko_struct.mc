@@ -57,6 +57,27 @@ uptr tk_ns_qualify(uptr nome);
 uptr tk_ns_qualified_name(uptr nome);
 i64 tk_ns_short_known(uptr curto);
 
+// teko_ns.mc's own `using`/namespace-outward search, but landing on a name the
+// forward scan (teko_fwd.mc, §50 O1) reserved rather than one a row already
+// exists for -- the plain `tk_ns_resolve` above never takes this route, so a
+// base class or a constructed value still needs the row WHOLE before it
+// resolves (O2/O3)
+i64 tk_ns_resolve_fwd(uptr curto);
+
+// teko_fwd.mc is included after this file: the forward scan runs before ANY
+// token is read (the whole entry source, §50 (a).4), pre-reserving every
+// class/struct/interface/delegate word so a field, a parameter, a return type
+// or a local of a type declared BELOW resolves at its first mention.
+// `tk_fwd_pending` is what `tk_newname` below asks to accept such a word
+// instead of refusing it; `tk_fwd_row`/`tk_fwd_row_by_ty` materialize the
+// placeholder row an identity-only site needs, on demand; `tk_fwd_adopt` is
+// what the real declaration calls, through `tk_type_add`, once the row is no
+// longer a placeholder
+i64 tk_fwd_pending(uptr qname);
+i64 tk_fwd_row(uptr qname);
+i64 tk_fwd_row_by_ty(i64 ty);
+void tk_fwd_adopt(i64 si, i64 vis, i64 proj);
+
 // teko_access.mc is included after this file too -- it reads the tables below --
 // and these three are what a type declaration has to ask it: the modifier that
 // came before the word, whether the file it is written in belongs to the
@@ -77,10 +98,13 @@ i64 tk_type_word(uptr name);
 #define TK_KARRAY  4
 
 // how much of a class has been read: one declared in one place is whole where
-// it stands, and a `partial` one stays OPEN until the first use of it closes
+// it stands, and a `partial` one stays OPEN until the first use of it closes.
+// TK_PFWD (§50 O1) is a fourth state: the row a use materialized ahead of the
+// real declaration, adopted in place once that declaration is read.
 #define TK_PWHOLE 0
 #define TK_POPEN  1
 #define TK_PDONE  2
+#define TK_PFWD   3
 
 // where a member may be reached from, C#'s three words; a member with no
 // modifier at all is `private`
@@ -474,6 +498,21 @@ i64 tk_struct_find(uptr name) {
     return tk_ns_resolve(name);
 }
 
+// the twin an IDENTITY-only site (§50 (b2): a field, a parameter, a return
+// type, a local) takes instead: the same search, but landing on a
+// forward-scanned name (teko_fwd.mc) materializes its placeholder row rather
+// than answering -1. `tk_struct_find` above stays untouched for every site
+// that needs the row WHOLE -- a base class, `new`, a delegate construction --
+// where a placeholder would silently lay a derived class out wrong or
+// allocate the wrong size.
+i64 tk_struct_find_fwd(uptr name) {
+    i64 si = tk_struct_find_exact(name);
+    if (si >= 0) return si;
+    si = tk_ns_resolve_fwd(name);
+    if (si >= 0) return si;
+    return tk_fwd_row(name);
+}
+
 i64 tk_struct_by_ty(i64 ty) {
     i64 i = 0;
     loop {
@@ -481,7 +520,7 @@ i64 tk_struct_by_ty(i64 ty) {
         if (sr_ty_at(i) == ty) return i;
         i = i + 1;
     }
-    return 0 - 1;
+    return tk_fwd_row_by_ty(ty);
 }
 
 // 1 when a value of type `ty` is a COUNTED reference: a class, an interface, a
@@ -749,10 +788,12 @@ void tk_field_add(i64 si, uptr name, i64 off, i64 ty, i64 nel, i64 vis, uptr sym
     tk_nfield = tk_nfield + 1;
 }
 
-// the row is appended BEFORE the body is read, so a field or a method body may
-// name the type being declared
-i64 tk_type_add(uptr name, i64 ty, i64 base, i64 kind, i64 vis, i64 proj) {
-    if (tk_nstruct == TK_MAXSTRUCT) err_at(tk_file, tk_line, "teko: too many type declarations");
+// a fresh row, in state `part`, at whatever position and file/line the caller
+// hands over -- the ONE place that lays out every field of the type table
+// (`tk_type_add` below for a real declaration, `tk_fwd_row`/`tk_fwd_row_by_ty`
+// in teko_fwd.mc for a placeholder one, §50 O1)
+i64 tk_type_row_new(uptr name, i64 ty, i64 base, i64 kind, i64 vis, i64 proj, i64 part, i64 line, uptr fl) {
+    if (tk_nstruct == TK_MAXSTRUCT) err_at(fl, line, "teko: too many type declarations");
     set_sr_name_at(tk_nstruct, name);
     set_sr_ty_at(tk_nstruct, ty);
     set_sr_size_at(tk_nstruct, 0);
@@ -765,12 +806,39 @@ i64 tk_type_add(uptr name, i64 ty, i64 base, i64 kind, i64 vis, i64 proj) {
     set_sr_vis_at(tk_nstruct, vis);
     set_sr_proj_at(tk_nstruct, proj);
     set_sr_abst_at(tk_nstruct, 0);
-    set_sr_part_at(tk_nstruct, TK_PWHOLE);
+    set_sr_part_at(tk_nstruct, part);
     set_sr_off_at(tk_nstruct, 0);
-    set_sr_hline_at(tk_nstruct, tk_line);
-    set_sr_hfile_at(tk_nstruct, tk_file);
+    set_sr_hline_at(tk_nstruct, line);
+    set_sr_hfile_at(tk_nstruct, fl);
     tk_nstruct = tk_nstruct + 1;
     return tk_nstruct - 1;
+}
+
+// the row is appended BEFORE the body is read, so a field or a method body may
+// name the type being declared -- UNLESS a use already materialized it ahead
+// of this declaration (§50 O1, TK_PFWD): then the placeholder is ADOPTED in
+// place instead of appended again, so its row index -- already read back by
+// every site that resolved through it -- never moves.
+i64 tk_type_add(uptr name, i64 ty, i64 base, i64 kind, i64 vis, i64 proj) {
+    i64 si = tk_struct_find_exact(name);
+    if (si >= 0 && sr_part_at(si) == TK_PFWD) {
+        set_sr_base_at(si, base);
+        set_sr_kind_at(si, kind);
+        set_sr_part_at(si, TK_PWHOLE);
+        set_sr_hline_at(si, tk_line);
+        set_sr_hfile_at(si, tk_file);
+        tk_fwd_adopt(si, vis, proj);
+        return si;
+    }
+    return tk_type_row_new(name, ty, base, kind, vis, proj, TK_PWHOLE, tk_line, tk_file);
+}
+
+// the placeholder a `Box`-typed field, parameter, return, local or global
+// resolves to before `class Box` is ever read (teko_fwd.mc's own
+// `tk_fwd_row`/`tk_fwd_row_by_ty`): no base, no layout, TK_PFWD -- everything
+// `tk_type_add` above fills in once the real declaration adopts it.
+i64 tk_type_add_pending(uptr name, i64 ty, i64 kind, i64 vis, i64 proj) {
+    return tk_type_row_new(name, ty, 0 - 1, kind, vis, proj, TK_PFWD, p_line(), p_file());
 }
 
 // ---- the static type of an already parsed expression ----
@@ -863,6 +931,11 @@ uptr tk_newname(uptr what) {
     if (tk_gen_find(p_name()) >= 0)
         err_at2(p_file(), p_line(), "teko: the name is already a generic", p_name());
     if (p_id() == T_IDENT) return p_ident();
+    if (tk_fwd_pending(tk_ns_qualified_name(p_name()))) {
+        uptr nm = p_name();
+        p_next();
+        return nm;
+    }
     if (tk_ns_short_known(p_name())) {
         uptr nm = p_name();
         if (tk_struct_find_exact(tk_ns_qualified_name(nm)) >= 0)

@@ -170,6 +170,15 @@ i64 tk_type_stmt();
 i64 tk_type_expr();
 i64 tk_static_member(i64 si, i64 line, uptr fl);
 
+// teko_fwd.mc is included after this file: `tk_ns_resolve_fwd`'s own search
+// below lands a candidate on it instead of on `tk_struct_find_exact` (§50
+// O1), so a namespaced short name declared below resolves through a `using`
+// too, for the identity-only sites that call it; `tk_import` below scans the
+// file `lex_include` just pushed the same way `tk_fwd_init` scans the entry
+// source
+i64 tk_fwd_row(uptr qname);
+void tk_fwd_scan(uptr p, uptr end, uptr file);
+
 // teko_expr.mc is included after this file: a qualified free function's own
 // call (entrega 5, crumb N2) reads its argument list the same way a static
 // method call already does
@@ -468,13 +477,56 @@ i64 tk_ns_resolve(uptr curto) {
     return found;
 }
 
+// `tk_ns_try_prefixes`/`tk_ns_resolve` above, but a candidate that names a
+// forward-scanned type (teko_fwd.mc, §50 O1) materializes its placeholder row
+// instead of answering -1 -- safe ONLY where the caller needs the row's
+// IDENTITY (its `ty`), never its layout: `tk_ns_param_ty`/`tk_ns_top` below,
+// never `tk_conf_name`'s base/interface list or `new`'s own lookup.
+i64 tk_ns_try_prefixes_fwd(uptr curto) {
+    uptr cur = tk_ns_current();
+    if (cur == 0) return 0 - 1;
+    i64 len = cstrlen(cur);
+    loop {
+        uptr pre = xstrdup(cur, len);
+        i64 si = tk_fwd_row(tk_join3(pre, "__", curto));
+        if (si >= 0) return si;
+        i64 cut = tk_ns_last_sep(cur, len);
+        if (cut < 0) break;
+        len = cut;
+    }
+    return 0 - 1;
+}
+
+i64 tk_ns_resolve_fwd(uptr curto) {
+    i64 si = tk_ns_try_prefixes_fwd(curto);
+    if (si >= 0) return si;
+    uptr fl = p_file();
+    i64 found = 0 - 1;
+    uptr found_ns = 0;
+    i64 i = 0;
+    loop {
+        if (i >= tk_nusing) break;
+        if (str_eq(ug_file_at(i), fl)) {
+            i64 cand = tk_fwd_row(tk_join3(ug_ns_at(i), "__", curto));
+            if (cand >= 0) {
+                if (found >= 0 && cand != found)
+                    err_at(fl, p_line(), tk_ns_ambig_msg(curto, found_ns, ug_ns_at(i)));
+                found = cand;
+                found_ns = ug_ns_at(i);
+            }
+        }
+        i = i + 1;
+    }
+    return found;
+}
+
 // the namespaced short word branch every "read a type here" position takes
 // BEFORE its own fallback (`teko_default.mc`'s free-function parameter,
 // `teko_generic.mc`'s field/parameter/return type): -1 when the current
 // token names no namespaced type, so the caller's own answer is unchanged
 i64 tk_ns_param_ty() {
     if (!tk_ns_short_known(p_name())) return 0 - 1;
-    i64 si = tk_ns_resolve(p_name());
+    i64 si = tk_ns_resolve_fwd(p_name());
     if (si < 0) return 0 - 1;
     return sr_ty_at(si);
 }
@@ -536,7 +588,7 @@ i64 tk_ns_proto(i64 ty, uptr name, i64 params) {
 void tk_ns_top() {
     i64 line = p_line();
     uptr fl = p_file();
-    i64 si = tk_ns_resolve(p_name());
+    i64 si = tk_ns_resolve_fwd(p_name());
     if (si < 0) err_at2(fl, line, "teko: unresolved name", p_name());
     i64 ty = sr_ty_at(si);
     p_next();                                    // the type word
@@ -1049,6 +1101,10 @@ void tk_import() {
     uptr full = tk_ns_read_path(seg0mem);
     if (p_id() != K_SEMI) err_at2(fl, line, "teko: expected ; after import", tk_ns_dotted(full));
     tk_ns_using_add(fl, line, full);
-    lex_include(tk_ns_path_of(full), line);       // the lookahead contract: still on the `;`
+    i64 pushed = lex_include(tk_ns_path_of(full), line);   // the lookahead contract: still on the `;`
+    // §50 O1: the pushed file, forward-scanned too -- `lex_file()`, not
+    // `p_file()`, because the push does not touch the pending lookahead
+    // token (hooks.md § record and replay), which is still the includer's
+    if (pushed) tk_fwd_scan(p_cp(), p_src_end(), lex_file());
     p_next();
 }
