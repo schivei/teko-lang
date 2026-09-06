@@ -346,25 +346,89 @@ void tk_ref_rewrite_assign(i64 n, i64 pn) {
     set_nd_a(n, store);
 }
 
-// higiene 2, item 2: a `ref`/`out` argument's own POINTEE against the
-// parameter's, IDENTICAL only -- C#'s own `ref`/`out` rule, narrower than
-// `tk_row_fits`'s derives/implements one (a `ref Square` slot does not widen
-// to hold a `ref Circle`, even were one to derive from the other): `ti != ei`
-// alone decides it, never `tk_row_fits`'s base-walk. Either pointee unknown
-// at PARSE TIME (a member/element ref, or a bare local `tk_slv_find` never
-// saw) is silently skipped, the same rule `tk_check_field_store` gives an
-// unknown source.
+// higiene 3, item A: the type a NAMED `ref`/`out` argument really points at.
+// The parse-time tag (`tk_rfarg_pointee`) falls back to `tk_slv_find`, a
+// unit-wide most-recent-wins table that never sees a PARAMETER -- so
+// `lvl_c(ref x)` inside `lvl_b(ref i64 x)` answers with whatever unrelated
+// local was declared last under that name. At PASS time the enclosing
+// function is known, so the declaration itself answers: its own parameter
+// list first, then the `N_VAR` its body declares.
+i64 tk_ref_param_ty(uptr name) {
+    i64 p = nd_a(tk_ref_cur_fn);
+    loop {
+        if (p == 0) break;
+        if (nd_name(p) != 0 && str_eq(nd_name(p), name)) return nd_type(p);
+        p = nd_next(p);
+    }
+    return 0 - 1;
+}
+
+i64 tk_ref_lty = 0 - 1;                // the local type the scan below found
+i64 tk_ref_lamb = 0;                   // ...and 1 once a second, different one showed up
+
+// `nd_val` is the array length, so `Point tbl[4]` is skipped exactly as
+// teko_struct.tk's own on_stmt hook skips it
+void tk_ref_scan_local(i64 n, uptr name) {
+    loop {
+        if (n == 0) break;
+        if (nd_kind(n) == N_VAR && nd_val(n) == 0 && nd_name(n) != 0 && str_eq(nd_name(n), name)) {
+            if (tk_ref_lty >= 0 && tk_ref_lty != nd_type(n)) tk_ref_lamb = 1;
+            tk_ref_lty = nd_type(n);
+        }
+        tk_ref_scan_local(nd_a(n), name);
+        tk_ref_scan_local(nd_b(n), name);
+        tk_ref_scan_local(nd_c(n), name);
+        tk_ref_scan_local(nd_d(n), name);
+        n = nd_next(n);
+    }
+}
+
+// two sibling blocks may declare the same name under two types; that
+// ambiguity answers -1 rather than guess which one a given site meant
+i64 tk_ref_local_ty(uptr name) {
+    tk_ref_lty = 0 - 1;
+    tk_ref_lamb = 0;
+    tk_ref_scan_local(nd_b(tk_ref_cur_fn), name);
+    if (tk_ref_lamb) return 0 - 1;
+    return tk_ref_lty;
+}
+
+i64 tk_ref_arg_pointee(i64 a) {
+    i64 k = nd_kind(a);
+    if (k != N_ADDR && k != N_IDENT) return tk_rfarg_pointee(a);
+    uptr name = nd_name(a);
+    if (name == 0) return tk_rfarg_pointee(a);
+    if (tk_ref_cur_fn == 0) return 0 - 1;
+    i64 t = tk_ref_param_ty(name);
+    if (t >= 0) return t;
+    return tk_ref_local_ty(name);
+}
+
+uptr tk_pointee_name(i64 ty) {
+    i64 si = tk_struct_by_ty(ty);
+    if (si >= 0) return sr_name_at(si);
+    return type_name(ty);
+}
+
+// a `ref`/`out` argument's own POINTEE against the parameter's, IDENTICAL
+// only -- C#'s own `ref`/`out` rule, narrower than `tk_row_fits`'s
+// derives/implements one (a `ref Square` slot does not widen to hold a
+// `ref Circle`, even were one to derive from the other). higiene 3, item A
+// extends it from class/struct to EVERY pointee: `ref i64` refuses a
+// `ref u8` too, since the callee stores eight bytes through a slot that
+// holds one. Type identity alone decides it, so the two aliases of one
+// primitive (`bool`/`byte`/`u8`, `char`/`u32`, `str`/`ptr`/`uptr`) are the
+// same pointee here, as they are everywhere else. A pointee the pass cannot
+// name (a global, an ambiguous local) is silently skipped, the same rule
+// `tk_check_field_store` gives an unknown source.
 void tk_ref_check_pointee(i64 pn, i64 a, i64 line, uptr fl) {
     i64 pty = nd_type(pn);
-    i64 ti = tk_struct_by_ty(pty);
-    if (ti < 0) return;
-    i64 aty = tk_rfarg_pointee(a);
+    i64 aty = tk_ref_arg_pointee(a);
     if (aty < 0) return;
-    i64 ei = tk_struct_by_ty(aty);
-    if (ei == ti) return;
-    uptr aname = type_name(aty);
-    if (ei >= 0) aname = sr_name_at(ei);
-    tk_reject_compat(aname, sr_name_at(ti), line, fl);
+    if (aty == pty) return;
+    i64 ti = tk_struct_by_ty(pty);
+    if (ti >= 0 && tk_struct_by_ty(aty) == ti) return;
+    tk_reject_compat(tk_pointee_name(aty), tk_pointee_name(pty), line, fl);
 }
 
 // a call to a name declared exactly ONCE in the unit (teko_default.tk's own
