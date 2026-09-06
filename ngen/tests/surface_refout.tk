@@ -47,6 +47,12 @@
 //      one byte and wrapping at 255 proves it is one byte, not eight;
 //      `set32` writes a negative `i32` through an `out`; and `relayb` repasses
 //      a `ref u8` PARAMETER one level down.
+//  12. `floatcheck` (higiene 4) -- a pointee, a class field and the `ref`
+//      parameter of a METHOD, all of type `f64`: an indirect access to a
+//      float picks `<float>`'s own `ldf64`/`stf64`, so the eight bytes land
+//      in the register file the arithmetic reads. Through the integer pair,
+//      `bumpf(ref x)` left 1.5 untouched and `g.v = g.v + 1.0` wrote a word
+//      the float unit never saw.
 //
 // expect-exit: 42
 
@@ -307,6 +313,42 @@ i64 narrowcheck() {
     return 0;
 }
 
+void bumpf(ref f64 v) {
+    v = v + 1.0;
+}
+
+void setf(out f64 v) {
+    v = 3.25;
+}
+
+class Gauge {
+    public f64 v;
+
+    public void raise(ref f64 x) {
+        x = x + v;
+    }
+}
+
+i64 floatcheck() {
+    f64 x = 1.5;
+    bumpf(ref x);
+    if (x != 2.5) return 1;
+
+    f64 o = 1.0;
+    setf(out o);
+    if (o != 3.25) return 2;
+
+    Gauge g = new Gauge;
+    g.v = 1.5;
+    g.v = g.v + 1.0;
+    if (g.v != 2.5) return 3;
+
+    f64 y = 10.0;
+    g.raise(ref y);
+    if (y != 12.5) return 4;
+    return 0;
+}
+
 i64 main() {
     i64 bad = scheck();
     if (bad != 0) return 10 + bad;
@@ -346,6 +388,10 @@ i64 main() {
 
     bad = narrowcheck();
     if (bad != 0) return 120 + bad;
+
+    bad = floatcheck();
+    if (bad != 0) return 130 + bad;
+    if (rt_live() != 0) return 139;
 
     return 42;
 }

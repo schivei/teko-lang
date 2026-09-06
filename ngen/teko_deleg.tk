@@ -315,6 +315,16 @@ void tk_deleg_check_arg_kinds(i64 si, i64 args, i64 line, uptr fl) {
     }
 }
 
+// a return the caller has to extend at the call site: the core's own rule
+// (`walk_narrow`, mc src/gen_walk.mc) counts an INTEGER narrower than a word
+// and nothing else -- a float is its module's business, and casting one here
+// would read the integer result register and CONVERT it (higiene 4).
+i64 tk_deleg_ret_narrow(i64 ret) {
+    if (ret == TY_VOID) return 0;
+    if (type_kind(ret) == TK_FLOAT) return 0;
+    return type_width(ret) < 8;
+}
+
 // `code`/`obj`/`args` -> the typed `callp` expression, shared by the bare-call
 // rewrite (`tk_deleg_call`) and a field call (teko_expr.tk's `tk_field_use`).
 // `obj` is read TWICE -- once for the code pointer, once as the call's own
@@ -333,7 +343,7 @@ i64 tk_deleg_build(i64 si, i64 obj, i64 args, i64 na, i64 line, uptr fl) {
     i64 code = tk_call("tk_deleg_code", tk_clone(obj));
     i64 call = tk_call("callp", list_append(list_append(code, obj), args));
     i64 ret = dg_ret_at(si);
-    if (ret != TY_VOID && type_width(ret) < 8) return tk_cast(ret, call);
+    if (tk_deleg_ret_narrow(ret)) return tk_cast(ret, call);
     return call;
 }
 
@@ -879,6 +889,19 @@ i64 tk_lambda_alloc_fn(i64 si, uptr allocname, uptr vtname, uptr relname, uptr l
     return tk_func(sr_ty_at(si), allocname, param_new(TY_UPTR, "p"), tk_blk(st));
 }
 
+// the link that writes ONE by-value capture: the value crosses into the
+// closure as an argument, so its own register file decides which of the three
+// writers of lib/rt.tk carries it -- a float in an `i64` parameter is never
+// received at all (higiene 4), and a counted one owes a reference.
+uptr tk_cap_writer(i64 ty) {
+    if (type_kind(ty) == TK_FLOAT) {
+        if (type_width(ty) == 4) return "tk_cap_putf32";
+        if (type_width(ty) == 8) return "tk_cap_putf";
+    }
+    if (tk_is_counted(ty)) return "tk_cap_own";
+    return "tk_cap_put";
+}
+
 // the object the allocator is handed: a fresh block with one `tk_cap_put`
 // link per capture (lib/rt.tk), each writing the value or the ADDRESS taken
 // AT THAT INSTANT -- the "frozen copy" D221 decision 20 asks a by-value
@@ -893,10 +916,8 @@ i64 tk_lambda_capture_chain(i64 objsize) {
         i64 off = tk_int(24 + 8 * (i - tk_lc_base));
         if (lc_byref_at(i)) {
             blk = tk_call3("tk_cap_put", blk, off, tk_addr(lc_name_at(i)));
-        } else if (tk_is_counted(lc_ty_at(i))) {
-            blk = tk_call3("tk_cap_own", blk, off, tk_id(lc_name_at(i)));
         } else {
-            blk = tk_call3("tk_cap_put", blk, off, tk_id(lc_name_at(i)));
+            blk = tk_call3(tk_cap_writer(lc_ty_at(i)), blk, off, tk_id(lc_name_at(i)));
         }
         i = i + 1;
     }
