@@ -156,6 +156,11 @@ compilador ensinado via `[compiler] modules = ["<teko/teko.tk>", "user.mc"]` no 
 "lib/rt.tk"]` -- o validador compila cada unidade SOZINHA na caixa linux/x86_64 sem rede, e `teko.tk`
 não é unidade autônoma; candidata: uma unidade que inclua o compilador inteiro (`mc_teko.tk`). Publicar
 só em versão estável (decisão do dono). Detalhe em `DECISION_LOG.md` D230.
+**Adendo (mc):** a unidade de `check` é compilada pelo `mc` DE PRATELEIRA da caixa (sem teko carregada) →
+tem que ser superfície do NÚCLEO. `mc_teko.tk` serve enquanto os módulos forem transliteração; teko-ificar o
+compilador (S4.4+, fork g3) tornaria o `check` recusado pelo parser de prateleira -- pesa contra o g3
+"obrigatório". mc 0.15.9 publicado (só o registro padrão muda para `https://pkg.minicompiler.dev`); o patch
+`TE_RULE` que destrava o S4.2 vem como 0.15.10.
 
 ## 3.2 O mc que o CI usa hoje: 0.15.8 (2026-09-06)
 
