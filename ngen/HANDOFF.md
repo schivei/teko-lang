@@ -1946,11 +1946,73 @@ um `loop` (uma instância por volta, `rt_live()` plano). Gate: `rm -rf ngen/buil
 `01f5c81a` (`same=44 diff=0`); `mc limits ngen` `verdict ok`, `intrin` sem crescimento (8->8, com
 e sem `scope` no programa).
 
-**Fila DI4** (plano §58 (f)): namespaces como chave, interface-base como chave, o Singleton que
-recebe um Scoped (decisão 11, o escopo PRÓPRIO do singleton). Fora do escopo do port por ora
-(dívida declarada, plano §58 (g)): genérico como chave, `inject T.m()` direto (hoistar o sítio
-automaticamente é crumb futuro -- por ora a recusa é o comportamento correto), `delegate`/`struct`
-como serviço, `IDisposable`, factory/decoração de registro.
+**DI4 landado** (plano §58 (f)/(g), decisões 1-4/6/11, D229) -- fecha o desenho da série DI.
+Namespace e interface-base como chave **não precisaram de código novo**: `tk_inject` já lia o
+nome com `tk_ns_walk` + `tk_struct_find_fwd` (N1/O2), que já entra em `tk_ns_resolve_fwd` (busca
+por `using`) e aceita um caminho qualificado (`app.ICache`); e `tk_di_sv_matches` já varre
+`tk_nimpl`, onde a base de uma interface (`ICache : IBase`) já é achatada no `:` list da classe
+desde o fecho §50 I1 (`tk_iface_conf_close`). Confirmado por fixture, não por código: `inject
+app.ICache` (qualificado), `ICache`/`IBase` (bare, via `using app;`) resolvem ao MESMO Singleton.
+
+**O Singleton que recebe um Scoped (decisão 11, a regra teko ≠ C#)** é o único mecanismo novo:
+`tk_di_singleton_scope(sv)` aloca uma linha do MESMO pool que `scope { }` usa
+(`tk_di_scope_new`, extraído de `tk_di_scope_open`) -- uma por Singleton, nunca duas
+compartilhando. `tk_di_getter_sym` usa essa linha como `buildscope` no lugar do sentinela
+`tk_scope_svcbld` de DI3 (removido); `tk_di_resolve` trata esse `buildscope` exatamente como o de
+um `scope { }` (`scope >= 0` -> `tk_di_scope_local`), então um Scoped pedido pelo grafo do
+Singleton vira um LOCAL do corpo do getter, um por (Singleton, Scoped), memoizado e capturado nos
+campos que o guardam -- a mesma máquina do DI3, zero regra de RC nova. Os locais acumulados em
+`sc_head_at(buildscope)` durante essa construção são splicados na frente do `p = <cls>_new(...)`
+pelo próprio `tk_di_getter_sym`, e a linha é zerada ali para `tk_di_scopes_finish` nunca a
+reprocessar (ela só varre `scope { }` léxicos). Provado por fixture: um Singleton com DOIS
+dependentes que pedem o MESMO Scoped got a instância ÚNICA; DOIS Singletons com o MESMO Scoped
+recebem instâncias DIFERENTES.
+
+**Duas ressalvas de diagnóstico fecham junto:** um construtor `private`/`protected` de serviço
+agora recusa com mensagem PRÓPRIA (`teko: the constructor of this service is not accessible: X`),
+não mais a genérica de `tk_check_member` (DI nunca tem uma classe-que-pede à qual um `protected`
+responderia); e `tk_di_new_call` chama `tk_check_type_use` na classe do serviço antes de tudo, o
+mesmo `internal`-de-outro-projeto de qualquer outro alcance de tipo -- confirmado tanto para uma
+INTERFACE `internal` de outro projeto quanto para uma CLASSE `internal` cuja interface é pública.
+
+**A lacuna do verificador do DI3 (item 5)**: um `inject` de Scoped lido lexicamente dentro do
+corpo de uma lambda que está dentro de um `scope { }` é recusado -- a lambda vira uma função de
+TOPO separada (teko_deleg.mc), então um local prependado ao bloco do `scope { }` de fora seria
+inalcançável de dentro dela. `tk_lam_body_depth` (teko_deleg.mc) conta profundidade de lambda em
+voo; `tk_inject` recusa quando esse contador é > 0 E um `scope { }` está aberto (`teko: inject
+inside a lambda takes the service from the enclosing scope; bind it outside and capture it with
+use (...)`) -- um `inject` de Singleton dentro de uma lambda SEM `scope { }` aberto continua
+funcionando normalmente (confirmado por probe), porque não há local nenhum sendo prependado.
+
+**Tabela final de compatibilidade** (quem recebe quem, §58 (c) confirmado pelas fixtures):
+
+| recebe ↓ / recebido → | Singleton | Scoped | Transient |
+|---|---|---|---|
+| **Singleton** | o slot global (mesma instância) | o escopo PRÓPRIO do singleton -- uma instância por Singleton, compartilhada por toda a sua subárvore | construído dentro do escopo do singleton |
+| **Scoped** | o slot global | a instância DAQUELE escopo | construído no escopo que o recebe |
+| **Transient** | o slot global | a instância do escopo herdado (léxico, ou o do serviço que o construiu) | novo a cada injeção |
+| **raiz** (fora de `scope { }`) | o slot global | um slot global, uma instância no programa | novo a cada injeção |
+
+Fixtures: `surface_di.tk` cresce com `namespace app { ... }`/`using app;` (qualificado e bare,
+chave `ICache`/base `IBase`), `Board`/`WrapA`/`WrapB` (um Singleton com dois dependentes do
+MESMO Scoped) e `GaugeX`/`GaugeY` (dois Singletons, Scopeds distintos), e `ClockView : Clock`
+(classe derivada de serviço que NÃO é serviço, construída com `new` comum). `surface_di_scope.tk`
+cresce com `namespace mon { ... }`/`using mon;` dentro de um `scope { }` (qualificado e bare
+resolvem ao MESMO local de escopo). Zero fixture nova. Probes (fora de `tests/`, descartados):
+serviço `internal` de outro projeto (interface E classe); ctor `private` -> mensagem própria;
+duas classes implementando interfaces com base comum -> `two services implement`; `inject` dentro
+de lambda dentro de `scope { }` -> mensagem própria; `inject` dentro de lambda SEM `scope { }` ->
+funciona; `inject app.ICache` sem `app` existir -> `unknown type after inject: app`.
+
+Gate: `rm -rf ngen/build`, build do zero; `--entry-only` **45/45**; `--dump-ast` das **43
+fixtures não tocadas byte-idêntico** ao compilador da base `8d8721ff` (`same=43 diff=0`); `mc
+limits ngen` `verdict ok`, `intrin` sem crescimento (8->8), `passes`/`syntax` inalterados (nenhum
+passe/hook novo -- DI4 reusa `tk_di_pass`/`inject`/`scope` de DI1-DI3).
+
+**Dívidas que sobram (plano §58 (g), inalteradas)**: genérico como chave (`IRepo<T>`); escopo
+DINÂMICO por chamada (D229 decisão 9 é léxico, não dinâmico, de propósito); `delegate`/`struct`
+como serviço (sem vtable, sem contagem); `inject` em inicializador de campo (não existe); factory
+explícita, decoração/substituição de registro, serviço com chave (`[FromKeyedServices]`).
 
 ## 5.1 Armadilhas já pagas (não repita)
 

@@ -3265,3 +3265,44 @@ explícita e serviço com chave (`[FromKeyedServices]`); `inject` em inicializad
    IServiceScoped` dá `teko: a singleton taking a scoped service is not taught yet: Audit`, na linha
    do PARÂMETRO `IAudit a` (o mesmo idioma da errata DI2 §60 item 2 -- "a linha do construtor que a
    pede"), não na do `inject Svc` que disparou a cadeia.
+
+## 62. Errata -- DI4 landed, §58 closed (2026-09-06)
+
+1. **Namespace-qualified/bare `inject` and an interface's own BASE as a key needed ZERO new
+   code.** `tk_inject` already read its name through `tk_ns_walk` + `tk_struct_find_fwd`, which
+   already threads a qualified path and a `using`-brought bare short name through the same search
+   order every other type reference takes (N1/O2, `tk_ns_resolve_fwd`); `tk_di_sv_matches` already
+   walks `tk_nimpl`, where an interface's own base is already flattened into a conforming class's
+   set the moment it is declared (§50 I1, `tk_iface_conf_close`). Confirmed by fixture growth, not
+   by a diff: this crumb's ONLY new machinery is the Singleton's own scope and the two diagnostic
+   ressalvas below.
+2. **The Singleton's own scope is a real row of the SAME pool `scope { }` uses, not a parallel
+   table.** `tk_di_scope_new` (extracted from `tk_di_scope_open`, which now calls it) allocates a
+   fresh `sc_head`/`sc_block` row with no lexical push at all; `tk_di_singleton_scope(sv)` memoizes
+   one such row per service row in a new `sv_ownscope` column, lazily, the first time that
+   Singleton's own graph needs one. `tk_di_getter_sym` hands this row to `tk_di_new_call` as
+   `buildscope` in place of DI3's sentinel, and `tk_di_resolve`'s existing `scope >= 0` branch
+   (unchanged) treats it exactly like a `scope { }`'s own local -- the ENTIRE feature is "give the
+   Singleton a real scope id instead of a sentinel that always refused."
+3. **The locals a Singleton's own scope collects are spliced into its getter by the SAME function
+   that built them, not by `tk_di_scopes_finish`.** `tk_di_getter_sym` reads `sc_head_at(buildscope)`
+   right after the recursive `tk_di_new_call` that filled it, prepends it in front of the
+   `p = <cls>_new(...)` assignment, and zeroes the row -- `tk_di_scopes_finish`'s own blind sweep
+   over every scope row (which only ever intends to close a LEXICAL `scope { }`, whose `sc_block`
+   is always set) never sees a Singleton's own row at all once this runs, because its `sc_head` is
+   already 0 and its `sc_block` was never set to begin with.
+4. **A private/protected constructor's message and an internal-service check moved OFF
+   `tk_check_member`, not alongside it.** DI's own call site has no enclosing class a `protected`
+   constructor could ever answer to, so `tk_check_member`'s branch for it was dead weight that just
+   produced the wrong (generic) wording; `tk_di_new_call` now calls `tk_check_type_use` on the
+   service's class directly (catching an `internal`-of-another-project class even when its own
+   interface is public) and raises its own message the moment the picked constructor is not
+   `TK_VPUBLIC`. Confirmed by probe: an internal INTERFACE and an internal CLASS (whose interface
+   is public) each refuse at the expected site with the expected wording.
+5. **The DI3 lambda gap (item 5 of §58 (g)) is refused, not resolved.** `tk_lam_body_depth`
+   (teko_deleg.mc) counts lambda-body nesting live during parse; `tk_inject` refuses the instant
+   that counter is nonzero AND a `scope { }` is open, because the lambda's own body is compiled as
+   a SEPARATE top-level function (K4) and a Scoped local prepended to the enclosing `scope { }`'s
+   block would not be a name that function's own scope ever sees. An `inject` of a Singleton inside
+   a lambda with NO `scope { }` open is untouched (confirmed by probe): nothing is ever prepended
+   for it, so there is nothing to be unreachable.
