@@ -137,14 +137,14 @@ void tk_deleg_check_sig(i64 si, uptr fn, i64 d) {
 // `i64 Op__thunk_add(uptr env, i64 a, i64 b) { return add(a, b); }` -- the
 // ABI every delegate value shares, so a plain function needs a forwarder
 i64 tk_deleg_thunk_fn(i64 si, uptr thunkname, uptr fn) {
-    i64 params = param_new(TY_UPTR, "env");
+    i64 prs = param_new(TY_UPTR, "env");
     i64 args = 0;
     i64 np = dg_np_at(si);
     i64 i = 0;
     loop {
         if (i >= np) break;
         uptr pn = tk_join("a", tk_num(i));
-        params = list_append(params, param_new(dg_pty_at(si, i), pn));
+        prs = list_append(prs, param_new(dg_pty_at(si, i), pn));
         args = list_append(args, tk_id(pn));
         i = i + 1;
     }
@@ -153,7 +153,7 @@ i64 tk_deleg_thunk_fn(i64 si, uptr thunkname, uptr fn) {
     i64 body;
     if (ret == TY_VOID) body = tk_blk(tk_stmt(call));
     else                body = tk_blk(tk_ret(call));
-    return tk_func(ret, thunkname, params, body);
+    return tk_func(ret, thunkname, prs, body);
 }
 
 // `void Op__release_add(uptr this) { rt_free(this, 24); }` -- no capture in
@@ -212,10 +212,10 @@ uptr tk_deleg_thunk(i64 si, uptr fn) {
 // `delegate i64 Op(i64 a, i64 b);` -- the parameter list's own types, read by
 // the core's `parse_params()` (the exact grammar a delegate's own list needs)
 // and kept; the names themselves are not
-void tk_deleg_set_sig(i64 si, i64 ret, i64 params, i64 line, uptr fl) {
+void tk_deleg_set_sig(i64 si, i64 ret, i64 prs, i64 line, uptr fl) {
     set_dg_ret_at(si, ret);
     i64 n = 0;
-    i64 p = params;
+    i64 p = prs;
     loop {
         if (p == 0) break;
         if (n == TK_DGMAX)
@@ -241,9 +241,9 @@ void tk_delegate() {
     i64 ty = tk_type_word(name);
     i64 si = tk_type_add(name, ty, 0 - 1, TK_KDELEG, vis, proj);
     p_set_decl_name(name);
-    i64 params = parse_params();
+    i64 prs = parse_params();
     p_expect(K_SEMI, "expected ; after the delegate declaration");
-    tk_deleg_set_sig(si, ret, params, line, fl);
+    tk_deleg_set_sig(si, ret, prs, line, fl);
 }
 
 // `new Op(add)` / `Op f = add;`: the object `tk_deleg_thunk` allocates,
@@ -652,10 +652,10 @@ void tk_lambda_use(i64 line, uptr fl) {
 // the lambda's own parameter list against the delegate's: D221 decision 19
 // asks for explicit types AND a known target, so every parameter has to name
 // the pointee the delegate itself declares, in order
-void tk_lambda_check_params(i64 si, i64 params, i64 line, uptr fl) {
+void tk_lambda_check_params(i64 si, i64 prs, i64 line, uptr fl) {
     i64 np = dg_np_at(si);
     i64 i = 0;
-    i64 p = params;
+    i64 p = prs;
     loop {
         if (i >= np || p == 0) break;
         if (nd_type(p) != dg_pty_at(si, i))
@@ -808,16 +808,16 @@ i64 tk_lambda_release_fn(uptr relname, i64 objsize) {
 // (`tk_lambda_build` below) feeds with the value/address taken AT THAT
 // INSTANT, the "frozen copy" D221 decision 20 asks a by-value capture for
 i64 tk_lambda_alloc_params() {
-    i64 params = 0;
+    i64 prs = 0;
     i64 i = 0;
     loop {
         if (i >= tk_nlc) break;
         i64 pty = TY_UPTR;
         if (!lc_byref_at(i)) pty = lc_ty_at(i);
-        params = list_append(params, param_new(pty, tk_join("p", tk_num(i))));
+        prs = list_append(prs, param_new(pty, tk_join("p", tk_num(i))));
         i = i + 1;
     }
-    return params;
+    return prs;
 }
 
 // the allocator's own body: a fresh object (K1's own three-word head), then
@@ -877,14 +877,14 @@ uptr tk_lambda_gensym(uptr base) {
 // the lambda's own `top_add(f)` (and the vtable/release/allocator ones right
 // behind it) left the ENCLOSING statement's own on_stmt hooks reading 0 for
 // the rest of that declaration's body -- `tk_taint_owner()`'s own bug.
-i64 tk_lambda_finish(i64 si, uptr name, uptr saved, i64 params, i64 line, uptr fl) {
-    tk_lambda_check_params(si, params, line, fl);
+i64 tk_lambda_finish(i64 si, uptr name, uptr saved, i64 prs, i64 line, uptr fl) {
+    tk_lambda_check_params(si, prs, line, fl);
     tk_nlc = 0;
     if (tk_word("use")) tk_lambda_use(line, fl);
     p_expect(K_ARROW, "expected => after the lambda parameters");
     i64 ret = dg_ret_at(si);
     uptr envname = "__env";
-    i64 allparams = list_append(param_new(TY_UPTR, envname), params);
+    i64 allparams = list_append(param_new(TY_UPTR, envname), prs);
     tk_lam_body_depth = tk_lam_body_depth + 1;
     i64 f;
     if (p_id() == K_LBRACE) {
@@ -935,8 +935,8 @@ i64 tk_lambda_build(i64 si, i64 line, uptr fl) {
     uptr name = tk_lambda_gensym(sr_name_at(si));
     uptr saved = p_decl_name();
     p_set_decl_name(name);
-    i64 params = parse_params();
-    return tk_lambda_finish(si, name, saved, params, line, fl);
+    i64 prs = parse_params();
+    return tk_lambda_finish(si, name, saved, prs, line, fl);
 }
 
 // 1 when the token right after the current one spells `=>` -- K4b's own
@@ -964,8 +964,8 @@ i64 tk_deleg_short_lambda(i64 si, i64 line, uptr fl) {
     uptr name = tk_lambda_gensym(sr_name_at(si));
     uptr saved = p_decl_name();
     p_set_decl_name(name);
-    i64 params = param_new(dg_pty_at(si, 0), pname);
-    return tk_lambda_finish(si, name, saved, params, line, fl);
+    i64 prs = param_new(dg_pty_at(si, 0), pname);
+    return tk_lambda_finish(si, name, saved, prs, line, fl);
 }
 
 // non-consuming: does the balanced `(...)` the CURRENT `(` opens end in

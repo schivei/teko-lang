@@ -234,18 +234,18 @@ i64 tk_prop_addr(i64 fi) {
 
 // the body an auto-property's accessor gets: the load of the backing field, or
 // the store of `value` into it
-void tk_prop_auto_body(uptr fn, i64 rty, i64 params, i64 fty, i64 wantset) {
+void tk_prop_auto_body(uptr fn, i64 rty, i64 prs, i64 fty, i64 wantset) {
     i64 addr = tk_prop_addr(pp_backing);
     i64 body = tk_ret(tk_call(tk_ldn(fty), addr));
     if (wantset) body = tk_stmt(tk_os_mark(tk_call2(tk_stn(fty), addr, tk_id(tk_value_name())), fty));
-    top_add(tk_func(rty, fn, params, tk_blk(body)));
+    top_add(tk_func(rty, fn, prs, tk_blk(body)));
 }
 
 // `=> expression;` for a `get` and `=> statement;` for a `set`, read with the
 // receiver in scope exactly as a block body is read (teko_class.mc's
 // tk_member_body). The `set` form is a STATEMENT because `side = value` is one:
 // `=` is not in the core's infix table, deliberately (teko_expr.mc).
-void tk_prop_arrow_body(i64 ci, i64 rty, uptr fn, i64 params, i64 stat, i64 wantset) {
+void tk_prop_arrow_body(i64 ci, i64 rty, uptr fn, i64 prs, i64 stat, i64 wantset) {
     i64 mark = tk_nlocal;
     if (!stat) tk_local_add(tk_this_name(), ci);
     i64 keepstat = 0;
@@ -266,7 +266,7 @@ void tk_prop_arrow_body(i64 ci, i64 rty, uptr fn, i64 params, i64 stat, i64 want
     tk_nlocal = mark;
     tk_line = line;
     tk_file = fl;
-    i64 f = tk_func(rty, fn, params, tk_blk(body));
+    i64 f = tk_func(rty, fn, prs, tk_blk(body));
     set_nd_line(f, line);
     set_nd_file(f, fl);
     top_add(f);
@@ -289,20 +289,20 @@ void tk_prop_skip_accessor() {
 }
 
 // the three shapes one accessor's body takes
-i64 tk_prop_body(i64 ci, uptr name, uptr m, i64 fty, i64 off, uptr fn, i64 rty, i64 params, i64 stat, i64 wantset) {
+i64 tk_prop_body(i64 ci, uptr name, uptr m, i64 fty, i64 off, uptr fn, i64 rty, i64 prs, i64 stat, i64 wantset) {
     if (p_accept(K_SEMI)) {
         tk_prop_form(1);
         if (pp_backing < 0) off = tk_prop_backing(ci, name, m, fty, off, stat);
-        tk_prop_auto_body(fn, rty, params, fty, wantset);
+        tk_prop_auto_body(fn, rty, prs, fty, wantset);
         return off;
     }
     tk_prop_form(0);
     if (p_id() == K_LBRACE) {
-        tk_member_body(ci, rty, fn, params, stat);
+        tk_member_body(ci, rty, fn, prs, stat);
         return off;
     }
     if (!p_accept(K_ARROW)) err_at2(p_file(), p_line(), "teko: an accessor is `;`, `=> ...;` or a block", m);
-    tk_prop_arrow_body(ci, rty, fn, params, stat, wantset);
+    tk_prop_arrow_body(ci, rty, fn, prs, stat, wantset);
     return off;
 }
 
@@ -313,8 +313,8 @@ i64 tk_prop_accessor(i64 ci, uptr name, uptr m, i64 fty, i64 off, i64 ti, i64 vi
     i64 wantset = tk_accessor_word(m);
     uptr acc = tk_get_name(m);
     if (wantset) acc = tk_set_name(m);
-    i64 params = tk_prop_params(fty, wantset, stat);
-    uptr sig = tk_sig_of(params, !stat);
+    i64 prs = tk_prop_params(fty, wantset, stat);
+    uptr sig = tk_sig_of(prs, !stat);
     i64 kind2 = tk_member_gate(ci, acc, sig, ti, kind);
     if (kind2 < 0) {
         tk_prop_skip_accessor();
@@ -333,7 +333,7 @@ i64 tk_prop_accessor(i64 ci, uptr name, uptr m, i64 fty, i64 off, i64 ti, i64 vi
         tk_abstract_end(m);                      // `get;` and no backing field at all
         return off;
     }
-    return tk_prop_body(ci, name, m, fty, off, fn, rty, params, stat, wantset);
+    return tk_prop_body(ci, name, m, fty, off, fn, rty, prs, stat, wantset);
 }
 
 // a property the class declares itself, or one copied from a trait that the

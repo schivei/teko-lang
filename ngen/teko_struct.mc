@@ -394,11 +394,11 @@ i64 tk_var(i64 ty, uptr name, i64 init) {
     return n;
 }
 
-i64 tk_func(i64 ty, uptr name, i64 params, i64 body) {
+i64 tk_func(i64 ty, uptr name, i64 prs, i64 body) {
     i64 f = tk_nd(N_FUNC);
     set_nd_name(f, name);
     set_nd_type(f, ty);
-    set_nd_a(f, params);
+    set_nd_a(f, prs);
     set_nd_b(f, body);
     return f;
 }
@@ -1114,8 +1114,8 @@ void tk_ix_emit() {
     i64 high = tk_if(tk_bin(K_GE, tk_id("i"), tk_id("n")),
                      tk_stmt(tk_call("rt_panic", tk_str("index past the end of an array field"))));
     i64 body = tk_blk(list_append(list_append(low, high), tk_ret(tk_id("i"))));
-    i64 params = list_append(param_new(TY_I64, "i"), param_new(TY_I64, "n"));
-    top_add(tk_func(TY_I64, "tk_ix", params, body));
+    i64 prs = list_append(param_new(TY_I64, "i"), param_new(TY_I64, "n"));
+    top_add(tk_func(TY_I64, "tk_ix", prs, body));
 }
 
 // A LITERAL index is decided here, against the constant the instantiation

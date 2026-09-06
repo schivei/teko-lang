@@ -584,11 +584,11 @@ uptr tk_ns_read_path(uptr pmem) {
 // only ever asks `type_of_token`, which a namespaced short name is
 // deliberately not in -- D31.5). A global of the type is refused rather than
 // half-rebuilding `parse_global`, which this module has no hook onto.
-i64 tk_ns_proto(i64 ty, uptr name, i64 params) {
+i64 tk_ns_proto(i64 ty, uptr name, i64 prs) {
     i64 n = tk_nd(N_PROTO);
     set_nd_name(n, name);
     set_nd_type(n, ty);
-    set_nd_a(n, params);
+    set_nd_a(n, prs);
     return n;
 }
 
@@ -603,11 +603,11 @@ void tk_ns_top() {
     p_set_decl_name(name);
     if (p_id() != K_LPAR)
         err_at2(fl, line, "teko: a namespaced type at top level declares a function", name);
-    i64 params = parse_params();
+    i64 prs = parse_params();
     tk_line = line;
     tk_file = fl;
-    if (p_accept(K_SEMI)) { top_add(tk_ns_proto(ty, name, params)); return; }
-    top_add(parse_function(ty, name, params));
+    if (p_accept(K_SEMI)) { top_add(tk_ns_proto(ty, name, prs)); return; }
+    top_add(parse_function(ty, name, prs));
 }
 
 // the rest of a local declaration once its type is already known AND already
