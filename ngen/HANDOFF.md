@@ -226,17 +226,22 @@ chamador pedir explicitamente por `inputs.version` —, baixa o asset do par, co
 git tag -a v0.3.1 -m "teko 0.3.1" && git push origin v0.3.1
 ```
 
-ou, para uma tag que **já existe**, aba Actions → *Release* → *Run workflow* com
-`version = 0.3.1` (sem o `v`; o job recusa uma versão fora de `X.Y.Z[-sufixo]` e recusa uma
-tag que não exista). Versão com `-` (`0.3.1-rc1`) publica como **pre-release**: nunca vira
-"latest" e o `mc pkg add` só a escolhe se nomeada.
+ou, para uma tag que **já existe**:
+
+```sh
+gh workflow run release.yml --ref v0.3.1
+```
+
+(ou aba Actions → *Release* → *Run workflow*, escolhendo a tag `v0.3.1` como ref do
+dispatch). Versão com `-` (`0.3.1-rc1`) publica como **pre-release**: nunca vira "latest" e
+o `mc pkg add` só a escolhe se nomeada.
 
 **Quatro jobs**, em `.github/workflows/release.yml`:
 
 | job | o que faz |
 |---|---|
-| `version` | deriva/valida tag e versão, e prova pela API que a tag existe |
-| `gate` | **é o próprio `ngen.yml`**, chamado por `workflow_call` sobre a TAG |
+| `version` | deriva/valida tag e versão do `github.ref_name`/`github.ref_type` da própria run |
+| `gate` | **é o próprio `ngen.yml`**, chamado por `workflow_call` — herda o ref do caller |
 | `release` | anexa os 10 arquivos à Release da tag, com notas geradas |
 | `publish-to-registry` | pré-voo do pacote; anúncio ao registro **atrás de uma variável** |
 
@@ -244,9 +249,18 @@ tag que não exista). Versão com `-` (`0.3.1-rc1`) publica como **pre-release**
 publicaria bytes que **nenhum portão viu** — foi exatamente por isso que a `release.yml`
 anterior (do compilador velho) virou promoção. Então quem empacota é a PRÓPRIA perna, com a
 action `.github/actions/package-teko`, logo depois de rodar as fixtures contra aquele
-binário. `ngen.yml` ganhou `workflow_call` com as entradas `ref`/`package`/`version`: num
-push ou PR comum nenhuma delas vem, e o workflow se comporta como antes. O `push` do
-`ngen.yml` passou a filtrar **branches**, para a tag não disparar a matriz duas vezes.
+binário. `ngen.yml` ganhou `workflow_call` com as entradas `package`/`version`: num push ou
+PR comum nenhuma delas vem, e o workflow se comporta como antes. O `push` do `ngen.yml`
+passou a filtrar **branches**, para a tag não disparar a matriz duas vezes.
+
+**CodeQL: sem `ref` de input (2026-09-06).** O `workflow_call` chegou a ganhar um input
+`ref`, repassado cru pro `actions/checkout` das duas jobs (`leg`/`fixpoint`) — o GHAS marcou
+6 alertas *high* de "Cache Poisoning via execution of untrusted code" nesse caminho. Correção
+de raiz: o input `ref` **saiu** — um `workflow_call` já roda no ref do CALLER, e a
+`release.yml` só chama o `ngen.yml` a partir de uma run que já está na tag (evento `push` da
+tag, ou `workflow_dispatch --ref vX.Y.Z`), então nenhum checkout precisa de um `ref` próprio
+para confiar ou desconfiar. O input `version` da `release.yml` saiu pelo mesmo motivo: a
+versão deriva de `github.ref_name`, validado contra `github.ref_type == 'tag'`.
 
 **O que a Release carrega:** 10 arquivos — `teko-<ver>-<os>-<arch>.tar.gz` + `.sha256` para
 os cinco pares (`linux-x86_64`, `linux-arm64`, `macos-arm64`, `windows-x86_64`,
