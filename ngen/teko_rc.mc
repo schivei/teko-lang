@@ -154,8 +154,9 @@ i64 tk_rc_releases(i64 base) {
 // whatever the stack happened to hold.
 void tk_rc_var(i64 n) {
     if (nd_val(n) != 0) return;                  // `C tbl[4]`: references, not one object
-    if (!tk_is_counted(nd_type(n))) return;
     i64 e = nd_a(n);
+    if (e != 0) tk_check_compat(nd_type(n), tk_ty_of(e), e, nd_line(n), nd_file(n));
+    if (!tk_is_counted(nd_type(n))) return;
     if (e == 0) e = tk_int(0);
     else if (tk_rc_own(e)) return;
     tk_rc_at(n);
@@ -172,6 +173,7 @@ void tk_rc_var(i64 n) {
 void tk_rc_assign(i64 n) {
     i64 li = tk_rc_index(nd_name(n));
     if (li < 0) return;
+    tk_check_compat(sc_ty_at(li), tk_ty_of(nd_a(n)), nd_a(n), nd_line(n), nd_file(n));
     if (!tk_is_counted(sc_ty_at(li))) return;
     tk_rc_at(n);
     i64 dest = tk_addr(nd_name(n));
@@ -197,6 +199,7 @@ void tk_rc_assign(i64 n) {
 // after it would never run.
 void tk_rc_return(i64 n, i64 p0) {
     i64 e = nd_a(n);
+    if (e != 0) tk_check_compat(tk_rc_ret, tk_ty_of(e), e, nd_line(n), nd_file(n));
     i64 parked = tk_nparked > p0;
     i64 needinc = 0;
     if (e != 0 && tk_is_counted(tk_rc_ret)) needinc = !tk_rc_own(e);
@@ -311,6 +314,27 @@ void tk_rc_park(i64 n) {
     tk_nparked = tk_nparked + 1;
 }
 
+// D226 compat crumb: a CALL's own arguments against the callee's declared
+// parameter types, by INDEX -- `decl_param_type` (the core's own API) answers
+// for whatever `decl_find` resolves, and by the time this pass runs every
+// overload already carries its final, unambiguous name (teko_over.mc's
+// rename, teko_default.mc's fill, both registered ahead of this one) --
+// which is also why a virtual or an interface call (`callp`, never a name
+// `decl_find` would know) is not this walk's to check: teko_typeof.mc's own
+// deferred/direct emission is where those are caught instead.
+void tk_rc_call_args(i64 n) {
+    i64 d = decl_find(nd_name(n));
+    if (d < 0) return;
+    i64 a = nd_a(n);
+    i64 i = 0;
+    loop {
+        if (a == 0) break;
+        tk_check_compat(decl_param_type(d, i), tk_ty_of(a), a, nd_line(n), nd_file(n));
+        a = nd_next(a);
+        i = i + 1;
+    }
+}
+
 // walks one expression and the siblings after it. `owner` is the node of THIS
 // sibling list that an owning slot is about to take -- the initializer of a
 // local, the value of an assignment, what a `return` hands back -- and is the
@@ -320,6 +344,7 @@ void tk_rc_walk(i64 n, i64 owner) {
     loop {
         if (n == 0) break;
         tk_rc_store(n);
+        if (nd_kind(n) == N_CALL) tk_rc_call_args(n);
         tk_rc_walk(nd_a(n), tk_rc_consumed(n));
         tk_rc_walk(nd_b(n), 0);
         tk_rc_walk(nd_c(n), 0);
@@ -488,8 +513,16 @@ i64 tk_rc_needed() {
     return 0;
 }
 
+// D226 compat crumb: a program of nothing but `struct` never needs the
+// reclaim (`tk_rc_needed` above answers 0 for it, a struct having no vtable
+// to release), but it still has slots the assignment check has to visit --
+// the walk itself is a no-op wherever `tk_is_counted` already gated it, so
+// widening this to "the unit declares ANY teko type at all" costs nothing a
+// struct-only program did not already pay.
+i64 tk_compat_needed() { return tk_nstruct > 0; }
+
 i64 tk_rc_pass(i64 root) {
-    if (!tk_rc_needed()) return root;
+    if (!tk_rc_needed() && !tk_compat_needed()) return root;
     tk_rc_root = root;
     i64 f = root;
     loop {

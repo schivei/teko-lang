@@ -508,7 +508,14 @@ i64 tk_di_ctor_args(i64 i, i64 scope) {
         if (tk_di_key_exists(want)) {
             i64 pline = nd_line(p);
             uptr pfile = nd_file(p);
-            a = tk_di_resolve(tk_di_find_impl(want, pline, pfile), scope, pline, pfile);
+            i64 implsv = tk_di_find_impl(want, pline, pfile);
+            a = tk_di_resolve(implsv, scope, pline, pfile);
+            // D226 compat crumb: a Singleton's own getter answers `uptr`, the one
+            // branch `tk_di_resolve` takes with no type of its own to fall back
+            // on; the service's own class is what the oracle is to see, `pure`
+            // exactly when the value is NOT a fresh Transient allocation (the
+            // memoized getter and a Scoped's own local are both borrowed).
+            tk_xt_add(a, sv_cls_at(implsv), sv_life_at(implsv) != TK_SVC_TRANSIENT);
         } else {
             a = tk_clone(df_node_at(d0 + j - nreq));
         }

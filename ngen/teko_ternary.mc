@@ -149,7 +149,13 @@ void tk_tern_lower(i64 n, uptr out) {
     i64 ifn = tk_if(c, tk_blk(thenOut));
     set_nd_c(ifn, tk_blk(elseOut));
 
-    st64(out, list_append(ld64(out), tk_var(ty, t, tk_int(0))));
+    // D226 compat crumb: the placeholder never survives to be read (both
+    // branches of `ifn` overwrite it before anything else touches `t`), but
+    // a teko-typed one is `null` rather than a plain `0` -- the one shape the
+    // assignment-compatibility check already knows fits any such slot.
+    i64 init = tk_int(0);
+    if (tk_struct_by_ty(ty) >= 0) init = tk_null();
+    st64(out, list_append(ld64(out), tk_var(ty, t, init)));
     st64(out, list_append(ld64(out), ifn));
 
     i64 keep = nd_next(n);

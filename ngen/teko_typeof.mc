@@ -71,6 +71,11 @@ i64 tk_fill_defaults(i64 args, i64 na, i64 np, i64 nreq, i64 d0);
 void tk_pick_refuse(i64 mi, uptr m, i64 line, uptr fl);
 void tk_loose_refuse(i64 mi, uptr m, i64 line, uptr fl);
 
+// D226 compat crumb: `tk_pend_field`'s own store branch resolves the value
+// early when it is itself a deferred access, the same way a receiver already
+// does below
+void tk_pend_do(i64 pi);
+
 uptr sc_name[TK_MAXSCOPE];            // the names in scope, innermost last
 i64  sc_ty[TK_MAXSCOPE];              // the type each was declared with
 i64  tk_nscope = 0;
@@ -209,6 +214,25 @@ i64 tk_ty_of(i64 n) {
 // tk_pend_by_name) is the whole point of the oracle knowing `tk_ty_of`.
 void tk_reject_scalar_member(uptr fl, i64 line, i64 ty, uptr m) {
     err_at2(fl, line, tk_join3("teko: ", type_name(ty), " has no members"), m);
+}
+
+// D226 compat crumb (assignment/initializer/argument/return): `tty`/`ety` as
+// the ORACLE answers them -- `ety < 0` is "not known", never a rejection, so
+// the check only ever recuses what it is SURE about. `en` is the value's own
+// node, read once for the one shape `null` takes (teko_struct.mc's
+// tk_is_null_lit); `tk_row_fits` (same file) is the identical/derives/
+// implements rule itself.
+void tk_check_compat(i64 tty, i64 ety, i64 en, i64 line, uptr fl) {
+    i64 ti = tk_struct_by_ty(tty);
+    if (ti < 0) return;
+    if (tk_is_null_lit(en)) return;
+    if (ety < 0) return;
+    if (tty == ety) return;
+    i64 ei = tk_struct_by_ty(ety);
+    if (tk_row_fits(ti, ei)) return;
+    uptr ename = type_name(ety);
+    if (ei >= 0) ename = sr_name_at(ei);
+    tk_reject_compat(ename, sr_name_at(ti), line, fl);
 }
 
 // ---- the walk a pass drives ----
@@ -353,8 +377,13 @@ i64 tk_pend_field(i64 pi, i64 fi, uptr pty, uptr ppure) {
         i64 k = tk_ax_index(pd_na_at(pi), nel, m, tk_line, tk_file);
         addr = tk_bin(K_ADD, addr, tk_bin(K_MUL, k, tk_int(type_width(fty))));
     }
-    if (form == TK_PSTORE || form == TK_PIXSTORE)
-        return tk_os_mark(tk_call2(tk_stn(fty), addr, pd_arg_at(pi)), fty);
+    if (form == TK_PSTORE || form == TK_PIXSTORE) {
+        i64 val = pd_arg_at(pi);
+        i64 vp = tk_pend_at(val);
+        if (vp >= 0) tk_pend_do(vp);
+        tk_check_compat(fty, tk_ty_of(val), val, tk_line, tk_file);
+        return tk_os_mark(tk_call2(tk_stn(fty), addr, val), fty);
+    }
     st64(pty, fty);
     st64(ppure, 1);
     return tk_call(tk_ldn(fty), addr);

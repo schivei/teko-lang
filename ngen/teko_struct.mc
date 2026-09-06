@@ -861,6 +861,62 @@ i64 tk_struct_of_expr(i64 n) {
     return 0 - 1;
 }
 
+// ---- assignment compatibility (C#'s own implicit reference conversion) ----
+// `tk_impl_has` (teko_iface.mc) is included after this file, and this
+// section is read by it as much as the other way around -- forward-declared
+// the same way every other early cross-file need already is here (§50 O1).
+i64 tk_impl_has(i64 ci, i64 fi);
+
+// 1 when `n` is the `null` literal (teko_type.mc's tk_null): the one ordinary
+// N_INT this project ever types TY_UPTR, so a class, an interface, a struct,
+// a delegate or a T[] of heap all accept it without needing a zero of their
+// own.
+i64 tk_is_null_lit(i64 n) {
+    return n != 0 && nd_kind(n) == N_INT && nd_type(n) == TY_UPTR && nd_val(n) == 0;
+}
+
+// 1 when a value declared `ei` (a row of this table, or -1 when it names no
+// row at all) fits a slot declared `ti`: identical, `ei` a class deriving
+// from `ti`, or `ei` implementing `ti` -- `tk_impl_has` already flattens
+// interface-extends-interface and copies a base class's own interfaces onto
+// the derived one, so the same call answers both. A `T[]` or a delegate
+// fits only its own identity, checked by the caller before this runs.
+i64 tk_row_fits(i64 ti, i64 ei) {
+    if (ti == ei) return 1;
+    if (ei < 0) return 0;
+    if (tk_is_ha(ti) || tk_is_deleg(ti)) return 0;
+    if (tk_is_class(ei)) {
+        i64 b = sr_base_at(ei);
+        loop {
+            if (b < 0) break;
+            if (b == ti) return 1;
+            b = sr_base_at(b);
+        }
+    }
+    return tk_impl_has(ei, ti);
+}
+
+// C#'s own wording for a failed implicit reference conversion, one name on
+// each side
+void tk_reject_compat(uptr ename, uptr tname, i64 line, uptr fl) {
+    err_at(fl, line, tk_join(tk_join3("teko: a value of type ", ename, " does not convert to "), tname));
+}
+
+// `p.f = e` / `p.items[i] = e` once the receiver's type IS known, at parse
+// time: the field's own row against whatever `tk_struct_of_expr` can already
+// tell about `v` -- a local, a field load, a `new` -- and nothing else,
+// because a call whose return only the pass will resolve is not this early
+// check's to guess at.
+void tk_check_field_store(i64 fty, i64 v, i64 line, uptr fl) {
+    i64 ti = tk_struct_by_ty(fty);
+    if (ti < 0) return;
+    if (tk_is_null_lit(v)) return;
+    i64 ei = tk_struct_of_expr(v);
+    if (ei < 0) return;
+    if (tk_row_fits(ti, ei)) return;
+    tk_reject_compat(sr_name_at(ei), sr_name_at(ti), line, fl);
+}
+
 // every local's (name, declared type), whatever the type -- K4's `use (a,
 // &b)` needs a capture's type at the exact point it reads the clause, and
 // only a struct/class local is tracked by `tk_local_add` below. Grown
@@ -910,7 +966,10 @@ i64 tk_on_stmt(i64 n) {
 i64 tk_ctor(uptr name, i64 ty, i64 size, i64 install) {
     i64 stmts = tk_var(TY_UPTR, "p", tk_call("rt_alloc", tk_int(size)));
     if (install) stmts = list_append(stmts, install);
-    stmts = list_append(stmts, tk_ret(tk_id("p")));
+    i64 r = tk_id("p");
+    tk_xt_add(r, tk_struct_by_ty(ty), 0);         // D226 compat crumb: `p` is `uptr`, the
+                                                   // fresh object it names is the type itself
+    stmts = list_append(stmts, tk_ret(r));
     return tk_func(ty, tk_ctor_name(name), 0, tk_blk(stmts));
 }
 
@@ -1096,6 +1155,7 @@ i64 tk_array_index(i64 addr, i64 x) {
         i64 v = parse_expr(0);
         tk_line = line;
         tk_file = fl;
+        tk_check_field_store(ety, v, line, fl);
         return tk_os_mark(tk_call2(tk_stn(ety), at, v), ety);
     }
     i64 r = tk_call(tk_ldn(ety), at);

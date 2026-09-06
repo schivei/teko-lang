@@ -149,6 +149,7 @@ i64 tk_ha_load(i64 base, i64 ety, i64 idx) {
 // store builds, marked for teko_rc.mc's own pass to pick between `rt_store`/
 // `rt_store_own` when the element is counted -- zero new machinery there.
 i64 tk_ha_store(i64 base, i64 ety, i64 idx, i64 v) {
+    tk_check_field_store(ety, v, tk_line, tk_file);
     return tk_os_mark(tk_call2(tk_stn(ety), tk_ha_addr(base, idx, ety), v), ety);
 }
 
