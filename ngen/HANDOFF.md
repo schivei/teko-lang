@@ -2320,6 +2320,12 @@ existe e o fixpoint FECHA com um único bloqueio removido, que é do lado do `mc
   teko1 (`teko1.o` 1 708 248 B, binário 1 529 192 B); teko1 -> teko2 (3,9 s); teko2 -> teko3 (4,4 s);
   **`cmp teko2.o teko3.o` LIMPO** -- e mais: `teko1.o == teko2.o` também, o compilador já está no
   ponto fixo na primeira volta. Ou seja a rota A está inteira: falta só o item do `mc`.
+  **Ressalva do verificador (2026-09-06):** a sonda NÃO satisfaz o critério "teko1 compila as 45"
+  da tabela §64(f) -- com as duas linhas comentadas o teko1 da sonda dá **38/45**, falhando exatamente
+  as 7 fixtures que usam `while`/`for` (`surface_array_global`, `surface_array_heap`, `surface_arrays`,
+  `surface_foreach`, `surface_loops`, `surface_switch`, `surface_ternary`), porque a sonda desliga a
+  semântica de laço da teko. Fecha só com o patch do `mc`; "fixpoint FECHA" aqui = critérios 1+2 (objeto
+  e `--dump-asm`), não os três.
 
 **O BLOQUEIO (pedido ao mc, um só).** `word_add` marca a ENTRADA de token como `TE_TAUGHT`, e a
 entrada é COMPARTILHADA entre a estrada de módulo e a de diretiva (`tok_add` é idempotente por

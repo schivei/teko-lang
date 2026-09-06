@@ -4133,6 +4133,11 @@ primeira volta, o que diz que a árvore que a teko produz para os fontes do núc
 geração para geração. O risco §64(h).5 ("passes da teko sobre 8 500 linhas de núcleo") não se
 materializou: o binário auto-hospedado roda (`teko1 --version` → `mc 0.15.8`, usage própria).
 
+**Ressalva (verificador independente, 2026-09-06):** a sonda prova os critérios 1 e 2 da tabela (f)
+(objeto e `--dump-asm`), NÃO o 3º ("teko1 compila as 45"): o teko1 da sonda dá 38/45, falhando as 7
+fixtures que usam `while`/`for` -- consequência direta de comentar `syntax_stmt("while"/"for")`. O
+3º critério só fecha com o patch do `mc` de (f).
+
 ### (f) O bloqueio que sobra é do `mc`, e é UM — pedido registrado
 
 `word_add` marca a ENTRADA de token (`TE_TAUGHT`), e `tok_add` é idempotente por lexema: a entrada é
