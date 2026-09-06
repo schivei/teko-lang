@@ -2928,3 +2928,258 @@ lambda contextual, `foreach` sobre `T[]`/forward, `b.x += 1` deferido, tipo anin
 sem release e sem qualificação de namespace, `params T[]`/`T[][]`/`ref`/`out T[]`, covariância de
 interface em argumento sobrecarregado) seguem consolidadas no HANDOFF §5, para quem pegar a
 próxima fila.
+
+## 58. DI resolvida em TEMPO DE COMPILAÇÃO — `IServiceSingleton`/`IServiceScoped`/`IServiceTransient` (architect-first, D229, 2026-09-06)
+
+Escopo: o ruling D229 — o dev marca a IMPLEMENTAÇÃO com uma das três interfaces-marcador, o registro
+acontece **no ato da compilação** e a injeção é resolvida **em comptime**, sem container de runtime e
+sem reflexão; a diferença para o C# é que um **Singleton PODE receber um Scoped** (o Singleton tem
+escopo PRÓPRIO) e um **Transient herda** o escopo de quem o recebe. Leis: D226 (C#/mercado), D229,
+D213 (reusa o núcleo, ensina só o delta), D218/D227 (o RC por escopo é o dono da posse), D220
+(visibilidade), §50 (ordem livre — o registro não precisa de varredura nova).
+
+MEDIDO, não presumido: `teko_class.mc:1159` (`tk_conf_name`, o ÚNICO sítio que lê um nome da lista `:`
+de uma classe) e `teko_iface.mc:565` (o mesmo para interface); `teko_iface.mc:249` (`tk_itab_emit` EMITE
+o índice `si` — nenhuma LINHA de tipo nova pode nascer na inicialização, §50 risco 1) e `:643`
+(interface sem membros é recusada hoje — marcador NÃO pode ser interface declarada);
+`teko_struct.mc:990` (campo `static` = global `u8 sym[8]`, o molde do slot de singleton);
+`lib/rt.mc:149` (`uptr rt_own(uptr p)` — atribuir chamada que devolve `uptr` a local de tipo classe é o
+idioma do próprio RC); `teko_rc.mc:108` (`tk_rc_own` consulta a linha `xt` ANTES de tudo, e `xt_pure ==
+1` é EMPRESTADO); `teko_struct.mc:745` (`tk_pure`, lido no PARSE por `teko_expr.mc:310`/
+`teko_iface.mc:252`: receptor não-puro é RECUSADO, nunca duplicado).
+
+### (a) Decisões
+
+1. **Os três marcadores são NOMES, não linhas de tipo.** `tk_di_marker(nm)` reconhece os três no
+   instante em que a lista `:` lê o nome (`tk_conf_name`), ANTES de qualquer busca na tabela de tipos.
+   Nenhum `type_new`, nenhum global e nenhuma palavra reservada nascem na inicialização — a ordem das
+   linhas `sr_*` (que é EMITIDA) fica byte-a-byte a de hoje e o gate de AST das 43 fixtures passa por
+   construção. Um `interface IServiceSingleton { }` do usuário é recusado em `tk_newname`
+   (`teko: IServiceSingleton is the service marker`).
+2. **O marcador não vira itab, não vira slot, não é herdado.** A interceptação vem antes de
+   `tk_conf_add`, logo o par (classe, marcador) nunca entra em `ci_*`; `tk_impls_inherit` não tem o que
+   copiar e uma classe derivada de um serviço **não é** um serviço (C#: registra-se o tipo registrado).
+   O lifetime fica num scratch (`tk_conf_life`, ao lado de `conf_if`/`tk_nconf`), consumido em
+   `tk_conf_apply` (teko_class.mc:1405) por `tk_di_conf_apply(ci)` — onde a linha da classe já existe.
+3. **Chaves = as interfaces que a classe implementa (fecho de `ci_*`, §50 I1) MAIS a própria classe.**
+   É a convenção `AsImplementedInterfaces` do mercado; `inject IDb` e `inject Db` funcionam os dois, e
+   a classe registrada não precisa implementar interface alguma.
+4. **Duas implementações da mesma chave = RECUSA no sítio que PEDE, não no registro.** "Última vence"
+   (C# `services.Add…`) é indefinível aqui: a ordem de declaração é LIVRE desde §50. Só é erro quando
+   alguém injeta a chave — `teko: two services implement this interface`, nomeando as duas.
+5. **`inject T` é a entrada.** Palavra de EXPRESSÃO (`syntax_expr("inject")`), lida como `new`
+   (teko_expr.mc:131): nome de tipo, qualificação por `tk_ns_walk`, linha `TK_PFWD` aceita. `new` = "o
+   dev constrói", `inject` = "o compilador constrói pelo registro"; é a grafia que o mercado C# usa
+   (`[Inject]`/`@inject`), já que `Services.Get<T>()` exigiria função genérica, que o ngen não ensina.
+   `main` não recebe parâmetros injetados.
+6. **A injeção é por CONSTRUTOR, como em C#.** O construtor de injeção é o de MAIS parâmetros
+   satisfazíveis (C# §12.6.4): cada parâmetro é um tipo de serviço resolvível OU tem DEFAULT (
+   `tk_fill_defaults`, a máquina do C1/C6). Empate de contagem = `teko: two constructors of this
+   service take the same number of injectable parameters`; sem construtor = o objeto zerado de sempre.
+7. **`new Repo(...)` à mão numa classe registrada continua permitido** (C# permite): um serviço é uma
+   classe comum; a DI só é acionada por `inject` e pela resolução de dependências.
+8. **`scope { ... }` abre um escopo.** Statement (`syntax_stmt("scope")`), corpo obrigatoriamente
+   bloco, aninhável — o `CreateScope()` do C# sem o provider (que aqui não existe).
+9. **O escopo é LÉXICO.** O contexto de um sítio `inject` é o `scope { }` que o envolve, e a RAIZ do
+   programa quando não há nenhum. Uma função chamada de dentro de um `scope { }` NÃO herda esse escopo
+   — quem precisa de serviço com escopo ou é um serviço (recebe por construtor) ou abre o seu próprio
+   `scope { }`. É a única regra que o comptime sabe provar, e cabe numa linha.
+10. **A RAIZ é um escopo.** "Transient sem escopo abre o próprio" (D229) não acontece: o escopo-raiz
+    sempre existe. Um Scoped resolvido na raiz tem UMA instância no programa, num slot global — e ganha
+    instância nova dentro de cada `scope { }`.
+11. **O escopo PRÓPRIO do Singleton (a diferença teko↔C#) é o corpo do seu builder.** Todo Scoped da
+    subárvore de um singleton vira um local de tipo classe DENTRO do builder — um por tipo,
+    compartilhado por aquela subárvore; dois singletons com o mesmo Scoped recebem instâncias
+    DIFERENTES.
+12. **Singleton e Scoped-de-raiz emitem um slot global + um getter; Scoped-de-bloco emite um LOCAL do
+    bloco; Transient emite a construção no próprio sítio.** Uma máquina só: "construir X no escopo S".
+13. **O RC não ganha uma única regra nova (D227).** O local de escopo é um `N_VAR` comum de tipo classe
+    → `tk_rc_block` (teko_rc.mc:367) libera no `}` e em todo salto que sai; o construtor que guardar o
+    parâmetro num campo faz `rt_store` (que incrementa), então capturar prolonga a vida. O getter é
+    declarado `uptr` (idioma de `rt_own`) e devolve EMPRESTADO; o sítio leva `tk_xt_add(n, si, 1)` e o
+    `rt_own` de `tk_rc_var` (teko_rc.mc:155) incrementa. Sítio Transient leva `pure = 0` (possuído), e
+    é parkeado/varrido como qualquer temporário.
+14. **O objeto de um singleton (e do Scoped de raiz) nunca é liberado** — é raiz, como o campo `static`
+    de tipo classe (§50 decisão 16). `rt_live()` tem piso acima de zero; a fixture DIZ isso.
+15. **Tudo resolve num `pass()`** (`tk_di_pass`), **depois de `tk_fwd_pass`** e **antes de
+    `tk_array_pass`**: depois do `tk_partial_pass` (fecha toda classe parcial, logo os alocadores
+    existem) e à frente de todo passe que censa por nome — o que este passe INSERE (locais de escopo,
+    builders de topo) chega como declaração e statement comuns para o oráculo, o `ref`/`out`, o
+    ternário e, por último, o RC.
+16. **O sítio defere com placeholder** (`tk_di_defer`, o idioma de `tk_unresolved_new`): sem o passe o
+    núcleo recusa `call to unknown function` — nunca miscompila. O nó já é tipado no parse
+    (`tk_xt_add(n, si, 0)`), então oráculo, `.` e RC não perdem nada; o `pure` sobe para 1 no PASSE
+    quando o lifetime resolvido for Singleton ou Scoped.
+17. **`inject T.m()` direto é recusado** (`pure == 0` no parse: `teko_expr.mc:310`/`teko_iface.mc:252`,
+    a recusa de `new C().m()`), para que um Transient nunca seja alocado duas vezes por um receptor
+    clonado. Escreve-se `IDb db = inject IDb; db.query();`. Dívida declarada (§(g)).
+18. **Ciclo é erro de compilação**, pego na resolução do grafo com pilha de nomes: `teko: cyclic
+    service` + a cadeia `A -> B -> A`. Serviço abstrato, marcador em interface, dois marcadores na
+    mesma classe e chave sem implementação são recusa própria (§(c)).
+19. **Genéricos (`IRepo<T>`) ficam de fora** — instância de genérico é linha de tipo própria e `inject`
+    teria de ler argumentos de tipo; dívida declarada com recusa clara, não silêncio.
+
+### (b) Superfície
+
+```
+interface IDb { i64 query(); }                        // o CONTRATO: é o que se injeta
+interface ILog { i64 write(i64 v); }
+public class Db : IDb, IServiceSingleton {            // a IMPLEMENTAÇÃO carrega o marcador
+    private i64 n;
+    public i64 query() { n = n + 1; return n; }
+}
+public class Audit : ILog, IServiceScoped { public i64 write(i64 v) { return v; } }
+public class Repo : IServiceTransient {               // registrada por si mesma (sem interface)
+    private IDb db;
+    public Repo(IDb db, ILog log) { this.db = db; }   // INJEÇÃO POR CONSTRUTOR
+    public i64 load() { return this.db.query(); }
+}
+
+i64 main() {
+    IDb a = inject IDb;                               // raiz: o singleton, uma instância no programa
+    scope {                                           // abre um escopo
+        Repo r = inject Repo;                         // transient: novo a cada injeção;
+        i64 x = r.load();                             // o ILog dele é o Audit DESTE escopo
+    }                                                 // o Audit do escopo morre aqui (RC, D227)
+    return a.query() + 40;
+}
+```
+
+### (c) Compatibilidade de lifetimes (teko ≠ C#) — nenhuma combinação é erro
+
+| recebe ↓ / recebido → | Singleton | Scoped | Transient |
+|---|---|---|---|
+| **Singleton** | o slot global (mesma instância) | **teko ≠ C#** (D229): instância no escopo PRÓPRIO do singleton, uma por singleton, viva enquanto ele viver. C# lançaria (captive dependency) | construído dentro do escopo do singleton |
+| **Scoped** | o slot global | a instância DAQUELE escopo (a mesma para toda a subárvore) | construído no escopo que o recebe |
+| **Transient** | o slot global | a instância do escopo HERDADO (léxico, ou o do serviço que o construiu) | novo a cada injeção |
+| **raiz** (fora de `scope { }`) | o slot global | um slot global: uma instância no programa (decisão 10) | novo a cada injeção |
+
+O que É erro, e a mensagem: chave sem implementação (`teko: no service implements this type`); duas
+implementações (decisão 4); ciclo (decisão 18); serviço sem construtor injetável (`teko: no constructor
+of this service takes only services`); dois marcadores na mesma classe (`teko: a class names two
+service lifetimes`); marcador numa interface (`teko: a service marker names a class`); classe abstrata
+(`teko: an abstract class is not a service`); `inject` de tipo não-serviço (`teko: this type is not a
+service`); e a visibilidade de sempre (`X is internal to another project`, `tk_check_type_use`).
+
+### (d1) Hook → uso
+
+| hook / API | uso |
+|---|---|
+| `syntax_expr("inject")` | o sítio de injeção, lido como `new` (teko_expr.mc:131) |
+| `syntax_stmt("scope")` + `parse_stmt()` | o bloco de escopo (o molde de `tk_while`, teko_loop.mc:171) |
+| `pass(&tk_di_pass)` | registro → grafo → emissão, logo depois de `tk_fwd_pass` |
+| `tk_glb`/`tk_func`/`tk_var`/`tk_if`/`tk_ret`/`tk_call`/`tk_id`/`tk_int`/`top_add` | o slot, o getter e os locais de escopo (teko_struct.mc:389-422) |
+| `tk_ctor_pick`/`mt_*`/`tk_fill_defaults`/`tk_new_sym` | o construtor de injeção e o símbolo do alocador |
+| `tk_xt_add`/`set_xt_pure_at`; `ci_*`/`tk_impl_index`/`tk_iface_nbase` | tipo do sítio no parse e posse no passe; as chaves que a implementação atende (fecho §50 I1) |
+| `node_assign`/`list_append`/`nd_a` | reescrita do placeholder; inserção na cabeça do bloco de escopo |
+
+### (d2) Sítios tocados
+
+| sítio | ação |
+|---|---|
+| `teko_class.mc:1159` `tk_conf_name` | reconhece o marcador ANTES da busca de tipo; grava o lifetime no scratch e devolve `base` |
+| `teko_class.mc:1405` `tk_conf_apply` | `tk_di_conf_apply(ci)`: consome o scratch, registra (classe, lifetime), recusa abstrata/duplicada |
+| `teko_iface.mc:565` `tk_iface_base_name` | marcador numa lista `:` de interface = recusa própria |
+| `teko_struct.mc` `tk_newname` | recusa a DECLARAÇÃO de um tipo com o nome de um marcador |
+| `teko.mc` `user_init` | `#include "teko_di.mc"`, as duas palavras, `pass(&tk_di_pass)` na posição da decisão 15 |
+| `ngen/teko_di.mc` (novo) | tabelas `sv_*`/`si_*`/`sb_*`/`sl_*`, o grafo, a emissão, as mensagens |
+
+Assinaturas: `i64 tk_di_marker(uptr nm); void tk_di_conf_apply(i64 ci); i64 tk_inject(); i64
+tk_scope_stmt(); i64 tk_di_find_impl(i64 want); i64 tk_di_ctor_pick(i64 ci); uptr tk_di_getter(i64 sv);
+i64 tk_di_local(i64 scope, i64 sv); i64 tk_di_build(i64 sv, i64 scope, i64 line, uptr fl); i64
+tk_di_pass(i64 root);`
+
+### (e) Mecanismo, em quatro frases
+
+**Registro:** a lista `:` grava (classe, lifetime); as CHAVES saem do fecho `ci_*` que a classe já
+publica, mais ela mesma. **Grafo:** `tk_di_build(sv, escopo)` resolve o construtor de injeção e recursa
+em cada parâmetro de tipo-serviço — Singleton/Scoped-de-raiz devolvem a chamada ao getter (emitido uma
+vez, memoizado), Scoped devolve o local daquele escopo (criado na primeira necessidade), Transient
+devolve a construção inteira; a pilha de nomes fecha o ciclo. **Emissão:** `uptr <cls>_di_get() { uptr
+p = ld64(<cls>_di_slot); if (p == 0) { <locais do escopo próprio> p = <cls>_new(args);
+st64(<cls>_di_slot, p); } return p; }` — o `p` é `uptr`, então o RC não o toca; os locais de tipo
+classe do escopo próprio SÃO tocados, que é o que se quer; os de um `scope { }` entram na CABEÇA do
+bloco, em ordem de dependência. **RC:** nada de novo — o bloco libera em ordem reversa, o campo que
+capturou já incrementou, e o sítio é emprestado (Singleton/Scoped) ou possuído (Transient).
+
+### (f) Sequência de crumbs
+
+**DI1 — marcadores, registro e diagnóstico; `inject` de um singleton sem dependência.** Arquivos:
+`ngen/teko_di.mc` (novo), `teko.mc`, `teko_class.mc` (`tk_conf_name`/`tk_conf_apply`), `teko_iface.mc`
+(recusa na interface), `teko_struct.mc` (`tk_newname`). Fixture: `ngen/tests/surface_di.tk`
+(`expect-exit: 42`) — `Clock : IClock, IServiceSingleton` com estado, duas injeções provando a MESMA
+instância (o contador chega a 2), `inject` pela classe concreta, `rt_live()` com o piso DITO. Gate: 5
+pernas; `--entry-only` 44/44; `--dump-ast` das 43 anteriores **byte-idêntico**; `mc limits ngen` ok
+(`syntax` +1, `passes` +1, `intrin` sem crescimento). Probes fora de `tests/`: marcador numa
+`interface`; dois marcadores na mesma classe; `abstract class : IServiceScoped`; `interface
+IServiceSingleton { }` do usuário; `inject` de tipo sem registro.
+
+**DI2 — injeção por construtor, grafo, ciclo, emissão do singleton.** Arquivos: `teko_di.mc` (grafo,
+emissão, `tk_di_ctor_pick`). Fixture: `surface_di.tk` cresce — cadeia de três níveis (`Svc(IRepo,
+IClock)` ← `Repo(IDb)` ← `Db`), construtor com um parâmetro `= default` preenchido, chamada através da
+interface provando o itab. Gate: 44/44; AST das 43 byte-idêntica; `limits ok`. Probes: ciclo `A -> B ->
+A`; duas implementações da chave injetada; construtor que pede `i64` sem default; dois construtores com
+a mesma contagem injetável.
+
+**DI3 — `scope { }`, Scoped e Transient.** Arquivos: `teko_di.mc` (locais de escopo, herança de
+escopo), `teko.mc` (`syntax_stmt("scope")`). Fixture: `ngen/tests/surface_di_scope.tk`
+(`expect-exit: 42`) — duas injeções do mesmo Scoped no MESMO `scope { }` (mesma instância), dois
+`scope { }` seguidos (instâncias diferentes), Transient novo a cada injeção, Transient que recebe o
+Scoped do escopo hospedeiro, `scope { }` aninhado, `rt_live()` de volta ao piso depois do `}`, `return`
+de dentro do escopo. Gate: 45/45; AST das 44 anteriores byte-idêntica; `limits ok` (`syntax` +1).
+Probes: `scope` sem `{`; `scope { }` dentro de laço (uma instância por volta).
+
+**DI4 — namespaces, herança de interface como chave, visibilidade, o Singleton que recebe Scoped.**
+Arquivos: `teko_di.mc` (qualificação, `tk_check_type_use`, escopo próprio do singleton). Fixture: as
+duas crescem — `namespace app { class Cache : ICache, IServiceSingleton { ... } }` injetada por `inject
+app.ICache` e pelo nome curto via `using`; chave que é interface-BASE (`I2 : I1`, a classe implementa
+`I2`, o sítio pede `I1`); um Singleton que recebe um Scoped (D229) provando UMA instância própria
+compartilhada por dois dependentes dele; classe derivada de serviço que NÃO é serviço. Gate: 45/45; AST
+das anteriores byte-idêntica; `limits ok`. Probes: serviço `internal` de outro projeto; `inject` de
+interface implementada por duas classes via base comum.
+
+### (g) Fora do escopo, dívidas e o que subir ao dono
+
+**Fora do escopo (dívida declarada, com recusa clara, nunca silêncio):** genérico como chave
+(`IRepo<T>`, decisão 19); `inject T.m()` direto (decisão 17 — hoistar o sítio é crumb futuro, molde
+`teko_ternary.mc`); escopo dinâmico (decisão 9); `delegate`/`struct` como serviço (sem vtable, sem
+contagem); `IDisposable` (o `~Name()` já roda no release); substituição/decoração de registro, factory
+explícita e serviço com chave (`[FromKeyedServices]`); `inject` em inicializador de campo (não existe).
+
+**Pedido ao mc: NENHUM** — tudo cabe em `syntax_expr`/`syntax_stmt`/`pass()`/`top_add`, já em uso aqui.
+
+**Ao dono (duas confirmações de GRAFIA; nenhuma bloqueia — o desenho segue com o que está decidido):**
+
+> 1. **`inject T`** é a forma de PEDIR um serviço (`IDb db = inject IDb;`), lida exatamente como `new`.
+>    O C# pede pelo provider (`GetRequiredService<T>()`), o que exigiria função genérica — que a teko
+>    sobre mc não ensina; a palavra `inject` é a que o próprio ecossistema C# usa para o mesmo pedido
+>    (`[Inject]`/`@inject` do Blazor). Se preferir outra palavra (`svc`, `resolve`, `service`), é uma
+>    linha no `user_init`.
+> 2. **`scope { ... }`** é o que ABRE um escopo (C#: `using var scope = provider.CreateScope();`, que
+>    não tem sentido sem container em runtime). Um `scope { }` = um conjunto de instâncias Scoped,
+>    liberadas no `}` pelo RC do D227. Se preferir a grafia `using scope { }`, também é uma linha.
+
+### (h) Riscos
+
+1. **Gate de AST.** A régua é a ordem das linhas `sr_*`, porque o índice é EMITIDO (`tk_itab_emit`).
+   A decisão 1 existe por isso: marcador é NOME, não linha de tipo — zero linha, zero global e zero
+   símbolo novos num programa sem DI. Um crumb que criar linha na inicialização deixa as fixtures com
+   interface VERMELHAS, e é o sinal certo.
+2. **Posse (o risco de memória).** O getter devolve EMPRESTADO e o sítio incrementa via `rt_own`;
+   devolver possuído E incrementar no sítio vaza uma referência por injeção. O local do getter é `uptr`
+   de propósito (o RC ignora) e o local de escopo é de tipo CLASSE de propósito (o RC libera). Prova:
+   `rt_live()` na fixture, antes/dentro/depois do `scope { }`.
+3. **Parking de temporário.** Valor possuído em posição sem dono é parkeado e varrido no fim do
+   statement (`tk_rc_park`, teko_rc.mc:305). O `p = <cls>_new(...)` do getter é o VALOR de uma
+   atribuição, que `tk_rc_expr` marca como `owner` e não parkeia (teko_rc.mc:455) — se essa forma
+   mudar, o singleton morre no ato; o implementador confirma por probe antes de seguir.
+4. **`pure` no parse × `pure` no passe.** O único consumidor de `xt_pure` antes do RC é `tk_pure`, lido
+   no PARSE pelo `.` (dois sítios medidos): por isso o parse grava 0 (recusa o receptor) e só o passe
+   eleva a 1. Um terceiro consumidor no meio muda essa conta.
+5. **Ordem dos passes.** `tk_di_pass` insere `N_VAR` em bloco e declaração de topo; roda DEPOIS de
+   `tk_partial_pass` (alocadores existem) e ANTES de `tk_typeof_pass`/`tk_rc_pass` (que têm de ver os
+   locais novos). Rodar depois do RC é a falha silenciosa: escopo que nunca libera.
+6. **Colisão de símbolo e tabelas fixas.** `<cls>_di_slot`/`<cls>_di_get` seguem a convenção de
+   `<cls>_vt`/`<cls>_new` e correm o mesmo risco (função livre com o nome exato) — recusa clara do
+   núcleo, régua `mc limits ngen`; `TK_MAXSVC`/`TK_MAXSITE`/`TK_MAXSCOPE`/`TK_MAXSDEP` seguem o idioma
+   do módulo, cada estouro com mensagem própria.
