@@ -2784,3 +2784,47 @@ de modificadores contígua antes da palavra; `tk_class`/`tk_interface` validam `
 linha materializada ao pular a declaração real (`tk_fwd_check_materialized`, backstop defensivo).
 Gate: `--entry-only` **41/41**; `--dump-ast` das 40 fixtures não tocadas `same=40 diff=0` contra
 `d23b17ec`; `mc limits` `verdict ok`.
+
+## 54. Errata — I1 landed (2026-09-06)
+
+O crumb I1 (§50 (c)) landou como desenhado, com dois pontos que o (c) deixava em aberto e um erro
+de ordenação achado e corrigido antes de landar.
+
+1. **`: I1, I0` da interface tem de ler ANTES de `set_sr_m0_at` marcar onde as assinaturas PRÓPRIAS
+   de `I2` começam.** Uma base abaixo materializa DENTRO da leitura da lista, e a materialização
+   acrescenta as assinaturas dela na MESMA tabela compartilhada (`im_*`) antes de `I2` ter lido as
+   suas — marcar o watermark antes da lista dobraria o range da base materializada sobre o de `I2`,
+   fazendo `sr_mn_at(I2)` contar métodos que não são dela. Primeira versão marcava antes; corrigido
+   (nenhuma fixture chegou a ver o bug, achado por um probe combinando herança + base abaixo).
+2. **O fecho é ADITIVO na mesma tabela `(classe, interface)` de sempre, não uma tabela nova (decisão
+   15 do §50, confirmada sobre código real).** `tk_iface_conf_close(ci, fi)` grava `fi` e copia,
+   SEM recursão, o conjunto já fechado de `fi` -- porque esse conjunto, por invariante, já é a
+   transitiva inteira (toda vez que uma interface fecha uma base, ela também herda o que a base já
+   tinha fechado). Isso faz `tk_iface_nbase`/`tk_iface_base_at` (o "base list" de uma interface) SER
+   o mesmo `sr_ni_at`/`tk_impl_index` que uma classe já usa para o próprio itab -- zero tabela nova,
+   zero campo novo além de `ci_via`.
+3. **O ciclo não passa pela pilha de materialização do O3 -- passa pelo PRÓPRIO fecho.**
+   `tk_fwd_in_flight` só guarda o lado que está em replay; o outro lado, cujo `tk_type_add` já
+   rodou (é a declaração REAL, não uma materialização), resolve como consulta normal e não aparece
+   na pilha. `tk_iface_conf_close` recusa examinando o conjunto já fechado do OUTRO lado
+   (`tk_impl_has(fi, ci)`) antes de gravar -- quem fecha por último sempre encontra o primeiro já
+   apontando de volta, porque fechar o primeiro achatou a cadeia nele. Mais barato que uma pilha
+   nova e não precisa saber se o outro lado veio de replay ou de declaração direta.
+4. **Despacho fundo em TRÊS sítios, não um** (achado ao rodar o probe do `.` sobre valor `I2`
+   chamando membro só de `I1`): `tk_iface_call` (teko_expr.mc, receptor de tipo já resolvido no
+   parse), `tk_pend_iface` (teko_typeof.mc, receptor que só o `pass()` tipa) e `tk_this_iface_call`
+   (teko_this.mc, `this` dentro do corpo default de OUTRA interface). Os três já resolviam `m` só
+   dentro de `si` (`tk_ifmeth_find`); trocado por `tk_ifmeth_find_deep(si, m, pdecl)`, que devolve a
+   interface que de fato declara `m` para o `tk_itab_emit` indexar a tabela CERTA -- sem isso, um
+   valor tipado `I2` chamando um método só em `I1` batia em "unknown member", já que `I2` não tem a
+   assinatura na própria fatia de `im_*`.
+5. **`interface I2 : I1 { }` com corpo vazio deixou de ser "sem métodos".** A checagem
+   `sr_mn_at(si) == 0` de `tk_interface()` não sabia de bases; ganhou `&& tk_iface_nbase(si) == 0` --
+   uma interface que só agrupa outras (padrão comum em C# para nomear um conjunto) não é mais
+   recusada quando as bases têm o que ela não tem.
+
+Gate: `rm -rf ngen/build`, build do zero; `--entry-only` **42/42** (as 41 anteriores + a nova);
+`--dump-ast` das **41 anteriores byte-idêntico** ao compilador da base `86bc343d` (`same=41 diff=0`);
+`mc limits` `verdict ok`, `intrin`/`passes`/`syntax` idênticos nos dois lados (zero intrínseco, zero
+pass, zero palavra nova). Sem PR, sem dreno -- branch `feat/ngen-i1-iface`, forward-only para
+`fix/retirement`.

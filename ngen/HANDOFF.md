@@ -1653,6 +1653,59 @@ Gate: `rm -rf ngen/build`, build do zero; `--entry-only` **41/41** (as 40 anteri
 Plano: `docs/design/plano-ngen-entrega4.md` §50 (O3 desta série; I1/G1 seguem na fila; §53 tem a
 errata). Sem PR, sem dreno -- branch `feat/ngen-o3-bases`, forward-only para `fix/retirement`.
 
+**I1 LANDADO** (§50, 2026-09-06): `interface I2 : I1, I0` -- a dívida "herança de interface" que o
+O3 registrou (`teko_iface.mc`, "`interface` ainda não tem `:` própria") fecha aqui.
+- `teko_iface.mc`: `tk_interface()` ganhou a MESMA leitura `: lista` de `tk_class()`
+  (`tk_iface_base_name`/`tk_iface_conf`, lidos ANTES de `set_sr_m0_at` -- ler depois dobraria o
+  range de assinaturas próprias de `I2` sobre as de uma base materializada no meio da lista,
+  corrompendo as duas). Cada nome tem de ser outra interface (`tk_is_iface`); classe/struct/trait
+  recusam com a mesma mensagem de sempre; uma base abaixo materializa pela MESMA
+  `tk_fwd_materialize` do O3, sem código novo -- confirmado com um probe onde `I1` (com corpo
+  default) fica abaixo de `I2 : I1`, que fica acima da classe: exit 42 de primeira.
+- **Fecho por ARESTA achatada, não seguida em runtime (decisão 15 do §50):** `tk_iface_conf_close(ci,
+  fi)` registra `fi` no conjunto de conformidade de `ci` (a MESMA tabela `(classe, interface)` de
+  sempre -- nada exige que o dono seja uma classe) e copia, sem recursão, o conjunto JÁ FECHADO de
+  `fi` (`tk_iface_nbase`/`tk_iface_base_at`, o mesmo `sr_ni_at`/`ci_if_at` que uma classe usa para
+  seu próprio itab). Uma classe que só nomeia `I2` ganha DUAS entradas de itab -- uma para `I2`, uma
+  para `I1` -- e `tk_conform`/`tk_mt_fill` (inalterados) cobram o método de `I1` da classe do jeito
+  de sempre; o corpo DEFAULT de `I1` responde por ela sem precisar saber que chegou via `I2`.
+  `tk_conf_apply` (teko_class.mc, `:` de uma classe) passou a chamar `tk_iface_conf_close` em vez de
+  `tk_impl_add` cru -- é essa troca de uma linha que dá à classe as interfaces herdadas.
+- **Ciclo `I1 : I2` / `I2 : I1` pego pelo fecho, não pela pilha de materialização:** a pilha
+  `tk_fwd_in_flight` do O3 só guarda o span de UM lado em replay -- o outro lado, cujo `tk_type_add`
+  já rodou, resolve como fila normal. `tk_iface_conf_close` recusa ANTES de gravar, com `tk_impl_has(fi,
+  ci)`: quem quer que dos dois feche por ÚLTIMO encontra o outro já conformando a si mesmo, porque
+  fechar o primeiro já achatou a cadeia inteira nele. `teko: cyclic interface base: <nome>`.
+  `tk_ifmeth_find_deep(si, m, pdecl)` (nova) -- a posição de `m` em `si` OU numa base sua,
+  devolvendo em `pdecl` a interface que de fato o declara, para o `.` sobre um valor tipado `I2`
+  chamar um membro só de `I1` despachar pelo itab CERTO (`tk_iface_call`/`tk_pend_iface`/
+  `tk_this_iface_call`, os três sítios que já resolviam `m` -- trocado `tk_ifmeth_find` raso por
+  esta versão funda, `si`/`sr_m0_at(si)` por `di`/`sr_m0_at(di)`, sem mecanismo novo).
+- `tk_impl_via`/`ci_via` (teko_iface.mc, nova coluna na mesma tabela): -1 quando a classe nomeou a
+  interface no PRÓPRIO `:`, ou a interface que a puxou por herança -- lida por
+  `tk_conform_missing` para dizer QUAL interface do `:` da classe é a dona do método que falta
+  (`teko: method of \`I1\` not implemented (via \`I2\`)`, verificado por probe).
+- **`interface I2 : I1 { }` -- corpo vazio agora é legítimo** (grupo puro, zero membro próprio):
+  `tk_interface()`'s `"interface with no methods"` só dispara quando `sr_mn_at(si) == 0 E
+  tk_iface_nbase(si) == 0` -- uma interface que só reúne bases não é mais "sem métodos" quando as
+  bases têm os seus.
+- **Fixture** `ngen/tests/surface_iface_inherit.tk` (exit 42): `I2 : I1` com `Sq : I2` respondendo
+  aos dois -- `i2.area()` (só de `I1`, despachado fundo) e `i2.tag()` (de `I2`); `I1 x = q` chamando
+  o mesmo `area()` direto; `Sq.unit()` (`static abstract` de `I1`, herdado); diamante `IC : IA, IB`
+  com `m()` repetido nas duas e uma única implementação em `Box`, as três formas (`IA`/`IB`/`IC`)
+  despachando pro mesmo símbolo; `rt_live()` de volta ao piso (`checks()` à parte). Probes (fora de
+  `tests/`, descartados): base de interface classe/struct/trait -- recusa; ciclo `I1:I2`/`I2:I1` --
+  `teko: cyclic interface base`; método herdado não implementado -- `... not implemented (via
+  \`I2\`)`; base declarada abaixo (com corpo default) -- funciona de primeira, sem dívida.
+
+Gate: `rm -rf ngen/build`, build do zero; `--entry-only` **42/42** (as 41 anteriores + a nova);
+`--dump-ast` das **41 anteriores byte-idêntico** ao compilador da base `86bc343d` (`same=41 diff=0`);
+`mc limits` `verdict ok`, `intrin` 8/16 nos dois lados (zero intrínseco novo), `passes` 14/14 (zero
+pass nova -- I1 só estendeu `tk_interface`/`tk_conf_apply`/os três sítios de despacho de método).
+
+Plano: `docs/design/plano-ngen-entrega4.md` §50 (I1 desta série; G1 segue na fila; §54 tem a errata).
+Sem PR, sem dreno -- branch `feat/ngen-i1-iface`, forward-only para `fix/retirement`.
+
 ## 5.1 Armadilhas já pagas (não repita)
 
 1. **`mc --exe` emite Mach-O SEMPRE.** `minicompiler/mc` `src/main.mc:227` faz
