@@ -3619,7 +3619,7 @@ para a frente (o `gen2==gen3` do `src/` congelado morreu com o D211).
 | **S3** | `teko_init()` + `[package]` (D64.7) | `teko.mc`→`teko_init`, `ngen/user.mc` (novo), `ngen/mc.toml` `[package]` | 45/45; `mc pkg hash ngen` estável entre dois runs |
 | **S4.0** | sonda de transparência | nenhum (script descartável) | **JÁ FEITA** — resultado em (e); repetir após S1 |
 | **S4.1** | transliteração `.mc`→`.tk` + renome de `scope`/`out` internos (~58 sítios) | os 31 `ngen/*.mc` → `.tk`, `lib/rt.mc` → `lib/rt.tk`, `mc.toml` | 45/45; `--dump-ast` das 45 idêntico; objeto do compilador idêntico a menos das strings de nome de arquivo |
-| **S4.2** | `mc_teko.tk` + `ngen/scripts/bootstrap.sh` | novos | teko1 compila as 45; **`cmp teko2.o teko3.o`** vazio; `--dump-asm` diff vazio — **rota A: BLOQUEADO no pedido (g1)** |
+| **S4.2** | `mc_teko.tk` + `ngen/scripts/bootstrap.sh` | novos | teko1 compila as 45; **`cmp teko2.o teko3.o`** vazio; `--dump-asm` diff vazio — **g1 RESOLVIDO pelo `source_claim` do mc 0.15.8; bloqueio novo (o `while`/`for` do prelúdio) em §70(f)** |
 | **S4.3** | perna de fixpoint no CI | `.github/workflows/ngen.yml` | a 6ª perna verde |
 | **S4.4+** | teko-ificação por módulo (D64.8, uma onda por módulo) | um `.tk` por vez | 45/45 + fixpoint a CADA módulo |
 
@@ -4056,3 +4056,119 @@ contra o código pré-fix (`git stash`) reproduz a mensagem e a localização er
 da letra.
 
 Sem PR, sem dreno — branch `feat/ngen-hygiene2`, forward-only para `fix/retirement`.
+
+## 70. Errata do §64 — S4.2 landado parcial; o fork g1 resolvido, um bloqueio novo (2026-09-06)
+
+Branch `feat/ngen-s42-bootstrap`, base `c7357b9b`, `mc` 0.15.8, host macOS/aarch64.
+
+### (a) O fork g1 está RESOLVIDO — pelo `source_claim`, não pelo renome do núcleo
+
+O §64(g1) pedia ao `mc` UMA de duas saídas; o `mc` entregou a **(2)**, a geral: `source_claim`
+(0.15.8, PR #37). A teko registra `tk_source_claim` em `tk_fwd_init()` (`ngen/teko_fwd.tk`), antes
+de qualquer `syntax`/`type_alias`, e reivindica **duas** classes de fonte:
+
+1. **todo nome terminado em `.tk`** — um programa, uma fixture, `lib/rt.tk` e, na rota A, os 31
+   módulos do próprio pacote `teko`;
+2. **todo quadro que a própria teko empurra**, por `tk_push_source(name, text, len)` — o mesmo
+   `p_push_source` entre `tk_claim_own = 1` e `= 0`. São quatro sítios: instância de genérico
+   (`teko_generic.tk:402`), corpo de trait (`teko_trait.tk:262`), declaração materializada do §50 O3
+   (`teko_class.tk:1133`) e o prelúdio de `+=`/`-=`/`++`/`--` (`teko_loop.tk:74`). O NOME desses
+   quadros é uma frase (`Box__Circle__4 instantiated from f.tk:12`, `<teko-loop-prelude>`), não um
+   arquivo — o sufixo `.tk` responderia 0 e o texto que a TEKO escreveu seria lido com o vocabulário
+   do núcleo. A doc do `mc` avisa exatamente isso ("a source the module pushes itself is asked too").
+
+Tudo o mais fica de fora: `<mc/host>`, `<mc/core_min>` e as partes, `<sys>`, `<prelude>`,
+`core_teko.mc`, `user.mc`. Ali `type`/`out`/`params` voltam a ser nomes de parâmetro — a colisão de
+23+43 sítios do §64(e) **deixou de existir**, medida: o self-compile passa de `mc/objmodel:293` para
+muito além. O renome interno da S4.1 (`scope`→`dscope`, `out`→`dst`, `params`→`prs`) **continua
+necessário**: os módulos são `.tk`, logo SÃO reivindicados, e ali as palavras valem.
+
+### (b) `ngen/mc_teko.tk` — a unidade única da rota A
+
+Cinco `#include` e nada mais: `<mc/host>`, `<mc/core_min>`, `core_teko.mc` (as outras quatro partes
++ `main()`), `teko.tk` (os 30 irmãos) e `user.mc` (`user_init`) — a ordem do glue que `mc build`
+gera. Sem identificador próprio, então nada nele pode colidir com palavra ensinada, embora seja
+`.tk` e portanto reivindicado. O `mc` aceita `#include` de `.mc` dentro de `.tk` sem ajuste
+(auditado na S4.1, §68).
+
+### (c) `ngen/scripts/bootstrap.sh` — o rito, e como o `.o` sai do fluxo `build`
+
+`teko0 = mc build ngen --config <cfg0> --compiler-only` → `teko1/2/3 = <estágio anterior> build ngen
+--config <cfgN> --entry-only` sobre `mc_teko.tk`. Critérios: `cmp build/teko2.o build/teko3.o`,
+`--dump-asm` de teko2 vs teko3 com diff vazio, e as **45 fixtures compiladas por teko1**. POSIX
+`sh`, sem `set -e`, tempo por etapa e tamanho de cada objeto/binário, mensagem clara por passo.
+
+O objeto **não precisa do modo cru**: o config derivado MANTÉM o bloco `[linker]` — com linker o
+`mc` escreve `<out>.o` e o entrega ao `cc`, e o objeto fica em disco (sem linker o backend embutido
+escreve só o executável). Os derivados nascem do `ngen/mc.toml` pelo mesmo `sed` do HANDOFF §4,
+moram AO LADO dele (o `entry` resolve contra o diretório do CONFIG) e somem no `trap EXIT`;
+`ngen/mc.toml` não é tocado. O modo cru (`teko mc_teko.tk -o x.o`) dá objeto do mesmo tamanho, mas
+seu `--dump-asm` sai em x86-64 mesmo com `[target] macos/aarch64` — serve de diagnóstico, não de
+alvo.
+
+### (d) Tetos de tabela: a escala mudou de fixture para unidade
+
+Seis tabelas globais da teko estouraram, uma por vez, na ordem em que o self-compile as alcança —
+cada uma com mensagem própria, nenhuma com corrupção silenciosa. Subidas contra contagem medida na
+árvore (grep de declarações em `mc/src` + `ngen`), não a olho:
+
+| teto | era | é | o que conta | medido |
+|---|---|---|---|---|
+| `TK_MAXFDECL` | 256 | 4096 | declarações livres com lista de parâmetros | ~2 300 |
+| `TK_MAXSLV` | 512 | 8192 | locais da unidade inteira (K4's `use`) | ~3 800 |
+| `TK_MAXODECL` | 1024 | 8192 | declarações da unidade (mangling de sobrecarga) | ~2 300 |
+| `TK_MAXGARR` | 64 | 512 | arrays globais | ~180 |
+| `TK_MAXGDEF` | 64 | 512 | escritas diferidas em array possivelmente global | — |
+| `TK_MAXARR` | 256 | 1024 | arrays locais em escopo | — |
+
+`--dump-ast` das 45 fixtures fica byte-idêntico (`same=45 diff=0`): teto de tabela não move árvore.
+
+### (e) O fixpoint FECHA — medido, com o bloqueio de (f) removido experimentalmente
+
+Probe fora do commit (as duas linhas `syntax_stmt("while"/"for")` comentadas, que é exatamente o que
+o pedido de (f) devolveria): teko0 compila `mc_teko.tk` em **4,0 s** → `teko1.o` **1 708 248 B**,
+binário **1 529 192 B**; teko1 → teko2 em **3,9 s**; teko2 → teko3 em **4,4 s**; **`cmp teko2.o
+teko3.o` limpo**. E mais forte: **`teko1.o == teko2.o`** — o compilador já está no ponto fixo na
+primeira volta, o que diz que a árvore que a teko produz para os fontes do núcleo não muda de
+geração para geração. O risco §64(h).5 ("passes da teko sobre 8 500 linhas de núcleo") não se
+materializou: o binário auto-hospedado roda (`teko1 --version` → `mc 0.15.8`, usage própria).
+
+### (f) O bloqueio que sobra é do `mc`, e é UM — pedido registrado
+
+`word_add` marca a ENTRADA de token (`TE_TAUGHT`), e `tok_add` é idempotente por lexema: a entrada é
+a MESMA que o `#rule stmt: while (...)` do `<prelude>` usa. Como `lex_word_id` esconde toda entrada
+marcada em fonte não reivindicada, o `syntax_stmt("while", &tk_while)` da teko apaga o `while` dos
+fontes do NÚCLEO — `mc/objmodel:212: expected ; after expression`, na linha
+`while (i < 16 && ld8(s + i)) {` de `name16`. Vale para `while` e `for`, os dois únicos literais de
+despacho em forma de identificador do prelúdio (`+=`/`-=`/`++`/`--` são pontuação, e pontuação não é
+escopada por construção).
+
+A release note do 0.15.8 declara o oposto ("Fora do escopo: `#rule`/`#infix`/`#prefix`/`#token` — o
+`while`/`for` do prelude, que o núcleo usa"), e isso é verdade **enquanto o dialeto não ensinar o
+mesmo lexema**. A teko ensina, e ensina porque precisa: `tk_while`/`tk_for` (`teko_loop.tk`) fazem
+escopo/RC e reescrita de nível de `break N`/`continue N`, e o `for` da teko aceita passos que a
+regra do prelúdio não tem (`i++`, `i += k`, chamada) — a regra não substitui o handler.
+
+**Pedido ao mc:** numa fonte NÃO reivindicada, um lexema que também é literal de despacho de
+`#rule`/`#token` tem de continuar PALAVRA e despachar para a REGRA — nunca para o handler do módulo.
+Note que devolver o id no `lex_word_id` não basta: `parse_stmt` consulta `syntax_stmt_find` ANTES de
+`rule_find` (`parse.mc:1256-1258`), então o handler do módulo pegaria o `while` do núcleo. A forma
+sugerida é um segundo bit por entrada (setado pela estrada de diretiva) mais um guard nas buscas
+`syntax_*_find` quando a fonte corrente não é reivindicada. Repro mínimo: um módulo com
+`syntax_stmt("while", &h)` + `source_claim` de `.tk`, compilando qualquer `.mc` que use `while`.
+
+**Contorno recusado, de propósito:** desmarcar a entrada (`tok_set_taught(id, 0)`, o que
+`core_types_init` faz pelo `i32`) devolveria o `while` a toda fonte, mas o despacho iria ao handler
+DA TEKO, que passaria a parsear o núcleo com semântica de teko — exatamente o que a transparência do
+§64(h).5 proíbe. Sem gambiarra: o item é do `mc`.
+
+### (g) Gate
+
+`rm -rf ngen/build`, build do zero; `--entry-only` **45/45**; `--dump-ast` das 45 byte-idêntico
+contra a base `c7357b9b` (`same=45 diff=0`); `mc limits ngen --config` `verdict ok`, com a linha
+nova `source_claim 1/8` e `intrin 8/8` (zero intrínseco novo); nenhuma fixture nova, `ngen/tests/`
+intocado; `ngen/mc.toml` intocado; `ngen/scripts/bootstrap.sh` chega ao stage 1 e para no bloqueio
+de (f), imprimindo a mensagem do compilador. S4.3 (a perna de fixpoint no CI) fica esperando o
+patch do `mc`.
+
+Sem PR, sem dreno — forward-only para `fix/retirement`.

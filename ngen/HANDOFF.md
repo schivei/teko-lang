@@ -143,7 +143,23 @@ nomes antigos, mas o CI (`ngen.yml`: API de releases e base de download) e a rec
 para `minicompiler/mc`. Tags, releases e checksums não mudam. A org é a casa dos pacotes oficiais e a
 identidade admin do registro.
 
-## 3.2 O mc que o CI usa hoje: 0.15.3 (2026-09-06)
+## 3.2 O mc que o CI usa hoje: 0.15.8 (2026-09-06)
+
+**0.15.8 (PR #37, patch de cooperação): `void source_claim(uptr fn)`**, handler `i64 f(uptr name)`,
+1 = "esta fonte é do meu dialeto". Chamado de `lex_push_mem`, UMA vez por quadro, com o nome que
+`lex_file()` imprimiria; a cadeia inteira é reperguntada para os quadros já abertos no instante em
+que um handler registra (a entrada inclusive), no molde do `on_source`; e o handler NÃO pode
+empurrar fonte. O que a resposta muda é UMA coisa: numa fonte que ninguém reivindica, uma palavra
+que o módulo registrou por `word_add` (`syntax`/`syntax_stmt`/`syntax_expr`/`syntax_infix`/
+`type_alias`/`type_new`) deixa de ser palavra e lexa como identificador comum -- é o que permite a
+um compilador ensinado ler os fontes do PRÓPRIO núcleo, onde `type`, `out` e `params` são nomes de
+parâmetro. Fora do escopo: `#rule`/`#infix`/`#prefix`/`#token`, `intrinsic()` e o `i32` do núcleo.
+**Adotado pela S4.2** (`ngen/teko_fwd.tk`, `tk_source_claim`/`tk_push_source`; §5) -- e a ressalva
+medida está lá: a marca é por ENTRADA de token, então um lexema que o dialeto ensina E que é
+literal de `#rule` do prelúdio (`while`, `for`) some das fontes não reivindicadas. `mc limits`
+ganha a linha `source_claim`.
+
+(Registro anterior, 0.15.3:)
 
 **0.15.3 (PR #31, patch de cooperação): `void on_source(uptr fn)`**, handler `void f(uptr name,
 uptr src, i64 len)`, chamado de `lex_push_mem` como última instrução do push, para TODA fonte que
@@ -2260,6 +2276,77 @@ Plano: `docs/design/plano-ngen-entrega4.md` §69 (detalhe completo, incluindo os
 mapeados dos itens 3/4/5). Sem PR, sem dreno -- branch `feat/ngen-hygiene2`, forward-only para
 `fix/retirement`.
 
+**S4.2 LANDADO PARCIAL** (D225, plano §64(e)/§70 -- auto-hospedagem, rota A): a superfície toda
+existe e o fixpoint FECHA com um único bloqueio removido, que é do lado do `mc` (abaixo).
+
+- **`source_claim` adotado** (`ngen/teko_fwd.tk`, mc 0.15.8). `tk_source_claim(name)` devolve 1 para
+  **(a)** todo nome terminado em `.tk` -- um programa, uma fixture, `lib/rt.tk`, os 31 módulos do
+  pacote quando o compilador compila a si mesmo -- e **(b)** todo quadro que a PRÓPRIA teko empurra,
+  que passa a ir por `tk_push_source` (a mesma assinatura de `p_push_source`, entre `tk_claim_own = 1`
+  e `= 0`): a instância de genérico (`teko_generic.tk`), o corpo de trait (`teko_trait.tk`), a
+  declaração materializada do §50 O3 (`teko_class.tk`) e o prelúdio de `+=`/`-=`/`++`/`--`
+  (`teko_loop.tk`). Sem (b) esses quadros -- cujo NOME é uma frase (`Box__Circle__4 instantiated
+  from f.tk:12`, `<teko-loop-prelude>`), não um arquivo -- seriam lidos com o vocabulário do núcleo,
+  e `class`/`str`/`public` no texto que a própria teko escreveu lexariam como identificador comum.
+  Tudo o mais (`<mc/host>`, `<mc/objmodel>`, `<sys>`, `<prelude>`, `core_teko.mc`, `user.mc`, todo
+  `.mc`) NÃO é reivindicado: ali `type`, `out` e `params` voltam a ser nomes de parâmetro. **O fork
+  g1 do §64 está RESOLVIDO pelo `source_claim`, não pelo renome do núcleo** -- e o renome interno que
+  a S4.1 fez (`scope`/`out`/`params` dentro do `ngen/`) segue necessário, porque os módulos são `.tk`
+  e portanto SÃO reivindicados.
+- **`ngen/mc_teko.tk`** (novo) -- a unidade única da rota A (D64.9): cinco linhas de `#include`
+  (`<mc/host>`, `<mc/core_min>`, `core_teko.mc` com as outras quatro partes + `main()`, `teko.tk`
+  com os 30 irmãos, `user.mc` com `user_init`), a mesma ordem do glue que `mc build` gera
+  (`ngen/build/teko.mc`). É `.tk`, logo reivindicado -- e por isso não tem um identificador próprio:
+  toda linha é um include, nada nele pode colidir com palavra ensinada.
+- **`ngen/scripts/bootstrap.sh`** (novo, POSIX `sh`, sem `set -e`, tempo por etapa) -- teko0 (`mc
+  build ngen --compiler-only`) -> teko1 -> teko2 -> teko3, todos por `teko build ngen --config
+  <derivado> --entry-only` sobre `mc_teko.tk`; critérios: `cmp build/teko2.o build/teko3.o`,
+  `--dump-asm` de teko2 vs teko3 com diff vazio, e as 45 fixtures compiladas por **teko1**. Os
+  configs derivados (`ngen/mc.boot{0,1,2,3}.toml`, `mc.bootfix.toml`) nascem do `ngen/mc.toml` pelo
+  MESMO `sed` do §4, ficam ao lado dele (o `entry` resolve contra o diretório do CONFIG, não do
+  projeto -- um config em scratch não acha `mc_teko.tk`) e somem no `trap EXIT`; `ngen/mc.toml` não
+  é tocado. **O `.o` vem do fluxo `build`, sem modo cru:** o derivado MANTÉM o bloco `[linker]` --
+  com linker o `mc` escreve `<out>.o` e o entrega ao `cc`, e é isso que deixa o objeto em disco; sem
+  linker o backend embutido escreve só o executável. (O modo cru `teko mc_teko.tk -o x.o` também
+  funciona e dá objeto byte-idêntico -- 1 708 248 B nos dois -- mas o `--dump-asm` do modo cru sai em
+  x86-64 mesmo com `[target] macos/aarch64`, então ele serve de diagnóstico, não de alvo.)
+- **Tetos de tabela subidos para a escala de UMA UNIDADE** (o núcleo tem ~8 500 linhas a mais do que
+  qualquer fixture): `TK_MAXFDECL` 256->4096 (declarações livres com parâmetro; medidas ~2 300),
+  `TK_MAXSLV` 512->8192 (locais da unidade; ~3 800), `TK_MAXODECL` 1024->8192 (declarações da
+  unidade), `TK_MAXGARR` 64->512 e `TK_MAXGDEF` 64->512 (arrays globais; ~180), `TK_MAXARR`
+  256->1024. Cada um foi o erro SEGUINTE do self-compile, na ordem; nenhuma outra tabela estourou.
+- **PROVA do fixpoint, com o bloqueio do `mc` removido experimentalmente** (probe fora do commit:
+  as duas linhas `syntax_stmt("while"/"for")` comentadas): teko0 compila `mc_teko.tk` (4,0 s) ->
+  teko1 (`teko1.o` 1 708 248 B, binário 1 529 192 B); teko1 -> teko2 (3,9 s); teko2 -> teko3 (4,4 s);
+  **`cmp teko2.o teko3.o` LIMPO** -- e mais: `teko1.o == teko2.o` também, o compilador já está no
+  ponto fixo na primeira volta. Ou seja a rota A está inteira: falta só o item do `mc`.
+
+**O BLOQUEIO (pedido ao mc, um só).** `word_add` marca a ENTRADA de token como `TE_TAUGHT`, e a
+entrada é COMPARTILHADA entre a estrada de módulo e a de diretiva (`tok_add` é idempotente por
+lexema). A teko ensina `while` e `for` (`syntax_stmt`, `teko_loop.tk` -- os handlers dela fazem
+escopo/RC e reescrita de nível de `break N`/`continue N`, que a regra do prelúdio não faz), então as
+entradas `while`/`for` ficam marcadas -- e `lex_word_id` esconde toda palavra marcada em fonte NÃO
+reivindicada. Resultado: o `while` do `<prelude>`, que o NÚCLEO usa ~150 vezes, some das fontes do
+núcleo. Sintoma exato: `mc/objmodel:212: expected ; after expression`, na linha
+`while (i < 16 && ld8(s + i)) {` de `name16`. A release note do 0.15.8 afirma o contrário ("Fora do
+escopo: `#rule`/`#infix`/`#prefix`/`#token` (o `while`/`for` do prelude, que o núcleo usa)") -- e
+isso vale só enquanto o dialeto NÃO ensinar o mesmo lexema; a teko ensina. **Pedido:** numa fonte
+não reivindicada, um lexema que também é literal de despacho de `#rule`/`#token` tem de continuar
+PALAVRA e despachar para a REGRA -- nunca para o handler do módulo (`parse_stmt` consulta
+`syntax_stmt_find` antes de `rule_find`, `parse.mc:1256`), o que sugere um segundo bit por entrada
+(setado pela estrada de diretiva) mais um guard nas buscas `syntax_*_find` para fonte não
+reivindicada. Repro mínimo: um módulo com `syntax_stmt("while", &h)` + `source_claim` de `.tk`
+compilando qualquer `.mc` que use `while`. **Contorno NÃO foi feito** (a saída "desmarcar com
+`tok_set_taught(id, 0)`" faria o handler da teko parsear o `while` do núcleo -- semântica errada e
+transparência perdida).
+
+Gate (host macOS/aarch64, `mc` 0.15.8): `rm -rf ngen/build`, build do zero; `--entry-only`
+**45/45**; `--dump-ast` das 45 byte-idêntico ao compilador da base `c7357b9b` (`same=45 diff=0`) --
+o `source_claim` e os tetos não movem uma árvore; `mc limits ngen --config` `verdict ok`, com a
+linha nova `source_claim 1/8` e `intrin 8/8` (zero intrínseco novo); nenhuma fixture nova
+(`ngen/tests/` intocado); `ngen/scripts/bootstrap.sh` chega ao **stage 1** e para no bloqueio acima,
+com a mensagem do compilador impressa. Detalhe completo em `docs/design/plano-ngen-entrega4.md` §70.
+
 ## 5.1 Armadilhas já pagas (não repita)
 
 1. **`mc --exe` emite Mach-O SEMPRE.** `minicompiler/mc` `src/main.mc:227` faz
@@ -2454,6 +2541,24 @@ mapeados dos itens 3/4/5). Sem PR, sem dreno -- branch `feat/ngen-hygiene2`, for
     a varredura. A regra prática: quem faz uma varredura léxica pré-parse no `on_source` faz só isso
     ali; qualquer push que o construto (import, generic, base fora de ordem) precisar continua
     acontecendo no handler DAQUELE construto, nunca dentro do callback de `on_source`.
+25. **Ensinar uma palavra que o `#rule` do prelúdio JÁ possui a tira do núcleo (S4.2).** `word_add`
+    marca a ENTRADA de token (`TE_TAUGHT`), e `tok_add` é idempotente por lexema -- a entrada é a
+    MESMA que o `#rule stmt: while (...)` do `<prelude>` usa. Como `lex_word_id` esconde toda
+    entrada marcada em fonte não reivindicada, o `syntax_stmt("while", &tk_while)` da teko apaga o
+    `while` dos fontes do núcleo (que o usam ~150 vezes): `mc/objmodel:212: expected ; after
+    expression`. Vale para `while` e `for`, os dois únicos literais de despacho em forma de
+    identificador do prelúdio (`+=`/`-=`/`++`/`--` são pontuação, e pontuação não é escopada). Não
+    tem contorno do lado da teko que preserve a semântica: desmarcar a entrada
+    (`tok_set_taught(id, 0)`) faz o handler DA TEKO parsear o `while` do núcleo, que é justamente o
+    que a transparência do §64(h).5 proíbe. É item do lado do `mc` (§5, pedido registrado).
+26. **Um teto de tabela dimensionado para fixture não sobrevive à auto-hospedagem.** As tabelas da
+    teko são arrays globais de tamanho fixo (`TK_MAX*`) calibrados para um programa de dezenas de
+    linhas; a unidade da rota A traz ~8 500 linhas de núcleo junto. Seis estouraram, um por vez, na
+    ordem em que o self-compile os alcança (`TK_MAXFDECL`, `TK_MAXSLV`, `TK_MAXGARR`, `TK_MAXGDEF`,
+    `TK_MAXARR`, `TK_MAXODECL`) -- cada um com mensagem própria e clara, nenhum com corrupção
+    silenciosa. Ao subir, subir contra uma CONTAGEM medida na árvore (grep das declarações), não a
+    olho: é o que separa `4096` de um número mágico.
+
 
 ## 5.2 Canal com a sessão do mc
 
