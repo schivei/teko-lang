@@ -254,6 +254,7 @@ uptr tk_deleg_code(uptr d) {
 // `0 <= i < a.Length`, or `panic` -- word 16 of the object is its own length,
 // and the elements start at word 24 (`ngen/teko_heaparr.mc`'s own layout).
 uptr tk_arr_at(uptr a, i64 i, i64 w) {
+    if (a == 0) panic("index into a null array");
     i64 n = ld64(a + 16);
     if (i < 0) panic("index below zero into an array");
     if (i >= n) panic("index past the end of an array");
