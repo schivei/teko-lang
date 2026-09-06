@@ -2014,6 +2014,45 @@ DINÂMICO por chamada (D229 decisão 9 é léxico, não dinâmico, de propósito
 como serviço (sem vtable, sem contagem); `inject` em inicializador de campo (não existe); factory
 explícita, decoração/substituição de registro, serviço com chave (`[FromKeyedServices]`).
 
+**COMPAT+HIGIENE LANDADO** (D226, plano §63; 45 fixtures): três itens independentes num crumb só.
+- **Item 1** -- compatibilidade de tipo em atribuição/inicialização/argumento/retorno, C#'s own
+  implicit reference conversion (`tk_row_fits`, `teko_struct.mc`): idêntico, deriva (classe->base),
+  implementa (`tk_impl_has` já fecha herança de interface e herança de classe), `null` sempre cabe;
+  `T[]`/delegate só idêntico. Dois sítios por TIMING: parse (`tk_check_field_store`, receptor já
+  tipado) e pass (`tk_check_compat`, `teko_typeof.mc`, o oráculo cheio) -- `tk_rc_var`/
+  `tk_rc_assign`/`tk_rc_return` (`teko_rc.mc`) rodam a checagem ANTES do gate `tk_is_counted`, e
+  `tk_rc_pass` agora dispara também para unidade só-`struct` (`tk_compat_needed`, `tk_nstruct > 0`).
+  Argumento de chamada é de graça para função livre/método direto/ctor: `tk_rc_call_args`
+  (`teko_rc.mc`, dentro de `tk_rc_walk`) usa `decl_param_type` do próprio núcleo, sem tabela nova --
+  vtable/itab (`callp`) ficam de fora, dívida registrada (aridade já checada, tipo não). **Dois bugs
+  reais que a checagem nova encontrou, corrigidos na raiz:** o alocador de `struct` (`tk_ctor`)
+  devolvia `p: uptr` sem marcar o tipo do struct (igual ao que `tk_new_fn` de classe já fazia);
+  o temporário hospedado de um ternário/switch-expression (`tk_tern_lower`) inicializava com `i64 0`
+  mesmo quando o braço é `Op` -- virou `tk_null()`. E um argumento de construtor resolvido por
+  `inject` (`tk_di_ctor_args`) precisou do MESMO tag (`tk_xt_add`), com `pure` fazendo trabalho de
+  verdade: a 1ª tentativa marcou `pure=0` e `surface_di.tk` quebrou em runtime ("reference count
+  below zero") porque o getter memoizado devolve referência EMPRESTADA, não fresca.
+- **Item 2** -- `tk_arr_at` (`ngen/lib/rt.mc`) ganhou o guard `if (a == 0) panic(...)` antes do
+  `ld64(a+16)` que segfaultava num `T[]` nunca atribuído -- aditivo puro, as mesmas 7 linhas em
+  todo fixture que inclui `rt.mc`.
+- **Item 3** -- `tk_lam_check_name` (`teko_deleg.mc`) parava de recusar global/`const`/função livre
+  dentro do corpo de uma lambda com a mesma mensagem de um typo genuíno. Sem hook sobre declaração
+  de topo (`parse_top`, não `parse_stmt`) -- a resposta é DEFERIDA (`tk_lg_add`) para o fim de
+  `tk_deleg_pass` (que já roda sempre que há lambda), que resolve contra um scan de `N_GLOBAL`
+  (`tk_lam_resolve_globals`/`tk_global_find`). Escrita em global e `const` bare já funcionavam (sem
+  bug ali). Dívida registrada: `use (g)` de um global segue com a mensagem genérica ("captures a
+  local"), não a específica "globals are visible without use" -- deferir essa checagem tocaria a
+  tabela de captura de forma síncrona, risco não justificado por uma melhoria cosmética.
+- **Fixtures:** `surface_iface_inherit.tk` ganhou `Animal`/`Dog` (derivada->base, ao lado do
+  class->interface já existente); `surface_lambda.tk` ganhou `global_const_free_check` (item 16,
+  zero `use (...)`). Zero fixture nova. Gate: `rm -rf ngen/build`; build do zero; `--entry-only`
+  **45/45**; `--dump-ast` das 43 fixtures não tocadas byte-idêntico contra `088bf795`, `same=43`
+  fora do universo de `rt.mc` (que ganha só a linha aditiva do item 2 em todo fixture que o inclui);
+  `mc limits ngen` `verdict ok`. Probes das recusas (item 1: classe não relacionada, interface não
+  implementada, downcast, `T[]`/delegate de tipo diferente, argumento errado, retorno errado; item 2:
+  índice em array nulo, exit 70; item 3: nome genuinamente desconhecido) rodados fora de
+  `ngen/tests/` e descartados, não commitados.
+
 ## 5.1 Armadilhas já pagas (não repita)
 
 1. **`mc --exe` emite Mach-O SEMPRE.** `minicompiler/mc` `src/main.mc:227` faz
