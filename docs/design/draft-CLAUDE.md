@@ -13,7 +13,7 @@ não empilhe perguntas.
 ## Protocolo de fork (decisão, owner-gate, ambiguidade) — REGRA DURA
 Antes de parar com dúvida, **TER CERTEZA** que não está já deliberado:
 1. **Checar se já está deliberado** — buscar em `DECISION_LOG.md` (D225–D230 relevantes para ngen),
-   `docs/design/port-teko-mc.md`, `ngen/HANDOFF.md`, `docs/design/pr-org-ngen.md`.
+   `docs/design/port-teko-mc.md`, `HANDOFF.md`, `docs/design/pr-org-ngen.md`.
 2. **Mais recente vence** — aplicar a decisão mais recente por data/ID.
 3. **Só HALT em fork real** — parar e notificar o dono **apenas** quando NÃO existe deliberação,
    enunciando o fork curto e claro.
@@ -74,7 +74,10 @@ sh scripts/bootstrap.sh --os linux --arch x86_64
 - **Recusas com `teko: <causa curta>`.** Mensagem de erro padrão compilador: `arquivo:linha:coluna: "causa"`.
   Nada de história, referências ou explicação de design.
 - **`--dump-ast` idêntico quando o crumb não muda código aceito.** Prova de no-op.
-- **Nada de `SendMessage`, `Variant`, `params T[]` com lambda, `T[][]`, `namespace` aninhado.**
+- **Superfície fora da v0.1.0 (recusada com mensagem, não implementada em silêncio):** `Func<>`/`Action<>`,
+  multicast, `params T[]`, `T[][]`, `namespace` aninhado, DI genérica, float em `params`, `when` no `_` final.
+- **Coordenação:** o coordenador não manda mensagem a agente em voo (`SendMessage` indisponível); errou →
+  kill e re-dispatch limpo, nunca remendo em voo.
   Construções fora de v0.1.0; recusa se aparecerem.
 
 ## Processo (uma passada scout → implementer)
@@ -88,7 +91,7 @@ na branch do agente; dreno por ff/cherry-pick para `fix/retirement`.
 
 ## Onde estão as docs
 
-- **`ngen/HANDOFF.md`**: guia completo de operação local, CI, armadilhas recorrentes.
+- **`HANDOFF.md`**: guia completo de operação local, CI, armadilhas recorrentes.
 - **`docs/design/port-teko-mc.md`**: design do port.
 - **`docs/design/pr-org-ngen.md`**: gates para merge na org, checklist do dono.
 - **`docs/design/plano-ngen-entrega4.md`**: plano de trabalho, recusas v0.1.0 explícitas.
@@ -97,7 +100,7 @@ na branch do agente; dreno por ff/cherry-pick para `fix/retirement`.
 ## Canal com o mc (NOTICES)
 
 Decisões que impactam o mc, ou pedidos de check do mc, vão a `NOTICES` no `minicompiler/mc`
-ou em email ao maintainer. Exemplos: mudança de hook signature, limite de feature do mc,
+no canal de avisos do mc (`NOTICES-teko.md` do repo do mc, lido no começo de cada lote). Exemplos: mudança de hook signature, limite de feature do mc,
 pacote registrado, tool `tekoc` vs lib `teko`. **O mc pinado é autoridade** — se o mc não compila
 uma feature, é fork (parar e perguntar).
 

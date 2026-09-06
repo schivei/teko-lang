@@ -50,7 +50,7 @@ Runs on five native legs in CI (`ngen.yml`, `fixpoint` job).
 
 ## What a PR must contain
 
-- **Green `mc build ngen && run`**: all 18 fixtures compile and execute with correct exit codes
+- **Green `mc build ngen && run`**: all 45 fixtures compile and execute with correct exit codes
   on your platform.
 - **Fixpoint closure** (if touching modules in `mc_teko.tk`): `teko1 == teko2 == teko3` byte-identical
   objects, matching `--dump-asm`.
@@ -58,7 +58,7 @@ Runs on five native legs in CI (`ngen.yml`, `fixpoint` job).
 - **No changes to mc's core** (`minicompiler/mc src/`). Teko only teaches new modules; the base
   grammar, lexer, and type system of mc are off-limits.
 - **No new intrinsics or hardcoded backend logic.** Every function has surface code (`exp fn` in `.tk`).
-  If a feature "wants" special handling in the backend, that's a fork — open an issue in DECISION_LOG.
+  If a feature "wants" special handling in the backend, that's a fork: record it in `DECISION_LOG.md` and ask the owner.
 
 ## Code style for `.tk` hook modules
 
@@ -68,7 +68,7 @@ Runs on five native legs in CI (`ngen.yml`, `fixpoint` job).
 - **Error messages: compiler style.** `file:line:column: "short cause"` (e.g., `teko: unsupported (os,arch)`).
   No lengthy explanations or references to docs.
 - **Refused features carry `teko:` prefix:** v0.1.0 does not support `Func<>`, `params T[]`, `T[][]`,
-  nested `namespace`, `Variant`, etc. Any of these triggers `teko: <cause short>`.
+  nested `namespace`, float in `params`, `when` on the last `_` arm. Any of these triggers `teko: <cause short>`.
 
 ## Decisions and forks
 
@@ -77,8 +77,8 @@ mirror C# grammar and behavior (where applicable).
 
 **Open forks** (design decisions not yet decided, or tensions between laws):
 1. Check `DECISION_LOG.md` (entries D225–D230 cover ngen policy).
-2. Check `docs/design/port-teko-mc.md` and `ngen/HANDOFF.md` (§2, the laws).
-3. If genuinely open, open an issue in `DECISION_LOG.md` (assign to owner if urgent) with the fork
+2. Check `docs/design/port-teko-mc.md` and `HANDOFF.md` (§2, the laws).
+3. If genuinely open, record the fork in `DECISION_LOG.md` and ask the owner, with the fork
    statement and context. Do not implement competing designs.
 
 ## Reporting mc-side defects
@@ -91,12 +91,12 @@ If `mc` itself has a bug or limitation affecting teko's port:
 
 ## CI and workflows
 
-- **`ngen.yml`**: matrix of 5 native legs, each runs `mc build ngen` and all 18 fixtures.
+- **`ngen.yml`**: matrix of 5 native legs, each runs `mc build ngen` and all 45 fixtures.
 - **`fixpoint` job**: teko0→teko1→teko2→teko3, object comparison and ASM diff, all 45 fixtures via teko1.
 - **Squash merge only.** The ruleset `main` requires fast-forward or squash; merge commits are blocked.
 - **No legacy workflows.** The old compiler CI (`src/`, `pr.yml`, release cycles) is archived.
 
 ---
 
-For the full operational guide, see `ngen/HANDOFF.md`. For design decisions and the port rationale,
+For the full operational guide, see `HANDOFF.md`. For design decisions and the port rationale,
 see `docs/design/port-teko-mc.md` and `DECISION_LOG.md` (D211–D230).
