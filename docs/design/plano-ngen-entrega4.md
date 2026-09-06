@@ -4659,3 +4659,94 @@ lacuna que o item fecha.
 **Consequência para o golden:** o `sha256` de `teko2.o` continua reportado e não comparado. Nesta
 máquina ele é reprodutível (14 escadas completas entre base e tip); pinar um golden versionado
 segue dependendo de ver o número estável também no CI, agora com a provenance impressa ao lado.
+
+## 75. R1 — release do `ngen`: o workflow que corta uma versão (2026-09-06)
+
+O dono vai cortar uma versão estável, mergear `fix/retirement` na `main` e abrir PR para
+`teko-org/teko-lang`, que passa a ser o repositório de trabalho. Este item entrega o
+`release.yml` do `ngen`, o `[package].check` publicável e a retirada dos workflows do
+compilador velho. Base: tip de `fix/retirement` em `77019bd6`; branch `feat/ngen-release-ci`,
+quatro commits.
+
+### (a) O workflow: promove, não recompila
+
+`.github/workflows/release.yml` era o *Bootstrap Release* — a promoção de um prerelease
+noturno de `src/`. Mesmo arquivo, conteúdo novo, quatro jobs, disparado por push de tag `v*`
+ou por `workflow_dispatch` com `version`:
+
+| job | o que faz |
+|---|---|
+| `version` | deriva e valida tag/versão (`X.Y.Z[-sufixo]`), prova pela API que a tag existe |
+| `gate` | `uses: ./.github/workflows/ngen.yml` sobre a TAG — as 5 pernas + os 2 fixpoint |
+| `release` | os 10 arquivos + notas geradas na Release da tag (cria ou atualiza) |
+| `publish-to-registry` | pré-voo do pacote sempre; anúncio atrás de `TEKO_REGISTRY_PUBLISH` |
+
+**Não há job `assets`.** Um job que compilasse o compilador outra vez publicaria bytes que
+nenhum portão viu — o argumento que já tinha reescrito a `release.yml` anterior ("se o binário
+que passou todos os gates é válido, release só precisa promover"). Quem empacota é a PRÓPRIA
+perna, com `.github/actions/package-teko`, imediatamente depois de rodar as fixtures contra
+aquele binário. Para isso `ngen.yml` ganhou `workflow_call` com três entradas — `ref` (a tag a
+conferir quando o dispatch não roda nela), `package` (liga o empacotamento por perna e a
+provenance do fixpoint) e `version` (o nome do asset). Push/PR comum não passa nenhuma delas e
+o workflow se comporta exatamente como antes; o `push` passou a filtrar `branches`, para a tag
+não disparar a matriz duas vezes contra o mesmo `github.ref`.
+
+**Os assets** seguem a grafia do `mc`: `teko-<ver>-<os>-<arch>.tar.gz` + `.sha256`, com `arm64`
+no nome e `aarch64` no `[target]`. O empacotamento é reproduzível pela mesma receita do
+`scripts/release-assets.sh` do `mc` (mtime fixo, lista de membros explícita e ordenada, `ustar`,
+`gzip -n`) — verificado localmente: duas execuções da action sobre a mesma árvore dão o mesmo
+`sha256`. Dentro do tarball vão o binário, `lib/rt.tk` (um programa teko inclui o runtime por
+caminho), `INSTALL.txt` gerado, o `README.md` do `ngen/` e o `LICENSE`.
+
+**As notas** citam a versão do `mc` que construiu, os checksums dos cinco tarballs e as tabelas
+de provenance do fixpoint. A versão do `mc` é LIDA da própria tabela de provenance em vez de ser
+passada à parte: uma derivação, dois leitores, sem chance de o número publicado divergir do
+medido.
+
+### (b) `[package].check` — o que o registro consegue compilar
+
+O validador compila cada unidade de `check` **sozinha**, na caixa linux/x86_64, sem rede e pelo
+`mc` DE PRATELEIRA (guia 27 §5). As duas entradas que estavam lá falhavam, medido com mc 0.15.12
+de dentro de `ngen/`:
+
+| unidade | o que o mc de prateleira diz |
+|---|---|
+| `teko.tk` | `machine_arm64_float:332: initializer must be constant` — é fragmento |
+| `lib/rt.tk` | `lib/rt.tk:64: type expected in parameter` — o `str` de `void panic(str msg)` |
+| `mc_teko.tk` | exit 0 |
+
+Logo `check = ["mc_teko.tk"]`, e `files` ganhou `mc_teko.tk` + `core_teko.mc` + `user.mc` (o
+hash de árvore cobre só `files`; unidade de `check` fora dele é recusada). É a forma do pacote
+do próprio `mc`. Hash novo: `057e7aed61f2f244d52a53b522b06fb84eaf88d552247e37060ea651761424d5`
+(era `d41a0c80…`), o MESMO calculado no runner linux do CI. A ressalva do §3.3 do handoff segue
+viva: teko-ificar o compilador (S4.4+) torna `mc_teko.tk` ilegível ao parser de prateleira e o
+pacote perde o `check`.
+
+### (c) Os workflows do compilador velho saíram
+
+Oito arquivos removidos — `pr.yml` (2940 linhas), `nightly.yml`, `reseed-bootstrap.yml`,
+`seed-linux-fork.yml`, `tag-on-version-bump.yml`, `theory.yml`, `theory-generation-decay.yml`,
+`mirror-pr-to-org.yml`. Ficam `ngen.yml`, `release.yml`, `codeql.yml` e `branch-policy.yml`.
+O CodeQL perdeu a perna `c-cpp` (compilava `src/runtime/teko_rt.c` e `src/assert/assert.c`, árvore
+congelada) e ficou com `actions`, que é o que o CI de hoje realmente é; `paths` virou
+`['ngen/**', '.github/**']`. `branch-policy.yml` não foi tocada de propósito: ela recusa origem
+`theory/**`/`cargo/**` contra `main`/`remodel/*`, namespaces do fluxo de vagão que morre com esta
+limpeza — proposta de remoção registrada no §3.4 do handoff, decisão do dono.
+
+### (d) A prova: o run de teste
+
+Tag `v0.0.0-test` empurrada na branch, run **34050196515** — **11 jobs verdes**, incluindo as 5
+pernas, os 2 fixpoint, o agregador `mc build ngen && run`, a Release e o registro. A Release de
+teste trouxe os **10 arquivos** (5 tarballs + 5 `.sha256`), marcada como pre-release por causa do
+sufixo `-test`, com as notas descritas em (a). `publish-to-registry` rodou o pré-voo — `mc pkg
+hash ngen = 057e7aed…` e `ok: mc_teko.tk compiles on its own` — e **não** publicou: sem a
+variável, imprimiu o plano e saiu 0. Tag e Release de teste foram apagadas em seguida.
+
+Dois achados do run, ambos registrados no handoff:
+
+1. **O arquivo estava DESLIGADO.** O GitHub identifica workflow por CAMINHO; `release.yml` era o
+   *Bootstrap Release*, `disabled_manually` desde a limpeza de 2026-09-04, e a primeira tag não
+   disparou NADA — sem erro, sem run. Foi preciso religar por
+   `gh api -X PUT .../actions/workflows/316148340/enable`. Vai acontecer de novo na org.
+2. **O `teko0`/`teko1.o`/`teko2.o` de macos/aarch64 do CI são byte-idênticos aos construídos
+   localmente** (`aa102141…` e `d530d6b1…`) — mais uma corrida a favor de pinar um golden.

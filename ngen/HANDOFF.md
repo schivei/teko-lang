@@ -176,6 +176,72 @@ O passo que baixa e verifica o `mc` é o MESMO nas seis: `.github/actions/setup-
 composta) resolve o `latest` de `minicompiler/mc`, baixa o asset do par, confere o
 `.sha256` e assere `mc --host` — nenhum job pode testar um compilador diferente do outro.
 
+### Cortar uma versão: `release.yml` (R1, 2026-09-06)
+
+**Como se corta.** A tag É a versão; não existe arquivo de versão.
+
+```sh
+git tag -a v0.3.1 -m "teko 0.3.1" && git push origin v0.3.1
+```
+
+ou, para uma tag que **já existe**, aba Actions → *Release* → *Run workflow* com
+`version = 0.3.1` (sem o `v`; o job recusa uma versão fora de `X.Y.Z[-sufixo]` e recusa uma
+tag que não exista). Versão com `-` (`0.3.1-rc1`) publica como **pre-release**: nunca vira
+"latest" e o `mc pkg add` só a escolhe se nomeada.
+
+**Quatro jobs**, em `.github/workflows/release.yml`:
+
+| job | o que faz |
+|---|---|
+| `version` | deriva/valida tag e versão, e prova pela API que a tag existe |
+| `gate` | **é o próprio `ngen.yml`**, chamado por `workflow_call` sobre a TAG |
+| `release` | anexa os 10 arquivos à Release da tag, com notas geradas |
+| `publish-to-registry` | pré-voo do pacote; anúncio ao registro **atrás de uma variável** |
+
+**Não existe job `assets`, de propósito.** Um job que compilasse o compilador de novo
+publicaria bytes que **nenhum portão viu** — foi exatamente por isso que a `release.yml`
+anterior (do compilador velho) virou promoção. Então quem empacota é a PRÓPRIA perna, com a
+action `.github/actions/package-teko`, logo depois de rodar as fixtures contra aquele
+binário. `ngen.yml` ganhou `workflow_call` com as entradas `ref`/`package`/`version`: num
+push ou PR comum nenhuma delas vem, e o workflow se comporta como antes. O `push` do
+`ngen.yml` passou a filtrar **branches**, para a tag não disparar a matriz duas vezes.
+
+**O que a Release carrega:** 10 arquivos — `teko-<ver>-<os>-<arch>.tar.gz` + `.sha256` para
+os cinco pares (`linux-x86_64`, `linux-arm64`, `macos-arm64`, `windows-x86_64`,
+`windows-arm64`, a mesma grafia de asset do `mc`) — e notas geradas com a **versão do mc**
+que construiu, o bloco de checksums e as **tabelas de provenance do fixpoint** (tamanho e
+`sha256` de `teko0`/`teko1.o`/`teko2.o`/`teko3.o` nos dois pares). Dentro do tarball: o
+binário (`teko`, `teko.exe` no Windows), `lib/rt.tk` (um PROGRAMA teko inclui o runtime por
+caminho), `INSTALL.txt` gerado, `README.md` do `ngen/` e o `LICENSE`. O empacotamento é
+**reproduzível** (mtime fixo, lista de membros explícita e ordenada, `ustar`, `gzip -n`) —
+a mesma receita do `scripts/release-assets.sh` do `mc`.
+
+**`publish-to-registry` tem duas metades.** A primeira roda SEMPRE: `mc pkg hash ngen` e a
+compilação de cada unidade de `[package].check` pelo `mc` DE PRATELEIRA — que é o que o
+validador do registro faz na caixa dele (guia 27 §5). A segunda é o anúncio
+(`minicompiler/register-action@v1`), **atrás da variável de repositório
+`TEKO_REGISTRY_PUBLISH`**: só com ela igual a `1` o anúncio acontece; sem ela o job imprime
+o plano e sai 0 — nunca vermelho, nunca mentindo que publicou. O pacote precisa ser
+registrado **uma vez, por uma pessoa**, em <https://minicompiler.dev/me> (guia 27 §3); antes
+disso o registro responde `404 not registered`.
+
+(Detalhe medido: o runner baixa o repositório da action no *Set up job*, mesmo quando o passo
+está `if`-desligado — então `minicompiler/register-action@v1` sumir do GitHub deixaria o job
+vermelho ainda que ninguém publicasse. Hoje ela existe e é pública.)
+
+**`mc pkg check` NÃO é o que roda aqui:** ele recebe um arquivo de ÍNDICE
+(`mc pkg check INDEX.toml`) e é o gate do CI do próprio registro sobre uma linha publicada —
+não um validador de diretório. O equivalente local do que o validador faz é o par
+hash + compilação das unidades de `check`, que é o que o pré-voo executa.
+
+**ARMADILHA JÁ PAGA — o arquivo estava DESLIGADO.** O GitHub identifica um workflow pelo
+CAMINHO DO ARQUIVO, não pelo `name:`. `.github/workflows/release.yml` era o *Bootstrap
+Release* do compilador velho e estava `disabled_manually` na limpeza de 2026-09-04, então a
+primeira tag de teste **não disparou nada** — sem erro, sem run. Foi preciso religar
+(`gh api -X PUT repos/<owner>/<repo>/actions/workflows/<id>/enable`, id `316148340` no fork)
+e re-empurrar a tag. **No repositório da org isto vai acontecer de novo** se o `release.yml`
+lá nascer/for herdado desligado: conferir `gh workflow list --all` depois do primeiro push.
+
 ## 3.1a Repositórios do mc migraram para a organização `minicompiler` (2026-09-05)
 
 `schivei/mc` → **`minicompiler/mc`** (e os privados `mc-registry`/`mc-ops`). O GitHub redireciona os
@@ -201,6 +267,26 @@ tem que ser superfície do NÚCLEO. `mc_teko.tk` serve enquanto os módulos fore
 compilador (S4.4+, fork g3) tornaria o `check` recusado pelo parser de prateleira -- pesa contra o g3
 "obrigatório". mc 0.15.9 publicado (só o registro padrão muda para `https://pkg.minicompiler.dev`); o patch
 `TE_RULE` que destrava o S4.2 vem como 0.15.10.
+
+**DÍVIDA FECHADA (R1, 2026-09-06): `check = ["mc_teko.tk"]`.** Medido com o mc 0.15.12, de dentro de
+`ngen/`, as DUAS entradas antigas falhavam no `mc` de prateleira — `mc teko.tk` →
+`machine_arm64_float:332: initializer must be constant` (é fragmento: assume `<mc/host>` + o núcleo já
+incluídos) e `mc lib/rt.tk` → `lib/rt.tk:64: type expected in parameter` (o `str` de
+`void panic(str msg)` é palavra que a TEKO ensina, logo o parser de prateleira não a conhece). A única
+unidade inteira e ainda 100% núcleo é **`mc_teko.tk`** (`mc mc_teko.tk -o x.o`, exit 0). `files` ganhou
+`mc_teko.tk` + os dois arquivos que ela inclui e o pacote não embarcava (`core_teko.mc`, `user.mc`) —
+o hash de árvore cobre só `files`, e unidade de `check` fora dele é recusada. É a mesma forma do pacote
+do próprio `mc` (`check = ["src/mc_linux_x86_64.mc"]` + o `src/user.mc` que ela precisa).
+
+Hash de árvore do pacote (`mc pkg hash ngen`), depois da mudança:
+
+```
+057e7aed61f2f244d52a53b522b06fb84eaf88d552247e37060ea651761424d5   (antes: d41a0c80…1a7ada)
+```
+
+A ressalva do adendo continua **viva**: teko-ificar o compilador (S4.4+, fork g3) torna `mc_teko.tk`
+ilegível para o parser de prateleira e o pacote perde o `check`. Não há hoje uma segunda unidade
+candidata — `lib/rt.tk` só voltaria a ser `check` se `panic` deixasse de usar `str` na assinatura.
 
 ## 3.2 O mc que o CI usa hoje: 0.15.12 (2026-09-06)
 
@@ -322,6 +408,71 @@ crumb 2), README do `lx` com `MAXPARAMS` 12. **Segue aberto no mc:** hook de dec
 de função (C6 — `on_param` ou geral) e `syntax_infix` sobre operador do core morrendo em
 silêncio no `ops_init()` (rota do C5 é `pass()` de qualquer forma). Ao sair release nova:
 baixar, trocar o symlink, **reconferir o baseline** (§4).
+
+## 3.4 Gates e releases para a org (R1, 2026-09-06)
+
+O dono vai cortar uma versão estável, mergear `fix/retirement` na `main` e abrir PR para
+`teko-org/teko-lang`, que passa a ser o repositório de trabalho. O que a org precisa exigir,
+e o que deixa de existir:
+
+### Os checks que o ruleset da `main` deve exigir
+
+| check | de onde vem | obrigatório? |
+|---|---|---|
+| `mc build ngen && run` | job `gate` de `ngen.yml` (agrega as 5 pernas) | **SIM** — é o único hoje |
+| `fixpoint (linux/x86_64)` | job `fixpoint` de `ngen.yml` | opcional, **recomendado** |
+| `fixpoint (macos/aarch64)` | job `fixpoint` de `ngen.yml` | opcional, **recomendado** |
+
+O agregador continua sendo o nome que o ruleset atual exige e **não mudou de significado**:
+ele depende só da matriz `leg` e fica verde quando as cinco pernas ficam. As cinco pernas
+individuais (`ngen (linux/x86_64)`, …) NÃO precisam entrar no ruleset — o agregador já
+falha se qualquer uma falhar; listá-las só duplica.
+
+Promover as duas pernas de `fixpoint` a obrigatórias é decisão de ruleset, e a recomendação é
+SIM: elas provam coisa diferente das pernas (que o compilador se reproduz, `teko2.o == teko3.o`),
+custam ~1 min e já rodam em todo push/PR. O único efeito colateral é que um PR que quebre o ponto
+fixo passa a ser barrado em vez de apenas reportado — que é o que se quer de uma linguagem
+auto-hospedada.
+
+### O que SAI
+
+* **"CI gate" e "Test suite gate"** (do `pr.yml`) — os checks do compilador velho. Já não
+  fechariam nunca; o `pr.yml` foi apagado nesta entrega.
+* **Os 17 workflows legados.** Oito arquivos foram removidos (`pr.yml`, `nightly.yml`,
+  `reseed-bootstrap.yml`, `seed-linux-fork.yml`, `tag-on-version-bump.yml`, `theory.yml`,
+  `theory-generation-decay.yml`, `mirror-pr-to-org.yml`); o resto dos `disabled_manually` são
+  workflows de branches de teoria que nunca existiram nesta árvore.
+* **`mirror-pr-to-org.yml`** em especial: com o trabalho MUDANDO para a org, espelhar PR do fork
+  para lá deixa de fazer sentido.
+* **A perna `c-cpp` do CodeQL**, que compilava `src/runtime/teko_rt.c` e `src/assert/assert.c` —
+  árvore congelada. Fica a perna `actions` (o CI agora é workflow + action composta com
+  `contents: write`, que é a classe de coisa que esse analisador existe para ler).
+
+### O que FICA, com ressalva: `branch-policy.yml`
+
+O check chama-se **`Branch policy gate`** e recusa um PR cuja ORIGEM seja `theory/**` ou
+`cargo/**` contra base `main`/`remodel/*`. São namespaces do fluxo de **vagão/esteira** que morre
+com esta limpeza: sem `theory/*` e sem vagões, o gate é no-op, não regra. **Proposta ao dono:**
+apagar `branch-policy.yml` junto com o resto do fluxo antigo, ou — se ele quiser manter uma cancela
+de origem — reescrevê-la para o que a org realmente vai proibir (ex.: PR direto de branch de agente
+para `main` sem passar por `fix/retirement`). Não foi tocada nesta entrega porque mudar o que um
+ruleset pode exigir é decisão do dono, não do implementador.
+
+### Órfãos que sobraram (relatados, não removidos)
+
+`scripts/**` (a maquinaria shell/PowerShell da escada velha: `produce_assets.sh`,
+`nightly_tag.sh`, `fixpoint_gate.sh`, `ci_producer_matrix.sh`, `win/*.ps1`, …) e os dois arquivos
+de dados que só o `pr.yml` lia — `.github/ci-lane-exceptions.txt` e `.github/sast-baseline.txt` —
+não têm mais nenhum leitor. Nenhum dos quatro workflows sobreviventes os referencia. Apagá-los é
+varredura de `src/` congelado, fora do escopo desta entrega.
+
+### Religar o `release.yml` na org
+
+Ver a armadilha no fim do §3.1: o GitHub identifica workflow por **caminho de arquivo**. Se o
+`release.yml` chegar à org herdando o estado `disabled_manually` do *Bootstrap Release*, a tag não
+dispara NADA e não há erro nenhum para ler. Conferir com `gh workflow list --all` depois do
+primeiro push, e religar por
+`gh api -X PUT repos/teko-org/teko-lang/actions/workflows/<id>/enable`.
 
 ## 4. Loop local — o `mc` vem da RELEASE, não de submodule
 
