@@ -1509,6 +1509,80 @@ contextual contra um `delegate` declarado abaixo.
 Plano: `docs/design/plano-ngen-entrega4.md` §50 (O1 desta série; O2/O3/I1/G1 seguem na fila). Sem
 PR, sem dreno -- branch `feat/ngen-o1-fwd`, forward-only para `fix/retirement`.
 
+**O2 LANDADO** (§50, 2026-09-05/06): usos que precisam do CORPO -- `.`, `new`, membro estático --
+deferidos para um pass, fechando o bloco §50 (b2) inteiro e três ressalvas do verificador do O1.
+
+- **`.` sobre receptor PFWD** (`teko_expr.mc`'s `tk_dot`): quando `tk_struct_of_expr` acha um `si`
+  cujo `sr_part_at(si) == TK_PFWD` -- um local, um campo ou um retorno de tipo declarado abaixo cuja
+  identidade já foi materializada, mas o corpo (campos/métodos) ainda não -- o acesso DEFERE pela
+  MESMA máquina que um parâmetro já usava (`tk_defer_member`/`tk_pend_do`, teko_typeof.mc): nenhuma
+  linha nova, o oráculo resolve pelo TIPO uma vez que a declaração real tiver sido lida.
+- **`new Nome(args)` sobre PFWD** (`teko_expr.mc`): duas tabelas novas (`nf_*`, o pending de `new`;
+  `TK_MAXNFWD 32`) -- os argumentos são lidos no PARSE (o parser é quem tem os tokens), o nó fica
+  tipado desde já (`tk_xt_add(n, si, 0)`, pure=0: possuído) e a escolha do construtor, a recusa de
+  `abstract` e `tk_close_open` esperam `tk_fwd_resolve_all_new`, chamado de `tk_fwd_pass` DEPOIS do
+  backstop de decisão 14. `tk_new()` também materializa `tk_fwd_row(name)` quando `new` é o PRIMEIRO
+  uso do nome (nenhum campo/local o adiantou), e recusa cedo `interface`/`delegate` sobre uma linha
+  ainda PFWD com mensagem própria (delegado: dívida nova, nunca testada pelo fixture).
+- **`Tipo.membro` estático sobre PFWD** (`teko_access.mc`): a mesma ideia, tabela `st_*`
+  (`TK_MAXSTFWD 32`) -- só a FORMA (load/store/call) e o argumento/valor já parseados são gravados
+  (`tk_fwd_defer_static`); `tk_fwd_resolve_static_one` refaz o dispatch de quatro vias que
+  `tk_static_member` já fazia (const, então `call`→método, então propriedade, então campo) sobre o
+  `si` agora adotado.
+- **Ressalva 3 do O1 fechada** (a mais séria: `tk_struct_find`/`tk_deleg_find` aceitavam um
+  placeholder como se fosse corpo cheio). `tk_deleg_find` (teko_deleg.mc) e `tk_conf_name`
+  (teko_class.mc, base/interface -- o sítio que O3 ainda vai herdar) agora tratam
+  `sr_part_at(si) == TK_PFWD` como "não encontrado": um delegado ainda-PFWD cai no refuse claro de
+  `tk_new()` em vez de ser tratado como um delegado de zero parâmetros, e uma base ainda-PFWD cai na
+  recusa "unknown base class or interface" de sempre em vez de derivar um layout vazio. Provado por
+  probe: `abstract class B` declarada abaixo + `B b = new B();` → `an abstract class is not
+  instantiated: B` **na linha do sítio** (não da declaração).
+- **Ressalva 2 fechada** (tipo QUALIFICADO `A.Item` acima da declaração): duas peças. (1)
+  `tk_ns_walk` (teko_ns.mc) reconhece um segmento cujo JOIN ainda é só forward-scanned
+  (`tk_fwd_row(probe) >= 0`) e para de estender exatamente como já parava para um tipo real; (2)
+  **achado que o §50 (b2) não previu**: o SEGMENTO da esquerda (`A`/`Geo`) só vira palavra reservada
+  (`syntax_stmt`/`syntax_expr` → `tk_ns_seg_stmt`/`tk_ns_seg_expr`) quando a declaração REAL de
+  `namespace A { ... }` é lida (`tk_ns_seg_register`, teko_ns.mc) -- então `Geo.Item` escrito ANTES
+  de `namespace Geo { ... }` nem chegava a disparar o hook qualificado. Fechado ensinando a VARREDURA
+  a reservar esse mesmo segmento (`tk_fwd_try_namespace` chama `tk_ns_seg_register(seg0)`,
+  idempotente, teko_fwd.mc) -- `tk_ns_seg_stmt`/`tk_ns_seg_expr` então tratam `sr_part_at(si) ==
+  TK_PFWD` do jeito que `tk_type_expr` trata (`tk_fwd_defer_static`). `tk_ns_seg_stmt`'s próprio
+  ramo de var-decl (`A.Item x;`) já funcionava sem mudança nenhuma -- é identidade-só (O1).
+- **Coerção de delegate posterior NÃO precisou de código novo** (`Op f = add;` com `delegate Op`
+  abaixo): `tk_type_stmt` já roteia por `tk_struct_find_fwd` (O1) e `tk_is_deleg(si)` já responde
+  certo sobre um PFWD (o `kind` é conhecido desde a varredura); `tk_deleg_var`/`tk_deleg_coerce`
+  rodam em `tk_deleg_pass`, que só executa DEPOIS que a unidade inteira -- incluindo a declaração real
+  do delegate -- já foi lida. A entrada do (b2) para esse sítio já descrevia o estado atual, não uma
+  dívida.
+- **Ressalva 1 (`#include "x.tk"` cru não varrido) permanece dívida, registrada, não fechada.** Não
+  há hook do núcleo que avise um módulo de um `#include` cru (`do_directive` é interno), e ler o
+  arquivo incluído do disco por fora do lexer exigiria uma primitiva de I/O que a superfície do `mc`
+  hoje não expõe a um módulo -- e o pedido `on_source(&fn)` do §50(d) resolveria isso de graça e
+  cobre TODA fonte empurrada (incluída, embutida ou `import`ada), sem inventar uma segunda rota
+  paralela só para o caso cru. Teko escreve `import`; o `#include` cru fica sem a ordem livre.
+- **Fixture** `order_types.tk` cresceu (exit 42 recalculado): `box_value(Box b)` chama um método
+  sobre um PARÂMETRO de tipo posterior; `o2_checks()` constrói `new Box(41)` (construtor COM
+  argumento) antes de `class Box`, lê `Box.STEP` (const) e `Box.made` (`static`, incrementado no
+  ctor) antes da declaração real, e fecha com `rt_live()` de volta ao piso (`floor + 2` até o
+  `return`, `floor` depois -- só `b`/`oau` ficam vivos ali dentro); `OpAddUser` coage `op_add` (uma
+  função livre) para `Op f`, delegate declarado abaixo; `qual_check()` constrói `new Geo.Item()`
+  ANTES de `namespace Geo { ... }` (a mesma `Geo` que só abre de verdade mais abaixo no arquivo).
+  Probes (fora de `tests/`, descartadas): `new` de `abstract` posterior -- recusa na linha do SÍTIO,
+  não da declaração; `b.nope()` sobre `Box` posterior -- `unknown member of Box: nope`; `new Box(3)`
+  sobre `Box` com construtor `private` -- `Box.Box is private`; um tipo NUNCA declarado (`Ghost`) --
+  reproduz o mesmo achado do O1 (decisão 14, o backstop "is used but never declared" só dispara por
+  um falso positivo real da varredura; um nome genuinamente inexistente já falha antes, no núcleo,
+  com `expected ; after expression` -- nenhum programa sintaticamente válido chega a acionar SÓ esse
+  backstop).
+
+Gate: `rm -rf ngen/build`, build do zero; `--entry-only` **40/40** (nenhuma fixture nova); `--dump-ast`
+das **39 não tocadas byte-idêntico** ao compilador da base `d9e51b5b` (`same=39 diff=0`); `mc limits`
+`verdict ok`, `intrin` 8/16 nos dois lados (zero intrínseco novo), `passes` 14/13 (a mesma `tk_fwd_pass`
+do O1, sem pass nova -- O2 estendeu o corpo dela).
+
+Plano: `docs/design/plano-ngen-entrega4.md` §50 (O2 desta série; O3/I1/G1 seguem na fila; §52 tem a
+errata). Sem PR, sem dreno -- branch `feat/ngen-o2-defer`, forward-only para `fix/retirement`.
+
 ## 5.1 Armadilhas já pagas (não repita)
 
 1. **`mc --exe` emite Mach-O SEMPRE.** `minicompiler/mc` `src/main.mc:227` faz
@@ -1668,6 +1742,17 @@ PR, sem dreno -- branch `feat/ngen-o1-fwd`, forward-only para `fix/retirement`.
     nada a ver com O1. A correção: não existe um segundo bit — `sr_part_at(si) == TK_PFWD` no fim
     da unidade JÁ significa "foi materializado por um uso e nunca adotado"; qualquer outro estado
     (inclusive o `TK_PWHOLE` de uma declaração comum) significa "resolvido", sem tabela extra.
+22. **`tk_struct_find_exact` de um JOIN qualificado não basta para dizer "este segmento é uma
+    palavra reconhecida" -- o SEGMENTO em si só é reservado pela declaração REAL do namespace
+    (§50 O2, achado durante a ressalva 2).** `geo.Circle` só dispara `tk_ns_seg_stmt`/
+    `tk_ns_seg_expr` porque `namespace geo { ... }`, ao ser PARSEADA de verdade, chama
+    `tk_ns_seg_register("geo")` (`syntax_stmt`/`syntax_expr` sobre a palavra "geo" em si, não sobre
+    o nome qualificado "geo__Circle"). Ensinar `tk_ns_walk`/`tk_fwd_row` a materializar
+    "geo__Circle" como PFWD não adianta nada se "geo" nunca virou uma palavra hookada -- o parser
+    lê `Geo.Item` como dois tokens soltos e erra `expected ; after expression` bem antes de qualquer
+    tabela de forward ser consultada. Correção: a VARREDURA (`tk_fwd_try_namespace`, teko_fwd.mc)
+    chama `tk_ns_seg_register` no MESMO instante em que reconhece o cabeçalho `namespace A.B { ... }`
+    -- idempotente, mesma função que a declaração real chama, sem tabela paralela.
 
 ## 5.2 Canal com a sessão do mc
 
