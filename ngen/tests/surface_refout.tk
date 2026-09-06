@@ -40,6 +40,13 @@
 //      the check read the enclosing declaration instead of the unit-wide
 //      table of locals, which answers with the unrelated `Box`. A
 //      mismatched scalar (`ref i64` given a `ref u8`) is a probe.
+//  11. `narrowcheck` (K2w) -- a POINTEE narrower than a word: the slot of a
+//      `ref`/`out` parameter is declared at pointer width, so the address it
+//      carries is no longer stored and reloaded at the pointee's own 1/2/4
+//      bytes (which truncated it: `bumpb(ref u8 b)` faulted). `bumpb` writes
+//      one byte and wrapping at 255 proves it is one byte, not eight;
+//      `set32` writes a negative `i32` through an `out`; and `relayb` repasses
+//      a `ref u8` PARAMETER one level down.
 //
 // expect-exit: 42
 
@@ -269,6 +276,37 @@ i64 scopecheck() {
     return 0;
 }
 
+void bumpb(ref u8 b) {
+    b = b + 1;
+}
+
+void relayb(ref u8 b) {
+    bumpb(ref b);
+}
+
+void set32(out i32 w) {
+    w = 0 - 70000;
+}
+
+i64 narrowcheck() {
+    u8 b = 7;
+    bumpb(ref b);
+    if (b != 8) return 1;
+
+    u8 top = 255;
+    bumpb(ref top);
+    if (top != 0) return 2;                       // one byte wide, so it wraps
+
+    u8 r = 200;
+    relayb(ref r);
+    if (r != 201) return 3;
+
+    i32 w = 1;
+    set32(out w);
+    if (w != 0 - 70000) return 4;                 // wider than u16, still signed
+    return 0;
+}
+
 i64 main() {
     i64 bad = scheck();
     if (bad != 0) return 10 + bad;
@@ -305,6 +343,9 @@ i64 main() {
 
     bad = scopecheck();
     if (bad != 0) return 110 + bad;
+
+    bad = narrowcheck();
+    if (bad != 0) return 120 + bad;
 
     return 42;
 }
