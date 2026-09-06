@@ -9,16 +9,21 @@
 //
 // `type_new("ref", 8, 8, TK_INT)` / `type_new("out", ...)` give the two words
 // an identity distinct from `uptr` (D221) and reserve them; a `ref T`/`out T`
-// PARAMETER is built with `nd_type` set to the POINTEE `T`, not to this
-// identity -- the oracle (`tk_ty_scope_params`, teko_typeof.tk) therefore
-// needs zero change, and overload/operator resolution over the parameter
-// already sees `T`. The identity lives ONLY in a side table keyed by the
-// PARAMETER NODE (`tk_rp_add`/`tk_rp_kind`/`tk_rp_pointee`): a node index is
-// already the unique, collision-free identity every other table in this
-// project keys structural data by (teko_struct.tk's `xt_*`, teko_typeof.tk's
-// pending members), and it sidesteps the ambiguity a bare (name, index) pair
-// would have across two overloads that differ only in a parameter's TYPE at
-// the same position (`f(ref i64)` next to `f(ref Circle)`).
+// PARAMETER is declared with POINTER width (`TY_UPTR`, K2w) -- what it really
+// carries is an ADDRESS, and a parameter declared with a POINTEE narrower than
+// a word (`u8`, `i32`, `bool`) had that address stored and reloaded at the
+// pointee's own width, which truncates it: `bump(ref u8 x)` faulted. The
+// POINTEE lives in a side table keyed by the PARAMETER NODE
+// (`tk_rp_add`/`tk_rp_kind`/`tk_rp_pointee`), and `tk_param_ty`/
+// `tk_decl_param_ty` below are the ONE pair every reader of a parameter's type
+// goes through, so the oracle (`tk_ty_scope_params`, teko_typeof.tk), the
+// mangling, overload/operator resolution and every argument check keep seeing
+// `T`, never the `uptr` the slot is laid out as. A node index is already the
+// unique, collision-free identity every other table in this project keys
+// structural data by (teko_struct.tk's `xt_*`, teko_typeof.tk's pending
+// members), and it sidesteps the ambiguity a bare (name, index) pair would
+// have across two overloads that differ only in a parameter's TYPE at the same
+// position (`f(ref i64)` next to `f(ref Circle)`).
 //
 // SITE: `f(ref a)`/`f(out a)` is mandatory, C#-style, through `syntax_expr`
 // (`tk_ref_arg`/`tk_out_arg`) firing in `parse_primary`, exactly where a call
@@ -198,6 +203,25 @@ i64 tk_decl_param_node(i64 d, i64 i) {
     return 0 - 1;
 }
 
+// the type a PARAMETER node STANDS for: its own declared type for an ordinary
+// parameter, and the POINTEE for a `ref`/`out` one, whose declared type is the
+// pointer width the address needs (K2w). Every site that used to read
+// `nd_type` off a parameter reads this instead.
+i64 tk_param_ty(i64 p) {
+    i64 r = tk_rp_row(p);
+    if (r < 0) return nd_type(p);
+    return rp_ty_at(r);
+}
+
+// the same question by INDEX of a declaration, for the sites that ask the
+// core's own `decl_param_type` -- which answers the DECLARED type, `uptr` for
+// a `ref`/`out` parameter since K2w
+i64 tk_decl_param_ty(i64 d, i64 i) {
+    i64 p = tk_decl_param_node(d, i);
+    if (p < 0) return decl_param_type(d, i);
+    return tk_param_ty(p);
+}
+
 uptr tk_ref_kindname(i64 kind) {
     if (kind == TK_RP_OUT) return "out";
     return "ref";
@@ -208,7 +232,7 @@ uptr tk_ref_kindname(i64 kind) {
 // helper `tk_sig_of` (teko_class.tk) and `tk_ov_sig` (teko_over.tk) both call
 uptr tk_ty_sfx(i64 p) {
     i64 rk = tk_rp_kind(p);
-    uptr base = tk_ty_mangle_name(nd_type(p));       // K3: `T[]`'s own name is unsafe in a symbol
+    uptr base = tk_ty_mangle_name(tk_param_ty(p));   // K3: `T[]`'s own name is unsafe in a symbol
     if (rk == TK_RP_NONE) return base;
     return tk_join(tk_join(tk_ref_kindname(rk), "_"), base);
 }
@@ -340,7 +364,7 @@ i64 tk_ref_param_named(uptr name) { return tk_rp_named_in(tk_ref_cur_fn, name); 
 // caller's slot address, so the store goes straight through it -- a counted
 // pointee is left as an ordinary N_ASSIGN, `teko_rc.tk`'s own exception
 void tk_ref_rewrite_assign(i64 n, i64 pn) {
-    i64 store = tk_arr_store(nd_type(pn), tk_id(nd_name(n)), nd_a(n));
+    i64 store = tk_arr_store(tk_param_ty(pn), tk_id(nd_name(n)), nd_a(n));
     set_nd_kind(n, N_EXPRSTMT);
     set_nd_name(n, 0);
     set_nd_a(n, store);
@@ -357,7 +381,7 @@ i64 tk_ref_param_ty(uptr name) {
     i64 p = nd_a(tk_ref_cur_fn);
     loop {
         if (p == 0) break;
-        if (nd_name(p) != 0 && str_eq(nd_name(p), name)) return nd_type(p);
+        if (nd_name(p) != 0 && str_eq(nd_name(p), name)) return tk_param_ty(p);
         p = nd_next(p);
     }
     return 0 - 1;
@@ -422,7 +446,7 @@ uptr tk_pointee_name(i64 ty) {
 // name (a global, an ambiguous local) is silently skipped, the same rule
 // `tk_check_field_store` gives an unknown source.
 void tk_ref_check_pointee(i64 pn, i64 a, i64 line, uptr fl) {
-    i64 pty = nd_type(pn);
+    i64 pty = tk_param_ty(pn);
     i64 aty = tk_ref_arg_pointee(a);
     if (aty < 0) return;
     if (aty == pty) return;
@@ -480,14 +504,14 @@ void tk_ref_walk(i64 n) {
             if (pn >= 0) {
                 tk_rp_mark_seen(pn);
                 tk_ref_walk(nd_a(n));
-                if (!tk_is_counted(nd_type(pn))) tk_ref_rewrite_assign(n, pn);
+                if (!tk_is_counted(tk_param_ty(pn))) tk_ref_rewrite_assign(n, pn);
                 n = nd_next(n);
                 continue;
             }
         } else if (k == N_IDENT) {
             i64 pn = tk_ref_param_named(nd_name(n));
             if (pn >= 0) {
-                tk_ref_replace(n, tk_arr_load(nd_type(pn), tk_id(nd_name(n))));
+                tk_ref_replace(n, tk_arr_load(tk_param_ty(pn), tk_id(nd_name(n))));
                 n = nd_next(n);
                 continue;
             }
@@ -554,7 +578,7 @@ void tk_ref_out_prologue(i64 f) {
     i64 p = nd_a(f);
     loop {
         if (p == 0) break;
-        if (tk_rp_kind(p) == TK_RP_OUT && tk_is_counted(nd_type(p)))
+        if (tk_rp_kind(p) == TK_RP_OUT && tk_is_counted(tk_param_ty(p)))
             pre = list_append(pre, tk_stmt(tk_call2("rt_store", tk_id(nd_name(p)), tk_int(0))));
         p = nd_next(p);
     }
