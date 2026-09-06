@@ -1617,7 +1617,10 @@ D218/D219/D220. Lido: `mc/docs/guide/96-a-new-primitive.md`, `hooks.md` §3/§4,
 9. **`null` entra na superfície** (`syntax_expr("null")`, `N_INT 0` tipado `TY_UPTR`): `Op f = null;`
    / `Circle c = null;`; `rc_dec(0)`/`rt_own(0)` já são no-op. Chamar um delegate nulo é PÂNICO, não
    segfault: `tk_deleg_code(uptr d)` (nova, `lib/rt.mc`) checa e chama `rt_panic`.
-10. **`ref`/`out` = DOIS `type_new`, mais tabela de apontado.** `type_new("ref", 8, 8, TK_INT)` e
+10. **`ref`/`out` = DOIS `type_new`, mais tabela de apontado.** *(Errata K2w, §72: o parâmetro NÃO é
+    declarado com o tipo do apontado — nasce com largura de PONTEIRO (`TY_UPTR`), porque carrega um
+    endereço; o apontado fica só na tabela lateral, lido por `tk_param_ty`/`tk_decl_param_ty`.)*
+    `type_new("ref", 8, 8, TK_INT)` e
     `type_new("out", …)` dão a identidade que o oráculo distingue de `uptr` (D221) e reservam as duas
     palavras do C#; um id por `ref T` explodiria a tabela de palavras, então o tipo APONTADO mora
     numa tabela do módulo, chaveada por (declaração, índice). **Medido, não presumido:** `word_add`
@@ -1629,7 +1632,8 @@ D218/D219/D220. Lido: `mc/docs/guide/96-a-new-primitive.md`, `hooks.md` §3/§4,
     para um local, e para `ref p.x`/`ref a[i]` o mesmo nó de endereço que o store de `.`/`[` já
     constrói (`teko_expr.mc` `tk_field_use`, `teko_array.mc` `tk_arr_addr`).
 12. **Deref implícito num `pass()`, e o oráculo vê T desde já.** `tk_ty_scope_params` registra o
-    parâmetro `ref T`/`out T` com o tipo APONTADO, então `tk_ty_of`, sobrecarga e operadores acertam
+    parâmetro `ref T`/`out T` com o tipo APONTADO — *desde a K2w (§72) pela tabela lateral
+    (`tk_param_ty`), não pelo `nd_type` do nó* —, então `tk_ty_of`, sobrecarga e operadores acertam
     sem esperar; só o rebaixamento (`x` → `ldW(x)`, `x = e` → `stW(x, e)`) é do pass, antes de
     `tk_ops_pass` e de `tk_rc_pass`. D227: escopo e posse têm UM dono, o pass.
 13. **`ref T` de tipo contado escreve pelo SLOT do caller.** `x = e` no corpo vira `rt_store(x, e)`
@@ -4291,3 +4295,117 @@ consumidor de `nd_type(p)` (mangling `tk_ty_sfx`, `tk_arr_load`/`tk_arr_store` d
 o apontado da tabela lateral (`tk_rp_pointee`) — redesenho do K2, não higiene. Registrado aqui e
 no HANDOFF §5; a checagem do item A NÃO o mascara (ela recusa a MISTURA de larguras, não o uso
 correto de um `ref u8`).
+
+
+## 72. K2w — `ref`/`out` nasce com largura de PONTEIRO (2026-09-06)
+
+Fecha a dívida do §71(d). Base: o tip de `fix/retirement` em `cc539258`; dois commits —
+`cf95af7d` (o parâmetro declarado) e `3a684eda` (o thunk de delegate).
+
+### (a) O defeito, e por que era do desenho e não do mc
+
+Um parâmetro `ref T`/`out T` era DECLARADO com o tipo do apontado (K2, D221, §41 decisões 10/12:
+era o que dava oráculo, mangling e overload de graça), mas o que ele carrega é um ENDEREÇO. O mc
+gera o store/load do slot de um parâmetro com `type_width(nd_type(param))`
+(`machine_arm64.mc:190`/`:336`, `machine_x86_64.mc:227`/`:322`), então para todo `T` de largura
+1/2/4 (`u8`/`i8`/`u16`/`i16`/`u32`/`i32`/`bool`) o ponteiro era TRUNCADO na entrada da função:
+`void bumpb(ref u8 x) { x = x + 1; }` chamado com um `u8` faltava (SIGSEGV, 139). O mesmo em
+dialeto mc puro (`void poke(u8 x) { st8(x, 5); }` com `&b`) falta igual — o mc está certo, o tipo
+declarado do parâmetro é que estava errado. Largura 8 (`ref i64`, `ref uptr`, `ref` de classe) não
+era afetada, e é o que todas as fixtures usavam.
+
+### (b) A correção: um par de acessores, e o resto é mecânico
+
+O slot passa a ser `TY_UPTR` nos DOIS sítios que constroem um (`tk_default_param` para função
+livre/lambda, `tk_params` para método), e o apontado continua exatamente onde a K2 já o punha: a
+tabela lateral chaveada pelo NÓ do parâmetro (`tk_rp_add`/`tk_rp_pointee`). O que muda é a FONTE
+que todo consumidor lê:
+
+- **`tk_param_ty(p)`** (teko_ref.tk) — o tipo que um nó de parâmetro REPRESENTA: o apontado quando
+  há linha na tabela, o próprio `nd_type` quando não há.
+- **`tk_decl_param_ty(d, i)`** — a mesma pergunta por ÍNDICE, para os sítios que chamavam
+  `decl_param_type` (a API do núcleo, que responde o `uptr` DECLARADO).
+
+Censo dos sítios convertidos (todos os que liam o tipo de um PARÂMETRO; depois da conversão, o
+grep de `nd_type(p…)`/`decl_param_type(` sobre a árvore inteira do `ngen/` responde só quatro
+linhas, todas legítimas: as duas comparações de `teko_params.tk` com `tk_ty_params` — que um
+`ref`/`out` nunca é — e os dois acessores novos, que são quem lê o nó cru):
+
+| arquivo | sítio | o que lia |
+| --- | --- | --- |
+| teko_ref.tk | `tk_ty_sfx` | mangling `ref_i64`/`out_Circle` (símbolo INALTERADO) |
+| teko_ref.tk | `tk_ref_rewrite_assign` | a largura de `stW(x, e)` |
+| teko_ref.tk | `tk_ref_walk` (N_IDENT) | a largura de `ldW(x)` |
+| teko_ref.tk | `tk_ref_walk` (N_ASSIGN) | `tk_is_counted` do apontado |
+| teko_ref.tk | `tk_ref_out_prologue` | `tk_is_counted` do `out` zerado |
+| teko_ref.tk | `tk_ref_param_ty` | o apontado de um argumento REPASSADO (higiene 3) |
+| teko_ref.tk | `tk_ref_check_pointee` | o apontado do PARÂMETRO (apontado × apontado) |
+| teko_typeof.tk | `tk_ty_scope_params` | o oráculo (e, por ele, `tk_rc_assign`) |
+| teko_over.tk | `tk_ov_args_fit` | o tipo do parâmetro contra o do argumento |
+| teko_over.tk | `tk_ov_refout_pair_clash` | `f(ref i64)` × `f(out i64)` |
+| teko_rc.tk | `tk_rc_call_args` | checagem de argumento por índice |
+| teko_expr.tk | `tk_vcall_args_check` | idem, chamada virtual |
+| teko_expr.tk | `tk_field_use` (slot de delegate) | o parâmetro é de tipo delegate? |
+| teko_deleg.tk | `tk_deleg_set_sig`/`check_sig`/`check_call_args`/`tk_lambda_check_params` | a assinatura do delegate |
+| teko_iface.tk | `tk_ifargs_check` | idem, chamada por itab |
+| teko_ops.tk | `tk_op_owns_operand`/`tk_op_declare` | os operandos de um operador |
+| teko_di.tk | `tk_di_ctor_satisfiable`/`tk_di_ctor_args` | a chave de serviço de um parâmetro |
+
+Como o mangling lê o APONTADO, nenhum símbolo muda: `bump__ref_i64` continua `bump__ref_i64`, e o
+`--dump-syms` das 45 fixtures é byte-idêntico ao da base.
+
+### (c) O segundo commit: o thunk de delegate era um parâmetro gerado com o mesmo defeito
+
+`tk_deleg_thunk_fn` (K1) declarava os parâmetros do forwarder com `dg_pty_at` — o APONTADO —, e o
+thunk é gerado DURANTE o pass de delegate, depois de o `tk_ref_pass` já ter passado, então nada o
+corrigia. `delegate void Bump(ref u8 x)` preenchido com uma função nua truncava o endereço na
+entrada do thunk (`ref i64` não era afetado; a LAMBDA nunca foi, porque os parâmetros dela são
+lidos por `parse_params` e portanto já nascem no slot certo).
+
+A assinatura do delegate passa a registrar o KIND de cada parâmetro (`dg_pk`, ao lado de
+`dg_pty`), e `dg_pslot_at` é o que o thunk declara: `uptr` para um slot `ref`/`out`, o apontado nos
+demais. Com o kind na assinatura, três checagens que não podiam existir passam a existir:
+`tk_deleg_check_sig` (uma função por valor não preenche mais um slot `ref`, nem o inverso),
+`tk_lambda_check_params`, e `tk_deleg_check_arg_kinds` no SÍTIO DE CHAMADA — que dá as mesmas duas
+mensagens que `tk_ref_check_call` já dá a uma chamada direta. `tk_deleg_sig_str` soletra o kind, e
+uma incompatibilidade lê `Bump(ref u8)`.
+
+### (d) Gate
+
+Host macOS/aarch64, `mc` 0.15.8. `rm -rf ngen/build`, build do zero; laço `--entry-only`
+**45/45**; **nenhuma fixture nova** (uma tocada, `surface_refout.tk`); `ngen/mc.toml` intocado;
+`mc limits ngen --config` `verdict ok`, `intrin 8/16` e `passes 15/30` — os MESMOS da base (zero
+intrínseco novo, zero pass nova); `lib/rt.tk` intocado.
+
+`--dump-ast` das 45 contra o compilador da base `cc539258`: **44 byte-idênticas** (nenhuma outra
+fixture declara `ref`/`out`) e **1 com diff próprio** — `surface_refout.tk`, cujo diff é
+exatamente 14 linhas `PARAM type=<apontado>` viradas `PARAM type=uptr` mais o `narrowcheck` novo.
+`--dump-syms` das 45, base contra tip, sobre as fixtures ATUAIS: **byte-idêntico nas 45**.
+
+Fixture: `surface_refout.tk` ganha `narrowcheck` (`expect-exit: 42` mantido) — `ref u8` escrito e
+lido pelo apontado, o wrap em 255 provando que o store é de UM byte e não de oito, um `ref u8`
+repassado um nível abaixo, e um `i32` negativo escrito por um `out`.
+
+Probes (em `ngen/_probe/`, fora de `ngen/tests/`, descartados), cada um rodado TAMBÉM contra o
+compilador da base para separar correção de regressão: `ref u8`/`ref i32`/`out u16`/`ref bool` +
+repasse (base 139, tip 42); `ref` de campo `u8` e de elemento de array `u8` (base 139, tip 42);
+sobrecarga `g(u8)` × `g(ref u8)` e método `twice(ref u8)` (base 139, tip 42); `f(ref u8)` ao lado
+de `f(out i64)` — apontados distintos, aceitos (base 139, tip 42; com o `nd_type` cru os dois
+slots seriam `uptr` e o par seria recusado por engano); interface + `override` virtual com
+`ref u8` e `ref` de classe, `rt_live()==0` no fim (base 139, tip 42); genérico
+`Holder<i64,2>` com método `ref u8` (tip 42); `out C`/`ref C` de classe com destrutor e
+`rt_live()==0` (base 42, tip 42 — largura 8 não regride); delegate com `ref u8` por função nua
+(base 139, tip 42) e por lambda (tip 42); `ref i64` por delegate (base 42, tip 42). Recusas, todas
+mantidas: `ref u8` recebendo `ref u16` e o mesmo por repasse (`a value of type u16 does not
+convert to u8`), argumento sem `ref` (`argument 1 needs \`ref\` at the call site`), `ref` num
+parâmetro por valor, `out` nunca atribuído, `f(ref u8)` + `f(out u8)`, `ref x;` como local,
+função por valor num slot `ref` de delegate, lambda por valor idem, e chamada de delegate sem
+`ref`.
+
+### (e) Dívida ADJACENTE achada (não é deste crumb)
+
+**`ref f64` compila e devolve o valor errado, no tip E na base** (`bumpf(ref f64 v)` sobre `1.5`
+não vira `2.5`): a largura é 8, então NÃO é o defeito do K2w, e o comportamento é idêntico antes e
+depois. A causa é outra — o deref usa `ld64`/`st64` (`tk_arr_load`/`tk_arr_store`, inteiros), e a
+aritmética do corpo é de ponto flutuante; um `ref` de f64 precisa do par de load/store de FLOAT.
+Registrado aqui e no HANDOFF §5; não foi tocado.
