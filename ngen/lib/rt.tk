@@ -322,6 +322,30 @@ uptr tk_va_put(uptr xs, i64 i, i64 v) {
     return xs;
 }
 
+// one capture of a closure, written into the object AT THE CREATION SITE
+// (teko_deleg.tk, higiene 3 item B). The chain is the same shape a `params`
+// list is built with, and for the same reason -- a store is a statement and
+// the whole closure has to be ONE expression -- so each link hands the object
+// back to the next. The allocator therefore takes the object and no capture
+// at all: `MAXPARAMS` (12, the mc ABI) stops bounding how many names one
+// `use (...)` may hold.
+//
+// Every slot is a word, whatever the capture's own width, so one `st64` is
+// what writes it; the closure's prologue reads it back at the declared width
+// (`tk_ldn`), which is where a narrower capture is cut back to size.
+uptr tk_cap_put(uptr p, i64 off, i64 v) {
+    st64(p + off, v);
+    return p;
+}
+
+// the same store for a capture of COUNTED type: the closure holds a reference
+// of its own, alongside the one the declaring scope already holds
+uptr tk_cap_own(uptr p, i64 off, uptr v) {
+    rc_inc(v);
+    st64(p + off, v);
+    return p;
+}
+
 // xs[i] of a `params` list, guarded: an index outside [0, n) has no word to
 // read, so it panics instead of handing back whatever the arena holds there.
 i64 tk_va_at(uptr xs, i64 n, i64 i) {
