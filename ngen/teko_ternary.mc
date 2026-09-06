@@ -109,8 +109,8 @@ void tk_tern_at(i64 n) {
     tk_file = nd_file(n);
 }
 
-void tk_tern_scan(i64 n, uptr out);
-void tk_tern_hoist_var(i64 n, uptr out);
+void tk_tern_scan(i64 n, uptr dst);
+void tk_tern_hoist_var(i64 n, uptr dst);
 void tk_tern_stmt(i64 n, uptr pre);
 i64  tk_tern_stmts(i64 head);
 void tk_tern_branch(i64 n);
@@ -122,14 +122,14 @@ void tk_tern_branch(i64 n);
 // (already-reduced) arms -- a nested one has, by now, become a plain
 // reference to ITS own temporary, already in scope (`tk_ty_scope_add`, right
 // below) for exactly this reason.
-void tk_tern_lower(i64 n, uptr out) {
+void tk_tern_lower(i64 n, uptr dst) {
     i64 c = nd_a(n);
     i64 a = nd_next(c);
     i64 b = nd_next(a);
     set_nd_next(c, 0);
     set_nd_next(a, 0);
     set_nd_next(b, 0);
-    tk_tern_scan(c, out);
+    tk_tern_scan(c, dst);
 
     i64 thenOut = 0;
     tk_tern_scan(a, &thenOut);
@@ -155,8 +155,8 @@ void tk_tern_lower(i64 n, uptr out) {
     // assignment-compatibility check already knows fits any such slot.
     i64 init = tk_int(0);
     if (tk_struct_by_ty(ty) >= 0) init = tk_null();
-    st64(out, list_append(ld64(out), tk_var(ty, t, init)));
-    st64(out, list_append(ld64(out), ifn));
+    st64(dst, list_append(ld64(dst), tk_var(ty, t, init)));
+    st64(dst, list_append(ld64(dst), ifn));
 
     i64 keep = nd_next(n);
     node_assign(n, tk_id(t));
@@ -169,18 +169,18 @@ void tk_tern_lower(i64 n, uptr out) {
 // walk a statement list: a block never sits inside an expression's own
 // children in this grammar, so no statement-position node is skipped by not
 // special-casing one here.
-void tk_tern_scan(i64 n, uptr out) {
+void tk_tern_scan(i64 n, uptr dst) {
     loop {
         if (n == 0) break;
         if (nd_kind(n) == N_CALL && str_eq(nd_name(n), "tk_ternary")) {
-            tk_tern_lower(n, out);
+            tk_tern_lower(n, dst);
         } else if (nd_kind(n) == N_VAR) {
-            tk_tern_hoist_var(n, out);
+            tk_tern_hoist_var(n, dst);
         } else {
-            tk_tern_scan(nd_a(n), out);
-            tk_tern_scan(nd_b(n), out);
-            tk_tern_scan(nd_c(n), out);
-            tk_tern_scan(nd_d(n), out);
+            tk_tern_scan(nd_a(n), dst);
+            tk_tern_scan(nd_b(n), dst);
+            tk_tern_scan(nd_c(n), dst);
+            tk_tern_scan(nd_d(n), dst);
         }
         n = nd_next(n);
     }
@@ -194,14 +194,14 @@ void tk_tern_scan(i64 n, uptr out) {
 // a ternary's own `c` -- and the node itself is overwritten in place by a
 // bare read of the name it declares, `tk_tern_lower`'s own "build fresh,
 // rewrite the original in place" shape.
-void tk_tern_hoist_var(i64 n, uptr out) {
+void tk_tern_hoist_var(i64 n, uptr dst) {
     uptr nm = nd_name(n);
     i64 ty = nd_type(n);
     i64 init = nd_a(n);
-    tk_tern_scan(init, out);
+    tk_tern_scan(init, dst);
     tk_ty_scope_add(nm, ty);
     tk_tern_at(n);
-    st64(out, list_append(ld64(out), tk_var(ty, nm, init)));
+    st64(dst, list_append(ld64(dst), tk_var(ty, nm, init)));
     i64 keep = nd_next(n);
     node_assign(n, tk_id(nm));
     set_nd_next(n, keep);
@@ -258,7 +258,7 @@ void tk_tern_stmt(i64 n, uptr pre) {
 // the statements of one block, rebuilt in order: a statement whose own
 // expression held a ternary comes back preceded by the local it hoisted
 i64 tk_tern_stmts(i64 head) {
-    i64 out = 0;
+    i64 dst = 0;
     i64 n = head;
     loop {
         if (n == 0) break;
@@ -266,11 +266,11 @@ i64 tk_tern_stmts(i64 head) {
         set_nd_next(n, 0);
         i64 pre = 0;
         tk_tern_stmt(n, &pre);
-        if (pre != 0) out = list_append(out, pre);
-        out = list_append(out, n);
+        if (pre != 0) dst = list_append(dst, pre);
+        dst = list_append(dst, n);
         n = nx;
     }
-    return out;
+    return dst;
 }
 
 void tk_tern_fn(i64 f) {

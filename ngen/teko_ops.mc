@@ -230,17 +230,17 @@ void tk_op_head_check(i64 stat, i64 kind, i64 fty) {
 
 // 1 when one of the parameters is of the type that declares the operator, which
 // is what keeps a type from declaring operators over types that are not its own
-i64 tk_op_owns_operand(i64 ci, i64 params, i64 np) {
+i64 tk_op_owns_operand(i64 ci, i64 prs, i64 np) {
     i64 ty = sr_ty_at(ci);
-    if (nd_type(params) == ty) return 1;
+    if (nd_type(prs) == ty) return 1;
     if (np == 1) return 0;
-    return nd_type(nd_next(params)) == ty;
+    return nd_type(nd_next(prs)) == ty;
 }
 
 // ...and what it is once the list is read: one operand or two, of an arity the
 // token itself allows, all of them passed at every site, and one of them of the
 // declaring type
-void tk_op_decl_check(i64 ci, i64 np, i64 nreq, i64 params) {
+void tk_op_decl_check(i64 ci, i64 np, i64 nreq, i64 prs) {
     uptr sp = tk_op_spell(tk_op_tok_cur);
     if (np != 1 && np != 2)
         err_at(tk_file, tk_line, tk_join3("teko: the operator `", sp, "` names one operand or two"));
@@ -250,7 +250,7 @@ void tk_op_decl_check(i64 ci, i64 np, i64 nreq, i64 params) {
         err_at(tk_file, tk_line, tk_join3("teko: `", sp, "` is a unary operator; it names one operand"));
     if (nreq != np)
         err_at(tk_file, tk_line, "teko: an operator parameter has no default; a site always passes it");
-    if (!tk_op_owns_operand(ci, params, np))
+    if (!tk_op_owns_operand(ci, prs, np))
         err_at2(tk_file, tk_line, "teko: an operator names an operand of the type that declares it",
                 sr_name_at(ci));
 }
@@ -258,15 +258,15 @@ void tk_op_decl_check(i64 ci, i64 np, i64 nreq, i64 params) {
 // the declaration, recorded so that a site may be resolved against it. The
 // parameter TYPES are what the site matches, and reading them from the node
 // list here is what saves the resolution from taking the signature string apart.
-void tk_op_declare(i64 ci, i64 mi, i64 params) {
+void tk_op_declare(i64 ci, i64 mi, i64 prs) {
     if (tk_nop == TK_MAXOP) err_at(tk_file, tk_line, "teko: too many operators");
     i64 t1 = 0 - 1;
-    if (nd_next(params)) t1 = nd_type(nd_next(params));
+    if (nd_next(prs)) t1 = nd_type(nd_next(prs));
     st64(op_mi + tk_nop * 8, mi);
     st64(op_cls + tk_nop * 8, ci);
     st64(op_tok + tk_nop * 8, tk_op_tok_cur);
     st64(op_np + tk_nop * 8, mt_np_at(mi));
-    st64(op_t0 + tk_nop * 8, nd_type(params));
+    st64(op_t0 + tk_nop * 8, nd_type(prs));
     st64(op_t1 + tk_nop * 8, t1);
     st64(op_line + tk_nop * 8, tk_line);
     st64(op_file + tk_nop * 8, tk_file);

@@ -359,18 +359,18 @@ void tk_rc_expr(i64 n) { tk_rc_walk(n, n); }
 // `i64 $m = rt_mark();` before the statement and `rt_sweep($m);` after it: what
 // the statement parked dies with it. The mark is read at run time rather than
 // counted here, because `a && f(new C())` may park nothing at all.
-i64 tk_rc_fence(i64 out, i64 n) {
+i64 tk_rc_fence(i64 dst, i64 n) {
     uptr m = gensym_new();
-    out = list_append(out, tk_var(TY_I64, m, tk_call("rt_mark", 0)));
-    out = list_append(out, n);
-    return list_append(out, tk_stmt(tk_call("rt_sweep", tk_id(m))));
+    dst = list_append(dst, tk_var(TY_I64, m, tk_call("rt_mark", 0)));
+    dst = list_append(dst, n);
+    return list_append(dst, tk_stmt(tk_call("rt_sweep", tk_id(m))));
 }
 
 // the statements of one block, walked in order and rebuilt: a statement that
 // parked a temporary comes back fenced between its mark and its sweep
 i64 tk_rc_stmts(i64 head) {
     i64 base = tk_nparked;
-    i64 out = 0;
+    i64 dst = 0;
     i64 n = head;
     loop {
         if (n == 0) break;
@@ -379,12 +379,12 @@ i64 tk_rc_stmts(i64 head) {
         i64 p0 = tk_nparked;
         tk_rc_swept = 0;
         tk_rc_stmt(n);
-        if (tk_nparked > p0 && !tk_rc_swept) out = tk_rc_fence(out, n);
-        else                                 out = list_append(out, n);
+        if (tk_nparked > p0 && !tk_rc_swept) dst = tk_rc_fence(dst, n);
+        else                                 dst = list_append(dst, n);
         n = nx;
     }
     tk_nparked = base;                           // every one of them is fenced by now
-    return out;
+    return dst;
 }
 
 // `{ ... }`: the locals it declares die at its `}`, in reverse order, and the

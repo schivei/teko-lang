@@ -85,8 +85,8 @@
 // after its parameter list is read, and the record a site resolves against
 uptr tk_op_name(uptr pisop);
 void tk_op_head_check(i64 stat, i64 kind, i64 fty);
-void tk_op_decl_check(i64 ci, i64 np, i64 nreq, i64 params);
-void tk_op_declare(i64 ci, i64 mi, i64 params);
+void tk_op_decl_check(i64 ci, i64 np, i64 nreq, i64 prs);
+void tk_op_declare(i64 ci, i64 mi, i64 prs);
 
 // teko_this.mc is included after this file for the same reason -- it reads the
 // method table too -- and these four are the receiver's side of a member
@@ -227,10 +227,10 @@ void set_df_node_at(i64 i, i64 v)  { st64(df_node + i * 8, v); }
 // and empty for a method that takes no parameter at all. It is what tells two
 // overloads apart -- one name, one class, different parameter types -- and the
 // suffix that keeps their two symbols apart.
-uptr tk_sig_of(i64 params, i64 recv) {
+uptr tk_sig_of(i64 prs, i64 recv) {
     uptr s = "";
-    i64 p = params;
-    if (recv) p = nd_next(params);               // past the receiver a static one does not take
+    i64 p = prs;
+    if (recv) p = nd_next(prs);               // past the receiver a static one does not take
     loop {
         if (p == 0) break;
         s = tk_join3(s, "__", tk_ty_sfx(p));      // `ref_i64`/`out_Circle`, or the plain type (K2)
@@ -803,14 +803,14 @@ void tk_abstract_end(uptr m) {
 }
 
 // the body of one method, parsed by the CORE with the parameter list built here
-i64 tk_member_fn(i64 ci, i64 fty, uptr fn, i64 params, i64 stat) {
+i64 tk_member_fn(i64 ci, i64 fty, uptr fn, i64 prs, i64 stat) {
     i64 mark = tk_nlocal;                        // the receiver belongs to this body alone
     if (!stat) tk_local_add(tk_this_name(), ci); // `this.field` inside the body
     i64 keepstat = 0;
     i64 keep = tk_this_enter_body(ci, stat, &keepstat);
     i64 line = p_line();
     uptr fl = p_file();
-    i64 f = parse_function(fty, fn, params);
+    i64 f = parse_function(fty, fn, prs);
     tk_this_leave_body(keep, keepstat);
     tk_nlocal = mark;
     set_nd_line(f, line);                        // the declaration starts at the {
@@ -818,8 +818,8 @@ i64 tk_member_fn(i64 ci, i64 fty, uptr fn, i64 params, i64 stat) {
     return f;
 }
 
-void tk_member_body(i64 ci, i64 fty, uptr fn, i64 params, i64 stat) {
-    top_add(tk_member_fn(ci, fty, fn, params, stat));
+void tk_member_body(i64 ci, i64 fty, uptr fn, i64 prs, i64 stat) {
+    top_add(tk_member_fn(ci, fty, fn, prs, stat));
 }
 
 // a type inside a type: the pair `internal` and nested types is exclusive, and
@@ -838,11 +838,11 @@ void tk_reject_reserved_member(uptr m) {
     err_at2(tk_file, tk_line, "teko: method name reserved by the class", m);
 }
 
-void tk_ctor_add(i64 ci, i64 mi, i64 params) {
+void tk_ctor_add(i64 ci, i64 mi, i64 prs) {
     if (tk_nctor == TK_MAXCTOR) err_at(tk_file, tk_line, "teko: too many constructors");
     set_ctr_cls_at(tk_nctor, ci);
     set_ctr_mi_at(tk_nctor, mi);
-    set_ctr_params_at(tk_nctor, params);
+    set_ctr_params_at(tk_nctor, prs);
     tk_nctor = tk_nctor + 1;
 }
 
@@ -945,16 +945,16 @@ i64 tk_member_ctor(i64 ci, uptr name, i64 off, i64 ti, i64 vis, i64 stat, i64 ki
     i64 np = 0;
     i64 nreq = 0;
     i64 d0 = tk_ndflt;
-    i64 params = tk_params(&np, &nreq, 0, 1);
-    uptr sig = tk_sig_of(params, 1);
+    i64 prs = tk_params(&np, &nreq, 0, 1);
+    uptr sig = tk_sig_of(prs, 1);
     if (tk_method_own(ci, tk_ctor_key(), sig) >= 0)
         err_at2(tk_file, tk_line, "teko: two constructors with the same parameter types", name);
     uptr fn = tk_ctor_sym(name, sig);
     i64 mi = tk_method_add(tk_ctor_key(), ci, sig, fn, np, nreq, d0, TY_VOID, 0 - 1);
     set_mt_vis_at(mi, vis);
-    tk_ctor_add(ci, mi, tk_clone_list(nd_next(params)));
+    tk_ctor_add(ci, mi, tk_clone_list(nd_next(prs)));
     i64 up = tk_base_init(ci);                   // `: base(args)`, read before the body
-    i64 f = tk_member_fn(ci, TY_VOID, fn, params, 0);
+    i64 f = tk_member_fn(ci, TY_VOID, fn, prs, 0);
     if (up) set_nd_a(nd_b(f), list_append(up, nd_a(nd_b(f))));
     top_add(f);
     return off;
@@ -1045,9 +1045,9 @@ i64 tk_member(i64 ci, uptr name, i64 off, i64 ti) {
     i64 nreq = 0;
     i64 d0 = tk_ndflt;
     if (isop) tk_op_head_check(stat, kind, fty);        // an operator names its operands itself
-    i64 params = tk_params(&np, &nreq, extra, !stat);   // the signature decides every gate below
-    if (isop) tk_op_decl_check(ci, np, nreq, params);
-    uptr sig = tk_sig_of(params, !stat);
+    i64 prs = tk_params(&np, &nreq, extra, !stat);   // the signature decides every gate below
+    if (isop) tk_op_decl_check(ci, np, nreq, prs);
+    uptr sig = tk_sig_of(prs, !stat);
     kind = tk_member_gate(ci, m, sig, ti, kind);
     if (kind < 0) {
         tk_skip_body();                          // the class's own wins: its body is not parsed
@@ -1059,13 +1059,13 @@ i64 tk_member(i64 ci, uptr name, i64 off, i64 ti) {
     i64 mi = tk_method_add(m, ci, sig, fn, np, nreq, d0, fty, tk_slot_take(ci, kind, m, sig, fn));
     set_mt_vis_at(mi, vis);
     set_mt_static_at(mi, stat);
-    if (isop) tk_op_declare(ci, mi, params);
+    if (isop) tk_op_declare(ci, mi, prs);
     if (kind == 3) {
         set_mt_abst_at(mi, 1);
         tk_abstract_end(m);
         return off;
     }
-    tk_member_body(ci, fty, fn, params, stat);
+    tk_member_body(ci, fty, fn, prs, stat);
     return off;
 }
 
@@ -1303,12 +1303,12 @@ i64 tk_new_install(uptr vt) {
 //                              [Name_ctor<sig>(p, params...)] return p; }
 // The parameter list is the constructor's own, cloned: the declaration already
 // owns the nodes the source produced, and a node sits in one sibling list only.
-void tk_new_fn(i64 ci, uptr name, i64 size, uptr vt, uptr fn, i64 params, uptr ctor) {
+void tk_new_fn(i64 ci, uptr name, i64 size, uptr vt, uptr fn, i64 prs, uptr ctor) {
     i64 st = tk_var(TY_UPTR, "p", tk_call("rt_alloc", tk_int(size)));
     st = list_append(st, tk_new_install(vt));
     if (ctor) {
         i64 args = tk_id("p");
-        i64 pp = params;
+        i64 pp = prs;
         loop {
             if (pp == 0) break;
             args = list_append(args, tk_id(nd_name(pp)));
@@ -1319,7 +1319,7 @@ void tk_new_fn(i64 ci, uptr name, i64 size, uptr vt, uptr fn, i64 params, uptr c
     i64 r = tk_id("p");
     tk_xt_add(r, ci, 0);                         // the count is 1: the caller's own reference
     st = list_append(st, tk_ret(r));
-    top_add(tk_func(sr_ty_at(ci), fn, params, tk_blk(st)));
+    top_add(tk_func(sr_ty_at(ci), fn, prs, tk_blk(st)));
 }
 
 // one allocator per constructor, plus the plain `Name_new()` a `new Name` with

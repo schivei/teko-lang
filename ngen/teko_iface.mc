@@ -496,8 +496,8 @@ i64 tk_iface_accessor(i64 si, uptr m, i64 rty, i64 stat) {
         acc = tk_set_name(m);
         aty = TY_VOID;
     }
-    i64 params = tk_prop_params(rty, wantset, stat);
-    uptr sig = tk_sig_of(params, !stat);
+    i64 prs = tk_prop_params(rty, wantset, stat);
+    uptr sig = tk_sig_of(prs, !stat);
     if (tk_ifmeth_sig_find(si, acc, sig) >= 0)
         err_at2(tk_file, tk_line, "teko: the property already declares this accessor", m);
     if (!p_accept(K_SEMI))
@@ -549,8 +549,8 @@ void tk_iface_member(i64 si) {
     i64 d0 = tk_ndflt;
     i64 extra = 1;                               // the vtable word a dispatch spends
     if (stat) extra = 0;
-    i64 params = tk_params(&np, &nreq, extra, !stat);
-    uptr sig = tk_sig_of(params, !stat);
+    i64 prs = tk_params(&np, &nreq, extra, !stat);
+    uptr sig = tk_sig_of(prs, !stat);
     if (tk_ifmeth_sig_find(si, m, sig) >= 0) err_at2(tk_file, tk_line, "teko: duplicate interface method", m);
     uptr def = 0;
     if (p_id() == K_LBRACE) def = tk_ifdef_symbol(si, m, sig);
@@ -558,7 +558,7 @@ void tk_iface_member(i64 si) {
     if (def && abst) err_at2(tk_file, tk_line, "teko: an abstract interface member has no body", m);
     tk_ifmeth_add(m, sig, np, nreq, d0, rty, stat, def);
     set_sr_mn_at(si, tk_nifmeth - sr_m0_at(si));
-    if (def) tk_member_body(si, rty, def, params, 0);
+    if (def) tk_member_body(si, rty, def, prs, 0);
 }
 
 // one name of `interface I2 : I1, I0`'s own list, read the same way a

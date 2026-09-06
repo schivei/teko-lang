@@ -235,11 +235,11 @@ void tk_di_conf_apply(i64 ci) {
     tk_di_sv_add(ci, life, line, fl);
 }
 
-void tk_di_defer(i64 n, i64 want, i64 scope, i64 line, uptr fl) {
+void tk_di_defer(i64 n, i64 want, i64 dscope, i64 line, uptr fl) {
     if (tk_nds == TK_MAXDISITE) err_at(fl, line, "teko: too many `inject` sites");
     set_ds_node_at(tk_nds, n);
     set_ds_key_at(tk_nds, want);
-    set_ds_scope_at(tk_nds, scope);
+    set_ds_scope_at(tk_nds, dscope);
     set_ds_line_at(tk_nds, line);
     set_ds_file_at(tk_nds, fl);
     tk_nds = tk_nds + 1;
@@ -413,7 +413,7 @@ i64 tk_di_find_impl(i64 want, i64 line, uptr fl) {
 // `tk_di_resolve`, defined below `tk_di_getter_sym`, which calls back into
 // `tk_di_new_call` -- the same mutual recursion `mc/examples/lang` forward-
 // declares its own `lg_stmt`/`lg_expr` pair for.
-i64 tk_di_resolve(i64 sv, i64 scope, i64 line, uptr fl);
+i64 tk_di_resolve(i64 sv, i64 dscope, i64 line, uptr fl);
 
 // "A -> B -> A": the chain from the point `di_stk` already carries `sv`
 // (`from`) down to the top, with `sv`'s own name closing it -- decision 18's
@@ -494,7 +494,7 @@ i64 tk_di_ctor_pick(i64 ci) {
 // (DI3's own "a Transient inherits the scope of whoever receives it") --
 // anything else clones the default `tk_di_ctor_satisfiable` already
 // confirmed exists.
-i64 tk_di_ctor_args(i64 i, i64 scope) {
+i64 tk_di_ctor_args(i64 i, i64 dscope) {
     i64 mi = ctr_mi_at(i);
     i64 nreq = mt_nreq_at(mi);
     i64 d0 = mt_d0_at(mi);
@@ -509,7 +509,7 @@ i64 tk_di_ctor_args(i64 i, i64 scope) {
             i64 pline = nd_line(p);
             uptr pfile = nd_file(p);
             i64 implsv = tk_di_find_impl(want, pline, pfile);
-            a = tk_di_resolve(implsv, scope, pline, pfile);
+            a = tk_di_resolve(implsv, dscope, pline, pfile);
             // D226 compat crumb: a Singleton's own getter answers `uptr`, the one
             // branch `tk_di_resolve` takes with no type of its own to fall back
             // on; the service's own class is what the oracle is to see, `pure`
@@ -538,7 +538,7 @@ i64 tk_di_ctor_args(i64 i, i64 scope) {
 // any other reach for the type), but a non-`public` constructor gets a
 // message of its own instead of `tk_check_member`'s generic one -- DI never
 // has an enclosing class a `protected` constructor could answer to.
-i64 tk_di_new_call(i64 sv, i64 scope, i64 line, uptr fl) {
+i64 tk_di_new_call(i64 sv, i64 dscope, i64 line, uptr fl) {
     i64 ci = sv_cls_at(sv);
     uptr name = sr_name_at(ci);
     tk_close_open(ci);
@@ -557,7 +557,7 @@ i64 tk_di_new_call(i64 sv, i64 scope, i64 line, uptr fl) {
     if (ct < 0)
         err_at2(fl, line, "teko: no constructor of this service takes only services", name);
     i64 mi = ctr_mi_at(ct);
-    i64 args = tk_di_ctor_args(ct, scope);
+    i64 args = tk_di_ctor_args(ct, dscope);
     if (mt_vis_at(mi) != TK_VPUBLIC)
         err_at2(fl, line, "teko: the constructor of this service is not accessible", name);
     tk_line = line;
@@ -608,11 +608,11 @@ uptr tk_di_getter_sym(i64 sv, i64 line, uptr fl) {
 // the local of `scope` already holding `sv`, or -1: the whole reason a
 // second injection of the same Scoped inside the same `scope { }` answers
 // with the very same object (decision 9/13).
-i64 tk_di_scope_find(i64 scope, i64 sv) {
+i64 tk_di_scope_find(i64 dscope, i64 sv) {
     i64 i = 0;
     loop {
         if (i >= tk_nsl) break;
-        if (sl_scope_at(i) == scope && sl_sv_at(i) == sv) return i;
+        if (sl_scope_at(i) == dscope && sl_sv_at(i) == sv) return i;
         i = i + 1;
     }
     return 0 - 1;
@@ -624,16 +624,16 @@ i64 tk_di_scope_find(i64 scope, i64 sv) {
 // SAME scope (decision (c)) -- ordinary `tk_rc_block` (teko_rc.mc) frees it
 // like any other local once it is prepended to the block's head
 // (`tk_di_scopes_finish`), one lap of a loop at a time if the block is one.
-i64 tk_di_scope_local(i64 scope, i64 sv, i64 line, uptr fl) {
-    i64 li = tk_di_scope_find(scope, sv);
+i64 tk_di_scope_local(i64 dscope, i64 sv, i64 line, uptr fl) {
+    i64 li = tk_di_scope_find(dscope, sv);
     if (li >= 0) return tk_id(sl_name_at(li));
     uptr name = gensym_new();
-    i64 v = tk_var(sr_ty_at(sv_cls_at(sv)), name, tk_di_new_call(sv, scope, line, fl));
-    set_sl_scope_at(tk_nsl, scope);
+    i64 v = tk_var(sr_ty_at(sv_cls_at(sv)), name, tk_di_new_call(sv, dscope, line, fl));
+    set_sl_scope_at(tk_nsl, dscope);
     set_sl_sv_at(tk_nsl, sv);
     set_sl_name_at(tk_nsl, name);
     tk_nsl = tk_nsl + 1;
-    set_sc_head_at(scope, list_append(sc_head_at(scope), v));
+    set_sc_head_at(dscope, list_append(sc_head_at(dscope), v));
     return tk_id(name);
 }
 
@@ -644,10 +644,10 @@ i64 tk_di_scope_local(i64 scope, i64 sv, i64 line, uptr fl) {
 // time this runs), becomes that scope's own local (decision 13); anything
 // else -- a Singleton, or a Scoped resolved at the root -- answers through
 // the root's own memoized getter (decision 10, unchanged since DI1/DI2).
-i64 tk_di_resolve(i64 sv, i64 scope, i64 line, uptr fl) {
+i64 tk_di_resolve(i64 sv, i64 dscope, i64 line, uptr fl) {
     i64 life = sv_life_at(sv);
-    if (life == TK_SVC_TRANSIENT) return tk_di_new_call(sv, scope, line, fl);
-    if (life == TK_SVC_SCOPED && scope >= 0) return tk_di_scope_local(scope, sv, line, fl);
+    if (life == TK_SVC_TRANSIENT) return tk_di_new_call(sv, dscope, line, fl);
+    if (life == TK_SVC_SCOPED && dscope >= 0) return tk_di_scope_local(dscope, sv, line, fl);
     return tk_call(tk_di_getter_sym(sv, line, fl), 0);
 }
 
@@ -680,9 +680,9 @@ i64 tk_di_pass(i64 root) {
         if (i >= tk_nds) break;
         i64 line = ds_line_at(i);
         uptr fl = ds_file_at(i);
-        i64 scope = ds_scope_at(i);
+        i64 dscope = ds_scope_at(i);
         i64 sv = tk_di_find_impl(ds_key_at(i), line, fl);
-        i64 r = tk_di_resolve(sv, scope, line, fl);
+        i64 r = tk_di_resolve(sv, dscope, line, fl);
         i64 n = ds_node_at(i);
         i64 keep = nd_next(n);
         node_assign(n, r);
