@@ -25,6 +25,19 @@
 #
 #   sh ngen/scripts/bootstrap.sh                 # host from `mc --host`
 #   sh ngen/scripts/bootstrap.sh --os linux --arch x86_64
+#   sh ngen/scripts/bootstrap.sh --os windows --arch x86_64 \
+#       --linker-toml ngen/mc.linker.toml
+#
+# `--os`/`--arch` name the pair OUT LOUD and are checked against `mc --host`:
+# the ladder RUNS every stage it builds, so a target that is not this machine is
+# refused rather than cross-built into something nothing can execute.
+#
+# `--linker-toml FILE` REPLACES `ngen/mc.toml`'s own `[linker]` with the blocks
+# in FILE -- `[sysroot]` and `[linker]` as the CI's Windows leg writes them.
+# Windows has no direct-executable backend and no C runtime, so `cc` is not a
+# linker there: the link is `lld-link` against a sysroot of three files
+# (`.github/actions/windows-sysroot`). Everywhere else the option is not passed
+# and `ngen/mc.toml`'s `[linker] cc` stands.
 #
 # `mc` has to already be on PATH -- this script never downloads one. The `mc`
 # the CI puts on PATH before this script runs is the version PINNED by
@@ -39,20 +52,35 @@
 # The derived configs are written next to `ngen/mc.toml` (an entry path is
 # resolved against the CONFIG's own directory, so a config in a scratch
 # directory cannot find `mc_teko.tk`) and removed on exit; `ngen/mc.toml`
-# itself is never touched. They keep the `[linker]` block on purpose: with a
-# linker `mc` writes `<out>.o` and hands it over, which is what leaves the
-# object on disk for the `cmp` -- without one the built-in executable backend
-# writes the binary and no object at all.
+# itself is never touched. They always carry a `[linker]` block on purpose --
+# `ngen/mc.toml`'s own, or the one `--linker-toml` names: with a linker `mc`
+# writes `<out>.o` and hands it over, which is what leaves the object on disk
+# for the `cmp`, and without one the built-in executable backend writes the
+# binary and no object at all.
+#
+# On Windows every stage is named `<name>.exe`, because that is what the loader
+# there requires and what `[compiler].out` already gets from `mc` itself; `mc`
+# derives the object from `[project].out` by appending `.o`, so the objects the
+# criterion compares are `teko2.exe.o` and `teko3.exe.o` -- COFF, but the same
+# `cmp`.
 
 os=""
 arch=""
+linker=""
+usage="usage: bootstrap.sh [--os OS] [--arch ARCH] [--linker-toml FILE]"
 while [ $# -gt 0 ]; do
     case "$1" in
-        --os)   os="$2";   shift 2 ;;
-        --arch) arch="$2"; shift 2 ;;
-        *) echo "usage: bootstrap.sh [--os OS] [--arch ARCH]" >&2; exit 1 ;;
+        --os)          os="$2";     shift 2 ;;
+        --arch)        arch="$2";   shift 2 ;;
+        --linker-toml) linker="$2"; shift 2 ;;
+        *) echo "$usage" >&2; exit 1 ;;
     esac
 done
+
+if [ -n "$linker" ] && [ ! -f "$linker" ]; then
+    echo "FAIL: --linker-toml $linker does not exist" >&2
+    exit 1
+fi
 
 if [ ! -f ngen/mc.toml ]; then
     echo "FAIL: run from the repository root (ngen/mc.toml not found)" >&2
@@ -67,12 +95,35 @@ if ! command -v mc >/dev/null 2>&1; then
     exit 1
 fi
 
-if [ -z "$os" ];   then os=$(mc --host   | awk '$1 == "os"   { print $2 }'); fi
-if [ -z "$arch" ]; then arch=$(mc --host | awk '$1 == "arch" { print $2 }'); fi
+host_os=$(mc --host   | awk '$1 == "os"   { print $2 }')
+host_arch=$(mc --host | awk '$1 == "arch" { print $2 }')
+if [ -z "$os" ];   then os="$host_os";     fi
+if [ -z "$arch" ]; then arch="$host_arch"; fi
 if [ -z "$os" ] || [ -z "$arch" ]; then
     echo "FAIL: could not resolve the host pair (mc --host)" >&2
     exit 1
 fi
+
+# The ladder RUNS every stage it builds, and the taught compiler of stage 0 is
+# written by the HOST's executable backend either way (mc docs/build.md
+# § [compiler]) -- so a target that is not this machine cannot be a fixed point,
+# it is a cross build with nothing to execute. `--os`/`--arch` are there to say
+# the pair OUT LOUD in a CI log, not to cross-compile.
+if [ "$os" != "$host_os" ] || [ "$arch" != "$host_arch" ]; then
+    echo "FAIL: $os/$arch is not this machine ($host_os/$host_arch); the ladder runs what it builds" >&2
+    exit 1
+fi
+
+# What an executable is called here. `mc` appends it to `[compiler].out` by
+# itself (src/driver.mc, host_exe_suffix); `[project].out` is this script's to
+# name, and the two agree because target and host are the same pair.
+exe=""
+if [ "$os" = "windows" ]; then exe=".exe"; fi
+
+teko0="ngen/build/teko$exe"
+teko1="ngen/build/teko1$exe"
+teko2="ngen/build/teko2$exe"
+teko3="ngen/build/teko3$exe"
 
 cfg0="ngen/mc.boot0.toml"
 cfg1="ngen/mc.boot1.toml"
@@ -112,24 +163,50 @@ write_target_tail() {
     echo "-- glibc machine: [target] interp $loader, libc gnu --"
 }
 
+# `ngen/mc.toml` minus the `[linker]` block when one is being substituted; the
+# whole file otherwise. Same `awk` the CI's leg config uses.
+base_config() {
+    if [ -z "$linker" ]; then
+        cat ngen/mc.toml
+        return 0
+    fi
+    awk '/^\[/ { skip = ($0 == "[linker]") } !skip' ngen/mc.toml
+}
+
 # derive CONFIG ENTRY OUT -- ngen/mc.toml with the host's own target and one
 # stage's entry/output, the same `sed` shape HANDOFF.md §4 uses for a fixture
 derive() {
-    sed -e "s#^os   = .*#os   = \"$os\"#" \
-        -e "s#^arch = .*#arch = \"$arch\"#" \
-        -e "s#^entry = .*#entry = \"$2\"#" \
-        -e "s#^out   = .*#out   = \"$3\"#" \
-        ngen/mc.toml \
+    base_config \
+        | sed -e "s#^os   = .*#os   = \"$os\"#" \
+              -e "s#^arch = .*#arch = \"$arch\"#" \
+              -e "s#^entry = .*#entry = \"$2\"#" \
+              -e "s#^out   = .*#out   = \"$3\"#" \
         | sed -e "/^arch = /r $tail_" > "$1"
+    if [ -n "$linker" ]; then
+        printf '\n' >> "$1"
+        cat "$linker" >> "$1"
+    fi
 }
 
-now() {
-    perl -MTime::HiRes=time -e 'printf "%.3f\n", time'
-}
+# Millisecond stage times where there is a `perl`, whole seconds where there is
+# not -- the ladder must not fail over a stopwatch.
+if command -v perl > /dev/null 2>&1; then
+    now() {
+        perl -MTime::HiRes=time -e 'printf "%.3f\n", time'
+    }
 
-dt() {
-    perl -e 'printf "%.3f", '"$2"' - '"$1"''
-}
+    dt() {
+        perl -e 'printf "%.3f", '"$2"' - '"$1"''
+    }
+else
+    now() {
+        date +%s
+    }
+
+    dt() {
+        echo $(($2 - $1))
+    }
+fi
 
 size_of() {
     wc -c < "$1" | tr -d ' '
@@ -169,31 +246,31 @@ write_target_tail
 
 t_total0=$(now)
 
-echo "-- stage 0: mc build ngen --compiler-only -> ngen/build/teko --"
-derive "$cfg0" "tests/hello.tk" "build/teko-hello"
+echo "-- stage 0: mc build ngen --compiler-only -> $teko0 --"
+derive "$cfg0" "tests/hello.tk" "build/teko-hello$exe"
 step "mc builds teko0" mc build ngen --config "$cfg0" --compiler-only
-echo "  size ngen/build/teko: $(size_of ngen/build/teko) bytes"
+echo "  size $teko0: $(size_of "$teko0") bytes"
 
-echo "-- stage 1: teko0 mc_teko.tk -> ngen/build/teko1 --"
-derive "$cfg1" "mc_teko.tk" "build/teko1"
-step "teko0 compiles mc_teko.tk" ngen/build/teko build ngen --config "$cfg1" --entry-only
-echo "  size ngen/build/teko1.o: $(size_of ngen/build/teko1.o) bytes"
-echo "  size ngen/build/teko1:   $(size_of ngen/build/teko1) bytes"
+echo "-- stage 1: teko0 mc_teko.tk -> $teko1 --"
+derive "$cfg1" "mc_teko.tk" "build/teko1$exe"
+step "teko0 compiles mc_teko.tk" "$teko0" build ngen --config "$cfg1" --entry-only
+echo "  size $teko1.o: $(size_of "$teko1.o") bytes"
+echo "  size $teko1:   $(size_of "$teko1") bytes"
 
-echo "-- stage 2: teko1 mc_teko.tk -> ngen/build/teko2 --"
-derive "$cfg2" "mc_teko.tk" "build/teko2"
-step "teko1 compiles mc_teko.tk" ngen/build/teko1 build ngen --config "$cfg2" --entry-only
-echo "  size ngen/build/teko2.o: $(size_of ngen/build/teko2.o) bytes"
+echo "-- stage 2: teko1 mc_teko.tk -> $teko2 --"
+derive "$cfg2" "mc_teko.tk" "build/teko2$exe"
+step "teko1 compiles mc_teko.tk" "$teko1" build ngen --config "$cfg2" --entry-only
+echo "  size $teko2.o: $(size_of "$teko2.o") bytes"
 
-echo "-- stage 3: teko2 mc_teko.tk -> ngen/build/teko3 --"
-derive "$cfg3" "mc_teko.tk" "build/teko3"
-step "teko2 compiles mc_teko.tk" ngen/build/teko2 build ngen --config "$cfg3" --entry-only
-echo "  size ngen/build/teko3.o: $(size_of ngen/build/teko3.o) bytes"
+echo "-- stage 3: teko2 mc_teko.tk -> $teko3 --"
+derive "$cfg3" "mc_teko.tk" "build/teko3$exe"
+step "teko2 compiles mc_teko.tk" "$teko2" build ngen --config "$cfg3" --entry-only
+echo "  size $teko3.o: $(size_of "$teko3.o") bytes"
 
-echo "-- criterion 1: cmp ngen/build/teko2.o ngen/build/teko3.o --"
-if ! cmp ngen/build/teko2.o ngen/build/teko3.o; then
+echo "-- criterion 1: cmp $teko2.o $teko3.o --"
+if ! cmp "$teko2.o" "$teko3.o"; then
     echo "FAIL: teko2.o != teko3.o -- no fixed point" >&2
-    echo "diagnosis: diff <(ngen/build/teko2 --dump-asm ngen/mc_teko.tk) <(ngen/build/teko3 --dump-asm ngen/mc_teko.tk)" >&2
+    echo "diagnosis: diff <($teko2 --dump-asm ngen/mc_teko.tk) <($teko3 --dump-asm ngen/mc_teko.tk)" >&2
     exit 1
 fi
 echo "  ok: teko2.o == teko3.o"
@@ -208,19 +285,19 @@ echo "  ok: teko2.o == teko3.o"
 # ladder was already at the fixed point on its first turn.
 echo "-- provenance (reported, not gated) --"
 echo "  mc:       $(mc --version 2>&1 | head -1)"
-echo "  teko0:    $(sha256_of ngen/build/teko)"
-echo "  teko1.o:  $(sha256_of ngen/build/teko1.o)"
-echo "  teko2.o:  $(sha256_of ngen/build/teko2.o)"
-echo "  teko3.o:  $(sha256_of ngen/build/teko3.o)"
-if cmp -s ngen/build/teko1.o ngen/build/teko2.o; then
+echo "  teko0:    $(sha256_of "$teko0")"
+echo "  teko1.o:  $(sha256_of "$teko1.o")"
+echo "  teko2.o:  $(sha256_of "$teko2.o")"
+echo "  teko3.o:  $(sha256_of "$teko3.o")"
+if cmp -s "$teko1.o" "$teko2.o"; then
     echo "  teko1.o == teko2.o: yes (fixed point on the first turn)"
 else
     echo "  teko1.o == teko2.o: no (the stock mc's codegen differs from teko1's own)"
 fi
 
 echo "-- criterion 2: --dump-asm of teko2 vs teko3 --"
-ngen/build/teko2 --dump-asm ngen/mc_teko.tk > "$asm2" 2>&1
-ngen/build/teko3 --dump-asm ngen/mc_teko.tk > "$asm3" 2>&1
+"$teko2" --dump-asm ngen/mc_teko.tk > "$asm2" 2>&1
+"$teko3" --dump-asm ngen/mc_teko.tk > "$asm3" 2>&1
 if ! diff "$asm2" "$asm3" > "$out"; then
     echo "FAIL: the two dumps differ" >&2
     head -40 "$out" >&2
@@ -234,9 +311,9 @@ fail=0
 for src in ngen/tests/*.tk; do
     n=$(basename "$src" .tk)
     want=$(grep -m1 '// expect-exit:' "$src" | sed 's/.*expect-exit: *//')
-    derive "$cfgf" "tests/$n.tk" "build/$n"
-    if ngen/build/teko1 build ngen --config "$cfgf" --entry-only >"$out" 2>"$err"; then
-        "ngen/build/$n"
+    derive "$cfgf" "tests/$n.tk" "build/$n$exe"
+    if "$teko1" build ngen --config "$cfgf" --entry-only >"$out" 2>"$err"; then
+        "ngen/build/$n$exe"
         got=$?
     else
         got="build-fail"

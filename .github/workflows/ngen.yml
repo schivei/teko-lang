@@ -18,9 +18,9 @@ name: ngen (mc) CI
 # AGGREGATOR job below, which keeps the name the ruleset already asks for
 # (`mc build ngen && run`) and fails if any leg failed.
 #
-# The SIXTH job is `fixpoint` (S4.3): the self-hosting ladder teko0 -> teko1 ->
-# teko2 -> teko3 over `ngen/mc_teko.tk`, on linux/x86_64, linux/aarch64 and
-# macos/aarch64. It proves a different thing from the legs -- that the compiler reproduces itself,
+# The SIXTH job is `fixpoint` (S4.3, S4.3b): the self-hosting ladder teko0 ->
+# teko1 -> teko2 -> teko3 over `ngen/mc_teko.tk`, on the SAME FIVE PAIRS. It
+# proves a different thing from the legs -- that the compiler reproduces itself,
 # not that a fixture exits 42 -- and it is deliberately NOT wired into the
 # aggregator: `mc build ngen && run` is the name the ruleset requires and its
 # meaning stays exactly what it says. Promoting the ladder to a required check
@@ -206,96 +206,17 @@ jobs:
           exe: ${{ matrix.exe }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # `lld-link` links and `llvm-dlltool` writes the import library; both ship
-      # with LLVM, which both Windows images already carry. The download is the
-      # branch that must never be reached silently -- this leg is the only place
-      # a Windows binary is executed, so it fails loudly instead of skipping.
-      - name: obtain the LLVM tools (Windows)
-        if: runner.os == 'Windows'
-        env:
-          LLVM_VERSION: '20.1.8'
-        run: |
-          set -eu
-          have() { [ -x "$1/lld-link.exe" ] && [ -x "$1/llvm-dlltool.exe" ]; }
-          bin=""
-          for cand in "/c/Program Files/LLVM/bin" "$PWD/.llvm/bin"; do
-            if have "$cand"; then bin="$cand"; break; fi
-          done
-          if [ -z "$bin" ]; then
-            echo "LLVM not on this image -- downloading $LLVM_VERSION"
-            case "$MC_ARCH" in
-              aarch64) tarball="clang+llvm-$LLVM_VERSION-aarch64-pc-windows-msvc.tar.xz"
-                       installer="LLVM-$LLVM_VERSION-woa64.exe" ;;
-              *)       tarball="clang+llvm-$LLVM_VERSION-x86_64-pc-windows-msvc.tar.xz"
-                       installer="LLVM-$LLVM_VERSION-win64.exe" ;;
-            esac
-            base="https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_VERSION"
-            mkdir -p .llvm
-            if curl -fSL -o "$RUNNER_TEMP/llvm.tar.xz" "$base/$tarball"; then
-              tar -xf "$RUNNER_TEMP/llvm.tar.xz" -C .llvm --strip-components=1
-            else
-              curl -fSL -o "$RUNNER_TEMP/llvm.exe" "$base/$installer"
-              7z x -o.llvm "$RUNNER_TEMP/llvm.exe" >/dev/null
-            fi
-            bin="$PWD/.llvm/bin"
-          fi
-          if ! have "$bin"; then
-            echo "::error::lld-link and llvm-dlltool are not both in $bin" >&2
-            exit 1
-          fi
-          # `mc` spawns the linker through CreateProcessA, which reads the WIN32
-          # PATH -- so the directory goes in in Windows form, not MSYS form.
-          cygpath -w "$bin" >>"$GITHUB_PATH"
-          # `mktemp -d` hands out /tmp/... paths, which the native mc cannot
-          # open (95-windows-host.md); the runner's own temp is a form both
-          # the shell and mc accept.
-          echo "TMPDIR=$(cygpath -m "$RUNNER_TEMP")" >>"$GITHUB_ENV"
-          # `llvm-dlltool` has no --version and answers its usage with a
-          # non-zero exit, so the existence check above is its whole probe.
-          "$bin/lld-link.exe" --version
-          echo "llvm-dlltool: $bin/llvm-dlltool.exe"
-
-      # Everything a Windows link needs that is not the program. There is
-      # nothing to download: the two objects are the system layer and the entry
-      # point, compiled out of the bundle inside `mc` itself, and the import
-      # library is generated from a list of names (`minicompiler/mc`
-      # scripts/sysroot-windows.sh -- the list is the kernel32 entry points
-      # those two layers declare).
+      # Windows has no direct-executable backend and no C runtime, so the link
+      # needs three files this workflow builds first. The composite action
+      # assembles them, puts LLVM on `$PATH` in Windows form and points
+      # `TMPDIR` at the runner's own temp; the fixpoint job below uses the very
+      # same action, so the two Windows jobs cannot assemble different sysroots.
       - name: build the Windows sysroot
         if: runner.os == 'Windows'
-        run: |
-          set -eu
-          case "$MC_ARCH" in
-            aarch64) backend="coff-obj-arm64";  machine="arm64" ;;
-            *)       backend="coff-obj-x86_64"; machine="i386:x86-64" ;;
-          esac
-          dir="ngen/build/sysroot/windows-$MC_ARCH"
-          mkdir -p "$dir"
-          printf '#include <sys_windows_start>\n' >"$dir/winstart.mc"
-          printf '#include <sys_windows_host>\n'  >"$dir/mcrt.mc"
-          "$MC" --backend="$backend" "$dir/winstart.mc" -o "$dir/winstart.obj"
-          "$MC" --backend="$backend" "$dir/mcrt.mc"     -o "$dir/mcrt.obj"
-          cat >"$dir/kernel32.def" <<'DEF'
-          LIBRARY kernel32.dll
-          EXPORTS
-          CloseHandle
-          CreateDirectoryA
-          CreateFileA
-          CreateProcessA
-          DeleteFileA
-          ExitProcess
-          GetCommandLineA
-          GetEnvironmentVariableA
-          GetExitCodeProcess
-          GetLastError
-          GetStdHandle
-          ReadFile
-          VirtualAlloc
-          WaitForSingleObject
-          WriteFile
-          DEF
-          llvm-dlltool -m "$machine" -d "$dir/kernel32.def" -D kernel32.dll -l "$dir/kernel32.lib"
-          ls -l "$dir"
+        uses: ./.github/actions/windows-sysroot
+        with:
+          arch: ${{ matrix.arch }}
+          mc: ${{ steps.mc.outputs.mc }}
 
       # `ngen/mc.toml` is the single source of truth and is never edited: the
       # leg config is DERIVED from it, so `[project]`, `[compiler]`, `[include]`
@@ -430,18 +351,20 @@ jobs:
   # the OBJECTS teko2.o/teko3.o, an empty diff between the two `--dump-asm`
   # dumps, and teko1 compiling and running all 45 fixtures.
   #
-  # Three runners: linux/x86_64, the default pair of `ngen/mc.toml`,
-  # macos/aarch64, where the ladder was measured closing (§70), and
-  # linux/aarch64, which has a leg of its own and whose loader the script
-  # already knows -- it was out of S4.3 only to keep the new job at two
-  # runners. Windows is still out; bringing it in is S4.3b's second item.
+  # The SAME FIVE PAIRS the legs run on (S4.3b): what the ladder proves is a
+  # property of a machine, so proving it on three and asserting it on five would
+  # be the cross-compiled claim this workflow exists to refuse.
   #
-  # The derived configs the script writes KEEP `ngen/mc.toml`'s `[linker] cc`:
-  # with a linker `mc` writes the object and hands it over, which is what
-  # leaves `<out>.o` on disk for the `cmp`, and without one the built-in
-  # executable backend writes the binary and no object at all. All three
-  # runners have a `cc`; the five legs link differently (built-in backends)
-  # and are unaffected.
+  # Every derived config the script writes carries a `[linker]`, because a
+  # linker is what makes `mc` write `<out>.o` and hand it over -- without one
+  # the built-in executable backend writes the binary and no object at all, and
+  # there is nothing to `cmp`. On linux and macOS that linker is
+  # `ngen/mc.toml`'s own `cc`, kept as it is. On Windows there is no `cc` and no
+  # C runtime, so the matrix carries the leg's `lld-link` line and the script
+  # takes it through `--linker-toml`, which replaces the `[linker]` block of the
+  # derived config; the three files it links against come from the same
+  # composite action the leg uses. The five legs themselves link differently
+  # (built-in backends off Windows) and are unaffected either way.
   fixpoint:
     name: fixpoint (${{ matrix.os }}/${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
@@ -458,15 +381,67 @@ jobs:
             os: linux
             arch: x86_64
             asset: x86_64
+            exe: ''
+            linker: ''
           - runner: ubuntu-24.04-arm
             os: linux
             arch: aarch64
             asset: arm64
+            exe: ''
+            linker: ''
           - runner: macos-latest
             os: macos
             arch: aarch64
             asset: arm64
+            exe: ''
+            linker: ''
+          # `linker` is what `--linker-toml` feeds the script INSTEAD of
+          # `ngen/mc.toml`'s `[linker] cc`: on Windows `cc` is not a linker, and
+          # the ladder still needs one, because a linker is what makes `mc`
+          # leave `<out>.o` on disk for the `cmp`. It is the same line the
+          # native leg carries, against the same sysroot.
+          - runner: windows-latest
+            os: windows
+            arch: x86_64
+            asset: x86_64
+            exe: '.exe'
+            linker: |
+              [sysroot]
+              path = "build/sysroot/windows-x86_64"
+
+              [linker]
+              cmd  = "lld-link"
+              args = ["-machine:x64", "-subsystem:console", "-entry:mc_start", "-nodefaultlib",
+                      "-stack:8388608", "-out:{out}", "{obj}",
+                      "{sysroot}/winstart.obj", "{sysroot}/mcrt.obj", "{sysroot}/kernel32.lib"]
+          - runner: windows-11-arm
+            os: windows
+            arch: aarch64
+            asset: arm64
+            exe: '.exe'
+            linker: |
+              [sysroot]
+              path = "build/sysroot/windows-aarch64"
+
+              [linker]
+              cmd  = "lld-link"
+              args = ["-machine:arm64", "-subsystem:console", "-entry:mc_start", "-nodefaultlib",
+                      "-stack:8388608", "-out:{out}", "{obj}",
+                      "{sysroot}/winstart.obj", "{sysroot}/mcrt.obj", "{sysroot}/kernel32.lib"]
+    env:
+      EXE: ${{ matrix.exe }}
+      MC_LINKER: ${{ matrix.linker }}
+      # MSYS rewrites an argument that looks like a path, and every dash-form
+      # lld-link option does (`minicompiler/mc` docs/guide/95-windows-host.md § 4);
+      # the derived config's path also has to stay RELATIVE (D224). Harmless
+      # where there is no MSYS.
+      MSYS2_ARG_CONV_EXCL: '*'
     steps:
+      # The Windows images ship core.autocrlf=true and the ladder compiles
+      # sources straight out of the checkout. A no-op on the other runners.
+      - name: never translate line endings
+        run: git config --global core.autocrlf false
+
       - name: checkout
         uses: actions/checkout@v4
         with:
@@ -479,22 +454,49 @@ jobs:
           os: ${{ matrix.os }}
           arch: ${{ matrix.arch }}
           asset: ${{ matrix.asset }}
+          exe: ${{ matrix.exe }}
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      # The same action the Windows leg uses: `winstart.obj`, `mcrt.obj` and
+      # `kernel32.lib` under `ngen/build/sysroot/windows-<arch>`, which is what
+      # the `[sysroot] path` of the matrix's `linker` block resolves to, plus
+      # LLVM on `$PATH` and a `TMPDIR` the native `mc` can open.
+      - name: build the Windows sysroot
+        if: runner.os == 'Windows'
+        uses: ./.github/actions/windows-sysroot
+        with:
+          arch: ${{ matrix.arch }}
+          mc: ${{ steps.mc.outputs.mc }}
 
       # `bootstrap.sh` calls `mc` by name -- it is the entry point of the ladder
       # and the one binary the ladder does not build itself -- so the toolchain
-      # goes on $PATH here instead of being addressed through $MC.
+      # goes on $PATH here instead of being addressed through $MC. On Windows
+      # the directory goes in in WINDOWS form: the runner hands that PATH to a
+      # native process, and an MSYS-shaped entry does not survive the trip.
       - name: put mc on PATH
+        env:
+          MC_DIR: ${{ steps.mc.outputs.dir }}
         run: |
           set -eu
-          echo "${{ steps.mc.outputs.dir }}" >>"$GITHUB_PATH"
+          dir="$MC_DIR"
+          if [ "$RUNNER_OS" = "Windows" ]; then dir=$(cygpath -w "$dir"); fi
+          echo "$dir" >>"$GITHUB_PATH"
 
       # Times per stage, sizes of every object and binary, and the three
-      # criteria are all printed by the script itself.
+      # criteria are all printed by the script itself. `--linker-toml` is passed
+      # only where the matrix carries a linker block -- everywhere else
+      # `ngen/mc.toml`'s own `[linker] cc` is what the derived configs keep.
       - name: teko0 -> teko1 -> teko2 -> teko3
         run: |
           set -eu
-          sh ngen/scripts/bootstrap.sh --os "${{ matrix.os }}" --arch "${{ matrix.arch }}"
+          if [ -n "$MC_LINKER" ]; then
+            printf '%s\n' "$MC_LINKER" >ngen/mc.linker.toml
+            cat ngen/mc.linker.toml
+            sh ngen/scripts/bootstrap.sh --os "${{ matrix.os }}" --arch "${{ matrix.arch }}" \
+              --linker-toml ngen/mc.linker.toml
+          else
+            sh ngen/scripts/bootstrap.sh --os "${{ matrix.os }}" --arch "${{ matrix.arch }}"
+          fi
 
       # Reported, NOT gated: the `cmp` above already proves the fixed point
       # WITHIN a run, and whether teko2.o is byte-identical ACROSS runs and
@@ -521,7 +523,7 @@ jobs:
             printf '### fixpoint (%s/%s), mc %s\n\n' \
               "${{ matrix.os }}" "${{ matrix.arch }}" "${{ steps.mc.outputs.version }}"
             printf '| object | bytes | sha256 |\n|---|---:|---|\n'
-            for o in teko teko1.o teko2.o teko3.o; do
+            for o in "teko$EXE" "teko1$EXE.o" "teko2$EXE.o" "teko3$EXE.o"; do
               f="ngen/build/$o"
               if [ -f "$f" ]; then
                 printf '| `%s` | %s | `%s` |\n' "$o" "$(wc -c <"$f" | tr -d ' ')" "$(sha256 "$f")"
@@ -555,11 +557,13 @@ jobs:
         id: dumps
         run: |
           set -eu
-          if [ ! -f ngen/build/teko1.o ] || [ ! -f ngen/build/teko2.o ]; then exit 0; fi
-          if cmp -s ngen/build/teko1.o ngen/build/teko2.o; then exit 0; fi
+          o1="ngen/build/teko1$EXE.o"
+          o2="ngen/build/teko2$EXE.o"
+          if [ ! -f "$o1" ] || [ ! -f "$o2" ]; then exit 0; fi
+          if cmp -s "$o1" "$o2"; then exit 0; fi
           mkdir -p ngen/build/dumps
-          ngen/build/teko  --dump-asm ngen/mc_teko.tk >ngen/build/dumps/teko0-asm.txt 2>&1 || true
-          ngen/build/teko1 --dump-asm ngen/mc_teko.tk >ngen/build/dumps/teko1-asm.txt 2>&1 || true
+          "ngen/build/teko$EXE"  --dump-asm ngen/mc_teko.tk >ngen/build/dumps/teko0-asm.txt 2>&1 || true
+          "ngen/build/teko1$EXE" --dump-asm ngen/mc_teko.tk >ngen/build/dumps/teko1-asm.txt 2>&1 || true
           diff ngen/build/dumps/teko0-asm.txt ngen/build/dumps/teko1-asm.txt \
             >ngen/build/dumps/diff.txt 2>&1 || true
           echo "archive=yes" >>"$GITHUB_OUTPUT"
