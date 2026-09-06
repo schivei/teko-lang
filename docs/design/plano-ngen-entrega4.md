@@ -4893,3 +4893,93 @@ para lá em vez de duplicar.
 
 Gate: mesmo do item (a) — o README não toca código, então o gate é o mesmo run de CI que prova o
 item (a); revisão de conteúdo (≤120 linhas, sem link `github.com/schivei/mc`) é o critério próprio.
+
+## 78. S4.3b — o `fixpoint` cobre as cinco pernas (2026-09-06)
+
+Terceiro crumb do desvio "v0.1.0 estável", e o fecho das duas dívidas que o §73(e) registrou
+(itens 3 e 4). A escada do fixpoint deixa de rodar em dois pares e passa a rodar nos **mesmos
+cinco** que as pernas nativas cobrem. Base: o tip de `fix/retirement` em `756fd924`; branch
+`feat/ngen-s43b-fixpoint-all`, três commits — `a488063a` (linux/aarch64), `02b1106b` (Windows) e
+o de docs. Nenhuma mudança em `ngen/*.tk`, `ngen/mc.toml` ou `ngen/tests/`; `ngen/MC_VERSION`
+segue `0.15.12`.
+
+**Por que cinco e não três.** O que a escada prova é propriedade **de uma máquina** — que o
+compilador escrito ALI se reproduz ALI. Provar em três pares e afirmar em cinco é exatamente a
+afirmação cross-compilada que a matriz de pernas existe para recusar (§64, "nada é cross-compilado
+e deixado sem rodar"). O job `fixpoint` passa a espelhar a matriz `leg`, par a par.
+
+### (a) linux/aarch64 — configuração, como o §73(e) item 4 previa
+
+`ubuntu-24.04-arm` vira a terceira entrada da matriz e nada mais muda: o par já tinha perna e o
+`write_target_tail` do `bootstrap.sh` já conhecia o loader glibc dele
+(`/lib/ld-linux-aarch64.so.1`), escrito quando o §73(c) resolveu o `exit 127` do x86_64. Ficou
+fora do S4.3 só para o job novo custar dois runners.
+
+### (b) Windows — o sysroot fatorado, e o `[linker]` que a escada precisa
+
+A escada precisa do `<out>.o` em disco, o que exige `[linker]`; no Windows não há `cc` nem C
+runtime, então o link é `lld-link` contra três arquivos. Duas peças:
+
+1. **`.github/actions/windows-sysroot`** (action composta, nova) é a montagem que a perna Windows
+   fazia em dois passos inline: LLVM no `$PATH` em forma **Windows** (`cygpath -w` — o `mc` chama
+   o linker por `CreateProcessA`, que lê o PATH do Win32), `TMPDIR` no temp do runner (o `mc`
+   nativo não abre `/tmp/...`), e `winstart.obj`/`mcrt.obj`/`kernel32.lib` compilados do bundle do
+   próprio `mc` (`--backend=coff-obj-{x86_64,arm64}` + `llvm-dlltool` sobre a lista de 15 exports).
+   A perna e o fixpoint a usam — **zero duplicação**, e não há como os dois montarem sysroots
+   diferentes.
+2. **`bootstrap.sh --linker-toml FILE`**: os configs derivados removem o `[linker] cc` do
+   `ngen/mc.toml` (mesmo `awk` do config das pernas) e recebem no fim os blocos
+   `[sysroot]`/`[linker]` do arquivo. A matriz do job escreve a MESMA linha `lld-link` da perna
+   (`-entry:mc_start -nodefaultlib -stack:8388608`). POSIX `sh`, sem `set -e`, status por passo.
+
+**Nomes.** No Windows todo estágio é `<nome>.exe`. O `mc` anexa o sufixo do host ao
+`[compiler].out` sozinho (`drv_teach`/`host_exe_suffix`); o `[project].out` é o script que nomeia,
+e o objeto sai de `out + ".o"` — então o critério compara `teko2.exe.o` com `teko3.exe.o`, COFF,
+mesmo `cmp`. O laço das 45 fixtures roda `.exe`. O `mc` também vai para o `$GITHUB_PATH` em forma
+Windows.
+
+**Nada foi preciso do lado do `mc`.** `--dump-asm` sobre um compilador COFF, `--entry-only`,
+`--compiler-only` e o link por `[linker]` funcionaram como nos outros pares, na 0.15.12 pinada.
+
+### (c) O achado: o sufixo do compilador ensinado é o do HOST
+
+`drv_teach` monta o nome do binário com `host_exe_suffix()` — o compilador ensinado tem de RODAR
+na máquina que o escreveu, então o sufixo é o do host, nunca o do `[target]`. Um probe com
+`--os windows` numa máquina macOS escreveu `ngen/build/teko` e o script procurou
+`ngen/build/teko.exe`: `exit 127`, com o binário ali (a mesma classe da armadilha 30, outra causa).
+A correção não é adivinhar sufixo — é **recusar alvo ≠ máquina**: `bootstrap.sh` confere
+`--os`/`--arch` contra `mc --host` e falha na hora, com a causa. A escada **executa** todo estágio
+que constrói; um ponto fixo que não roda não é ponto fixo, e `--os`/`--arch` existem para dizer o
+par em voz alta no log do CI, não para cross-compilar.
+
+### (d) O que o CI mediu (run `34052547541`, mc 0.15.12, 11/11 verde)
+
+| | teko0 | 0→1 | 1→2 | 2→3 | total | `--dump-asm` | `teko2.o` | `sha256(teko2.o)` |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| linux/x86_64 | 1,494 s | 3,183 s | 3,157 s | 3,163 s | 20,682 s | 192 502 linhas | 2 071 936 B | `d37e4cb3…` |
+| linux/aarch64 | 2,578 s | 7,457 s | 7,189 s | 7,519 s | 41,938 s | 191 667 linhas | 2 247 992 B | `6e80a42e…` |
+| macos/aarch64 | 2,805 s | 5,792 s | 4,166 s | 4,199 s | 33,751 s | 191 586 linhas | 1 722 368 B | `034843cd…` |
+| windows/x86_64 | 2,360 s | 4,842 s | 4,835 s | 4,857 s | 41,930 s | 191 564 linhas | 1 820 893 B | `a45444fd…` |
+| windows/aarch64 | 3,062 s | 7,491 s | 7,409 s | 7,405 s | 71,524 s | 191 564 linhas | 1 771 513 B | `30aed5f0…` |
+
+`teko1.o == teko2.o == teko3.o` e 45/45 fixtures nos **cinco** — ponto fixo na primeira volta em
+todos. O objeto de macos/aarch64 (`034843cd…`) é byte-idêntico ao construído no host local, a mesma
+evidência entre-máquinas do §73(d), agora sobre a 0.15.12. As duas arquiteturas de Windows dão o
+MESMO número de linhas de `--dump-asm` (191 564) e objetos diferentes, que é o esperado: o dump é o
+mesmo programa, o objeto é COFF de máquinas diferentes.
+
+### (e) O que continua NÃO sendo gate
+
+1. **`sha256` reportado, não barrado** — inalterado desde o §73(e) item 1. Agora há cinco tabelas
+   de provenance por run (e cinco no corpo de uma release: `release.yml` já lê
+   `provenance/*/provenance.md` por glob, então nada muda lá).
+2. **O agregador não mudou.** `mc build ngen && run` continua dependendo só da matriz `leg`.
+   Promover a escada a check obrigatório segue sendo decisão de ruleset, tomada fora deste
+   workflow; os cinco nomes de context estão listados em `docs/design/pr-org-ngen.md` §2/§5 para
+   quem for configurá-lo.
+
+**Gate local** (host macOS/aarch64, `mc` 0.15.12): `rm -rf ngen/build`;
+`sh ngen/scripts/bootstrap.sh` → `FIXPOINT OK`, 45/45, `034843cd…` nos três objetos, `--dump-asm`
+191 586 linhas diff vazio — e o MESMO run por `--linker-toml` com um bloco `cc` equivalente
+reproduz os três hashes byte a byte, que é a prova de que a substituição do `[linker]` deriva um
+config equivalente.
