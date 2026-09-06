@@ -23,8 +23,12 @@
 // and by the time the pass runs it is empty. It builds its own scope over the
 // tree, under the same rule -- a mark per block, cut back on the way out -- so a
 // name declared in an inner block answers only there. A name this oracle cannot
-// decide -- a global, a receiver it never saw -- answers -1, and only THEN does
-// the member's own name get to resolve the access (`tk_pend_by_name`).
+// decide -- a scalar global, a receiver it never saw -- answers -1, and only
+// THEN does the member's own name get to resolve the access
+// (`tk_pend_by_name`). ONE exception (G1, §50): a global `T[]` of heap
+// (teko_array.mc's own `tk_ty_global_ha`) IS decided, the same way a global
+// scalar array is a compile-time bound instead -- `g.Length` is otherwise
+// indistinguishable from any other unknown member.
 //
 // The consumer here is `.` on a receiver the parser could not type: teko_expr.mc
 // DEFERS every one of them rather than guessing from the member's name, because
@@ -177,7 +181,11 @@ i64 tk_ty_of(i64 n) {
     i64 t = tk_xt_ty(n);
     if (t >= 0) return t;
     i64 k = nd_kind(n);
-    if (k == N_IDENT) return tk_ty_scope_find(nd_name(n));
+    if (k == N_IDENT) {
+        i64 s = tk_ty_scope_find(nd_name(n));
+        if (s >= 0) return s;
+        return tk_ty_global_ha(nd_name(n));         // G1: a global `T[]` of heap
+    }
     if (k == N_CALL) {
         i64 d = decl_find(nd_name(n));
         if (d < 0) return 0 - 1;
@@ -452,9 +460,24 @@ i64 tk_pend_iface(i64 pi, i64 si, uptr pty, uptr ppure) {
     return tk_itab_emit(pd_recv_at(pi), di, j, args, m, tk_line, tk_file);
 }
 
+// `g.Length` on a global `T[]` of heap (G1): the receiver only the oracle
+// could type (a global is never a LOCAL, so `tk_struct_of_expr` never sees
+// it at parse time), the one member teko_heaparr.mc's own parse-time
+// `tk_ha_member_of` answers for every OTHER receiver shape.
+i64 tk_pend_ha_length(i64 pi, uptr m, uptr pty, uptr ppure) {
+    if (!str_eq(m, "Length")) err_at2(tk_file, tk_line, "teko: an array has no member", m);
+    i64 form = pd_form_at(pi);
+    if (form == TK_PCALL) err_at2(tk_file, tk_line, "teko: the member is a field, not a method", m);
+    if (form == TK_PSTORE) err_at2(tk_file, tk_line, "teko: is read-only", m);
+    st64(pty, TY_I64);
+    st64(ppure, 1);
+    return tk_call("ld64", tk_bin(K_ADD, pd_recv_at(pi), tk_int(16)));
+}
+
 i64 tk_pend_emit(i64 pi, i64 si, uptr pty, uptr ppure) {
     uptr m = pd_name_at(pi);
     if (tk_is_iface(si)) return tk_pend_iface(pi, si, pty, ppure);
+    if (tk_is_ha(si)) return tk_pend_ha_length(pi, m, pty, ppure);
     i64 fi = tk_field_find(si, m);
     if (fi >= 0) {
         tk_check_member(tk_field_owner(fi), fd_vis_at(fi), m, tk_line, tk_file);
@@ -518,6 +541,12 @@ void tk_pend_do(i64 pi) {
     i64 rp = tk_pend_at(recv);
     if (rp >= 0) tk_pend_do(rp);
     tk_this_fix(recv);                           // `inner.x`: the receiver is a field of `this`
+    // `cs[i].area()` on a GLOBAL `T[]` (G1): `cs[i]` never enters the tree
+    // teko_array.mc's own pass walks -- the `.` deferred it as a RECEIVER,
+    // an orphan reachable only through `pd_recv`, same as an inner `.` in a
+    // chain -- so it is resolved here, on the very same chase, before its
+    // type is asked for.
+    if (nd_kind(recv) == N_INDEX) tk_array_maybe_rewrite_index(recv);
     tk_line = pd_line_at(pi);
     tk_file = pd_file_at(pi);
     i64 recv_ty = tk_ty_of(recv);
