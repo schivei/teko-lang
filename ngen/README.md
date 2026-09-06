@@ -55,9 +55,9 @@ The fixed point of the self-hosted compiler: `teko0` (the stock `mc` building `n
 `teko1` → `teko2` → `teko3`, each stage compiling `ngen/mc_teko.tk` with the compiler the
 previous stage produced. Green means `cmp` of the objects `teko2.o`/`teko3.o` is empty,
 `--dump-asm` of teko2 vs teko3 diffs empty, and teko1 compiles and runs every fixture —
-printed as `FIXPOINT OK`. Runs in CI as the `fixpoint` job (linux/x86_64, macos/aarch64);
-Windows is out of this slice (needs the `lld-link` sysroot inside that job too, debt in
-`ngen/HANDOFF.md` §3.1).
+printed as `FIXPOINT OK`. Runs in CI as the `fixpoint` job on five native legs (linux/x86_64,
+linux/aarch64, macos/aarch64, windows/x86_64, windows/aarch64), covering the same pairs as the
+build matrix (`ngen/HANDOFF.md` §3.1).
 
 ## Toolchain version
 

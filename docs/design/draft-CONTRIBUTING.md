@@ -17,21 +17,20 @@ This guide covers the workflow for working on the language port.
 ## Building locally
 
 ```sh
-# Derive your platform's config from mc.toml (remove [linker], set [target] os/arch)
-awk '/\[linker\]/,/^$/ { next } { print }' mc.toml >teko.toml
-sed -i 's/^os   = .*/os   = "linux"/' teko.toml
-sed -i 's/^arch = .*/arch = "x86_64"/' teko.toml
+# Derive your platform's config from teko.toml (set [target] os/arch)
+sed -e 's/^os   = .*/os   = "linux"/' -e 's/^arch = .*/arch = "x86_64"/' \
+    teko.toml >mc.host.toml
 
 # Build the taught compiler
-mc build . --config teko.toml
+mc build . --config mc.host.toml
 
-# Run the fixtures (18 programs, each with // expect-exit: N oracle)
+# Run the fixtures (45 programs, each with // expect-exit: N oracle)
 for src in tests/*.tk; do
   n=$(basename "$src" .tk); w=$(grep -m1 '// expect-exit:' "$src" | sed 's/.*expect-exit: *//')
   sed -e "s#^entry = .*#entry = \"tests/$n.tk\"#" -e "s#^out   = .*#out   = \"build/$n\"#" \
-      teko.toml >"teko.$n.toml"
-  ./build/teko build . --config "teko.$n.toml" --entry-only && "./build/$n"
-  echo "$n exit=$?  want=$w"; rm -f "teko.$n.toml"
+      mc.host.toml >"mc.$n.toml"
+  ./build/teko build . --config "mc.$n.toml" --entry-only && "./build/$n"
+  echo "$n exit=$?  want=$w"; rm -f "mc.$n.toml"
 done
 ```
 

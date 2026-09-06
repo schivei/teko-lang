@@ -156,7 +156,7 @@ A regra do corte (plano §76/§77) é **zero resultado errado silencioso**: o qu
 | `mc limits ngen` | `verdict ok`; `intrin 8/16`, `types 7/14`, `heap 530 864/33 554 432` |
 | mc pinado | **0.15.12** (`ngen/MC_VERSION`; `.github/actions/setup-mc` lê o arquivo) |
 | pernas de CI | **5 nativas** (linux/x86_64, linux/aarch64, macos/aarch64, windows/x86_64, windows/aarch64) e **5 de `fixpoint`** nos mesmos pares; agregador `mc build ngen && run` |
-| hash do pacote | **a re-medir**: o valor de §3.3 (`057e7aed…761424d5`) é ANTERIOR ao V0, que mudou três arquivos de `[package].files` (`teko_params.tk`, `teko_struct.tk`, `teko_switch.tk`) — rodar `mc pkg hash ngen` ao cortar a tag |
+| hash do pacote | **9318b19cb5b76629c03ca1b354d0d93bc3860e8a4f7747945cd19e235a5e5004** (pós-V0, medido 2026-09-06); o hash muda a cada byte de `mc.toml`/`files` e é re-medido ao cortar a tag. Valor anterior a V0 (antes das 3 mudanças): `057e7aed…`; primeira tentativa: `d41a0c80…` |
 
 ## 4. O que a teko é hoje (notas da Release)
 
