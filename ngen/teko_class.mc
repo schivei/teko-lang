@@ -117,6 +117,14 @@ i64 tk_decl_vis_written();
 i64 tk_type_word(uptr name);
 void tk_check_type_use_from(i64 si, i64 proj, i64 line, uptr fl);
 
+// teko_access.mc is included after this file too: §50 O3's own two, the same
+// pair `tk_gen_replay` (teko_generic.mc) uses to make a pushed instance's
+// declarations carry the TEMPLATE's origin rather than the pushed frame's own
+// name, and the reset a fresh declaration's modifiers start from
+i64 tk_frame_enter(i64 proj);
+void tk_frame_leave(i64 keep);
+void tk_set_decl(i64 vis, i64 proj, i64 abst);
+
 #define TK_MAXMETHOD 128              // methods, summed across all classes
 #define TK_MAXVSLOT  128              // virtual slots, summed across all classes
 #define TK_MAXDFLT   64               // default arguments, summed across all signatures
@@ -1053,6 +1061,80 @@ i64 tk_member(i64 ci, uptr name, i64 off, i64 ti) {
 // that ask for it: a base class has to be whole before a class derives from it
 void tk_close_open(i64 si);
 
+// `class Dog : Animal` above `class Animal` (§50 O3, decision 11): the base's
+// row has to be WHOLE -- fields, virtual slots, itab, constructor -- before
+// `tk_base_take` below can lay the derived object out, so its declaration is
+// parsed right here, in the middle of the `:` list that asked for it, instead
+// of waiting for the parser to reach it further down. `fi`'s span was
+// captured by the lexical scan (teko_fwd.mc); it is pushed as a second
+// source exactly the way a generic instance is (`tk_gen_replay`,
+// teko_generic.mc), whose save/restore of the trait/`use` state this mirrors
+// -- a base out of order may itself derive from one not yet declared either,
+// three levels deep and more, which is what recurses back into this very
+// function.
+//
+// The token the push spends is not the base's own name -- it is whatever the
+// parser is sitting on right after it in the `:` list being read (a `,`
+// before another interface, or the `{` of the DERIVED class's own body), so
+// that token's own lexeme (`p_name()`) rides along, appended after the
+// captured declaration, and comes back out of the pushed frame once the
+// declaration itself has been read in full: the push's contract (hooks.md §
+// 4, "the push does not touch the pending lookahead token") is honoured by
+// regenerating, in one extra token, exactly what it would otherwise discard.
+i64 tk_fwd_materialize(i64 fi) {
+    uptr qname = fw_name_at(fi);
+    i64 kind = fw_kind_at(fi);
+    if (kind != TK_KCLASS && kind != TK_KIFACE) return 0 - 1;
+    if (fw_spanlen_at(fi) == 0) return 0 - 1;
+    if (fw_multi_at(fi))
+        err_at2(tk_file, tk_line, "teko: a partial base is not forward-declarable yet", tk_ns_dotted(qname));
+    if (tk_fwd_in_flight(qname))
+        err_at2(tk_file, tk_line, "teko: cyclic base", tk_ns_dotted(qname));
+    tk_fwd_flight_push(qname);
+
+    i64 s_line = tk_line;
+    uptr s_file = tk_file;
+    i64 s_own = tk_own_methods;
+    i64 s_nconf = tk_nconf;
+    i64 s_ntu = tk_ntu;
+    i64 s_nud = tk_nud;
+    i64 s_tu[TK_MAXUSE];
+    i64 s_ud[TK_MAXUSE];
+    i64 i = 0;
+    loop {
+        if (i >= TK_MAXUSE) break;
+        st64(s_tu + i * 8, tu_tr_at(i));
+        st64(s_ud + i * 8, ud_tr_at(i));
+        i = i + 1;
+    }
+
+    uptr text = tk_join3(xstrdup(fw_span_at(fi), fw_spanlen_at(fi)), " ", p_name());
+    tk_set_decl(0 - 1, 0 - 1, 0);
+    i64 s_frame = tk_frame_enter(fw_proj_at(fi));
+    p_push_source(tk_fwd_frame(qname, tk_file, tk_line), text, cstrlen(text));
+    p_next();                                    // spends the token the caller was sitting on
+    parse_top();
+    tk_frame_leave(s_frame);
+
+    tk_line = s_line;
+    tk_file = s_file;
+    tk_own_methods = s_own;
+    tk_nconf = s_nconf;
+    tk_ntu = s_ntu;
+    tk_nud = s_nud;
+    i = 0;
+    loop {
+        if (i >= TK_MAXUSE) break;
+        set_tu_tr_at(i, ld64(s_tu + i * 8));
+        set_ud_tr_at(i, ld64(s_ud + i * 8));
+        i = i + 1;
+    }
+
+    tk_fwd_flight_pop();
+    set_fw_mat_at(fi, 1);
+    return tk_struct_find_exact(qname);
+}
+
 // one name of the `:` list, whose word is reserved by then (type_new), so the
 // raw lexeme is read and looked up in the type table. `proj` is the origin of
 // the class being declared -- the list is read before its row exists, and an
@@ -1068,15 +1150,25 @@ i64 tk_conf_name(i64 base, i64 proj) {
     uptr seg0mem = xalloc(8);
     uptr nm = tk_ns_read_path(seg0mem);
     uptr disp = tk_ns_dotted(nm);                 // what a message shows: the dev's own `A.B` spelling
+    i64 bare = str_eq(nm, ld64(seg0mem));
     i64 si = 0 - 1;
-    if (str_eq(nm, ld64(seg0mem))) si = tk_struct_find(nm);
+    if (bare) si = tk_struct_find(nm);
     else si = tk_struct_find_exact(nm);
     // §50 O2 ressalva 3: a row a use materialized ahead of its real
     // declaration (`TK_PFWD`) has no base/slots/itab yet -- deriving from it
-    // now would lay the derived class out wrong. A base declared below is
-    // O3's own debt, untaught here; this is the same "not found" a base that
-    // is never declared at all already gets.
+    // now would lay the derived class out wrong; fall through to O3 below,
+    // exactly as a base never scanned at all would.
     if (si >= 0 && sr_part_at(si) == TK_PFWD) si = 0 - 1;
+    // §50 O3 decision 12: a base or an interface declared BELOW materializes
+    // here -- but only a BARE name in the SAME namespace as this use, the
+    // one `tk_ns_qualified_name` peeks without registering anything. A
+    // qualified spelling (`geo.Base`) or a name only a `using` would reach is
+    // untaught (dívida): it falls through to the "not found" below exactly
+    // as it always has.
+    if (si < 0 && bare) {
+        i64 fi = tk_fwd_find(tk_ns_qualified_name(nm));
+        if (fi >= 0) si = tk_fwd_materialize(fi);
+    }
     if (si < 0 && tk_trait_find(nm) >= 0)
         err_at2(fl, line, "teko: a trait is not a base class nor an interface; use `use`", disp);
     if (si < 0) err_at2(fl, line, "teko: unknown base class or interface", disp);
@@ -1377,6 +1469,12 @@ void tk_class() {
     i64 part = tk_take_decl_part();
     uptr qname = tk_ns_qualified_name(p_name());   // exact reopen check: never the `using` search
     i64 qsi = tk_struct_find_exact(qname);
+    // §50 O3: a `:` list reaching for this class ahead of its own place
+    // already read this whole declaration through `tk_fwd_materialize` --
+    // its tokens, still unread in the real source, are skipped rather than
+    // parsed a second time, silently (decision 11)
+    i64 fwi = tk_fwd_find(qname);
+    if (fwi >= 0 && fw_mat_at(fwi)) { tk_fwd_skip_decl(fwi); return; }
     // a row a USE materialized ahead of this declaration (§50 O1, TK_PFWD) is
     // not a genuine first part yet -- it has none of a first part's layout
     // (no vtable slot reserved, no base taken); it falls through to the

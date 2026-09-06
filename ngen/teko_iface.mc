@@ -465,6 +465,12 @@ void tk_interface() {
     p_next();                                    // the `interface` word
     i64 vis = tk_take_decl_vis();                // the `public`/`internal` before the word
     i64 proj = tk_take_decl_proj();
+    // §50 O3: a class's `:` list reaching for this interface ahead of its
+    // own place already read this whole declaration through
+    // `tk_fwd_materialize` (teko_class.mc) -- its tokens, still unread in the
+    // real source, are skipped rather than parsed a second time, silently
+    i64 fwi = tk_fwd_find(tk_ns_qualified_name(p_name()));
+    if (fwi >= 0 && fw_mat_at(fwi)) { tk_fwd_skip_decl(fwi); return; }
     uptr name = tk_ns_qualify(tk_newname("interface"));   // the current namespace, if any
     i64 ty = tk_type_word(name);                 // a name of its own type parses
     i64 si = tk_type_add(name, ty, 0 - 1, TK_KIFACE, vis, proj);
