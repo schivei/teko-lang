@@ -2828,3 +2828,25 @@ Gate: `rm -rf ngen/build`, build do zero; `--entry-only` **42/42** (as 41 anteri
 `mc limits` `verdict ok`, `intrin`/`passes`/`syntax` idênticos nos dois lados (zero intrínseco, zero
 pass, zero palavra nova). Sem PR, sem dreno -- branch `feat/ngen-i1-iface`, forward-only para
 `fix/retirement`.
+
+## 55. `on_source` (mc 0.15.3) — a varredura migra para o callback (2026-09-06)
+
+Item pequeno, sem crumb próprio no plano além deste registro curto (dono pediu o `on_source`
+depois do O1/O2/O3/I1, §5.2 do HANDOFF tem o pedido e o ack). `ngen/teko_fwd.mc` ganhou
+`tk_fwd_on_source`/`tk_fwd_is_source_name`; `tk_fwd_init` agora só registra o callback
+(`on_source(&tk_fwd_on_source)`) em vez de varrer a entrada na mão; `tk_import`
+(`ngen/teko_ns.mc`) parou de chamar `tk_fwd_scan` depois do próprio `lex_include` -- o push já
+dispara o callback registrado, por conta própria, e o filtro por sufixo `.tk` mantém fora o
+que não é fonte teko (`<teko-loop-prelude>`, os frames de replay de genérico/base/trait, um
+`#include "../lib/rt.mc"`). Fecha a última dívida "not scanned" do O2: um `#include "x.tk"` CRU
+(fora de `import`) agora tem seu conteúdo varrido no instante do push, então um tipo declarado
+nele e usado ACIMA da sua própria declaração, mas ainda dentro do arquivo incluído, resolve.
+
+Gate: `rm -rf ngen/build`, build do zero; `--entry-only` **42/42** (nenhuma fixture nova ou
+tocada); `--dump-ast` das **42 fixtures** byte-idêntico ao compilador da base `0a0bd0f4`
+(`same=42 diff=0`); `mc limits` `verdict ok`, `on_source` 1 (linha nova na tabela), `intrin`
+8/8 (zero intrínseco novo), `passes`/`syntax` 14/14 (nenhuma pass nova, nenhuma palavra nova).
+Probe (fora de `ngen/tests/`, descartado): `box_value(Box b) { return b.get(); }` acima de
+`class Box { ... }`, os dois dentro de um `#include "parts/x.tk"` cru puxado por `main.tk` --
+compilador da base recusa com `type expected in parameter`; com o callback, compila e roda
+(exit 42). Sem PR, sem dreno -- branch `feat/ngen-onsource`, forward-only para `fix/retirement`.
