@@ -48,6 +48,15 @@ i64 tk_type_stmt();
 // answers for a real declaration that says nothing
 i64 tk_origin_of_file(uptr f);
 
+// teko_expr.mc/teko_access.mc are included after this file: §50 O2's own two
+// resolvers, run from `tk_fwd_pass` below once every forward-scanned type is
+// either adopted or reported by the backstop -- a `new`/`Type.member` this
+// unit deferred (teko_expr.mc's `tk_fwd_defer_new`, teko_access.mc's
+// `tk_fwd_defer_static`) is rewritten in place here, over the placeholder its
+// own parse-time call already built
+void tk_fwd_resolve_all_new();
+void tk_fwd_resolve_all_static();
+
 // teko_trait.mc is included after this file: a trait's body is captured
 // whole here, under the same table the real `trait Name { ... }` fills in
 void tk_trait_scan(uptr name, uptr text, i64 len, i64 vis, i64 proj);
@@ -219,12 +228,14 @@ i64 tk_fwd_word_eq(uptr p, i64 n, uptr kw) {
 }
 
 // a dotted path (`A.B.C`), "__"-joined exactly as `tk_ns_qualify` joins one --
-// the same shape a real `namespace`/`using` reads with `tk_ns_read_path`
-uptr tk_fwd_read_path(uptr p, uptr end, uptr pfull) {
+// the same shape a real `namespace`/`using` reads with `tk_ns_read_path`.
+// `pseg0` gets the FIRST segment alone, what `tk_ns_seg_register` reserves.
+uptr tk_fwd_read_path(uptr p, uptr end, uptr pfull, uptr pseg0) {
     i64 nlen = 0;
     uptr n = tk_fwd_word(p, end, &nlen);
     p = n + nlen;
-    uptr full = xstrdup(n, nlen);
+    uptr seg0 = xstrdup(n, nlen);
+    uptr full = seg0;
     loop {
         uptr q = tk_fwd_skip_ws(p, end);
         if (q >= end || ld8(q) != '.') break;
@@ -236,6 +247,7 @@ uptr tk_fwd_read_path(uptr p, uptr end, uptr pfull) {
         p = s + slen;
     }
     st64(pfull, full);
+    st64(pseg0, seg0);
     return p;
 }
 
@@ -323,11 +335,19 @@ uptr tk_fwd_try_trait(uptr p, uptr end, uptr cur_ns, uptr file) {
 // `namespace` just consumed: reads the dotted path and, when it opens a
 // block or is file-scoped (`;`), remembers it through the three out-params --
 // a malformed spelling (neither) is left for the real parser to reject and
-// changes nothing here. Returns the position just past the path.
+// changes nothing here. Returns the position just past the path. §50 O2
+// ressalva 2: the path's own FIRST segment is reserved here too
+// (`tk_ns_seg_register`, teko_ns.mc, idempotent, included before this file)
+// -- otherwise a qualified reference (`Geo.Item`) written ABOVE this same
+// `namespace Geo { ... }` never dispatches through `tk_ns_seg_stmt`/
+// `tk_ns_seg_expr` at all, since today only the REAL declaration reserves
+// the word.
 uptr tk_fwd_try_namespace(uptr p, uptr end, i64 depth, uptr pcur_ns, uptr pns_block, uptr pns_depth) {
     p = tk_fwd_skip_ws(p, end);
     uptr full = 0;
-    p = tk_fwd_read_path(p, end, &full);
+    uptr seg0 = 0;
+    p = tk_fwd_read_path(p, end, &full, &seg0);
+    tk_ns_seg_register(seg0);
     uptr peek = tk_fwd_skip_ws(p, end);
     if (peek < end && ld8(peek) == '{') {
         st64(pcur_ns, full);
@@ -406,7 +426,10 @@ void tk_fwd_init() {
 // declaration ever adopted it. `tk_type_add` flips the state to TK_PWHOLE the
 // moment a declaration IS read (adopted or not, a name never used before its
 // declaration never becomes TK_PFWD at all), so this is a false positive of
-// the scan, the only way it fires (decision 14, §50)
+// the scan, the only way it fires (decision 14, §50). Run BEFORE the two
+// resolvers below: a `new`/`Type.member` deferred against a name that turns
+// out to be this same false positive gets the clear message here instead of
+// a confusing one from a constructor/field pick over an empty placeholder.
 i64 tk_fwd_pass(i64 root) {
     i64 i = 0;
     loop {
@@ -417,5 +440,7 @@ i64 tk_fwd_pass(i64 root) {
                    tk_join3("teko: ", tk_ns_short_of(fw_name_at(i)), " is used but never declared"));
         i = i + 1;
     }
+    tk_fwd_resolve_all_new();
+    tk_fwd_resolve_all_static();
     return root;
 }

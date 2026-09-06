@@ -289,19 +289,167 @@ i64 tk_static_member(i64 si, i64 line, uptr fl) {
     return tk_static_use(fi, line, fl);
 }
 
+// ---- §50 O2: `Type.member` on a type only the forward scan has seen so far
+// (teko_fwd.mc's own `TK_PFWD`) -- which of const/field/property/method
+// `member` names is not known until the real declaration is read, so only
+// the FORM (load, store, call) and the already-parsed argument/value are
+// recorded here; the pick itself waits for `tk_fwd_resolve_all_static`,
+// which runs the same four-way dispatch `tk_static_member` runs for a type
+// it already knew.
+#define TK_MAXSTFWD 32
+
+#define TK_STLOAD  0
+#define TK_STSTORE 1
+#define TK_STCALL  2
+
+i64  st_node[TK_MAXSTFWD];
+i64  st_si[TK_MAXSTFWD];
+uptr st_name[TK_MAXSTFWD];
+i64  st_arg[TK_MAXSTFWD];             // the call's arguments, or the assigned value
+i64  st_na[TK_MAXSTFWD];
+i64  st_form[TK_MAXSTFWD];
+i64  st_line[TK_MAXSTFWD];
+uptr st_file[TK_MAXSTFWD];
+i64  tk_nstf = 0;
+
+i64  st_node_at(i64 i)  { return ld64(st_node + i * 8); }
+i64  st_si_at(i64 i)    { return ld64(st_si + i * 8); }
+uptr st_name_at(i64 i)  { return ld64(st_name + i * 8); }
+i64  st_arg_at(i64 i)   { return ld64(st_arg + i * 8); }
+i64  st_na_at(i64 i)    { return ld64(st_na + i * 8); }
+i64  st_form_at(i64 i)  { return ld64(st_form + i * 8); }
+i64  st_line_at(i64 i)  { return ld64(st_line + i * 8); }
+uptr st_file_at(i64 i)  { return ld64(st_file + i * 8); }
+
+void set_st_node_at(i64 i, i64 v)  { st64(st_node + i * 8, v); }
+void set_st_si_at(i64 i, i64 v)    { st64(st_si + i * 8, v); }
+void set_st_name_at(i64 i, uptr v) { st64(st_name + i * 8, v); }
+void set_st_arg_at(i64 i, i64 v)   { st64(st_arg + i * 8, v); }
+void set_st_na_at(i64 i, i64 v)    { st64(st_na + i * 8, v); }
+void set_st_form_at(i64 i, i64 v)  { st64(st_form + i * 8, v); }
+void set_st_line_at(i64 i, i64 v)  { st64(st_line + i * 8, v); }
+void set_st_file_at(i64 i, uptr v) { st64(st_file + i * 8, v); }
+
+void tk_st_add(i64 n, i64 si, uptr m, i64 arg, i64 na, i64 form, i64 line, uptr fl) {
+    if (tk_nstf == TK_MAXSTFWD) err_at(fl, line, "teko: too many static accesses on a type declared below");
+    set_st_node_at(tk_nstf, n);
+    set_st_si_at(tk_nstf, si);
+    set_st_name_at(tk_nstf, m);
+    set_st_arg_at(tk_nstf, arg);
+    set_st_na_at(tk_nstf, na);
+    set_st_form_at(tk_nstf, form);
+    set_st_line_at(tk_nstf, line);
+    set_st_file_at(tk_nstf, fl);
+    tk_nstf = tk_nstf + 1;
+}
+
+// `Type.member` / `Type.member = e` / `Type.member(args)`, the `.` NOT yet
+// consumed -- the shared tail `tk_type_expr`/`tk_ns_seg_stmt`/`tk_ns_seg_expr`
+// all reach once their own type word (bare or namespace-qualified) resolves
+// to a still-forward row.
+i64 tk_fwd_defer_static(i64 si, i64 line, uptr fl) {
+    if (!p_accept(tk_dot_tok)) err_at2(fl, line, "teko: a type name reaches its static members", sr_name_at(si));
+    uptr m = p_ident();
+    i64 form = TK_STLOAD;
+    i64 arg = 0;
+    i64 na = 0;
+    if (p_id() == K_LPAR) { form = TK_STCALL; arg = tk_args(&na); }
+    else if (p_accept(K_ASSIGN)) { form = TK_STSTORE; arg = parse_expr(0); }
+    tk_line = line;
+    tk_file = fl;
+    i64 n = tk_call("tk_unresolved_static", 0);
+    tk_st_add(n, si, m, arg, na, form, line, fl);
+    return n;
+}
+
+// one deferred access, once the type is fully declared: the same const/
+// property/method/field dispatch `tk_static_member` makes, over the form and
+// the argument/value the parser already read
+void tk_fwd_resolve_static_one(i64 i) {
+    i64 si = st_si_at(i);
+    uptr m = st_name_at(i);
+    i64 form = st_form_at(i);
+    i64 line = st_line_at(i);
+    uptr fl = st_file_at(i);
+    tk_line = line;
+    tk_file = fl;
+    tk_check_type_use(si, line, fl);
+    i64 r = 0;
+    i64 mci = tk_mconst_find(si, m);
+    if (mci >= 0) {
+        if (form != TK_STLOAD) err_at2(fl, line, "teko: a constant is not assigned or called", m);
+        r = tk_mconst_use(mci, line, fl);
+    } else if (form == TK_STCALL) {
+        i64 mi = tk_method_pick(si, m, st_na_at(i));
+        if (mi < 0) tk_pick_refuse(mi, m, line, fl);
+        tk_check_member(mt_cls_at(mi), mt_vis_at(mi), m, line, fl);
+        if (!mt_static_at(mi))
+            err_at(fl, line, tk_join3("teko: ", tk_join3(sr_name_at(si), ".", m),
+                                      " is an instance member; reach it through an object"));
+        i64 args = tk_fill_defaults(st_arg_at(i), st_na_at(i), mt_np_at(mi), mt_nreq_at(mi), mt_d0_at(mi));
+        r = tk_call(mt_fn_at(mi), args);
+        i64 rs = tk_struct_by_ty(mt_ret_at(mi));
+        if (rs >= 0) tk_xt_add(r, rs, 0);
+    } else if (tk_prop_find(si, m) >= 0) {
+        i64 wantset = form == TK_STSTORE;
+        i64 mi = tk_prop_accessor_of(si, m, wantset, line, fl);
+        if (!mt_static_at(mi))
+            err_at(fl, line, tk_join3("teko: ", tk_join3(sr_name_at(si), ".", m),
+                                      " is an instance member; reach it through an object"));
+        i64 v = 0;
+        if (wantset) v = st_arg_at(i);
+        r = tk_call(mt_fn_at(mi), v);
+        i64 rs = tk_struct_by_ty(mt_ret_at(mi));
+        if (rs >= 0) tk_xt_add(r, rs, 0);
+    } else {
+        i64 fi = tk_static_field_of(si, m, line, fl);
+        if (fi < 0) err_at2(fl, line, tk_join("teko: unknown static member of ", sr_name_at(si)), m);
+        if (fd_nel_at(fi) > 0)
+            err_at2(fl, line, "teko: an array field on a type declared below is not taught yet", m);
+        i64 fty = fd_ty_at(fi);
+        i64 addr = tk_id(fd_sym_at(fi));
+        if (form == TK_STSTORE) {
+            if (tk_lam_escapes(st_arg_at(i)))
+                err_at(fl, line, "teko: a lambda that captures by reference cannot leave its scope");
+            r = tk_os_mark(tk_call2(tk_stn(fty), addr, st_arg_at(i)), fty);
+        } else {
+            r = tk_call(tk_ldn(fty), addr);
+            tk_xt_put(r, tk_struct_by_ty(fty), fty, 1);
+        }
+    }
+    i64 n = st_node_at(i);
+    i64 keep = nd_next(n);
+    node_assign(n, r);
+    set_nd_next(n, keep);
+    if (tk_os_has(r)) tk_os_add(n);
+}
+
+void tk_fwd_resolve_all_static() {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nstf) break;
+        tk_fwd_resolve_static_one(i);
+        i = i + 1;
+    }
+}
+
 // the type word in EXPRESSION position, which the core's parse_primary has
 // nothing to do with: `Shape.made`, `Shape.tally()`. A plain type's own word
 // always resolves (it is registered under this exact spelling); a namespaced
 // short name (§31 N1) may not, when neither the current namespace nor a
 // `using` of the file names it -- checked here rather than left to
-// `tk_static_member`, which assumes a real row.
+// `tk_static_member`, which assumes a real row. §50 O2: a type only the
+// forward scan has seen so far defers instead of picking a member over an
+// empty placeholder.
 i64 tk_type_expr() {
     i64 line = p_line();
     uptr fl = p_file();
     uptr nm = p_name();
     i64 si = tk_struct_find(nm);
+    if (si < 0) si = tk_fwd_row(nm);              // §50 O2: declared below, never used before
     if (si < 0) err_at2(fl, line, "teko: unresolved name", nm);
     p_next();                                    // the type word
+    if (sr_part_at(si) == TK_PFWD) return tk_fwd_defer_static(si, line, fl);
     return tk_static_member(si, line, fl);
 }
 
