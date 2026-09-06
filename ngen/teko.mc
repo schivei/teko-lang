@@ -331,7 +331,13 @@ i64 tk_limits(i64 argc, uptr argv) {
     return drv_limits(argc, argv);
 }
 
-void user_init() {
+// teko_init() -- what entrega 4's S3 crumb (D64.7) exports instead of
+// `user_init` (docs/reference/packages.md §3: "a package never defines
+// `user_init`; it exports `<name>_init()` and the project's own module
+// calls it"). Every registration this compiler needs is still here,
+// unchanged; only the name changed, so `ngen/user.mc` -- the PROJECT's
+// own file, not the package's -- can call it from its own `user_init()`.
+void teko_init() {
     // `tk_access_init` first: it reads `cfg_file`/`lex_file()` and touches
     // nothing the lexer is reading FROM (no push, no cursor move), so it is
     // safe ahead of the forward scan below and gives it a working
