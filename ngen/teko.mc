@@ -217,10 +217,10 @@ void user_init() {
     // `tk_origin_of_file` for a trait's own placeholder (§50 O1).
     tk_access_init();
 
-    // §50 O1: the forward scan runs before every OTHER init -- in
-    // particular before `tk_loop_init` below pushes its own prelude source,
-    // the point past which `p_cp()`/`p_src_end()` answer for the prelude and
-    // not for the entry file (teko_fwd.mc's own header).
+    // §55 (mc 0.15.3's `on_source`): registers the forward-scan callback.
+    // Order against `tk_loop_init`'s own prelude push no longer matters --
+    // the callback runs once per source the lexer announces, filtered by
+    // name, not by when it happens to register (teko_fwd.mc's own header).
     tk_fwd_init();
 
     tk_types_init();

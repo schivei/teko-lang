@@ -139,7 +139,34 @@ nomes antigos, mas o CI (`ngen.yml`: API de releases e base de download) e a rec
 para `minicompiler/mc`. Tags, releases e checksums não mudam. A org é a casa dos pacotes oficiais e a
 identidade admin do registro.
 
-## 3.2 O mc que o CI usa hoje: 0.14.1 (2026-09-05)
+## 3.2 O mc que o CI usa hoje: 0.15.3 (2026-09-06)
+
+**0.15.3 (PR #31, patch de cooperação): `void on_source(uptr fn)`**, handler `void f(uptr name,
+uptr src, i64 len)`, chamado de `lex_push_mem` como última instrução do push, para TODA fonte que
+o lexer abre -- a entrada, `#include` que o NÚCLEO resolve sozinho, `<bundle>`/`<pack/...>` e todo
+`p_push_source`. `name` é o que `lex_file()` imprimiria para aquele quadro. **A entrada também é
+anunciada:** como `lex_init` empurra a entrada antes de `user_init()` rodar, registrar o handler
+dispara um REPLAY, só para ele, de toda fonte já aberta -- então a varredura manual da entrada
+que `tk_fwd_init` fazia deixa de ser necessária. **Adotado** (`ngen/teko_fwd.mc`,
+`tk_fwd_on_source`/`tk_fwd_is_source_name`): `tk_fwd_init` agora só chama `on_source(&tk_fwd_
+on_source)`; o callback filtra por SUFIXO `.tk` (nenhum outro nome que o lexer anuncia termina
+assim -- um frame de `p_push_source` sempre junta palavras com espaço ou dois-pontos, um nome de
+`<bundle>` é uma palavra nua tipo `mc/core`, e um `#include "../lib/rt.mc"` que um PROGRAMA `.tk`
+escreve termina em `.mc`) e chama `tk_fwd_scan` só para os que passam. Nenhuma tabela de
+"já varrido" nova: o `lex_seen` do próprio núcleo já impede um `#include`/`import` repetido de
+empurrar (e portanto de anunciar) o mesmo nome duas vezes. `tk_import` (`ngen/teko_ns.mc`) parou de
+chamar `tk_fwd_scan` depois do seu próprio `lex_include` -- o push já dispara o callback registrado,
+por conta própria. Fecha a dívida do O2: um `#include "parts/x.tk"` CRU (fora de `import`) agora
+tem seu conteúdo varrido no instante em que é empurrado, então um uso escrito ACIMA da declaração
+real, mas DENTRO do arquivo incluído, resolve -- provado por probe (fora de `ngen/tests/`): com o
+compilador da base (pré-0.15.3) o mesmo programa dava `type expected in parameter` (a palavra nunca
+tinha sido reservada); com o callback, compila e roda normal. `mc limits` ganha a linha `on_source`
+(1 registro, na segunda tabela -- a que mede a compilação REAL de um `.tk` pelo compilador
+ensinado; a primeira tabela, da compilação de `teko.mc` em si, nunca chega a rodar `user_init`).
+Baseline local no 0.15.3: 42/42, `same=42 diff=0` contra a base `0a0bd0f4` (nenhuma fixture tocada
+por este item).
+
+(Registro anterior, 0.14.1:)
 
 **0.14.1 (PR #25, patch de cooperação):** `continue N;` no núcleo, espelho de `break N;` — N
 níveis de laço contados do mais interno; `continue;` = `continue 1;` (mesmo nó de antes, inerte,
@@ -1887,6 +1914,19 @@ Sem PR, sem dreno -- branch `feat/ngen-i1-iface`, forward-only para `fix/retirem
     `tk_fwd_in_flight`, a pilha de voo) ficam em `teko_fwd.mc`; `tk_fwd_materialize` em si mora em
     `teko_class.mc`, ao lado de `tk_conf_name` -- o único chamador, e o primeiro arquivo da cadeia de
     include onde o estado do trait já é visível.
+24. **Um handler de `on_source` NÃO pode empurrar fonte de dentro do próprio callback -- e não
+    precisa: o que ele quer varrer já chegou.** `on_source` (0.15.3) chama o handler com o frame já
+    no topo da pilha do lexer; qualquer `lex_push_mem` alcançado de dentro dele (`p_push_source`,
+    `lex_include`, um `#include`) é recusado com `mc: on_source handler pushed a source: <name>` --
+    sem a guarda seria recursão até `SIGSEGV` (anunciar um push que abre outro, que anuncia mais um,
+    ...). `tk_fwd_on_source` (`teko_fwd.mc`) só LÊ `src`/`len` (a varredura é byte a byte, nunca
+    consome um token nem empurra nada), então nunca é alcançado por esse guard; `tk_import`
+    (`teko_ns.mc`) continua chamando `lex_include` no PRÓPRIO handler de `import` -- fora do
+    callback de `on_source`, então o push em si não viola a guarda, e o arquivo que ele empurra é
+    anunciado (e varrido) pelo callback registrado, por conta própria, sem `tk_import` ter de repetir
+    a varredura. A regra prática: quem faz uma varredura léxica pré-parse no `on_source` faz só isso
+    ali; qualquer push que o construto (import, generic, base fora de ordem) precisar continua
+    acontecendo no handler DAQUELE construto, nunca dentro do callback de `on_source`.
 
 ## 5.2 Canal com a sessão do mc
 

@@ -176,11 +176,10 @@ i64 tk_fwd_defer_static(i64 si, i64 line, uptr fl);
 // teko_fwd.mc is included after this file: `tk_ns_resolve_fwd`'s own search
 // below lands a candidate on it instead of on `tk_struct_find_exact` (§50
 // O1), so a namespaced short name declared below resolves through a `using`
-// too, for the identity-only sites that call it; `tk_import` below scans the
-// file `lex_include` just pushed the same way `tk_fwd_init` scans the entry
-// source
+// too, for the identity-only sites that call it. `tk_import` below no
+// longer scans the file `lex_include` pushes itself (§55): the callback
+// `tk_fwd_init` registers is announced for that push too.
 i64 tk_fwd_row(uptr qname);
-void tk_fwd_scan(uptr p, uptr end, uptr file);
 
 // teko_expr.mc is included after this file: a qualified free function's own
 // call (entrega 5, crumb N2) reads its argument list the same way a static
@@ -1102,7 +1101,10 @@ void tk_using() {
 // declared inside the IMPORTED file is a different file's own and does not
 // count, `tk_ns_mark_file_saw_ns`'s own header). The `#include "x.tk"` form
 // keeps working unchanged: `import` is one door onto the same mechanism, not
-// the only one.
+// the only one. §55: this function still calls `lex_include` itself --
+// pushing stays here, outside the `on_source` callback (hooks.md § on_source's
+// own guard) -- but no longer scans the pushed file by hand: the callback
+// `tk_fwd_init` registered is announced for that same push.
 void tk_import() {
     i64 line = p_line();
     uptr fl = p_file();
@@ -1114,10 +1116,6 @@ void tk_import() {
     uptr full = tk_ns_read_path(seg0mem);
     if (p_id() != K_SEMI) err_at2(fl, line, "teko: expected ; after import", tk_ns_dotted(full));
     tk_ns_using_add(fl, line, full);
-    i64 pushed = lex_include(tk_ns_path_of(full), line);   // the lookahead contract: still on the `;`
-    // §50 O1: the pushed file, forward-scanned too -- `lex_file()`, not
-    // `p_file()`, because the push does not touch the pending lookahead
-    // token (hooks.md § record and replay), which is still the includer's
-    if (pushed) tk_fwd_scan(p_cp(), p_src_end(), lex_file());
+    lex_include(tk_ns_path_of(full), line);      // the lookahead contract: still on the `;`
     p_next();
 }

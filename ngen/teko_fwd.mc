@@ -2,10 +2,17 @@
 // docs/design/plano-ngen-entrega4.md), the C6 debt the handoff named: a
 // one-pass parser refuses `Box b = new Box();` written above `class Box`.
 //
-// The fix is a LEXICAL pre-scan of the whole source, run before the real
-// parser ever reads a token (`tk_fwd_init`, the first line of `user_init`,
-// and `tk_import`, right after a push -- teko_ns.mc). It walks the raw bytes
-// looking for `class`/`struct`/`interface`/`delegate`/`trait`, skipping
+// The fix is a LEXICAL pre-scan of the whole source. Since mc 0.15.3 the
+// scan is driven by a single `on_source` registration (`tk_fwd_init`,
+// §55): the lexer itself calls `tk_fwd_on_source` for every source it
+// opens -- the entry file (announced by REPLAY at registration time,
+// hooks.md § on_source), every `#include` the CORE resolves on its own (a
+// raw `#include "parts/x.tk"`, the gap O2 left open), every `import`
+// (`tk_import`, teko_ns.mc, which still calls `lex_include` itself but no
+// longer scans anything after it) and every `<bundle>`/`p_push_source`
+// replay -- and the callback filters by name (`tk_fwd_is_source_name`) down
+// to real `.tk` sources before it walks the raw bytes looking for
+// `class`/`struct`/`interface`/`delegate`/`trait`, skipping
 // comments, strings, char literals and `#directive` lines, and following
 // `namespace A.B { ... }`/`namespace A.B;` to qualify a name the same way
 // `tk_ns_qualify` does. Nothing it finds is parsed -- it never consumes a
@@ -500,9 +507,10 @@ i64 tk_fwd_is_modifier(uptr w, i64 wlen) {
     return 0;
 }
 
-// the whole scan, over one source: the entry file (`tk_fwd_init`) or a file
-// `import` just pushed (teko_ns.mc's `tk_import`). Namespace state is local
-// to the call -- a file-scoped `namespace A.B;` only ever applies to the
+// the whole scan, over one source: whatever `.tk` file `tk_fwd_on_source`
+// (§55, below) just let through -- the entry, a raw `#include`, an `import`,
+// or a `<bundle>` frame the name filter would have rejected. Namespace state
+// is local to the call -- a file-scoped `namespace A.B;` only ever applies to the
 // file it is written in, matching `tk_ns_file_get`'s own per-file table.
 // `namespace` is recognized at ANY depth (a nested one is already refused
 // where the real parser opens it, D31.13-adjacent); `class`/`struct`/
@@ -564,16 +572,41 @@ void tk_fwd_scan(uptr p, uptr end, uptr file) {
     }
 }
 
-// the entry source, scanned before ANY token is read -- the first line of
-// `user_init`, ahead of `tk_loop_init`'s own prelude push (§50 (a).4: past
-// that point `p_cp()`/`p_src_end()` answer for the prelude, not the entry
-// file, measured against `mc/src/lex.mc`)
+// §55 (mc 0.15.3's `on_source`): true for a name this scanner should walk.
+// Every OTHER name the lexer ever announces here spells itself with a space
+// or a colon (`tk_fwd_frame`/`tk_gen_frame`/`tk_frame`'s own joins, all
+// above) or is a bare bundled/pushed name (`<teko-loop-prelude>`, `mc/core`,
+// `prelude`) -- none of them ends in `.tk`, and neither does a raw
+// `#include "../lib/rt.mc"` a `.tk` PROGRAM writes, so the suffix alone is
+// the whole filter. No "already scanned" table is needed either: the
+// core's own `lex_seen` already keeps a repeated `#include`/`import` of the
+// same name from pushing (and therefore from being announced) twice.
+i64 tk_fwd_is_source_name(uptr name) {
+    i64 n = cstrlen(name);
+    if (n < 3) return 0;
+    return ld8(name + n - 3) == '.' && ld8(name + n - 2) == 't' && ld8(name + n - 1) == 'k';
+}
+
+// §55: the single `on_source` handler, replacing the two sites this module
+// used to scan from by hand -- the entry file's own line at the top of
+// `user_init`, and `tk_import`'s call right after `lex_include`
+// (teko_ns.mc). The lexer now calls this for EVERY source it opens,
+// including the entry (by REPLAY, at registration time -- hooks.md § on_source
+// itself, "the entry file is announced too") and a raw `#include "parts/x.tk"`
+// the core resolves on its own, which O2 left unscanned (the gap this item
+// closes). The one guard `on_source` enforces (no push from inside the
+// callback) is never at risk here: this handler only reads `src`/`len`.
+void tk_fwd_on_source(uptr name, uptr src, i64 len) {
+    if (!tk_fwd_is_source_name(name)) return;
+    tk_fwd_scan(src, src + len, name);
+}
+
+// registers the callback above. Order no longer matters against
+// `tk_loop_init`'s own prelude push (the old §50 (a).4 note): the callback
+// runs once per source regardless of when it is pushed, and the name filter
+// throws the prelude's own announcement away on its own.
 void tk_fwd_init() {
-    // `p_file()` answers for the CURRENT TOKEN, and none has been read yet
-    // at this point -- `lex_file()` answers for the topmost open lexer
-    // frame directly (the entry source, already pushed), which is what
-    // `tk_access_init` above reaches for the very same reason.
-    tk_fwd_scan(p_cp(), p_src_end(), lex_file());
+    on_source(&tk_fwd_on_source);
 }
 
 // every forward-scanned type whose row is STILL TK_PFWD once the whole unit
