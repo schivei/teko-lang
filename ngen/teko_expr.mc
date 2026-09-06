@@ -333,18 +333,23 @@ i64 tk_call_method(i64 left, i64 si, uptr m, i64 line, uptr fl) {
 // `s.m(...)` where `s` is of INTERFACE type: the class is only known at run
 // time, so the method table comes from the object's own itab (`tk_itab`,
 // ngen/lib/rt.mc) and the call is indirect (teko_iface.mc's tk_itab_emit).
+// `m` may be `si`'s own or one it reaches only by extending another
+// interface (§50 I1: `tk_ifmeth_find_deep`) -- dispatch always goes through
+// the interface that actually declares it, its own itab entry on the object.
 i64 tk_iface_call(i64 left, i64 si, uptr m, i64 line, uptr fl) {
-    if (tk_ifmeth_find(si, m) < 0)
+    uptr pdecl = xalloc(8);
+    if (tk_ifmeth_find_deep(si, m, pdecl) < 0)
         err_at2(fl, line, tk_join("teko: unknown member of ", sr_name_at(si)), m);
+    i64 di = ld64(pdecl);
     i64 na = 0;
     i64 args = tk_args(&na);
-    i64 j = tk_ifmeth_pick(si, m, na);
+    i64 j = tk_ifmeth_pick(di, m, na);
     if (j < 0) tk_pick_refuse(j, m, line, fl);
-    i64 k = sr_m0_at(si) + j;
+    i64 k = sr_m0_at(di) + j;
     tk_line = line;
     tk_file = fl;
     args = tk_fill_defaults(args, na, im_np_at(k), im_nreq_at(k), im_d0_at(k));
-    i64 r = tk_itab_emit(left, si, j, args, m, line, fl);
+    i64 r = tk_itab_emit(left, di, j, args, m, line, fl);
     i64 rs = tk_struct_by_ty(im_ret_at(k));
     if (rs >= 0) tk_xt_add(r, rs, 0);
     return r;

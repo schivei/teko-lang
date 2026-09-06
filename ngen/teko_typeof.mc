@@ -425,22 +425,27 @@ i64 tk_pend_iface_prop(i64 pi, i64 si, uptr pty, uptr ppure) {
     return tk_itab_emit(pd_recv_at(pi), si, j, args, m, tk_line, tk_file);
 }
 
+// `m` may belong to `si` itself or to an interface it extends (§50 I1) --
+// same deep lookup `tk_iface_call` (teko_expr.mc) makes, dispatch through
+// whichever interface actually declares it.
 i64 tk_pend_iface(i64 pi, i64 si, uptr pty, uptr ppure) {
     uptr m = pd_name_at(pi);
     tk_check_type_use(si, tk_line, tk_file);     // an interface's members are public
     if (tk_prop_find(si, m) >= 0) return tk_pend_iface_prop(pi, si, pty, ppure);
-    if (tk_ifmeth_find(si, m) < 0)
+    uptr pdecl = xalloc(8);
+    if (tk_ifmeth_find_deep(si, m, pdecl) < 0)
         err_at2(tk_file, tk_line, tk_join("teko: unknown member of ", sr_name_at(si)), m);
+    i64 di = ld64(pdecl);
     if (pd_form_at(pi) != TK_PCALL)
         err_at2(tk_file, tk_line, "teko: the member is a method; call it with ()", m);
     i64 na = pd_na_at(pi);
-    i64 j = tk_ifmeth_pick(si, m, na);
+    i64 j = tk_ifmeth_pick(di, m, na);
     if (j < 0) tk_pick_refuse(j, m, tk_line, tk_file);
-    i64 k = sr_m0_at(si) + j;
+    i64 k = sr_m0_at(di) + j;
     i64 args = tk_fill_defaults(pd_arg_at(pi), na, im_np_at(k), im_nreq_at(k), im_d0_at(k));
     st64(pty, im_ret_at(k));
     st64(ppure, 0);
-    return tk_itab_emit(pd_recv_at(pi), si, j, args, m, tk_line, tk_file);
+    return tk_itab_emit(pd_recv_at(pi), di, j, args, m, tk_line, tk_file);
 }
 
 i64 tk_pend_emit(i64 pi, i64 si, uptr pty, uptr ppure) {
