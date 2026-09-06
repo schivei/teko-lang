@@ -4590,6 +4590,15 @@ mesma fixture sai **131** (`130 + 1`, o `ref f64`); contra o tip, 42.
    -- 0 em arm64; o machine x86_64 de `<float>` está correto (`cvttss2si`). O `ngen` não contorna:
    as fixtures/probes de `f32` comparam contra literais `f32` em vez de castar.
 
+**Dívida adjacente, do lado da teko, NÃO fechada aqui (precisa de decisão de superfície):** uma lista
+`params` não tem tipo de ELEMENTO -- é uma lista de PALAVRAS (`tk_va_put(uptr, i64, i64)` grava e
+`tk_va_at` devolve `i64`, `lib/rt.tk`), e o HANDOFF registra que `params i64[] xs` foi deliberadamente
+recusado. Logo um argumento float numa `params` cai na MESMA armadilha da captura (um `f64` não entra
+num parâmetro `i64`): `f64 total(params xs)` com `total(1.5, 2.5)` responde errado, no tip E na base
+(medido, probe fora de `ngen/tests/`) -- não é regressão da higiene 4 e não é o par de load/store. O
+conserto exige decidir COMO uma `params` ganha tipo de elemento (a grafia do C# é `params T[]`), que é
+superfície, não higiene.
+
 ### (c) Item B — o `teko1.o` não determinístico: NÃO reproduz, e a instrumentação que o próximo divergente já traz pronto
 
 O verificador do S4.3 registrou (mesma máquina, mesmo commit, `ngen/build` limpo, mc 0.15.10) duas

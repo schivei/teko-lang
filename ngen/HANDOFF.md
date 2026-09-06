@@ -2559,6 +2559,11 @@ ampliou (`ref f64`, campo `f64`).
   registrador. Repro mínimo e o segundo pedido (as conversões `f32` de `fa_w` em arm64) no plano
   §74(b). Enquanto isso, fixture e probes de `f32` COMPARAM contra literais `f32` em vez de castar
   para `i64`.
+- **Dívida adjacente registrada, NÃO fechada (é superfície, não higiene):** uma lista `params` não
+  tem tipo de ELEMENTO -- é lista de PALAVRAS (`tk_va_put`/`tk_va_at` gravam e devolvem `i64`), e
+  `params i64[] xs` foi deliberadamente recusado. Então um argumento float cai na MESMA armadilha da
+  captura: `f64 total(params xs)` com `total(1.5, 2.5)` responde errado **no tip E na base** (probe,
+  não é regressão). Fechar exige decidir como uma `params` ganha tipo de elemento. Plano §74(b).
 - Gate (host macOS/aarch64, `mc` 0.15.10): `rm -rf ngen/build`, build do zero; `--entry-only`
   **45/45** (nenhuma fixture nova; `surface_refout.tk` ganha `floatcheck`, e contra o compilador da
   base a MESMA fixture sai 131 = `130 + 1`); `mc limits ngen --config` `verdict ok`, `intrin 8/16` e
