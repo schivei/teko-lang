@@ -51,6 +51,8 @@
 #define TK_PLOAD  0                   // p.m
 #define TK_PSTORE 1                   // p.m = e
 #define TK_PCALL  2                   // p.m(...)
+#define TK_PIXLOAD  3                 // p.m[i], m an array field the receiver's type only the pass knows
+#define TK_PIXSTORE 4                 // p.m[i] = e
 
 // the argument list of a deferred call is read at parse time, by the same
 // function teko_expr.mc uses for a call it can resolve at once
@@ -287,6 +289,11 @@ void tk_pend_add(i64 n, i64 recv, uptr m, i64 arg, i64 na, i64 form, i64 line, u
 // function`, mc/src/gen_resolve.mc res_call), and a declared-but-undefined one
 // would stop at the link. It costs nothing when the rewrite does happen -- the
 // node is overwritten in place, so the name never reaches codegen.
+// `h.items[0]` / `h.items[0] = e` on a receiver only the pass could type: the
+// index is read here, at parse time, exactly as the STATIC path
+// (`tk_array_index`, teko_struct.mc) reads it -- `na` carries it through to
+// the pass (idle for every other form), since `pd_na` otherwise only ever
+// holds a call's own argument count
 i64 tk_defer_member(i64 left, uptr m, i64 line, uptr fl) {
     i64 form = TK_PLOAD;
     i64 arg = 0;
@@ -294,6 +301,14 @@ i64 tk_defer_member(i64 left, uptr m, i64 line, uptr fl) {
     if (p_id() == K_LPAR) {
         form = TK_PCALL;
         arg = tk_args(&na);
+    } else if (p_accept(K_LBRACK)) {
+        na = parse_expr(0);
+        p_expect(K_RBRACK, "expected ] after the index");
+        form = TK_PIXLOAD;
+        if (p_accept(K_ASSIGN)) {
+            form = TK_PIXSTORE;
+            arg = parse_expr(0);
+        }
     } else if (p_accept(K_ASSIGN)) {
         form = TK_PSTORE;
         arg = parse_expr(0);
@@ -314,11 +329,23 @@ i64 tk_defer_member(i64 left, uptr m, i64 line, uptr fl) {
 // `f(p.side)` has an argument type to be resolved by.
 i64 tk_pend_field(i64 pi, i64 fi, uptr pty, uptr ppure) {
     uptr m = pd_name_at(pi);
-    if (pd_form_at(pi) == TK_PCALL)
-        err_at2(tk_file, tk_line, "teko: the member is a field, not a method", m);
+    i64 form = pd_form_at(pi);
     i64 fty = fd_ty_at(fi);
+    i64 nel = fd_nel_at(fi);
     i64 addr = tk_bin(K_ADD, pd_recv_at(pi), tk_int(fd_off_at(fi)));
-    if (pd_form_at(pi) == TK_PSTORE)
+    if (form == TK_PCALL)
+        err_at2(tk_file, tk_line, "teko: the member is a field, not a method", m);
+    if ((form == TK_PIXLOAD || form == TK_PIXSTORE) && nel == 0)
+        err_at2(tk_file, tk_line, "teko: the field is not an array", m);
+    if (form == TK_PLOAD && nel > 0)
+        err_at2(tk_file, tk_line, "teko: an array field is read one element at a time", m);
+    if (form == TK_PSTORE && nel > 0)
+        err_at2(tk_file, tk_line, "teko: an array field is assigned one element at a time", m);
+    if (form == TK_PIXLOAD || form == TK_PIXSTORE) {
+        i64 k = tk_ax_index(pd_na_at(pi), nel, m, tk_line, tk_file);
+        addr = tk_bin(K_ADD, addr, tk_bin(K_MUL, k, tk_int(type_width(fty))));
+    }
+    if (form == TK_PSTORE || form == TK_PIXSTORE)
         return tk_os_mark(tk_call2(tk_stn(fty), addr, pd_arg_at(pi)), fty);
     st64(pty, fty);
     st64(ppure, 1);
