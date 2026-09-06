@@ -82,7 +82,34 @@ asm2="${TMPDIR:-/tmp}/teko2.$$.asm"
 asm3="${TMPDIR:-/tmp}/teko3.$$.asm"
 out="${TMPDIR:-/tmp}/bootstrap.$$.out"
 err="${TMPDIR:-/tmp}/bootstrap.$$.err"
-trap 'rm -f "$cfg0" "$cfg1" "$cfg2" "$cfg3" "$cfgf" "$asm2" "$asm3" "$out" "$err"' EXIT
+tail_="${TMPDIR:-/tmp}/bootstrap.$$.target-tail"
+trap 'rm -f "$cfg0" "$cfg1" "$cfg2" "$cfg3" "$cfgf" "$asm2" "$asm3" "$out" "$err" "$tail_"' EXIT
+
+# The extra `[target]` lines every derived config carries, written once here and
+# read back by `derive`. Empty everywhere except linux/glibc, and that case is
+# the ladder's own: the taught compiler is written by the HOST's executable
+# backend (mc docs/build.md § [compiler]), whose ELF writer defaults the program
+# interpreter and the libc soname to musl -- so on a glibc machine stage 1 gets
+# `ngen/build/teko: not found` at exit 127, the loader's way of saying the
+# interpreter named in the binary does not exist. The ladder RUNS every stage it
+# builds, so the loader THIS machine actually has is the oracle: named when it is
+# there, and on a musl machine nothing is appended and the musl defaults stand.
+# (`libc` is a family since mc 0.12.1; the ladder needs 0.15.10 anyway.)
+glibc_loader_of() {
+    case "$1" in
+        x86_64)  echo "/lib64/ld-linux-x86-64.so.2" ;;
+        aarch64) echo "/lib/ld-linux-aarch64.so.1" ;;
+    esac
+}
+
+write_target_tail() {
+    : >"$tail_"
+    [ "$os" = "linux" ] || return 0
+    loader=$(glibc_loader_of "$arch")
+    [ -n "$loader" ] && [ -e "$loader" ] || return 0
+    printf 'interp = "%s"\nlibc   = "gnu"\n' "$loader" >"$tail_"
+    echo "-- glibc machine: [target] interp $loader, libc gnu --"
+}
 
 # derive CONFIG ENTRY OUT -- ngen/mc.toml with the host's own target and one
 # stage's entry/output, the same `sed` shape HANDOFF.md §4 uses for a fixture
@@ -91,7 +118,8 @@ derive() {
         -e "s#^arch = .*#arch = \"$arch\"#" \
         -e "s#^entry = .*#entry = \"$2\"#" \
         -e "s#^out   = .*#out   = \"$3\"#" \
-        ngen/mc.toml > "$1"
+        ngen/mc.toml \
+        | sed -e "/^arch = /r $tail_" > "$1"
 }
 
 now() {
@@ -126,6 +154,7 @@ step() {
 
 echo "=== S4.2 -- fixed point of the self-hosted teko: teko0 -> teko1 -> teko2 -> teko3 ==="
 echo "-- target $os/$arch, entry ngen/mc_teko.tk --"
+write_target_tail
 
 t_total0=$(now)
 
