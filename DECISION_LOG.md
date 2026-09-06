@@ -1157,6 +1157,22 @@ Verificador reproduziu o crash instrumentando com ASan+UBSan (as flags do CI pro
 - **CONSERTO (dispatch):** `cg_emit_self_addr` tem que PARAR de escapar o endereço de um temp cujo escopo é o próprio statement-expression — hoist do `_rcvN` pra um escopo que sobrevive à chamada externa inteira, OU passar receptor tipo-valor por valor (Region/Arena são structs de 8B, métodos leem self). Root-cause, não workaround; conserta a CLASSE (todo receptor não-endereçável), não só o sítio arena.
 - **LEI DE PROCESSO (endurece D163/D164):** o fixpoint no sandbox NÃO pega UB que só crasha sob certos toolchains — **o gate de verificador de compiler-core passa a incluir um build ASan+UBSan** (`-fsanitize=address,undefined -fno-omit-frame-pointer -g`) do gen0 compilando o tip, além do fixpoint. Barato, pega stack-use-after-scope/UAF/OOB que o build seco esconde. (A ser gravado na CLAUDE.md.)
 
+### D229 · DONO: Dependency Injection resolvida em TEMPO DE COMPILAÇÃO — `IServiceSingleton`/`IServiceScoped`/`IServiceTransient`; Singleton recebe Scoped (tem escopo próprio) (dono 2026-09-06) 🔧 SUPERFÍCIE / roadmap obrigatório
+- **DI em comptime não pode ficar fora do roadmap.** O dev marca a implementação das suas classes como
+  `IServiceSingleton`, `IServiceScoped` ou `IServiceTransient`; **no ato da compilação** faz-se o registro
+  dessas classes, e a injeção é **resolvida em comptime** (sem container de runtime, sem reflexão).
+- **Diferença da teko para o C#:** um **Singleton PODE receber a injeção de um Scoped**, entendendo que o
+  Singleton tem o **seu próprio escopo**. Um **Transient** ou **herda o escopo** (de Scoped ou Singleton) ou
+  abre o próprio se não existir nenhum — caso que o dono julga impossível (transient é sempre invocado dentro
+  de um dos outros dois escopos).
+- **Architect-first** (dono: "talvez precise de um arquiteto"): a preocupação é a compilação por arquivo do
+  mc. Fato registrado pelo coordenador: o mc compila o programa como UMA unidade (sem TUs; `internal` = dir
+  do `mc.toml`), então um `pass()` enxerga todos os registros — a resolução comptime é um pass sobre a
+  árvore inteira. O arquiteto define: forma da injeção (construtor, como C#), o que ABRE um escopo, a
+  tabela de registros, os erros (implementação faltando/duplicada, ciclo), e a interação com o RC (D227).
+- Entra na fila depois do bloco §50 (ordem livre / herança de interface / `T[]` global), antes da
+  auto-hospedagem (D225).
+
 ### D228 · DONO: operador ternário `c ? a : b` entra na superfície; a `switch` expression é açúcar sobre ele (dono 2026-09-05) 🔧 SUPERFÍCIE
 - **Ternário `expr ? a : b`** é bem-vindo — "como está usando o mesmo construto de fluxo do mc"
   (dono, ao ver o desenho do hoist para a `switch` expression). Mesma precedência/associação do C#
