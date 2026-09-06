@@ -4750,3 +4750,103 @@ Dois achados do run, ambos registrados no handoff:
    `gh api -X PUT .../actions/workflows/316148340/enable`. Vai acontecer de novo na org.
 2. **O `teko0`/`teko1.o`/`teko2.o` de macos/aarch64 do CI são byte-idênticos aos construídos
    localmente** (`aa102141…` e `d530d6b1…`) — mais uma corrida a favor de pinar um golden.
+---
+
+## 76. V0 — inventário de recusas (2026-09-06)
+
+Primeiro crumb do desvio **"v0.1.0 estável"**. A regra do corte é uma só: **zero resultado errado
+silencioso**. O que a teko-sobre-mc ainda não ensina não pode ser aceito e respondido errado — tem
+de ser **recusado**, com mensagem no estilo do resto (`teko: <causa curta>`, arquivo:linha). Três
+buracos conhecidos, um commit cada, nenhuma superfície nova, nenhuma fixture nova (o corpus de
+`ngen/tests/` não tem fixture de erro — recusa se prova por probe), `ngen/mc.toml` intocado.
+
+### (a) Item 1 — a lista `params` é de PALAVRAS, e um float não é uma
+
+A dívida que a higiene 4 registrou (§74(b)): `tk_va_put`/`tk_va_at` (`ngen/lib/rt.tk`) gravam e
+devolvem a lista por parâmetro `i64`. Um `f64`/`f32` viaja no OUTRO banco de registradores, então
+nem entra pelo `put` nem sai pelo `at` — `f64 total(params xs)` com `total(1.5, 2.5)` respondia com
+o que o banco inteiro tivesse, na base e no tip, sem uma palavra. Enquanto `params T[]` não existir
+(o core não tem `[` em posição de parâmetro), as duas pontas são recusadas ONDE O TIPO É VISÍVEL:
+
+1. **O argumento que cai na lista.** `tk_va_check_float_args`, chamada de `tk_va_lower_call` sobre a
+   CAUDA (a parte que vira o pacote) e só sobre ela — um parâmetro fixo declarado `f64` continua
+   valendo, porque ele não passa pela lista. O tipo de cada argumento sai de `tk_va_arg_ty`: o
+   próprio nó para um literal (`1.5` é um `N_INT` cujo `nd_type` é `f64` — `fl_lit`, `lib/float.mc`)
+   e para um cast, e o oráculo de parse `tk_pty_of` (teko_struct.tk) no resto. `-1` é "não sei", nunca
+   recusa. Mensagem: ``teko: a `params` list holds words; a float argument is not taught yet``.
+2. **O elemento lido como float.** `tk_va_check_float_read`, chamada no TOPO do laço de `tk_va_walk`
+   — antes dos filhos, porque o `xs[i]` que ela precisa ver é justamente o que o walk rebaixa em
+   seguida. `tk_va_reads_list` reconhece o índice sobre o parâmetro-lista da instância, direto ou sob
+   aritmética (`xs[0] + xs[1]`, `0 - xs[0]`); uma leitura que atravessa uma CHAMADA não conta (a
+   palavra entra como o `i64` que é, e o que volta é o tipo do callee). Os três destinos que soletram
+   o tipo são o inicializador de um local float, uma atribuição a um, e o `return` de uma instância
+   cujo retorno declarado é float (`tk_va_ret`, salvo/restaurado em `tk_va_inst` ao lado de
+   `tk_va_n`). Mensagem: ``teko: a `params` list holds words; its element does not read as a float``.
+
+**Limites, deliberados e documentados:** um PARÂMETRO float repassado para a lista não é pego — a
+tabela `tk_slv_find` nunca vê parâmetro (o mesmo limite que a higiene 3 mediu) —, nem uma leitura que
+uma chamada carrega. É a regra do `tk_check_field_store`: recusa-se o que se sabe, cala-se no resto.
+
+### (b) Item 2 — o braço `_` textualmente último não carrega `when`
+
+A expression dobra os braços do ÚLTIMO para trás (`tk_switch_infix`), então o último braço é a base
+INCONDICIONAL da cadeia e a condição dele nunca é testada. Para um braço com rótulo isso é apenas um
+braço morto (o `1` de um `_` anterior casa primeiro); para o `_` **com `when`** é resultado errado: a
+guarda escrita é descartada e o braço é tomado assim mesmo. Recusado agora, na linha do próprio braço:
+``teko: the last `_` arm of a switch expression cannot carry a `when` ``.
+
+A mecânica é uma bandeira por braço (`isDefault` × `when` visto), zerada a cada volta e consultada
+depois do `}` — quem sobra é o último. **Semântica dos demais braços inalterada:** `_ when c` no meio
+continua dobrando para `1 && c` e sendo testado, `or` segue como estava, e um braço escrito depois de
+um `_` puro segue morto em vez de errado.
+
+### (c) Item 3 — o retorno de uma chamada passa a tipar o oráculo de parse
+
+O verificador da higiene 2 registrou: campo de outro objeto já era pego (`tk_field_use` tagueia o
+load), mas `b.useCircle(f())` com `f()` devolvendo `Square` onde se pede `Circle` passava em silêncio,
+porque `tk_pty_of` não tipava `N_CALL`. Passa a tipar, por `decl_find`/`decl_ret` — **o mesmo par que
+o oráculo PASS-TIME (`tk_ty_of`) já lê para o mesmo nó**, de modo que posição de ARGUMENTO passa a
+responder o que posição de INICIALIZADOR sempre respondeu (um `Circle c = f_que_devolve_i64();` já era
+recusado; o argumento não). Os dois consumidores do oráculo ganham a resposta juntos
+(`tk_vcall_args_check`, teko_expr.tk; `tk_ifargs_check`, teko_iface.tk). `ref`/`out` recebe um NOME,
+nunca uma chamada, e a DI não lê esse oráculo — não há terceiro sítio a tocar.
+
+**O que continua em silêncio, medido por probe:**
+
+- um callee declarado ABAIXO do sítio de chamada (`decl_find` responde sobre o que o core já parseou;
+  um protótipo acima do sítio também não fechou o caso, medido);
+- uma chamada INDIRETA (`callp` de delegate/virtual/interface em posição de argumento), que declaração
+  nenhuma nomeia;
+- **receptor que é PARÂMETRO** — limite ANTIGO da checagem, não deste oráculo: a classe do receptor não
+  é conhecida no parse, então `tk_call_method` nem chega ao sítio onde os argumentos seriam checados.
+  Probe: a MESMA chamada com receptor LOCAL é recusada e com receptor PARÂMETRO passa, na base e no tip.
+
+### (d) Gate e probes
+
+Host macOS/aarch64, `mc` **0.15.12**, base `77019bd6`, os três commits juntos: `rm -rf ngen/build`,
+build do zero; `--entry-only` **45/45**; `--dump-ast` das **45 byte-idêntico** ao compilador da base
+(`same=45 diff=0`) — uma recusa não muda o código aceito; `mc limits ngen --config` `verdict ok`, com
+`intrin 8/16` e `passes 15/30`, os mesmos da base; `sh ngen/scripts/bootstrap.sh` → **`FIXPOINT OK`**
+(`teko1.o == teko2.o == teko3.o`, `sha256` `034843cd…`, `--dump-asm` 191 586 linhas com diff vazio,
+teko1 compila as 45, 62,4 s no total); `ngen/mc.toml`, `ngen/tests/` e `ngen/scripts/` intocados.
+
+Probes em `ngen/_probe/` (apagado ao fim; cada um rodado TAMBÉM contra o compilador da base, para
+separar correção de regressão):
+
+| probe | o que prova | tip | base |
+| --- | --- | --- | --- |
+| literal float em `params` | item 1, argumento | recusa | aceita |
+| local `f64` em `params` | item 1, argumento pelo oráculo | recusa | aceita |
+| `f64 v = xs[0];` | item 1, leitura por inicializador | recusa | aceita |
+| `v = xs[1];` (local `f64`) | item 1, leitura por atribuição | recusa | aceita |
+| `return xs[0] + xs[1];` de `f64 total` | item 1, leitura por retorno | recusa | aceita |
+| `_ when g` como último braço | item 2 | recusa | aceita |
+| `_ when g` no meio + braço guardado depois do `_` | item 2, controle | roda 42 | roda 42 |
+| `Square` por vtable / por itab | item 3 | recusa | aceita (exit 0) |
+| tipo certo por vtable + itab + chamada escalar | item 3, controle | roda 42 | roda 42 |
+
+### (e) Dívida ADJACENTE achada (não é deste crumb)
+
+`xs[0]` de uma lista `params` usado como ARGUMENTO de uma chamada por vtable morre em `expression
+with no codegen`: a chamada já foi rebaixada a `callp` no parse e o `N_INDEX` sobrevive ao walk da
+instância. Reproduzido na BASE e no tip — não é regressão desta onda, e fica registrado.
