@@ -136,6 +136,42 @@ antes o sysroot que o link precisa, tudo com o próprio `mc` + LLVM da imagem:
 `minicompiler/mc` `scripts/sysroot-windows.sh`). A linha de link é a do próprio `mc`
 (`src/mc.windows-*.toml`): `-entry:mc_start -nodefaultlib -stack:8388608`.
 
+### A SEXTA perna: `fixpoint` (S4.3, 2026-09-06)
+
+Job **`fixpoint`**, fora da matriz `leg`, em **dois** runners — `fixpoint (linux/x86_64)`
+e `fixpoint (macos/aarch64)`. Roda `sh ngen/scripts/bootstrap.sh --os <os> --arch <arch>`:
+teko0 (`mc build ngen --compiler-only`, mc de prateleira) → teko1 → teko2 → teko3 sobre
+`ngen/mc_teko.tk`, com os TRÊS critérios do plano §64(f) — `cmp` dos objetos
+`teko2.o`/`teko3.o`, `--dump-asm` de teko2 vs teko3 com diff vazio, e teko1 compilando e
+rodando as 45 fixtures. As pernas provam "a fixture sai 42"; esta prova "o compilador se
+reproduz". O script imprime o tempo de CADA estágio e o tamanho de cada objeto/binário.
+
+**O que o job reporta e NÃO barra:** o passo de `summary` publica tamanho e **`sha256` de
+`teko1.o`/`teko2.o`**. O `cmp` dentro do run já prova o ponto fixo; se o `teko2.o` é
+byte-idêntico ENTRE runs e ENTRE máquinas é outra afirmação — imprimir é o que permite
+conferi-la antes de pinar. Quando estabilizar, vira golden versionado, no molde do
+`tests/golden/mc2.sha256` do mc.
+
+**O agregador NÃO mudou.** `mc build ngen && run` continua dependendo só da matriz `leg` —
+o nome é o que o ruleset exige e o significado dele fica sendo o que diz. Promover a escada
+a check obrigatório é decisão de ruleset, fora deste workflow.
+
+**Windows fica FORA desta fatia (dívida registrada).** A escada precisa do `<out>.o` em
+disco, o que exige `[linker]`; no Windows isso é o `lld-link` + o sysroot de três arquivos
+que a perna monta para si. Trazer a escada para lá é montar o sysroot também no job de
+fixpoint — trabalho real, não configuração.
+
+**`[target]` de linux, achado do CI:** o compilador ensinado é escrito pelo backend de
+executável do **HOST**, e o writer ELF do mc põe interpretador/soname **musl** por padrão;
+num runner glibc o `ngen/build/teko` existe e mesmo assim não executa (`not found`, exit
+127 — é o loader falando). O `bootstrap.sh` passou a anexar `interp`/`libc = "gnu"` ao
+`[target]` derivado **quando o alvo é linux e aquele loader existe na máquina**; máquina
+musl não anexa nada. (As pernas não sofriam: elas já traziam `interp`/`libc` na matriz.)
+
+O passo que baixa e verifica o `mc` é o MESMO nas seis: `.github/actions/setup-mc` (action
+composta) resolve o `latest` de `minicompiler/mc`, baixa o asset do par, confere o
+`.sha256` e assere `mc --host` — nenhum job pode testar um compilador diferente do outro.
+
 ## 3.1a Repositórios do mc migraram para a organização `minicompiler` (2026-09-05)
 
 `schivei/mc` → **`minicompiler/mc`** (e os privados `mc-registry`/`mc-ops`). O GitHub redireciona os
@@ -2485,6 +2521,38 @@ FLOAT. **Ampliação (verificador do K2w, 2026-09-06):** a causa é `tk_ldn`/`tk
 caminho próprio). O mc já expõe `ldf64`/`stf64`/`ldf32`/`stf32` (`lib/float.mc:424-427`), nunca usados no
 `ngen/`; conserto = ramo de float em `tk_ldn`/`tk_stn` antes do `type_width`. Higiene 4.
 
+**S4.3 LANDADO** (plano §64(f)/§73, 2026-09-06, base `e50ab97b`, branch `feat/ngen-s43-ci`,
+dois commits): a escada do fixpoint virou a **SEXTA** perna do CI — job `fixpoint`, matriz
+própria de dois runners, `fixpoint (linux/x86_64)` e `fixpoint (macos/aarch64)`, rodando
+`sh ngen/scripts/bootstrap.sh --os <os> --arch <arch>` e provando os três critérios do §64(f).
+Descrição no §3.1 acima; detalhe e medições no plano §73.
+
+- **`.github/actions/setup-mc` (novo)** — a resolução do `latest` de `minicompiler/mc`, o
+  download, a conferência do `.sha256` e a asserção de `mc --host` saíram do job `leg` para uma
+  action composta que as cinco pernas E o fixpoint usam. Saídas: `mc` (relativo), `dir`
+  (absoluto, para o `$GITHUB_PATH` — `bootstrap.sh` chama `mc` pelo NOME), `tag`, `version`.
+- **`bootstrap.sh` ganhou o `[target]` de linux** (segundo commit, causa-raiz do primeiro CI
+  vermelho): o compilador ensinado é escrito pelo backend de executável do HOST, e o writer ELF
+  do mc põe `PT_INTERP`/soname musl por padrão → em runner glibc o `ngen/build/teko` existe e
+  não executa (`not found`, exit 127, o loader falando). `write_target_tail` anexa
+  `interp`/`libc = "gnu"` **só quando o alvo é linux e aquele loader existe na máquina**; musl
+  não anexa nada; macOS não muda. A escada RODA o que constrói, então o loader desta máquina é
+  o oráculo.
+- **Medido no CI** (run `34043945146`, mc 0.15.10, tudo verde — 5 pernas + 2 fixpoint +
+  agregador): linux teko0 1,924 s → 4,085 / 4,089 / 4,084 s, `--dump-asm` 221 221 linhas diff
+  vazio, 45/45, total **26,887 s**, `teko1.o == teko2.o` = 2 062 312 B, `sha256` `33e7df95…`;
+  macOS teko0 3,032 s → 6,927 / 4,963 / 5,232 s, 221 134 linhas, 45/45, total **45,267 s**,
+  `teko1.o == teko2.o` = 1 714 920 B, `sha256` `689dc9a6…` — **byte-idêntico ao objeto do host
+  local**, primeira evidência de reprodutibilidade entre máquinas.
+- **Não é gate (ainda):** o `sha256` é impresso no `summary`, não comparado; vira golden
+  versionado quando estabilizar (molde do `tests/golden/mc2.sha256` do mc). O agregador
+  `mc build ngen && run` segue dependendo só da matriz `leg`.
+- **Dívidas:** escada no **Windows** (precisa do sysroot `lld-link` dentro do job) e em
+  **linux/aarch64** (o par tem perna; ficou fora só para o job custar dois runners).
+- Gate local (host macOS/aarch64, `mc` 0.15.10): `rm -rf ngen/build`; `sh ngen/scripts/bootstrap.sh`
+  → `FIXPOINT OK`, 45/45, 45,2 s; `ngen/mc.toml`, `ngen/*.tk` e `ngen/tests/` intocados;
+  `git status` limpo.
+
 ## 5.1 Armadilhas já pagas (não repita)
 
 1. **`mc --exe` emite Mach-O SEMPRE.** `minicompiler/mc` `src/main.mc:227` faz
@@ -2728,6 +2796,15 @@ caminho próprio). O mc já expõe `ldf64`/`stf64`/`ldf32`/`stf32` (`lib/float.m
     nada sobre largura 1/2/4 -- cubra `u8`/`i32` explicitamente. Vale igual para um parâmetro
     GERADO: o thunk de delegate repetia o defeito e não era alcançado pelo `tk_ref_pass`, porque
     nasce depois dele.
+
+30. **`<binário>: not found` com o binário ali, exit 127, é o LOADER falando.** O writer ELF do
+    mc põe `PT_INTERP`/soname **musl** por padrão, e o compilador ensinado sai pelo backend de
+    executável do HOST (`docs/build.md` § `[compiler]`) — num runner glibc ele existe, tem
+    tamanho e não executa. A cura é nomear o loader da máquina em `[target]`
+    (`interp` + `libc = "gnu"`), não caçar arquivo sumido. Consequência de processo: um config
+    DERIVADO do `ngen/mc.toml` não herda o que as pernas do CI carregam na matriz — o que a
+    perna resolve com `target_tail` a escada tem de resolver por conta (`write_target_tail` no
+    `bootstrap.sh`, e detectando o loader, porque quem executa o que constrói é esta máquina).
 
 
 ## 5.2 Canal com a sessão do mc

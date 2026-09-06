@@ -4418,3 +4418,86 @@ Registrado aqui e no HANDOFF §5; não foi tocado.
 **Ampliação (verificador do K2w):** a causa é `tk_ldn`/`tk_stn` (`teko_struct.tk`) mapearem só pela largura;
 atinge todo acesso indireto `f64` por esse par (`ref f64` e campo de classe `f64`), não o array fixo local. O
 mc já expõe `ldf64`/`stf64`/`ldf32`/`stf32` (`lib/float.mc`). Conserto mecânico = higiene 4.
+
+## 73. S4.3 — a perna de fixpoint no CI (2026-09-06)
+
+Fecha a linha S4.3 da tabela §64(f) ("perna de fixpoint no CI | `.github/workflows/ngen.yml` |
+a 6ª perna verde"). Base: o tip de `fix/retirement` em `e50ab97b`; branch `feat/ngen-s43-ci`,
+dois commits — `5db4abc0` (o job + a action composta) e `57a5ade8` (o `[target]` de linux).
+
+### (a) O job
+
+`fixpoint`, FORA da matriz `leg`, matriz própria de dois runners:
+**`fixpoint (linux/x86_64)`** (`ubuntu-latest`) e **`fixpoint (macos/aarch64)`**
+(`macos-latest`). Cada um roda `sh ngen/scripts/bootstrap.sh --os <os> --arch <arch>` a partir
+da raiz do repositório, e o script é quem prova os TRÊS critérios do §64(f): `cmp` dos OBJETOS
+`teko2.o`/`teko3.o`, `--dump-asm` de teko2 vs teko3 com diff vazio, e teko1 compilando e
+RODANDO as 45 fixtures. Os tempos por estágio e os tamanhos de todo objeto/binário já saem no
+log do próprio script; um passo de `summary` publica tamanho + `sha256` de `teko1.o`/`teko2.o`.
+
+Windows fica de fora desta fatia: a escada precisa do `<out>.o` em disco, o que exige
+`[linker]`, o que no Windows é o `lld-link` mais o sysroot de três arquivos que a perna monta
+para si — trabalho real, registrado como dívida (§(e)).
+
+### (b) Um só caminho para obter o `mc`: `.github/actions/setup-mc`
+
+Os dois passos que resolviam o `latest` de `minicompiler/mc`, baixavam o asset, conferiam o
+`.sha256` e asseriam `mc --host` saíram do job `leg` para uma **action composta**
+(`.github/actions/setup-mc/action.yml`), usada pelas cinco pernas E pelo job novo. Entradas:
+`os`/`arch`/`asset`/`exe`/`token`; saídas: `mc` (caminho relativo — a forma que Git Bash, bash
+e o próprio `mc` leem igual), `dir` (absoluto, para o `$GITHUB_PATH` do fixpoint, porque
+`bootstrap.sh` chama `mc` pelo NOME), `tag` e `version`. Não há mais como dois jobs testarem
+compiladores diferentes, e `latest` é resolvido por um código só.
+
+### (c) O achado do CI: o `[target]` de linux, e por que a perna não sofria
+
+Primeiro run: `fixpoint (linux/x86_64)` morreu no estágio 1 com
+`ngen/build/teko: not found`, exit **127** — com o `ngen/build/teko` presente e com 1 525 584
+bytes. Não é o arquivo que falta, é o **interpretador** nomeado dentro dele: o compilador
+ensinado é escrito pelo backend de executável do **HOST** (mc `docs/build.md` § `[compiler]`),
+cujo writer ELF põe `PT_INTERP`/soname **musl** por padrão, e o runner é glibc. As cinco pernas
+não sofriam porque já carregam `interp`/`libc` na própria matriz; a escada, que deriva o config
+do `ngen/mc.toml`, não carregava nada disso.
+
+Correção no `bootstrap.sh` (POSIX `sh`, sem `set -e`, como o resto do arquivo): `write_target_tail`
+escreve `interp = "<loader>"` + `libc   = "gnu"` num arquivo temporário quando **o alvo é linux E
+aquele loader EXISTE na máquina** (`/lib64/ld-linux-x86-64.so.2`, `/lib/ld-linux-aarch64.so.1`), e
+`derive` insere essas linhas logo depois do `arch = ` de `[target]` (`sed -e "/^arch = /r ..."`, a
+mesma técnica do workflow). Máquina musl não anexa nada e as defaults do mc valem. O critério é o
+certo porque a escada **executa** todo estágio que constrói: quem manda é o loader desta máquina,
+não uma tabela por par. macOS não muda (nada é anexado); o `[linker] cc` do `ngen/mc.toml` segue
+intocado, e é ele que mantém o `.o` em disco para o `cmp`.
+
+### (d) O que o CI mediu (run 34043945146, mc 0.15.10)
+
+| | linux/x86_64 | macos/aarch64 |
+|---|---|---|
+| teko0 (`mc build --compiler-only`) | 1,924 s | 3,032 s |
+| teko0 → teko1 | 4,085 s | 6,927 s |
+| teko1 → teko2 | 4,089 s | 4,963 s |
+| teko2 → teko3 | 4,084 s | 5,232 s |
+| `--dump-asm` | 221 221 linhas, diff vazio | 221 134 linhas, diff vazio |
+| fixtures por teko1 | 45/45 | 45/45 |
+| total do script | 26,887 s | 45,267 s |
+| `teko1.o` = `teko2.o` | 2 062 312 B | 1 714 920 B |
+| `sha256(teko2.o)` | `33e7df95…` | `689dc9a6…` |
+
+`teko1.o == teko2.o` nos dois: o compilador já está no ponto fixo na PRIMEIRA volta, o mesmo que
+o §70 mediu no host. O objeto de macos/aarch64 do CI é **byte-idêntico ao construído localmente**
+(mesmo `689dc9a6…`), o que é a primeira evidência de reprodutibilidade entre máquinas.
+
+### (e) O que NÃO é gate, e as dívidas
+
+1. **`sha256` é reportado, não barrado.** O `cmp` prova o ponto fixo DENTRO do run; que
+   `teko2.o` seja byte-idêntico ENTRE runs e máquinas é outra afirmação. Quando o número
+   estabilizar, vira golden versionado, no molde do `tests/golden/mc2.sha256` do mc — e aí o
+   job compara em vez de imprimir.
+2. **O agregador não mudou.** `mc build ngen && run` continua dependendo só da matriz `leg`:
+   é o nome que o ruleset de `main` exige e o significado dele fica sendo o que diz. Promover
+   a escada a check obrigatório é decisão de ruleset, tomada fora deste workflow.
+3. **Windows sem escada.** Precisa do sysroot (`winstart.obj`/`mcrt.obj`/`kernel32.lib`) e da
+   linha `lld-link` dentro do job de fixpoint, mais um `--linker`/tail equivalente no
+   `bootstrap.sh`. Nada disso é conceitualmente novo — é a mesma montagem que a perna Windows
+   já faz — mas é obra, não configuração.
+4. **linux/aarch64 sem escada.** O par tem perna (`ubuntu-24.04-arm`) e o `bootstrap.sh` já
+   conhece o loader dele; ficou de fora só para o job novo custar dois runners, não quatro.
