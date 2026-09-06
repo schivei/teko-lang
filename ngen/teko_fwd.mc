@@ -1,4 +1,4 @@
-// teko_fwd.mc -- free order of declaration for a type name (§50 O1,
+// teko_fwd.mc -- free order of declaration for a type name (§50 O1/O2/O3,
 // docs/design/plano-ngen-entrega4.md), the C6 debt the handoff named: a
 // one-pass parser refuses `Box b = new Box();` written above `class Box`.
 //
@@ -30,8 +30,13 @@
 // row's index -- and therefore every `tk_itab` already emitted against it --
 // stable. Only IDENTITY-only sites (a field, a parameter, a return type, a
 // local, `on_stmt`, the reference-counted-ness of a type) resolve through a
-// placeholder; a base class, `new` and a delegate construction still need
-// the row WHOLE and are untouched here (O2/O3).
+// placeholder; `new` and a delegate construction defer to a pass (O2). A base
+// class or an interface named in a `:` list needs the row WHOLE right where
+// it stands -- `tk_base_take` (teko_class.mc) lays the derived object out
+// from it immediately -- so the scan also captures each class/struct/
+// interface's own SPAN (`fw_span`/`fw_spanlen` below), and `tk_conf_name`
+// (teko_class.mc) replays it on the spot through `tk_fwd_materialize`, whole,
+// the moment the name is not found any other way (O3).
 
 // teko_ns.mc is included before this file: the short name of a namespaced
 // type reserves through the very function a real declaration already calls
@@ -68,19 +73,31 @@ i64  fw_ty[TK_MAXFWD];                 // the id `type_new` returned for it
 i64  fw_kind[TK_MAXFWD];               // TK_KSTRUCT/KCLASS/KIFACE/KDELEG
 i64  fw_vis[TK_MAXFWD];                // TK_TINTERNAL by default: the scan never reads public/internal
 i64  fw_proj[TK_MAXFWD];
+uptr fw_span[TK_MAXFWD];               // §50 O3: the declaration's own span, `class`/`struct`/`interface` through the closing `}`
+i64  fw_spanlen[TK_MAXFWD];            // 0 when the scan never found the `{` (a delegate, or a malformed source)
+i64  fw_multi[TK_MAXFWD];              // 1 once a SECOND scanned occurrence names this same qualified name (a `partial` part, or a plain duplicate): the span alone is one part, so materializing it would build an incomplete object
+i64  fw_mat[TK_MAXFWD];                // 1 once `tk_fwd_materialize` (teko_class.mc) has replayed this span whole -- the real declaration, reached later, is skipped rather than read again
 i64  tk_nfwd = 0;
 
-uptr fw_name_at(i64 i) { return ld64(fw_name + i * 8); }
-i64  fw_ty_at(i64 i)   { return ld64(fw_ty + i * 8); }
-i64  fw_kind_at(i64 i) { return ld64(fw_kind + i * 8); }
-i64  fw_vis_at(i64 i)  { return ld64(fw_vis + i * 8); }
-i64  fw_proj_at(i64 i) { return ld64(fw_proj + i * 8); }
+uptr fw_name_at(i64 i)    { return ld64(fw_name + i * 8); }
+i64  fw_ty_at(i64 i)      { return ld64(fw_ty + i * 8); }
+i64  fw_kind_at(i64 i)    { return ld64(fw_kind + i * 8); }
+i64  fw_vis_at(i64 i)     { return ld64(fw_vis + i * 8); }
+i64  fw_proj_at(i64 i)    { return ld64(fw_proj + i * 8); }
+uptr fw_span_at(i64 i)    { return ld64(fw_span + i * 8); }
+i64  fw_spanlen_at(i64 i) { return ld64(fw_spanlen + i * 8); }
+i64  fw_multi_at(i64 i)   { return ld64(fw_multi + i * 8); }
+i64  fw_mat_at(i64 i)     { return ld64(fw_mat + i * 8); }
 
-void set_fw_name_at(i64 i, uptr v) { st64(fw_name + i * 8, v); }
-void set_fw_ty_at(i64 i, i64 v)    { st64(fw_ty + i * 8, v); }
-void set_fw_kind_at(i64 i, i64 v)  { st64(fw_kind + i * 8, v); }
-void set_fw_vis_at(i64 i, i64 v)   { st64(fw_vis + i * 8, v); }
-void set_fw_proj_at(i64 i, i64 v)  { st64(fw_proj + i * 8, v); }
+void set_fw_name_at(i64 i, uptr v)    { st64(fw_name + i * 8, v); }
+void set_fw_ty_at(i64 i, i64 v)       { st64(fw_ty + i * 8, v); }
+void set_fw_kind_at(i64 i, i64 v)     { st64(fw_kind + i * 8, v); }
+void set_fw_vis_at(i64 i, i64 v)      { st64(fw_vis + i * 8, v); }
+void set_fw_proj_at(i64 i, i64 v)     { st64(fw_proj + i * 8, v); }
+void set_fw_span_at(i64 i, uptr v)    { st64(fw_span + i * 8, v); }
+void set_fw_spanlen_at(i64 i, i64 v)  { st64(fw_spanlen + i * 8, v); }
+void set_fw_multi_at(i64 i, i64 v)    { st64(fw_multi + i * 8, v); }
+void set_fw_mat_at(i64 i, i64 v)      { st64(fw_mat + i * 8, v); }
 
 i64 tk_fwd_find(uptr qname) {
     i64 i = 0;
@@ -149,7 +166,65 @@ void tk_fwd_add(uptr name, i64 ty, i64 kind, i64 vis, i64 proj) {
     set_fw_kind_at(tk_nfwd, kind);
     set_fw_vis_at(tk_nfwd, vis);
     set_fw_proj_at(tk_nfwd, proj);
+    set_fw_span_at(tk_nfwd, 0);
+    set_fw_spanlen_at(tk_nfwd, 0);
+    set_fw_multi_at(tk_nfwd, 0);
+    set_fw_mat_at(tk_nfwd, 0);
     tk_nfwd = tk_nfwd + 1;
+}
+
+// ---- §50 O3: the in-flight materialization stack, for `A : B` / `B : A` ----
+// a base out of order may itself derive from one not yet declared either, so
+// `tk_fwd_materialize` (teko_class.mc) may recurse into this same function --
+// what is currently being pushed and parsed, outermost first, is what a cycle
+// recurses back into
+uptr fl_name[TK_MAXFWD];
+i64  tk_nflight = 0;
+
+i64 tk_fwd_in_flight(uptr qname) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nflight) break;
+        if (str_eq(ld64(fl_name + i * 8), qname)) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+void tk_fwd_flight_push(uptr qname) {
+    st64(fl_name + tk_nflight * 8, qname);
+    tk_nflight = tk_nflight + 1;
+}
+
+void tk_fwd_flight_pop() { tk_nflight = tk_nflight - 1; }
+
+// "Animal forward-materialized from prog.tk:9" -- what `err_at` prints for
+// every error inside a base's own body, replayed ahead of the place it was
+// written, the same idea `tk_gen_frame` (teko_generic.mc) names an instance by
+uptr tk_fwd_frame(uptr qname, uptr fl, i64 line) {
+    return tk_join3(qname, " forward-materialized from ", tk_join3(fl, ":", tk_num(line)));
+}
+
+// §50 O3: the declaration a use already materialized whole -- its own tokens
+// are still sitting, unread, right where the source wrote them. `tk_class`/
+// `tk_interface` (teko_class.mc/teko_iface.mc) call this the instant they see
+// their own name is one of these, in place of reading it a second time: the
+// name, an optional `: Base, Iface, ...` list (read the same way `tk_conf_name`
+// reads one, whole names only, no semantic check -- the materialized replay
+// already ran every one of those) and the `{ ... }` body, real tokens this
+// time, so a `{`/`}` inside a string or a comment is never miscounted.
+i64 tk_fwd_skip_decl(i64 fi) {
+    p_next();                                    // the type's own name
+    if (p_accept(K_COLON)) {
+        loop {
+            tk_ns_read_path(xalloc(8));
+            if (!p_accept(K_COMMA)) break;
+        }
+    }
+    i64 n = 0;
+    p_skip_balanced(K_LBRACE, K_RBRACE, &n);
+    p_accept(K_SEMI);
+    return fi;
 }
 
 // ---- the scanner itself: a byte-level automaton over the raw source, never
@@ -264,13 +339,59 @@ void tk_fwd_reg_type(uptr qname, uptr shortname, i64 kind, uptr file, i64 has_ns
     tk_fwd_add(qname, ty, kind, TK_TINTERNAL, tk_origin_of_file(file));
 }
 
+// the first `{` at or after `p`, comments and directives skipped -- a `:`
+// list of dotted names never itself carries a brace, so this is always the
+// body's own opening one
+uptr tk_fwd_lbrace(uptr p, uptr end) {
+    loop {
+        p = tk_fwd_skip_ws(p, end);
+        if (p >= end) break;
+        if (ld8(p) == '{') break;
+        p = p + 1;
+    }
+    return p;
+}
+
+// from `{` through the byte past its matching `}`, strings/chars/comments
+// respected -- the body span `tk_fwd_try_trait` and (§50 O3) `tk_fwd_try_decl`
+// both capture, shared rather than walked twice
+uptr tk_fwd_brace_end(uptr b, uptr end) {
+    i64 bdepth = 0;
+    uptr q = b;
+    loop {
+        if (q >= end) break;
+        i64 c = ld8(q);
+        if (c == '"') { q = tk_fwd_skip_quoted(q + 1, end, '"'); continue; }
+        if (c == '\'') { q = tk_fwd_skip_quoted(q + 1, end, '\''); continue; }
+        if (c == '/' && q + 1 < end && ld8(q + 1) == '/') { q = tk_fwd_skip_line(q + 2, end); continue; }
+        if (c == '/' && q + 1 < end && ld8(q + 1) == '*') { q = tk_fwd_skip_block_comment(q + 2, end); continue; }
+        if (c == '{') { bdepth = bdepth + 1; q = q + 1; continue; }
+        if (c == '}') {
+            bdepth = bdepth - 1;
+            q = q + 1;
+            if (bdepth == 0) break;
+            continue;
+        }
+        q = q + 1;
+    }
+    return q;
+}
+
 // `class`/`struct`/`interface`/`delegate` just consumed, already known to sit
 // at `top_depth` (D220: a nested type is not taught, so the caller never
 // calls this deeper): reads the name that follows and reserves it, unless it
 // names a GENERIC (`Name<`). A delegate spells its RETURN TYPE first
 // (`delegate i64 Op(...)`, teko_deleg.mc's own `p_type()` before
 // `tk_newname`), so that one word is skipped before the name is read.
-uptr tk_fwd_try_decl(uptr p, uptr end, uptr cur_ns, i64 kind, uptr file) {
+//
+// §50 O3: a class/struct/interface's own span, `kwstart` (the keyword itself,
+// modifiers left out) through the byte past its `{ ... }`, is captured for
+// `tk_fwd_materialize` (teko_class.mc) -- UNLESS this is a SECOND scanned
+// occurrence of the same qualified name (`fw_multi`, decision unwritten in
+// §50: a `partial` type split across parts, or a plain duplicate), whose span
+// alone would build an incomplete object. A delegate has no body to capture
+// and is never a base, so it is left exactly as before.
+uptr tk_fwd_try_decl(uptr p, uptr end, uptr cur_ns, i64 kind, uptr file, uptr kwstart) {
     p = tk_fwd_skip_ws(p, end);
     if (kind == TK_KDELEG && p < end && is_alpha(ld8(p))) {
         i64 rlen = 0;
@@ -286,7 +407,14 @@ uptr tk_fwd_try_decl(uptr p, uptr end, uptr cur_ns, i64 kind, uptr file) {
     uptr name = xstrdup(n, nlen);
     uptr qname = name;
     if (cur_ns != 0) qname = tk_join3(cur_ns, "__", name);
+    i64 seen = tk_fwd_find(qname);
     tk_fwd_reg_type(qname, name, kind, file, cur_ns != 0);
+    i64 fi = tk_fwd_find(qname);
+    if (seen >= 0) { set_fw_multi_at(fi, 1); return p; }
+    if (kind == TK_KDELEG) return p;
+    uptr bend = tk_fwd_brace_end(tk_fwd_lbrace(p, end), end);
+    set_fw_span_at(fi, kwstart);
+    set_fw_spanlen_at(fi, bend - kwstart);
     return p;
 }
 
@@ -309,26 +437,8 @@ uptr tk_fwd_try_trait(uptr p, uptr end, uptr cur_ns, uptr file) {
     if (cur_ns != 0) qname = tk_join3(cur_ns, "__", name);
     uptr b = tk_fwd_skip_ws(p, end);
     if (b >= end || ld8(b) != '{') return b;
-    uptr bstart = b;
-    i64 bdepth = 0;
-    uptr q = b;
-    loop {
-        if (q >= end) break;
-        i64 c = ld8(q);
-        if (c == '"') { q = tk_fwd_skip_quoted(q + 1, end, '"'); continue; }
-        if (c == '\'') { q = tk_fwd_skip_quoted(q + 1, end, '\''); continue; }
-        if (c == '/' && q + 1 < end && ld8(q + 1) == '/') { q = tk_fwd_skip_line(q + 2, end); continue; }
-        if (c == '/' && q + 1 < end && ld8(q + 1) == '*') { q = tk_fwd_skip_block_comment(q + 2, end); continue; }
-        if (c == '{') { bdepth = bdepth + 1; q = q + 1; continue; }
-        if (c == '}') {
-            bdepth = bdepth - 1;
-            q = q + 1;
-            if (bdepth == 0) break;
-            continue;
-        }
-        q = q + 1;
-    }
-    tk_trait_scan(qname, bstart, q - bstart, TK_TINTERNAL, tk_origin_of_file(file));
+    uptr q = tk_fwd_brace_end(b, end);
+    tk_trait_scan(qname, b, q - b, TK_TINTERNAL, tk_origin_of_file(file));
     return q;
 }
 
@@ -401,10 +511,10 @@ void tk_fwd_scan(uptr p, uptr end, uptr file) {
         i64 top_depth = 0;
         if (ns_block) top_depth = ns_depth;
         if (depth != top_depth) continue;
-        if (tk_fwd_word_eq(w, wlen, "class"))     { p = tk_fwd_try_decl(p, end, cur_ns, TK_KCLASS, file); continue; }
-        if (tk_fwd_word_eq(w, wlen, "struct"))    { p = tk_fwd_try_decl(p, end, cur_ns, TK_KSTRUCT, file); continue; }
-        if (tk_fwd_word_eq(w, wlen, "interface")) { p = tk_fwd_try_decl(p, end, cur_ns, TK_KIFACE, file); continue; }
-        if (tk_fwd_word_eq(w, wlen, "delegate"))  { p = tk_fwd_try_decl(p, end, cur_ns, TK_KDELEG, file); continue; }
+        if (tk_fwd_word_eq(w, wlen, "class"))     { p = tk_fwd_try_decl(p, end, cur_ns, TK_KCLASS, file, w); continue; }
+        if (tk_fwd_word_eq(w, wlen, "struct"))    { p = tk_fwd_try_decl(p, end, cur_ns, TK_KSTRUCT, file, w); continue; }
+        if (tk_fwd_word_eq(w, wlen, "interface")) { p = tk_fwd_try_decl(p, end, cur_ns, TK_KIFACE, file, w); continue; }
+        if (tk_fwd_word_eq(w, wlen, "delegate"))  { p = tk_fwd_try_decl(p, end, cur_ns, TK_KDELEG, file, w); continue; }
         if (tk_fwd_word_eq(w, wlen, "trait"))     { p = tk_fwd_try_trait(p, end, cur_ns, file); continue; }
     }
 }
