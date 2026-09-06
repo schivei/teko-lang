@@ -308,6 +308,13 @@ i64 tk_switch_xleft(uptr xname, i64 marker, uptr usedFlag) {
 // folded from the LAST arm outward; the last arm's own condition (its guard
 // included) is never tested -- it is the chain's unconditional base, which
 // is why at least one `_` arm, ideally the last one written, is required.
+//
+// V0, item 2: that base is why a `when` on the TEXTUALLY LAST `_` arm is
+// refused. Every other arm keeps its guard (`_ when c` in the middle folds
+// to `1 && c`, tested like any other condition), and an arm after the `_`
+// is dead rather than wrong -- the `_`'s own `1` matches first. The last
+// `_` arm is the single shape where the guard the source wrote would be
+// dropped and the arm taken anyway: a wrong result nothing reported.
 i64 tk_switch_infix(i64 x) {
     i64 line = p_line();
     uptr fl = p_file();
@@ -330,6 +337,9 @@ i64 tk_switch_infix(i64 x) {
     i64 exprAt[TK_SWITCH_MAXARM];
     i64 narm = 0;
     i64 hasDefault = 0;
+    i64 guardedDefault = 0;
+    i64 gline = 0;
+    uptr gfl = 0;
 
     loop {
         if (p_id() == K_RBRACE) break;
@@ -337,10 +347,12 @@ i64 tk_switch_infix(i64 x) {
         i64 lline = p_line();
         uptr lfl = p_file();
         i64 cond = 0;
+        i64 isDefault = 0;
         if (tk_kw("_")) {
             p_next();
             cond = tk_int(1);
             hasDefault = 1;
+            isDefault = 1;
         } else {
             i64 v = tk_switch_label_val(lfl, lline);
             cond = tk_bin(K_EQ, tk_switch_xleft(xname, marker, &markerUsed), v);
@@ -353,9 +365,13 @@ i64 tk_switch_infix(i64 x) {
                 cond = tk_bin(K_OROR, cond, tk_bin(K_EQ, tk_switch_xleft(xname, marker, &markerUsed), v2));
             }
         }
+        guardedDefault = 0;
         if (tk_word("when")) {
             p_next();
             cond = tk_bin(K_ANDAND, cond, parse_expr(0));
+            guardedDefault = isDefault;
+            gline = lline;
+            gfl = lfl;
         }
         p_expect(K_ARROW, "expected '=>' in a switch arm");
         i64 e = parse_expr(0);
@@ -367,6 +383,8 @@ i64 tk_switch_infix(i64 x) {
     p_expect(K_RBRACE, "expected } after switch arms");
     if (narm == 0) err_at(fl, line, "teko: a switch expression needs at least one arm");
     if (!hasDefault) err_at(fl, line, "teko: a switch expression needs a `_` arm");
+    if (guardedDefault)
+        err_at(gfl, gline, "teko: the last `_` arm of a switch expression cannot carry a `when`");
 
     i64 chain = ld64(exprAt + (narm - 1) * 8);
     i64 i = narm - 2;
