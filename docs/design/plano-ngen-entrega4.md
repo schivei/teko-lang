@@ -4589,3 +4589,64 @@ mesma fixture sai **131** (`130 + 1`, o `ref f64`); contra o tip, 42.
    `(f32) <expr i64>` emite `scvtf d, x`. Repro: `i64 main() { f32 y = 2.5f; return (i64) (y * 10.0f); }`
    -- 0 em arm64; o machine x86_64 de `<float>` está correto (`cvttss2si`). O `ngen` não contorna:
    as fixtures/probes de `f32` comparam contra literais `f32` em vez de castar.
+
+### (c) Item B — o `teko1.o` não determinístico: NÃO reproduz, e a instrumentação que o próximo divergente já traz pronto
+
+O verificador do S4.3 registrou (mesma máquina, mesmo commit, `ngen/build` limpo, mc 0.15.10) duas
+escadas em que a primeira deu `teko1.o` = `90485ed5…` ≠ `teko2.o` = `teko3.o` = `689dc9a6…` e a
+segunda deu os três iguais. O item B foi caçar isso.
+
+**Não reproduziu, em 44 corridas.** Todas em macOS/aarch64, mc 0.15.10, `ngen/build` apagado antes
+de cada uma:
+
+| experimento | corridas | resultado |
+|---|---:|---|
+| escada completa, árvore do tip | 10 | `teko1.o == teko2.o == teko3.o` = `3bf52b96…` em todas |
+| escada completa, árvore da BASE `55ec9ffe` (exportada em `/tmp`) | 4 | os três = **`689dc9a6…`**, o hash documentado, em todas |
+| estágio 0+1 só, árvore do tip | 6 | `teko0` = `30d9176b…`, `teko1.o` = `3bf52b96…` em todas |
+| estágio 1 repetido com o MESMO teko0 (sem reconstruir) | 20 | `teko1.o` = `3bf52b96…` em todas |
+| estágio 0+1 com ambiente perturbado (env +4 KB, env +60 KB, `TMPDIR` /tmp e /private/tmp, sob carga de I/O) | 6 | idem |
+| estágio 0+1 em DUAS cópias da árvore, em paralelo, fora do repositório | 2 | idem, e igual ao serial |
+| estágio 1 com o config em caminho ABSOLUTO | 1 | idem |
+
+O `--dump-asm` do teko0 sobre `mc_teko.tk` também é byte-idêntico entre corridas
+(`e2d9df9f…`, 6 medições). A árvore da base reproduzir o `689dc9a6…` publicado é o controle: a
+medição do verificador é comparável e o número documentado é o que esta máquina produz.
+
+**O que a investigação DESCARTOU, com evidência:**
+
+1. **Versão do mc.** Só a 0.15.10 chega a produzir um `teko1.o` neste commit -- medido: com a 0.15.8
+   o `teko0` é construído (`709e35c6…`) e o estágio 1 morre no bloqueio `TE_RULE` do §70(f), sem
+   escrever objeto nenhum. A 0.15.9 é a 0.15.8 mais o registro padrão, logo idem.
+2. **Endereço/ASLR.** A `heap[HEAP_SIZE]` da arena do mc (`src/arena.mc:208`) é BSS e o binário é
+   PIE: o endereço-base muda a cada corrida. Se algum ponteiro vazasse para a saída (violação da
+   regra 1 de `docs/determinism.md`), as 44 corridas teriam divergido. Os chunks de crescimento
+   vêm de `mmap(0, …)` -- endereço escolhido pelo kernel, mesma conclusão.
+3. **Slot de tabela lido além de `n`.** As tabelas do `ngen` são globais (BSS) e os chunks de
+   arena vêm de `mmap` anônimo: as duas fontes são ZERADAS pelo carregador/kernel, então uma
+   leitura fora de `n` responde 0 -- errado, se for o caso, mas **determinístico**, nunca um byte
+   que varia entre corridas.
+4. **Caminho/diretório de trabalho.** As duas cópias em `/tmp` (paths diferentes, fora do
+   repositório) e o config absoluto dão o MESMO objeto: nada do caminho entra no `.o`.
+
+Resta, como explicação compatível com o sintoma exato (`teko1.o` diferente **com** `teko2.o` igual),
+uma diferença de ENTRADA na primeira escada -- o único estágio que o `mc` de prateleira escreve é o
+teko0, e dois teko1 semanticamente iguais produzem o mesmo teko2.o por construção (é o que ponto
+fixo significa). Sem o hash do teko0 daquela corrida não dá para ir além disso, e é exatamente essa
+lacuna que o item fecha.
+
+**Instrumentação (o entregável do item B):**
+
+1. **`ngen/scripts/bootstrap.sh`** imprime, depois do critério 1, um bloco `provenance` não-gated:
+   `mc --version`, o `sha256` de `ngen/build/teko` (**teko0**, que nenhum relatório tinha), de
+   `teko1.o`, `teko2.o` e `teko3.o`, e a resposta explícita de `teko1.o == teko2.o`. Com isso, uma
+   divergência futura é atribuível na hora: teko0 igual + teko1.o diferente = não-determinismo do
+   compilador; teko0 diferente = entrada diferente (mc, árvore ou `ngen/build` sujo).
+2. **`.github/workflows/ngen.yml`** publica `teko0`/`teko3.o` na tabela do `summary` (antes só
+   `teko1.o`/`teko2.o`) e, **quando `teko1.o != teko2.o`**, arquiva um artefato de 14 dias com o
+   `--dump-asm` do teko0 e o do teko1 sobre `mc_teko.tk` mais o `diff` dos dois -- a forma legível
+   que localiza O QUE mudou, que um objeto não dá. Nada disso é gate.
+
+**Consequência para o golden:** o `sha256` de `teko2.o` continua reportado e não comparado. Nesta
+máquina ele é reprodutível (14 escadas completas entre base e tip); pinar um golden versionado
+segue dependendo de ver o número estável também no CI, agora com a provenance impressa ao lado.
