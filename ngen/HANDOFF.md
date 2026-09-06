@@ -2236,6 +2236,26 @@ tipo) confirmada sem falso positivo; item 2 mismatch (`ref Circle` chamado com `
 derivado-pra-base (`ref Animal` chamado com `ref Dog`) -- as duas recusadas; item 6, o mesmo
 `nested_check` rodado contra o código PRÉ-fix reproduz o defeito relatado ao pé da letra.
 
+Verificador independente (2026-09-06, APROVADO-COM-RESSALVA; `same=42` também no `--dump-syms`,
+cherry-pick limpo sobre `4e9c87ea`, 45/45 no dreno). Duas dívidas que o parágrafo acima NÃO
+registrava, achadas por probe:
+- **`ref`/`out` de ESCALAR não é checado (item 2, dívida).** `tk_ref_check_pointee` só compara
+  apontado quando `tk_struct_by_ty(pty)` responde (classe/struct); para escalar devolve `<0` e a
+  checagem sai cedo. `ref i64` chamado com `ref u8` COMPILA e crasha em runtime (SIGSEGV, 139).
+  Pré-existe desde K2/D221 (não é regressão), mas C# barra `ref` de tipos distintos sejam eles
+  escalares ou não. Caminho: comparar o `pty` cru quando os dois lados são escalares conhecidos.
+- **Teto PRÁTICO de captura por lambda = 12, não 32 (item 6, relato impreciso).**
+  `tk_lambda_alloc_fn`/`tk_lambda_alloc_params` geram o alocador do closure com UM parâmetro REAL
+  por captura, sujeito ao `MAXPARAMS=12` do ABI; `TK_MAXLAMCAP=32` governa só a tabela do parser
+  (orçamento de ANINHAMENTO, não de uma lambda). Na faixa `[13, 31]` a falha é a mensagem do CORE
+  (`io:N: at most 12 parameters`, nome de arquivo errado); só a partir de 32 dispara a recusa
+  própria (`too many captures in one lambda`). Caminho: alocador recebendo o objeto e gravando as
+  capturas por `st64` em vez de recebê-las como parâmetros (remove o teto do ABI de vez).
+- Achado positivo: `b.useCircle(h.sq)` (campo `Square` de outro objeto) É recusado -- o campo já
+  chega tagueado por `tk_field_use`/`tk_xt_ty`, então o limite "field load não tagueado" é mais
+  estreito do que o texto do item 1 sugere; só o retorno de chamada (`f()` devolvendo `Square`)
+  passa silencioso.
+
 Plano: `docs/design/plano-ngen-entrega4.md` §69 (detalhe completo, incluindo os caminhos técnicos
 mapeados dos itens 3/4/5). Sem PR, sem dreno -- branch `feat/ngen-hygiene2`, forward-only para
 `fix/retirement`.
