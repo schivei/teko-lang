@@ -31,9 +31,12 @@ name: ngen (mc) CI
 # BINARY THE GATE PROVED, never a sibling rebuilt at tag time, and the only way
 # to have both properties is for the job that runs the fixtures to be the job
 # that packages. `package: true` turns on two steps that are off for an ordinary
-# push -- the per-leg tarball and the fixpoint provenance file -- and `ref`
-# names the commit to check out when the caller is releasing a tag from a
-# `workflow_dispatch` that is not itself on that tag.
+# push -- the per-leg tarball and the fixpoint provenance file. There is no
+# `ref` input: a `workflow_call` runs on the CALLER's own ref, and `release.yml`
+# only ever calls this workflow from a run that is already on the tag (a `push`
+# of the tag itself, or a `workflow_dispatch` the operator ran with
+# `--ref vX.Y.Z`) -- so every checkout below is a plain `actions/checkout@v5`
+# with no ref of its own to trust or distrust.
 #
 # `push` is filtered to BRANCHES so that pushing `v1.2.3` runs this workflow
 # exactly once, through the release, instead of racing a standalone run of it
@@ -46,11 +49,6 @@ on:
     branches: ['**']
   workflow_call:
     inputs:
-      ref:
-        description: 'commit, branch or tag to check out; empty means the caller''s own ref'
-        required: false
-        type: string
-        default: ''
       package:
         description: 'also package each leg as a release asset and archive the fixpoint provenance'
         required: false
@@ -183,13 +181,10 @@ jobs:
       - name: never translate line endings
         run: git config --global core.autocrlf false
 
-      # An empty `ref` is what `actions/checkout` does by default -- the ref the
-      # run is for. It is only ever non-empty when a release is gating a tag
-      # from a dispatch that runs on a branch.
       - name: checkout
         uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.ref }}
+          persist-credentials: false
 
       # `.github/actions/setup-mc` resolves the mc release PINNED by
       # `ngen/MC_VERSION`, downloads the asset for this pair, verifies the
@@ -445,7 +440,7 @@ jobs:
       - name: checkout
         uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.ref }}
+          persist-credentials: false
 
       - name: set up the mc toolchain
         id: mc
