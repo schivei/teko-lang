@@ -284,6 +284,30 @@ i64 tk_cast(i64 ty, i64 e) {
     return n;
 }
 
+// the cast an INDIRECT call has to carry: `callp` names no callee, so the core
+// types the node `TY_I64` (mc src/gen_resolve.mc) unless a cast sits DIRECTLY
+// on it -- that cast is the only place the return type can be declared, and
+// what makes `walk_ret_type()` answer float so <float>'s `fa_result` moves
+// `d0`/`xmm0` into the destination. A narrow INTEGER takes the same cast, by
+// the core's own rule (`walk_narrow`, mc src/gen_walk.mc): `uptr` is the
+// machine word and never narrow, what is neither TK_INT nor TK_SINT belongs to
+// a module, and a void return takes no cast at all.
+//
+// The caller wraps at the site that BUILDS the call, and every registration by
+// node position (`tk_xt_put`/`tk_xt_add`, and the `node_assign`/
+// `tk_node_replace` that copies a result into the tree) is about the node this
+// RETURNS, never the `callp` underneath: a node between the cast and the
+// `callp` breaks the core's match in silence.
+i64 tk_callp_ret(i64 ret, i64 call) {
+    if (ret == TY_VOID) return call;
+    i64 k = type_kind(ret);
+    if (k == TK_FLOAT) return tk_cast(ret, call);
+    if (ret == TY_UPTR) return call;
+    if (k != TK_INT && k != TK_SINT) return call;
+    if (type_width(ret) < 8) return tk_cast(ret, call);
+    return call;
+}
+
 // the raw load is always zero-extending (language.md § 2: "the signed read of
 // raw memory ... spelled (i32) ld32(p)"), so a signed narrower-than-word
 // element -- `i32`, today's only one -- is cast to its own type afterward.
