@@ -1917,8 +1917,36 @@ ciclo, e a emissão do singleton em cadeia -- mais o item herdado do verificador
   `verdict ok`, zero linha `grew` (`intrin` 8->8, `passes` 15->15, `syntax` 14->14 -- DI2 não abre
   hook novo, só cresce funções dentro de `teko_di.mc`/`teko_expr.mc`).
 
-**Fila DI3->DI4** (plano §58 (f)): DI3 -- `syntax_stmt("scope")`, Scoped e Transient com seu
-próprio ciclo de vida; DI4 -- namespaces como chave, interface-base como chave, o Singleton que
+**DI3 landado** (plano §58 (f), decisões 8-14) -- `scope { ... }` (`syntax_stmt("scope")`,
+`tk_scope_stmt`, teko_di.mc): o corpo é lido por `parse_stmt()`, o mesmo molde do corpo de
+`tk_while` (teko_loop.mc) -- o token corrente é `{`, então cai direto em `tk_block` e devolve o
+MESMO `N_BLOCK` que um bloco solto teria; um `scope` sem `{` é recusado (`teko: scope expects a
+block`) antes de empilhar qualquer coisa. Uma pilha de parse (`discope_stk`) marca o `scope { }`
+mais interno aberto; `tk_inject` grava esse número (`tk_di_cur_scope`, decisão 9) em cada sítio
+`ds_scope`, e `tk_di_resolve` o carrega por TODA a cadeia de um construtor (`tk_di_ctor_args`), de
+modo que um Transient construído dentro de um escopo resolve suas PRÓPRIAS dependências Scoped
+contra o MESMO escopo que o pediu ("Transient herda o escopo de quem o recebe"). Um Scoped
+resolvido sem `scope` aberto responde pelo getter de raiz de sempre (decisão 10, DI1/DI2
+inalterado); um resolvido DENTRO de um escopo vira um LOCAL do bloco (`tk_di_scope_local`), um
+`N_VAR` comum de tipo classe construído na primeira necessidade e devolvido por nome nas
+injeções seguintes da mesma chave no MESMO escopo -- `tk_rc_block` (teko_rc.mc) o libera como
+libera qualquer outro local, sem regra nova (decisão 13); os locais de um escopo são acumulados
+em ORDEM DE DEPENDÊNCIA (`sc_head`) e prependados à cabeça do bloco só depois que TODO `inject`
+da unidade resolveu (`tk_di_scopes_finish`, decisão 15). Aninhado: cada `scope { }` é o seu
+próprio id -- o interno NÃO herda os Scoped do externo (instâncias PRÓPRIAS, como C#); decorre da
+própria numeração léxica, sem mecanismo extra. Um Singleton constrói seu grafo sob o sentinela
+`tk_scope_svcbld`, que recusa um parâmetro Scoped com mensagem própria (`teko: a singleton taking
+a scoped service is not taught yet`) -- o escopo PRÓPRIO do singleton (decisão 11) é DI4.
+Fixture: `ngen/tests/surface_di_scope.tk` (duas injeções do mesmo Scoped no mesmo `scope { }`,
+dois `scope { }` seguidos, Transient fresco a cada injeção partilhando o Scoped do escopo
+hospedeiro, `scope { }` aninhado, `return` de dentro do escopo, `rt_live()`/contador de destrutor
+de volta ao piso). Probes (fora de `tests/`, descartados): `scope` sem `{`; `scope { }` dentro de
+um `loop` (uma instância por volta, `rt_live()` plano). Gate: `rm -rf ngen/build`, build do zero;
+`--entry-only` **45/45**; `--dump-ast` das **44 anteriores byte-idêntico** ao compilador da base
+`01f5c81a` (`same=44 diff=0`); `mc limits ngen` `verdict ok`, `intrin` sem crescimento (8->8, com
+e sem `scope` no programa).
+
+**Fila DI4** (plano §58 (f)): namespaces como chave, interface-base como chave, o Singleton que
 recebe um Scoped (decisão 11, o escopo PRÓPRIO do singleton). Fora do escopo do port por ora
 (dívida declarada, plano §58 (g)): genérico como chave, `inject T.m()` direto (hoistar o sítio
 automaticamente é crumb futuro -- por ora a recusa é o comportamento correto), `delegate`/`struct`

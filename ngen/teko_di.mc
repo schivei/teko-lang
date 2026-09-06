@@ -39,11 +39,27 @@
 // services under construction catches a cycle before it overflows the
 // compiler's own stack -- not the program's.
 //
-// What this crumb does NOT do (decision 19, §58 (g), later crumbs): `scope {
-// }` and the Scoped/Transient lifetimes it distinguishes from the root's
-// (DI3), and namespaced or generic keys (DI4). A Scoped or Transient marker
-// is still recognized and registered here, so a later crumb only teaches
-// their OWN resolution -- `tk_di_resolve` below is where that grows.
+// DI3 (this crumb, decisions 8-14) adds `scope { ... }`, a plain block a
+// parse-time stack marks as it opens and closes (`tk_di_scope_open`/`_close`,
+// the same balanced-push idiom `tk_di_push`/`_pop` above already uses for the
+// constructor cycle guard). `tk_inject`'s own site now records the INNERMOST
+// open scope (`tk_di_cur_scope`, decision 9 -- a function called from inside
+// one does not inherit it, because parsing that function's own body runs
+// with an empty stack of its own); `tk_di_resolve` threads that number all
+// the way down a constructor's argument list (`tk_di_ctor_args`), so a
+// Transient built inside a scope resolves ITS OWN Scoped dependencies
+// against the very scope that asked for it (decision (c), "Transient herda
+// o escopo de quem o recebe"). A Scoped resolved with no scope open answers
+// through the root's own singleton-shaped getter, unchanged from DI1/DI2
+// (decision 10); one resolved INSIDE a scope becomes a local of the block
+// (`tk_di_scope_local`, decision 13), built once per (scope, service) pair
+// and prepended to the block's own statements once the whole unit is parsed
+// (`tk_di_scopes_finish`) -- the ordinary block-scope RC (teko_rc.mc) then
+// frees it exactly where it frees any other local of class type, one lap of
+// a loop at a time, no rule of its own. A Singleton's own dependency graph
+// is built under a distinct sentinel scope (`tk_scope_svcbld`) that refuses
+// a Scoped parameter with a clear message -- the singleton's OWN private
+// scope (decision 11) is DI4's, not built here.
 
 #define TK_SVC_SINGLETON 0
 #define TK_SVC_SCOPED    1
@@ -52,9 +68,30 @@
 #define TK_MAXSVC    32                // classes marked with a service lifetime
 #define TK_MAXDISITE 32                // `inject` sites, awaiting tk_di_pass
 #define TK_MAXDISTK  32                // services under construction at once (cycle guard)
+#define TK_MAXDISCOPE  32                // `scope { }` statements in the unit
+#define TK_MAXDISCOPESTK 32              // scopes open at once, at any point of parsing
+#define TK_MAXDISCOPELOC 64              // (scope, service) locals the pass has built
 
 i64  di_stk[TK_MAXDISTK];              // the `sv` row of each service being built right now
 i64  tk_ndistk = 0;
+
+// the scope every `inject` resolves against when no `scope { }` is open, and
+// the one a Singleton's OWN dependency graph builds under -- neither is a
+// row of the tables below, so both are negative and never collide with one
+i64  tk_scope_root   = 0 - 1;
+i64  tk_scope_svcbld = 0 - 2;
+
+i64  sc_head[TK_MAXDISCOPE];             // the scope's own locals built so far, in dependency order
+i64  sc_block[TK_MAXDISCOPE];            // the N_BLOCK `scope { }` parsed into
+i64  tk_nscopedi = 0;
+
+i64  discope_stk[TK_MAXDISCOPESTK];      // the scope ids open right now, innermost last
+i64  tk_ndiscopestk = 0;
+
+i64  sl_scope[TK_MAXDISCOPELOC];         // the scope a local was built for
+i64  sl_sv[TK_MAXDISCOPELOC];            // the service it holds
+uptr sl_name[TK_MAXDISCOPELOC];          // the local's own name, read back for a second injection
+i64  tk_nsl = 0;
 
 i64  sv_cls[TK_MAXSVC];                // the class row carrying the marker
 i64  sv_life[TK_MAXSVC];               // TK_SVC_SINGLETON/SCOPED/TRANSIENT
@@ -64,6 +101,7 @@ i64  tk_nsv = 0;
 
 i64  ds_node[TK_MAXDISITE];            // the placeholder `inject` left in the tree
 i64  ds_key[TK_MAXDISITE];             // the type row named at the site
+i64  ds_scope[TK_MAXDISITE];           // the innermost `scope { }` open at the site, or the root
 i64  ds_line[TK_MAXDISITE];
 uptr ds_file[TK_MAXDISITE];
 i64  tk_nds = 0;
@@ -87,16 +125,35 @@ void set_sv_getter_at(i64 i, uptr v) { st64(sv_getter + i * 8, v); }
 
 i64  ds_node_at(i64 i)  { return ld64(ds_node + i * 8); }
 i64  ds_key_at(i64 i)   { return ld64(ds_key + i * 8); }
+i64  ds_scope_at(i64 i) { return ld64(ds_scope + i * 8); }
 i64  ds_line_at(i64 i)  { return ld64(ds_line + i * 8); }
 uptr ds_file_at(i64 i)  { return ld64(ds_file + i * 8); }
 
 void set_ds_node_at(i64 i, i64 v)  { st64(ds_node + i * 8, v); }
 void set_ds_key_at(i64 i, i64 v)   { st64(ds_key + i * 8, v); }
+void set_ds_scope_at(i64 i, i64 v) { st64(ds_scope + i * 8, v); }
 void set_ds_line_at(i64 i, i64 v)  { st64(ds_line + i * 8, v); }
 void set_ds_file_at(i64 i, uptr v) { st64(ds_file + i * 8, v); }
 
 i64  di_stk_at(i64 i)         { return ld64(di_stk + i * 8); }
 void set_di_stk_at(i64 i, i64 v) { st64(di_stk + i * 8, v); }
+
+i64  sc_head_at(i64 i)  { return ld64(sc_head + i * 8); }
+i64  sc_block_at(i64 i) { return ld64(sc_block + i * 8); }
+
+void set_sc_head_at(i64 i, i64 v)  { st64(sc_head + i * 8, v); }
+void set_sc_block_at(i64 i, i64 v) { st64(sc_block + i * 8, v); }
+
+i64  discope_stk_at(i64 i)         { return ld64(discope_stk + i * 8); }
+void set_discope_stk_at(i64 i, i64 v) { st64(discope_stk + i * 8, v); }
+
+i64  sl_scope_at(i64 i) { return ld64(sl_scope + i * 8); }
+i64  sl_sv_at(i64 i)    { return ld64(sl_sv + i * 8); }
+uptr sl_name_at(i64 i)  { return ld64(sl_name + i * 8); }
+
+void set_sl_scope_at(i64 i, i64 v)  { st64(sl_scope + i * 8, v); }
+void set_sl_sv_at(i64 i, i64 v)     { st64(sl_sv + i * 8, v); }
+void set_sl_name_at(i64 i, uptr v)  { st64(sl_name + i * 8, v); }
 
 // the lifetime `nm` names, or -1 when it names none of the three: a plain
 // string compare, never a `syntax()` word (decision 1) -- the type table
@@ -152,13 +209,59 @@ void tk_di_conf_apply(i64 ci) {
     tk_di_sv_add(ci, life, line, fl);
 }
 
-void tk_di_defer(i64 n, i64 want, i64 line, uptr fl) {
+void tk_di_defer(i64 n, i64 want, i64 scope, i64 line, uptr fl) {
     if (tk_nds == TK_MAXDISITE) err_at(fl, line, "teko: too many `inject` sites");
     set_ds_node_at(tk_nds, n);
     set_ds_key_at(tk_nds, want);
+    set_ds_scope_at(tk_nds, scope);
     set_ds_line_at(tk_nds, line);
     set_ds_file_at(tk_nds, fl);
     tk_nds = tk_nds + 1;
+}
+
+// `scope { ... }`, decisions 8/9/15: pushed the moment the block OPENS, so
+// every `inject` parsed inside it (`tk_di_cur_scope`) sees the innermost one
+// still open, and popped once `tk_scope_stmt` (teko.mc) has read back the
+// N_BLOCK the core built for it.
+i64 tk_di_scope_open(i64 line, uptr fl) {
+    if (tk_nscopedi == TK_MAXDISCOPE) err_at(fl, line, "teko: too many `scope` blocks");
+    if (tk_ndiscopestk == TK_MAXDISCOPESTK) err_at(fl, line, "teko: scopes nested too deep");
+    i64 sc = tk_nscopedi;
+    set_sc_head_at(sc, 0);
+    set_sc_block_at(sc, 0);
+    tk_nscopedi = tk_nscopedi + 1;
+    set_discope_stk_at(tk_ndiscopestk, sc);
+    tk_ndiscopestk = tk_ndiscopestk + 1;
+    return sc;
+}
+
+void tk_di_scope_close(i64 sc, i64 body) {
+    set_sc_block_at(sc, body);
+    tk_ndiscopestk = tk_ndiscopestk - 1;
+}
+
+// the innermost `scope { }` still open, or the root when none is (decision
+// 9): a function parsed with none open -- whether or not it is CALLED from
+// inside one -- never sees anything but the root here.
+i64 tk_di_cur_scope() {
+    if (tk_ndiscopestk == 0) return tk_scope_root;
+    return discope_stk_at(tk_ndiscopestk - 1);
+}
+
+// `scope { ... }` (decision 8): the body is read by `parse_stmt()`, exactly
+// as `tk_while`'s own body is (teko_loop.mc) -- the current token is `{`, so
+// that dispatches straight to `tk_block` (teko_stmt.mc) and hands back the
+// very same `N_BLOCK` a bare block would. A `scope` with no `{` next is
+// refused before anything is pushed, so a malformed one leaves no row behind.
+i64 tk_scope_stmt() {
+    i64 line = p_line();
+    uptr fl = p_file();
+    p_next();                                     // `scope`
+    if (p_id() != K_LBRACE) err_at(fl, line, "teko: scope expects a block");
+    i64 sc = tk_di_scope_open(line, fl);
+    i64 body = parse_stmt();
+    tk_di_scope_close(sc, body);
+    return body;
 }
 
 // 1 when `n` is the very node an `inject` site produced -- the placeholder
@@ -196,7 +299,7 @@ i64 tk_inject() {
     tk_line = line;
     tk_file = fl;
     i64 n = tk_call("tk_unresolved_inject", 0);
-    tk_di_defer(n, si, line, fl);
+    tk_di_defer(n, si, tk_di_cur_scope(), line, fl);
     tk_xt_add(n, si, 0);                          // owned until the pass knows the lifetime
     return n;
 }
@@ -258,7 +361,7 @@ i64 tk_di_find_impl(i64 want, i64 line, uptr fl) {
 // `tk_di_resolve`, defined below `tk_di_getter_sym`, which calls back into
 // `tk_di_new_call` -- the same mutual recursion `mc/examples/lang` forward-
 // declares its own `lg_stmt`/`lg_expr` pair for.
-i64 tk_di_resolve(i64 sv, i64 line, uptr fl);
+i64 tk_di_resolve(i64 sv, i64 scope, i64 line, uptr fl);
 
 // "A -> B -> A": the chain from the point `di_stk` already carries `sv`
 // (`from`) down to the top, with `sv`'s own name closing it -- decision 18's
@@ -335,9 +438,11 @@ i64 tk_di_ctor_pick(i64 ci) {
 // the picked constructor's own argument list, in its declared order: a
 // service-typed parameter recurses (`tk_di_find_impl` + `tk_di_resolve`, at
 // THAT parameter's own line -- "the constructor that asks for it", decision
-// (c)), anything else clones the default `tk_di_ctor_satisfiable` already
+// (c)), against the SAME `scope` the service itself is being built for
+// (DI3's own "a Transient inherits the scope of whoever receives it") --
+// anything else clones the default `tk_di_ctor_satisfiable` already
 // confirmed exists.
-i64 tk_di_ctor_args(i64 i) {
+i64 tk_di_ctor_args(i64 i, i64 scope) {
     i64 mi = ctr_mi_at(i);
     i64 nreq = mt_nreq_at(mi);
     i64 d0 = mt_d0_at(mi);
@@ -351,7 +456,7 @@ i64 tk_di_ctor_args(i64 i) {
         if (tk_di_key_exists(want)) {
             i64 pline = nd_line(p);
             uptr pfile = nd_file(p);
-            a = tk_di_resolve(tk_di_find_impl(want, pline, pfile), pline, pfile);
+            a = tk_di_resolve(tk_di_find_impl(want, pline, pfile), scope, pline, pfile);
         } else {
             a = tk_clone(df_node_at(d0 + j - nreq));
         }
@@ -364,12 +469,13 @@ i64 tk_di_ctor_args(i64 i) {
 
 // a fresh `<cls>_new(...)` of the service's own class: the constructor DI2
 // picks (`tk_di_ctor_pick`), its arguments built by recursing into every
-// service-typed parameter (`tk_di_ctor_args`), or the constructor that takes
-// no argument at all when the class declares none (decision 7, decision 12).
-// `di_stk` brackets the whole pick so a cycle is caught before it recurses
-// forever (decision 18); a class whose constructors none qualify is refused
-// exactly as DI1 already refused the argument-less case.
-i64 tk_di_new_call(i64 sv, i64 line, uptr fl) {
+// service-typed parameter (`tk_di_ctor_args`, against `scope`), or the
+// constructor that takes no argument at all when the class declares none
+// (decision 7, decision 12). `di_stk` brackets the whole pick so a cycle is
+// caught before it recurses forever (decision 18); a class whose
+// constructors none qualify is refused exactly as DI1 already refused the
+// argument-less case.
+i64 tk_di_new_call(i64 sv, i64 scope, i64 line, uptr fl) {
     i64 ci = sv_cls_at(sv);
     uptr name = sr_name_at(ci);
     tk_close_open(ci);
@@ -387,7 +493,7 @@ i64 tk_di_new_call(i64 sv, i64 line, uptr fl) {
     if (ct < 0)
         err_at2(fl, line, "teko: no constructor of this service takes only services", name);
     i64 mi = ctr_mi_at(ct);
-    i64 args = tk_di_ctor_args(ct);
+    i64 args = tk_di_ctor_args(ct, scope);
     tk_check_member(mt_cls_at(mi), mt_vis_at(mi), name, line, fl);
     tk_line = line;
     tk_file = fl;
@@ -399,7 +505,10 @@ i64 tk_di_new_call(i64 sv, i64 line, uptr fl) {
 // `uptr <cls>_di_get() { uptr p = ld64(slot); if (p == 0) { p = <cls>_new();
 // st64(slot, p); } return p; }` -- emitted once per service, the moment the
 // first `inject` needs it (decision 12/15's own memoized getter); `p` is
-// `uptr`, so the RC pass, run last, never touches the slot itself.
+// `uptr`, so the RC pass, run last, never touches the slot itself. A
+// Singleton's OWN dependency graph is built under `tk_scope_svcbld`, not the
+// root -- its private scope is DI4's (decision 11); a root-resolved Scoped
+// shares this same getter, and builds its graph against the root instead.
 uptr tk_di_getter_sym(i64 sv, i64 line, uptr fl) {
     if (sv_slot_at(sv)) return sv_getter_at(sv);
     uptr cname = sr_name_at(sv_cls_at(sv));
@@ -409,7 +518,9 @@ uptr tk_di_getter_sym(i64 sv, i64 line, uptr fl) {
     i64 pvar = tk_var(TY_UPTR, "p", tk_call("ld64", tk_id(slotsym)));
     i64 assignp = tk_nd(N_ASSIGN);
     set_nd_name(assignp, "p");
-    set_nd_a(assignp, tk_di_new_call(sv, line, fl));
+    i64 buildscope = tk_scope_root;
+    if (sv_life_at(sv) == TK_SVC_SINGLETON) buildscope = tk_scope_svcbld;
+    set_nd_a(assignp, tk_di_new_call(sv, buildscope, line, fl));
     i64 storeslot = tk_stmt(tk_call2("st64", tk_id(slotsym), tk_id("p")));
     i64 thenblk = tk_blk(list_append(assignp, storeslot));
     i64 ifstmt = tk_if(tk_bin(K_EQ, tk_id("p"), tk_int(0)), thenblk);
@@ -420,28 +531,88 @@ uptr tk_di_getter_sym(i64 sv, i64 line, uptr fl) {
     return gettersym;
 }
 
-// the call an `inject` site becomes: a Transient builds fresh every time
-// (decision 12; DI3 gives it its own scope-of-birth), a Singleton or a
-// Scoped resolved with no `scope { }` open answers through the root's own
-// memoized getter (decision 10 -- the root is a scope too)
-i64 tk_di_resolve(i64 sv, i64 line, uptr fl) {
-    if (sv_life_at(sv) == TK_SVC_TRANSIENT) return tk_di_new_call(sv, line, fl);
+// the local of `scope` already holding `sv`, or -1: the whole reason a
+// second injection of the same Scoped inside the same `scope { }` answers
+// with the very same object (decision 9/13).
+i64 tk_di_scope_find(i64 scope, i64 sv) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nsl) break;
+        if (sl_scope_at(i) == scope && sl_sv_at(i) == sv) return i;
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+// the Scoped's own local for `scope`, built at the first injection that
+// needs it and read back at every one after (decision 13): an `N_VAR` of the
+// service's own class type, its constructor's arguments built against this
+// SAME scope (decision (c)) -- ordinary `tk_rc_block` (teko_rc.mc) frees it
+// like any other local once it is prepended to the block's head
+// (`tk_di_scopes_finish`), one lap of a loop at a time if the block is one.
+i64 tk_di_scope_local(i64 scope, i64 sv, i64 line, uptr fl) {
+    i64 li = tk_di_scope_find(scope, sv);
+    if (li >= 0) return tk_id(sl_name_at(li));
+    uptr name = gensym_new();
+    i64 v = tk_var(sr_ty_at(sv_cls_at(sv)), name, tk_di_new_call(sv, scope, line, fl));
+    set_sl_scope_at(tk_nsl, scope);
+    set_sl_sv_at(tk_nsl, sv);
+    set_sl_name_at(tk_nsl, name);
+    tk_nsl = tk_nsl + 1;
+    set_sc_head_at(scope, list_append(sc_head_at(scope), v));
+    return tk_id(name);
+}
+
+// the call an `inject` site becomes: a Transient builds fresh every time,
+// its own dependencies resolved against the SAME `scope` (decision 12/(c));
+// a Scoped resolved with a `scope { }` open becomes that scope's own local
+// (decision 13); a Scoped asked for while building a Singleton's own graph
+// is refused (decision 11 is DI4's, not this crumb's); anything else --
+// a Singleton, or a Scoped resolved at the root -- answers through the
+// root's own memoized getter (decision 10, unchanged since DI1/DI2).
+i64 tk_di_resolve(i64 sv, i64 scope, i64 line, uptr fl) {
+    i64 life = sv_life_at(sv);
+    if (life == TK_SVC_TRANSIENT) return tk_di_new_call(sv, scope, line, fl);
+    if (life == TK_SVC_SCOPED) {
+        if (scope == tk_scope_svcbld)
+            err_at2(fl, line, "teko: a singleton taking a scoped service is not taught yet", sr_name_at(sv_cls_at(sv)));
+        if (scope >= 0) return tk_di_scope_local(scope, sv, line, fl);
+    }
     return tk_call(tk_di_getter_sym(sv, line, fl), 0);
+}
+
+// once every deferred `inject` is resolved, each scope's own locals -- built
+// in dependency order as they were first needed -- are prepended to the
+// block's own statements (decision 15's "the pass INSERTS locals of scope,
+// as ordinary declarations"); a `scope { }` no Scoped ever needed inside it
+// is left exactly as the parser wrote it.
+void tk_di_scopes_finish() {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nscopedi) break;
+        i64 head = sc_head_at(i);
+        if (head != 0) {
+            i64 blk = sc_block_at(i);
+            set_nd_a(blk, list_append(head, nd_a(blk)));
+        }
+        i = i + 1;
+    }
 }
 
 // every deferred `inject`, once the whole unit is parsed and every service in
 // it is registered (§50): the placeholder is rewritten in place, the node
 // index and its parse-time type untouched (`tk_fwd_resolve_all_new`'s own
 // idiom), and only now does `pure` rise to 1 for a borrowed answer -- a
-// Singleton or a Scoped's own root instance (decision 16).
+// Singleton, a root-resolved Scoped, or a scope's own local (decision 16).
 i64 tk_di_pass(i64 root) {
     i64 i = 0;
     loop {
         if (i >= tk_nds) break;
         i64 line = ds_line_at(i);
         uptr fl = ds_file_at(i);
+        i64 scope = ds_scope_at(i);
         i64 sv = tk_di_find_impl(ds_key_at(i), line, fl);
-        i64 r = tk_di_resolve(sv, line, fl);
+        i64 r = tk_di_resolve(sv, scope, line, fl);
         i64 n = ds_node_at(i);
         i64 keep = nd_next(n);
         node_assign(n, r);
@@ -452,5 +623,6 @@ i64 tk_di_pass(i64 root) {
         }
         i = i + 1;
     }
+    tk_di_scopes_finish();
     return root;
 }

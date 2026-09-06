@@ -3234,3 +3234,34 @@ explícita e serviço com chave (`[FromKeyedServices]`); `inject` em inicializad
    getter é emprestado, o tipo da própria classe para um alocador é próprio -- o mesmo mecanismo que
    já cobre qualquer `new X(new Y())` escrito à mão. `rt_live() == 4` na fixture (Clock, Db, Repo, Svc)
    prova que nada vazou nem foi contado em dobro.
+
+## 61. Errata — DI3 landado (2026-09-06)
+
+1. **`scope { ... }` não precisou de nó novo nem de gancho no RC.** `tk_scope_stmt` lê o corpo por
+   `parse_stmt()` -- o token corrente é `{`, que já resolve para `tk_block` (teko_stmt.mc) -- e
+   devolve o MESMO `N_BLOCK` que um bloco solto teria; `scope { }` degrada para um bloco comum aos
+   olhos de TODO passe seguinte (oráculo, `ref`/`out`, RC), e é exatamente essa degradação que faz o
+   "uma instância por volta de laço" (probe) sair de graça: o bloco é reexecutado a cada volta, então
+   o `N_VAR` que `tk_di_pass` prependa à sua cabeça roda -- e é liberado pelo `tk_rc_block` de sempre
+   -- uma vez por volta, sem regra de laço nova.
+2. **A ORDEM de inserção dos locais de um escopo (decisão "em ordem de dependência") sai de graça da
+   recursão de construção, não de um passe de ordenação.** `tk_di_scope_local(scope, sv, ...)`
+   constrói o `N_VAR` de `sv` chamando `tk_di_new_call` -- e é DENTRO dessa chamada, ao resolver um
+   parâmetro Scoped do construtor de `sv`, que uma dependência ainda não vista entra em `sc_head`
+   PRIMEIRO (a chamada recursiva completa e o `list_append` do dependente só roda depois). Nenhum
+   `sort`/pilha de prontidão foi necessário -- confirmado por probe (dois Scoped, um dependendo do
+   outro, no mesmo `scope { }`: a ordem gerada é dependência-primeiro).
+3. **O ciclo A -> B -> A entre dois Scoped do MESMO escopo continua pego pelo `di_stk` de DI2, sem
+   ajuste.** A memoização `sl_*` só registra uma entrada DEPOIS que `tk_di_new_call` retorna -- então,
+   em plena recursão de um ciclo, a segunda tentativa de resolver A ainda não a encontra em `sl_*` e
+   tenta construir de novo, o que dispara o `tk_di_push` de DI2 e a mensagem de ciclo de sempre antes
+   de qualquer estouro de pilha. Nenhuma tabela nova de detecção foi cogitada nem precisou existir.
+4. **O Singleton que recebe um Scoped é RECUSADO, não silenciosamente resolvido pela raiz.** Sem o
+   sentinela `tk_scope_svcbld`, o grafo de um Singleton (que já não passava `scope` algum antes desta
+   crumb) cairia no mesmo `scope >= 0` falso que a raiz usa e devolveria a instância COMPARTILHADA da
+   raiz -- errado por (c)/decisão 11, que reserva ao Singleton um escopo PRÓPRIO (DI4). A recusa
+   explícita troca esse silêncio por um erro de compilação claro; confirmado por probe (fora de
+   `tests/`, descartado): `class Svc : IServiceSingleton { public Svc(IAudit a) {...} }` com `Audit :
+   IServiceScoped` dá `teko: a singleton taking a scoped service is not taught yet: Audit`, na linha
+   do PARÂMETRO `IAudit a` (o mesmo idioma da errata DI2 §60 item 2 -- "a linha do construtor que a
+   pede"), não na do `inject Svc` que disparou a cadeia.
