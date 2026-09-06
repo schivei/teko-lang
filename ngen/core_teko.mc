@@ -9,7 +9,7 @@
 //                       backend_coff -- every writer a leg links with
 //   <mc/core_build>     `mc build --entry-only`, what the CI (and this
 //                       file's own `mc.toml`) compiles each fixture with
-//   <mc/core_bundle>    `#include <name>`, which `lib/rt.mc` needs for
+//   <mc/core_bundle>    `#include <name>`, which `lib/rt.tk` needs for
 //                       `<sys>`
 //
 // `<mc/core_pkg>` and `<mc/core_sandbox>` are left out on purpose: nothing
