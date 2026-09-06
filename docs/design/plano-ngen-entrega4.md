@@ -4484,7 +4484,10 @@ intocado, e é ele que mantém o `.o` em disco para o `cmp`.
 
 `teko1.o == teko2.o` nos dois: o compilador já está no ponto fixo na PRIMEIRA volta, o mesmo que
 o §70 mediu no host. O objeto de macos/aarch64 do CI é **byte-idêntico ao construído localmente**
-(mesmo `689dc9a6…`), o que é a primeira evidência de reprodutibilidade entre máquinas.
+(mesmo `689dc9a6…`), o que é a primeira evidência de reprodutibilidade entre máquinas — e os dois
+runs consecutivos da branch (`34043945146` e `34044112521`, o segundo só com mudança de doc)
+deram **o mesmo `sha256` nos dois pares**, que é a evidência entre runs. São esses os números que
+um golden versionado pinaria.
 
 ### (e) O que NÃO é gate, e as dívidas
 

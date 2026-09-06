@@ -2543,7 +2543,8 @@ Descrição no §3.1 acima; detalhe e medições no plano §73.
   vazio, 45/45, total **26,887 s**, `teko1.o == teko2.o` = 2 062 312 B, `sha256` `33e7df95…`;
   macOS teko0 3,032 s → 6,927 / 4,963 / 5,232 s, 221 134 linhas, 45/45, total **45,267 s**,
   `teko1.o == teko2.o` = 1 714 920 B, `sha256` `689dc9a6…` — **byte-idêntico ao objeto do host
-  local**, primeira evidência de reprodutibilidade entre máquinas.
+  local**, primeira evidência de reprodutibilidade entre máquinas; e dois runs consecutivos da
+  branch deram o MESMO `sha256` nos dois pares (evidência entre runs).
 - **Não é gate (ainda):** o `sha256` é impresso no `summary`, não comparado; vira golden
   versionado quando estabilizar (molde do `tests/golden/mc2.sha256` do mc). O agregador
   `mc build ngen && run` segue dependendo só da matriz `leg`.
