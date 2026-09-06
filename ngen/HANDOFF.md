@@ -7,7 +7,11 @@ Escrito pela sessão remota coordenadora; leia inteiro antes do primeiro commit.
 
 O **port do teko para o `mc`** (minicompiler.dev, `minicompiler/mc`), morando dentro
 deste repositório. O teko passa a ser uma **linguagem ensinada ao `mc`** por
-módulos `.mc` (hooks), em vez de um compilador próprio.
+módulos (hooks), em vez de um compilador próprio. Desde S4.1 (plano §64(f)) os
+31 módulos do pacote `teko` (`teko.tk` + os 30 `teko_*.tk`) e `lib/rt.tk` são
+`.tk`, transliterados do `.mc` original -- `core_teko.mc` (o `main()` deste
+repositório) e `user.mc` (o driver do projeto) ficam `.mc`, por não serem do
+pacote (D64.7).
 
 **`src/` está CONGELADO e NÃO se toca.** Todo trabalho novo vive em `ngen/`.
 
@@ -277,7 +281,10 @@ escrito; o laço em si não mudou). `ngen/mc.macos.toml`, os `ngen/mc.*.toml` tr
 e `ngen/build/` **nunca se commitam**, e `ngen/mc.toml` fica intacto por padrão — só o
 **crumb que o autoriza explicitamente** (S1, plano §64/§65: `[compiler]` ganhou `core`/
 `modules`; S2, plano §64/§66: `[compiler].out` virou `"build/teko"`) pode tocá-lo, e só
-as chaves que esse crumb nomeia. Editá-lo fora de um crumb autorizado quebra o CI.
+as chaves que esse crumb nomeia. Editá-lo fora de um crumb autorizado quebra o CI. **S4.1**
+(módulos `.tk`, §5) tocou `[compiler].modules`/`[package]` por nome de arquivo, não por chave nova
+— o laço acima e o `sed` de derivação de host continuam idênticos, o `mc build`/`mc limits`
+não distingue `.mc` de `.tk` num módulo.
 
 **O `mc` NÃO emite C.** Ele emite objeto nativo e linka; não existe passo de `gcc`
 sobre saída do compilador ensinado. Compile sempre por `mc build DIR --config FILE`
@@ -2135,6 +2142,28 @@ muda**: o `awk`/`sed` que deriva `ngen/mc.ci.toml` só corta a seção `[linker]
 qualquer outra seção nova já demonstrou em S1 com `[compiler]`. Publicação (Release + tree hash +
 PR em `minicompiler/mc-registry`) fica de fora, como o crumb previu — o registro do mc ainda não
 abriu para o `teko`.
+
+**S4.1 LANDADO** (plano §64(f)/§68): dois commits. (1) renomeia os identificadores internos que
+colidem com palavra registrada pela teko (`word_add`) dentro do próprio `ngen/*.mc`: `scope` →
+`dscope` (21 sítios, `teko_di.mc`), `out` → `dst` (37, `teko_rc.mc`/`teko_ternary.mc`) e — achado
+fora do censo do §64(e), que só auditara `scope`/`out` — `params` → `prs` (75, sete arquivos):
+`type_new("params", ...)` (`teko_type.mc:68`) passa por `alias_add` → `word_add`, a MESMA reserva
+program-wide que `syntax()`/`syntax_stmt()` fazem (`hooks.mc:555-568`); auditoria completa contra
+as 39 palavras que o ngen registra (censo mecânico, não à mão) confirma só estes três colidindo
+dentro do ngen. (2) `git mv` dos 31 módulos do pacote (`teko.mc` + os 30 `teko_*.mc`) e
+`lib/rt.mc` para `.tk`; `core_teko.mc`/`user.mc` ficam `.mc` (não são do pacote, D64.7/§67);
+`#include`s internos, os 39 fixtures + `parts/ns_file.tk` que incluem `../lib/rt.tk`, e
+`ngen/mc.toml` (`[compiler].modules`, `[package]`) atualizados. **Nenhum shim de 1 linha
+necessário**: o mc estoque não exige sufixo `.mc` em `[compiler].modules` (`drv_include` escreve o
+path cru, sem checar extensão) nem em `#include`/`[package]` (`lex_include` abre por caminho real;
+`libs_open`/`packages.md` — "a trailing `.mc` is dropped... a payload with another extension keeps
+it"). Gate (host macOS/aarch64, `mc` 0.15.5): `rm -rf ngen/build`, build do zero, **45/45**;
+`--dump-ast` das 45 byte-idêntico contra a base `6c50aa98`; `mc limits ngen` `verdict ok`;
+`build/teko` **byte-idêntico** (`cmp` limpo) entre antes/depois do `git mv` — mais forte que "a
+menos das strings de nome de arquivo": o único diff é a linha `#include` do glue `build/teko.mc`
+(caminho de módulo), o binário compilado não embute o próprio caminho fonte; `mc pkg hash ngen` →
+`331ee075474088484b875fefc2a740bbbb27863852e0109ff24b35c723a2a253` (estável entre duas execuções).
+Detalhe completo em `docs/design/plano-ngen-entrega4.md` §68.
 
 ## 5.1 Armadilhas já pagas (não repita)
 

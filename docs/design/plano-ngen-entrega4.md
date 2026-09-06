@@ -3856,3 +3856,69 @@ registro do mc ainda não abriu para pacotes de terceiros (NOTICES-teko.md, 2026
 servidor). `mc pkg check` não roda localmente pela mesma razão (lê `index/<nome>.toml` de um
 registro, não uma árvore local); `mc pkg verify ngen` roda offline e devolve "verified 0 packages
 against mc.lock" (sem `[deps]`, exit 0).
+
+## 68. Errata do §64 — S4.1 landado (transliteração `.mc` → `.tk` + renome de colisões, 2026-09-06)
+
+Dois commits, `feat/ngen-s41-translit`.
+
+**Commit 1 — renome de identificadores internos.** O censo do §64(e) auditara as colisões da
+teko contra os fontes do NÚCLEO (`type`/`out`, 66 sítios) e, à parte, contra o próprio `ngen/`
+("scope (21) e out (37) — ~58 sítios"). Reauditoria mecânica (grep-de-código, comentários e
+strings descontados, contra as **39 palavras** que `ngen/*.mc` de fato registra por
+`syntax`/`syntax_stmt`/`syntax_expr`/`type_new`/`type_alias`) confirma os 58 e acha um terceiro:
+**`params`** (75 sítios, `teko_class.mc`, `teko_deleg.mc`, `teko_iface.mc`, `teko_ns.mc`,
+`teko_ops.mc`, `teko_prop.mc`, `teko_struct.mc`). Causa: `tk_ty_params = type_new("params", 8, 8,
+TK_INT)` (`teko_type.mc:68`) chama `alias_add`, que chama `word_add` (`hooks.mc:555-562`) — a
+MESMA reserva program-wide que `syntax()` faz (o comentário do próprio núcleo, `hooks.mc:586-588`:
+"the word is reserved PROGRAM-WIDE, exactly as `type_alias`'s is"). O §64(e) tratara só as chamadas
+`syntax*`; `type_new`/`type_alias` reservam pela mesma tabela e ficaram de fora do censo original.
+Os demais 36 candidatos (`base`, `value`, `static`, `get`/`set`, `case`, `in`, `or`, `use`, os
+tipos-alias `bool`/`char`/`byte`/`isize`/`usize`/`ptr`/`str`/`f32`/`f64`, `class`/`interface`/
+`trait`/`namespace`/`import`/`using`/`delegate`/`struct`/`new`/`inject`/`this`/`true`/`false`/
+`null`/`var`/`const`/`match`/`when`/`while`/`for`/`do`/`foreach`/`switch`/`public`/`internal`/
+`abstract`/`partial`/`ref`) não colidem dentro do `ngen/` — ou lidos contextualmente sem
+`tok_add`, ou (`str`/`f64`) usados só em posição de TIPO, o uso para o qual foram registrados.
+
+Renomes: `scope` → `dscope`, `out` → `dst`, `params` → `prs` — mecânico, comportamento
+preservado, comentários e mensagens de erro intocados (só o identificador de código muda).
+
+**Commit 2 — `git mv` .mc → .tk.** Os 31 módulos do pacote `teko` (`teko.mc` + os 30
+`teko_*.mc`) e `lib/rt.mc` → `.tk`; `core_teko.mc` (o `main()` deste repositório) e `user.mc` (o
+driver do projeto) ficam `.mc` — não são do pacote (D64.7/§67, mesmo precedente `teach-1.0.0` do
+mc). Atualizados: os 30 `#include "teko_X.tk"` de `teko.tk`, os 39 fixtures + `parts/ns_file.tk`
+que incluem `../lib/rt.tk`, `ngen/mc.toml` (`[compiler].modules`, `[package]` `lib`/`module`/
+`files`/`check`) e as menções em prosa (doc comments) ao nome de arquivo — próprio E cruzado —
+em TODOS os arquivos tocados (`ngen/*.tk`, `ngen/lib/rt.tk`, os 39 fixtures, `ngen/core_teko.mc`,
+`ngen/user.mc`, `ngen/README.md`); a única referência a `rt.mc` que sobrevive é
+`examples/lang/lib/rt.mc`, um arquivo DIFERENTE no repositório `mc` (`ngen/lib/rt.tk:4`).
+
+**Auditoria do mc estoque — nenhum shim necessário.** Três pontos verificados contra
+`minicompiler/mc`'s próprio `src/` (não presumidos):
+1. `[compiler].modules` — `driver.mc`'s `drv_gen_compiler`/`drv_include` escrevem
+   `#include "<path>"` literal para cada entrada; não há checagem de sufixo.
+2. `#include "rel"` (dentro dos módulos e dos fixtures) — `lex.mc`'s `lex_include` resolve por
+   caminho real em disco (`lex_find_path`) quando não está dentro de um frame bundled; sem
+   exigência de `.mc`.
+3. `[package]` (`lib`/`module`/`files`/`check`, e a resolução `<teko/x>` que um consumidor
+   bundlaria) — `deps.mc`'s `libs_open` tenta o nome EXATO primeiro, só reapende `.mc` se a
+   tentativa falhar; `docs/reference/packages.md`: "a trailing `.mc` is dropped from every
+   `<...>` name... a payload with another extension keeps it".
+
+Nenhum dos três exige sufixo `.mc` — `.tk` funciona como módulo de compilador e como membro de
+pacote sem ajuste no mc. `mc limits`'s `drv_is_source` (só reconhece `.mc` para o modo
+arquivo-avulso) é irrelevante aqui: já resolvido do lado do `ngen` desde S2 (`tk_limits`'s
+`tk_is_source`, §66).
+
+**Gate** (host macOS/aarch64, `mc` 0.15.5, config derivado por `sed` como o CI faz): dois builds
+do zero (`rm -rf ngen/build`), um por commit — **45/45** em cada; `--dump-ast` das 45 byte-idêntico
+contra a base `6c50aa98` nos dois; `mc limits ngen` `verdict ok`. Medição extra do commit 2: o
+`build/teko` compilado ANTES do `git mv` (a partir do commit 1) e o compilado DEPOIS são
+**byte-idênticos** (`cmp` limpo) — mais forte que "a menos das strings de nome de arquivo": o
+único diff é textual, no `#include` do glue GERADO (`build/teko.mc:5`, `"../teko.mc"` →
+`"../teko.tk"`); o binário resultante não embute o caminho-fonte de `ngen/*.tk` em lugar nenhum
+(o `p_file()`/`err_at` do compilador TAUGHT só embute o caminho do arquivo que ELE compila em
+seguida — `tests/*.tk` — não o do seu próprio código-fonte). `mc pkg hash ngen` mudou (nomes de
+arquivo entram no hash) para
+`331ee075474088484b875fefc2a740bbbb27863852e0109ff24b35c723a2a253`, estável entre duas execuções.
+
+Sem PR, sem dreno — forward-only para `fix/retirement` como o resto do `ngen/`.
