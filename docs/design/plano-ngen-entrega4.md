@@ -2879,3 +2879,52 @@ não tocadas byte-idêntico** ao compilador da base `0a0bd0f4` (`same=41 diff=0`
 (fora de `ngen/tests/`, descartado): o mesmo programa contra o compilador PRÉ-fix reproduz
 `teko: unknown member of I2: Value` ao pé da letra; com o fix, roda. Sem PR, sem dreno -- branch
 `feat/ngen-onsource`, forward-only para `fix/retirement`.
+
+## 57. Errata — G1 landed, bloco §50 fechado (2026-09-06)
+
+O crumb G1 (§50 (c)) landou como desenhado, com dois achados que o (c) não previa.
+
+1. **`i64[] g;` chaveia por TIPO, não por `nd_val`.** Um `T[]` global não carrega contagem própria
+   na declaração (`g = new i64[n];` vem depois, como statement comum) -- `tk_hg_collect`
+   (`teko_array.mc`) varre `N_GLOBAL` cuja `nd_type` é linha `TK_KARRAY` (`tk_is_ha`), ao lado da
+   varredura por `nd_val != 0` que o array FIXO já usa. As duas coexistem na MESMA sweep, dentro do
+   MESMO `tk_array_pass` -- nada de pass nova.
+2. **Achado real, não hipotético: `cs[i].area()` sobre um GLOBAL morria em `expression with no
+   codegen`.** `cs[i]` (N_INDEX) nunca chega à árvore que `tk_array_pass` percorre quando um `.`
+   segue -- `tk_defer_member` (teko_typeof.mc) defere o RECEPTOR inteiro, e o nó vira órfão
+   alcançável só por `pd_recv`, exatamente como o elo interno de uma cadeia `p.inner.x`. A correção:
+   `tk_pend_do` (que já persegue essa cadeia via `tk_pend_at(recv)`) ganhou UMA linha --
+   `if (nd_kind(recv) == N_INDEX) tk_array_maybe_rewrite_index(recv);` -- antes de perguntar
+   `tk_ty_of(recv)`, reusando o MESMO dispatcher que a sweep de leitura já usa (fixo OU heap,
+   `teko_array.mc`). Sem essa linha, a resolução por NOME (`tk_pend_by_name`) até ACERTAVA o método
+   (`Circle` é a única classe com `area`), mas construía a chamada sobre o `N_INDEX` cru, que o core
+   nunca soube baixar -- o próprio caso que o header do K3 já tinha avisado ("`cs[i].area()` sobre um
+   PARÂMETRO -- se `cs[i]` ficasse `N_INDEX` cru... resolveria por nome"), agora medido para GLOBAL
+   em vez de parâmetro.
+3. **`T[]` global em `namespace` fica BARE, por decisão, não por limitação descoberta tarde.**
+   Qualificar cada uso do nome (`geo__pts`) exigiria que `tk_ns_pass`'s próprio rewrite de
+   identificador (`tk_ns_rewrite_ident`, hoje só para `const`) consultasse `hg_*` -- mas
+   `tk_ns_pass` roda ANTES de `tk_array_pass` popular essa tabela (`pass()` são registradas nessa
+   ordem em `teko.mc`). Threads dessa ordem para trás (fazer `tk_hg_collect` rodar cedo o bastante
+   para o sweep de namespace) tocaria a arquitetura de FASES da §50 inteira por uma dívida que
+   nenhuma fixture testa (acesso cross-namespace ao global). Escolha: `tk_ns_reject_topkind` ganha
+   UMA exceção (`tk_ns_topglobal_ha`) que deixa a declaração passar sem renomear -- funciona para
+   todo uso BARE de dentro do próprio namespace (o caso do fixture), registrado como dívida honesta
+   no próprio comentário do código, não escondida.
+
+Gate: `rm -rf ngen/build`, build do zero; `--entry-only` **43/43** (as 42 anteriores + a nova);
+`--dump-ast` das **42 anteriores byte-idêntico** ao compilador da base `20d78560` (`same=42
+diff=0`); `mc limits` `verdict ok`, `intrin`/`passes`/`syntax` idênticos nos dois lados (zero
+intrínseco, zero pass, zero palavra nova -- G1 só estendeu `tk_array_pass`/`tk_pend_emit`/
+`tk_ty_of`/`tk_pend_do`, todos já registrados). Probes (fora de `ngen/tests/`, descartados):
+`g.Length = 3` -> `teko: is read-only: Length`; `g[n]` com `n == g.Length` -> exit 70 (`teko: index
+past the end of an array`); `foreach (i64 x in g)` sobre o global -> `teko: not a known array: g`
+(a dívida já registrada, recusa clara). Sem PR, sem dreno -- branch `feat/ngen-g1-global`,
+forward-only para `fix/retirement`.
+
+Com G1, o bloco §50 (ordem livre de declaração, herança de interface, `T[]` global) fecha por
+inteiro. As dívidas que sobram (`#include` cru não varrido, base/interface qualificada abaixo,
+lambda contextual, `foreach` sobre `T[]`/forward, `b.x += 1` deferido, tipo aninhado, `T[]` global
+sem release e sem qualificação de namespace, `params T[]`/`T[][]`/`ref`/`out T[]`, covariância de
+interface em argumento sobrecarregado) seguem consolidadas no HANDOFF §5, para quem pegar a
+próxima fila.
