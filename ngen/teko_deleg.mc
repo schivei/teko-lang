@@ -98,10 +98,15 @@ i64 tk_deleg_row(i64 ty) {
 }
 
 // the delegate row named `name`, or -1 for a plain type/no type at all: the
-// early branch `tk_new()` takes before its own struct/class lookup
+// early branch `tk_new()` takes before its own struct/class lookup. §50 O2
+// ressalva 3: a row a use materialized ahead of its real declaration
+// (`TK_PFWD`) is not a delegate YET -- `dg_ret`/`dg_np` are still unset --
+// so it is left for `tk_new()`'s own struct/class path to report honestly,
+// rather than answered here as a zero-parameter delegate.
 i64 tk_deleg_find(uptr name) {
     i64 si = tk_struct_find(name);
     if (si < 0) return 0 - 1;
+    if (sr_part_at(si) == TK_PFWD) return 0 - 1;
     if (!tk_is_deleg(si)) return 0 - 1;
     return si;
 }

@@ -165,10 +165,13 @@ i64 tk_method_named_find(i64 ci, uptr name);
 i64 tk_method_of_fn(uptr fn);
 
 // teko_access.mc is included after this file: the short word and the segment
-// word both dispatch through its existing machinery
+// word both dispatch through its existing machinery. §50 O2: a qualified
+// static access on a type only the forward scan has seen so far defers
+// through the very resolver a bare one does.
 i64 tk_type_stmt();
 i64 tk_type_expr();
 i64 tk_static_member(i64 si, i64 line, uptr fl);
+i64 tk_fwd_defer_static(i64 si, i64 line, uptr fl);
 
 // teko_fwd.mc is included after this file: `tk_ns_resolve_fwd`'s own search
 // below lands a candidate on it instead of on `tk_struct_find_exact` (§50
@@ -535,7 +538,11 @@ i64 tk_ns_param_ty() {
 // namespace this module knows, and stops the instant it names a declared
 // type -- `new geo.Circle()` (teko_expr.mc) and a bare segment's own
 // handlers below share this one walk. `acc` is already read and consumed by
-// the caller; the loop only ever consumes what comes AFTER it.
+// the caller; the loop only ever consumes what comes AFTER it. §50 O2
+// ressalva 2: a probe only the forward scan has seen so far (`A.Item`,
+// `Item` declared below inside `namespace A`) stops the walk exactly as an
+// already-declared one does -- `tk_fwd_row` materializes its placeholder row
+// in the same act, so the caller's own `tk_struct_find_exact(acc)` finds it.
 uptr tk_ns_walk(uptr acc) {
     loop {
         if (tk_struct_find_exact(acc) >= 0) break;
@@ -544,6 +551,7 @@ uptr tk_ns_walk(uptr acc) {
         uptr nxt = p_name();
         uptr probe = tk_join3(acc, "__", nxt);
         if (tk_struct_find_exact(probe) >= 0) { p_next(); acc = probe; break; }
+        if (tk_fwd_row(probe) >= 0) { p_next(); acc = probe; break; }
         if (tk_ns_find(probe) < 0) break;
         p_next();
         acc = probe;
@@ -677,7 +685,9 @@ i64 tk_ns_seg_stmt() {
         return tk_stmt(e);
     }
     if (p_id() != tk_ns_dot) return tk_var_after_type(sr_ty_at(si), line, fl);
-    i64 e = tk_static_member(si, line, fl);
+    i64 e;
+    if (sr_part_at(si) == TK_PFWD) e = tk_fwd_defer_static(si, line, fl);   // §50 O2 ressalva 2
+    else                           e = tk_static_member(si, line, fl);
     p_expect(K_SEMI, "expected ; after the static member");
     tk_line = line;
     tk_file = fl;
@@ -695,7 +705,10 @@ i64 tk_ns_seg_expr() {
     p_next();
     uptr acc = tk_ns_walk(seg0);
     i64 si = tk_struct_find_exact(acc);
-    if (si >= 0) return tk_static_member(si, line, fl);
+    if (si >= 0) {
+        if (sr_part_at(si) == TK_PFWD) return tk_fwd_defer_static(si, line, fl);   // §50 O2 ressalva 2
+        return tk_static_member(si, line, fl);
+    }
     if (tk_ns_find(acc) < 0) err_at2(fl, line, "teko: unresolved qualified name", tk_ns_dotted(acc));
     return tk_ns_qualified_call(acc, line, fl);
 }
