@@ -58,6 +58,11 @@ i64 tk_fwd_materialize(i64 fi);
 void tk_check_type_use_from(i64 si, i64 proj, i64 line, uptr fl);
 i64 tk_trait_find(uptr name);
 
+// higiene 2, item 1: an itab call's own arguments against the interface
+// member's declared parameter types (teko_typeof.tk, included after this
+// file)
+void tk_check_compat(i64 tty, i64 ety, i64 en, i64 line, uptr fl);
+
 // §58 DI1: a service lifetime names a CLASS, never an interface -- checked
 // here, before this name is looked up as a base at all (`teko_di.tk`, included
 // after this file).
@@ -76,6 +81,7 @@ i64  im_ret[TK_MAXIFMETH];
 i64  im_static[TK_MAXIFMETH];         // 1 for a `static abstract` member: no receiver, no itab slot
 i64  im_prop[TK_MAXIFMETH];           // 1 for a property's `get`, 2 for its `set`, 0 otherwise
 uptr im_def[TK_MAXIFMETH];            // the symbol of its DEFAULT body, or 0
+i64  im_prs[TK_MAXIFMETH];            // higiene 2, item 1: its own parameter list, receiver at index 0
 i64  tk_nifmeth = 0;
 
 i64  ci_if[TK_MAXIMPL];               // the interface row of one implementation
@@ -98,6 +104,7 @@ i64  im_ret_at(i64 i)  { return ld64(im_ret + i * 8); }
 i64  im_static_at(i64 i) { return ld64(im_static + i * 8); }
 i64  im_prop_at(i64 i) { return ld64(im_prop + i * 8); }
 uptr im_def_at(i64 i)  { return ld64(im_def + i * 8); }
+i64  im_prs_at(i64 i)  { return ld64(im_prs + i * 8); }
 i64  ci_if_at(i64 i)   { return ld64(ci_if + i * 8); }
 i64  ci_cls_at(i64 i)  { return ld64(ci_cls + i * 8); }
 i64  ci_via_at(i64 i)  { return ld64(ci_via + i * 8); }
@@ -112,6 +119,7 @@ void set_im_ret_at(i64 i, i64 v)   { st64(im_ret + i * 8, v); }
 void set_im_static_at(i64 i, i64 v) { st64(im_static + i * 8, v); }
 void set_im_prop_at(i64 i, i64 v)  { st64(im_prop + i * 8, v); }
 void set_im_def_at(i64 i, uptr v)  { st64(im_def + i * 8, v); }
+void set_im_prs_at(i64 i, i64 v)   { st64(im_prs + i * 8, v); }
 void set_ci_if_at(i64 i, i64 v)    { st64(ci_if + i * 8, v); }
 void set_ci_cls_at(i64 i, i64 v)   { st64(ci_cls + i * 8, v); }
 void set_ci_via_at(i64 i, i64 v)   { st64(ci_via + i * 8, v); }
@@ -206,7 +214,7 @@ i64 tk_ifmeth_by_name(uptr name) {
     return found;
 }
 
-void tk_ifmeth_add(uptr name, uptr sig, i64 np, i64 nreq, i64 d0, i64 ret, i64 stat, uptr def) {
+void tk_ifmeth_add(uptr name, uptr sig, i64 np, i64 nreq, i64 d0, i64 ret, i64 stat, uptr def, i64 prs) {
     if (tk_nifmeth == TK_MAXIFMETH) err_at(tk_file, tk_line, "teko: too many interface methods");
     set_im_name_at(tk_nifmeth, name);
     set_im_sig_at(tk_nifmeth, sig);
@@ -216,6 +224,7 @@ void tk_ifmeth_add(uptr name, uptr sig, i64 np, i64 nreq, i64 d0, i64 ret, i64 s
     set_im_ret_at(tk_nifmeth, ret);
     set_im_static_at(tk_nifmeth, stat);
     set_im_def_at(tk_nifmeth, def);
+    set_im_prs_at(tk_nifmeth, prs);
     tk_nifmeth = tk_nifmeth + 1;
 }
 
@@ -246,6 +255,25 @@ i64 tk_ifslot(i64 si, i64 j) {
     return slot;
 }
 
+// higiene 2, item 1: an itab call's own arguments against the member's OWN
+// declared parameter types, by INDEX -- `im_prs_at(k)` carries the receiver
+// at index 0 (`tk_params`/`tk_prop_params`'s own shape), so a user argument
+// at position `i` compares against the param at `i + 1`. Every implementer's
+// signature is required, by conformance, to match `k`'s exactly (`im_sig`),
+// so the declared parameter list is the same check a concrete implementer's
+// own would give, without knowing which one answers at run time.
+void tk_ifargs_check(i64 k, i64 args, i64 line, uptr fl) {
+    i64 p = im_prs_at(k);
+    if (p != 0) p = nd_next(p);
+    i64 a = args;
+    loop {
+        if (a == 0 || p == 0) break;
+        tk_check_compat(nd_type(p), tk_pty_of(a), a, line, fl);
+        a = nd_next(a);
+        p = nd_next(p);
+    }
+}
+
 // the indirect call an interface member is: the object's word 0 is its vtable,
 // the vtable's word 0 is the class's interface table, and `tk_itab` walks that
 // table for this interface's id (ngen/lib/rt.tk). The receiver is read twice --
@@ -258,6 +286,7 @@ i64 tk_itab_emit(i64 left, i64 si, i64 j, i64 args, uptr m, i64 line, uptr fl) {
         err_at2(fl, line, "teko: an interface call needs a name or a field on the left", m);
     tk_line = line;
     tk_file = fl;
+    tk_ifargs_check(sr_m0_at(si) + j, args, line, fl);
     i64 vt = tk_call("ld64", tk_clone(left));
     i64 mt = tk_call2("tk_itab", vt, tk_int(si));
     i64 fnp = tk_call("ld64", tk_bin(K_ADD, mt, tk_int(tk_ifslot(si, j) * 8)));
@@ -502,7 +531,7 @@ i64 tk_iface_accessor(i64 si, uptr m, i64 rty, i64 stat) {
         err_at2(tk_file, tk_line, "teko: the property already declares this accessor", m);
     if (!p_accept(K_SEMI))
         err_at2(p_file(), p_line(), "teko: an interface property declares accessors, not bodies", m);
-    tk_ifmeth_add(acc, sig, wantset, wantset, tk_ndflt, aty, stat, 0);
+    tk_ifmeth_add(acc, sig, wantset, wantset, tk_ndflt, aty, stat, 0, prs);
     set_im_prop_at(tk_nifmeth - 1, wantset + 1);
     set_sr_mn_at(si, tk_nifmeth - sr_m0_at(si));
     return 1;
@@ -556,7 +585,7 @@ void tk_iface_member(i64 si) {
     if (p_id() == K_LBRACE) def = tk_ifdef_symbol(si, m, sig);
     else p_expect(K_SEMI, "expected ; after the interface method");
     if (def && abst) err_at2(tk_file, tk_line, "teko: an abstract interface member has no body", m);
-    tk_ifmeth_add(m, sig, np, nreq, d0, rty, stat, def);
+    tk_ifmeth_add(m, sig, np, nreq, d0, rty, stat, def, prs);
     set_sr_mn_at(si, tk_nifmeth - sr_m0_at(si));
     if (def) tk_member_body(si, rty, def, prs, 0);
 }

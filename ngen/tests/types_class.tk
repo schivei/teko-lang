@@ -11,6 +11,13 @@
 // `base.area()` runs Shape's own implementation directly -- which is what lets
 // an `override` build on the method it overrides instead of recursing.
 //
+// `VShape.useCircle(Circle)` (higiene 2, item 1): a virtual method's own
+// argument checked against its declared parameter type through the vtable --
+// `b.useCircle(circ)` on a `VShape`-typed receiver holding a `VSquare`
+// dispatches to the override, and the argument's own teko type is checked at
+// the call site, not just at the direct-call sites `tk_rc_call_args` already
+// covered.
+//
 // expect-exit: 42
 
 #include "../lib/rt.tk"
@@ -43,6 +50,33 @@ i64 area_of(Shape s) {
     return s.area();
 }
 
+class Circle {
+    public i64 r;
+}
+
+class VShape {
+    public i64 side;
+
+    public virtual i64 useCircle(Circle c) {
+        return c.r + side;
+    }
+}
+
+class VSquare : VShape {
+    public override i64 useCircle(Circle c) {
+        return c.r * side;
+    }
+}
+
+i64 vcheck() {
+    Circle circ = new Circle;
+    circ.r = 3;
+    VShape b = new VSquare;
+    b.side = 4;
+    if (b.useCircle(circ) != 12) return 1;         // the override, through the vtable
+    return 0;
+}
+
 i64 main() {
     if (SHAPE_SIDE != 16) return 1;
     if (SHAPE_SIZE != 24) return 2;
@@ -66,6 +100,9 @@ i64 main() {
     if (r.area() != 16) return 10;               // the override, through the vtable
     if (r.scaled(2) != 32) return 11;            // an inherited virtual calling it
     if (area_of(r) != 16) return 12;             // ...and through a parameter
+
+    i64 vbad = vcheck();
+    if (vbad != 0) return 20 + vbad;
 
     return p.area() + q.area() + r.area() - 2;
 }

@@ -295,6 +295,27 @@ void tk_loose_refuse(i64 mi, uptr m, i64 line, uptr fl) {
     err_at(fl, line, tk_join("teko: wrong number of arguments for ", m));
 }
 
+// higiene 2, item 1: a virtual call's own arguments against the callee's
+// declared parameter types, by INDEX -- `decl_param_type` (the core's own
+// API), the same rule `tk_rc_call_args` (teko_rc.tk) already gives a direct
+// call. A virtual call's own node is `callp`, never the method's mangled
+// symbol `decl_find` would know, so `tk_rc_call_args`'s generic walk never
+// reaches it -- checked here instead, at the PARSE-TIME call site, where
+// `mt_fn_at(mi)` is in hand; `tk_pty_of` (teko_struct.tk), not the pass-time
+// `tk_ty_of`, is what a node's type is called at this point in the parse.
+void tk_vcall_args_check(i64 mi, i64 args, i64 line, uptr fl) {
+    i64 d = decl_find(mt_fn_at(mi));
+    if (d < 0) return;
+    i64 a = args;
+    i64 i = 1;                                    // parameter 0 is the receiver
+    loop {
+        if (a == 0) break;
+        tk_check_compat(decl_param_type(d, i), tk_pty_of(a), a, line, fl);
+        a = nd_next(a);
+        i = i + 1;
+    }
+}
+
 // `p.m(...)` once the method is known: a plain one is a direct call to the
 // mangled Owner_method, a virtual one goes through the object's vtable. The
 // virtual form reads the receiver twice, so it is only accepted where
@@ -310,6 +331,7 @@ i64 tk_emit_call(i64 left, i64 mi, i64 args, i64 na, i64 line, uptr fl) {
     } else {
         if (!tk_pure(left))
             err_at2(fl, line, "teko: a virtual call needs a name or a field on the left", mt_name_at(mi));
+        tk_vcall_args_check(mi, args, line, fl);
         i64 vt = tk_call("ld64", tk_clone(left));
         i64 fnp = tk_call("ld64", tk_bin(K_ADD, vt, tk_int((TK_VT_FIXED + slot) * 8)));
         r = tk_call("callp", list_append(list_append(fnp, left), args));
