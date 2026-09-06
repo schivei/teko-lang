@@ -263,7 +263,7 @@ for src in ngen/tests/*.tk; do
   n=$(basename "$src" .tk); w=$(grep -m1 '// expect-exit:' "$src" | sed 's/.*expect-exit: *//')
   sed -e "s#^entry = .*#entry = \"tests/$n.tk\"#" -e "s#^out   = .*#out   = \"build/$n\"#" \
       ngen/mc.macos.toml > "ngen/mc.$n.toml"
-  ngen/build/mc-teko build ngen --config "ngen/mc.$n.toml" --entry-only && "ngen/build/$n"
+  ngen/build/teko build ngen --config "ngen/mc.$n.toml" --entry-only && "ngen/build/$n"
   echo "$n exit=$?  want=$w"; rm -f "ngen/mc.$n.toml"
 done
 ```
@@ -276,8 +276,8 @@ Hoje isso dá **45/45 em exit 42/70** (o número de fixtures cresceu desde que e
 escrito; o laço em si não mudou). `ngen/mc.macos.toml`, os `ngen/mc.*.toml` transientes
 e `ngen/build/` **nunca se commitam**, e `ngen/mc.toml` fica intacto por padrão — só o
 **crumb que o autoriza explicitamente** (S1, plano §64/§65: `[compiler]` ganhou `core`/
-`modules`) pode tocá-lo, e só as chaves que esse crumb nomeia. Editá-lo fora de um crumb
-autorizado quebra o CI.
+`modules`; S2, plano §64/§66: `[compiler].out` virou `"build/teko"`) pode tocá-lo, e só
+as chaves que esse crumb nomeia. Editá-lo fora de um crumb autorizado quebra o CI.
 
 **O `mc` NÃO emite C.** Ele emite objeto nativo e linka; não existe passo de `gcc`
 sobre saída do compilador ensinado. Compile sempre por `mc build DIR --config FILE`
@@ -2079,6 +2079,28 @@ mc, sem nome de seção hardcoded — Mach-O/ELF/COFF diferem) e `mc limits DIR 
 Roda local hoje (`sh ngen/scripts/measure.sh ngen/build/mc-teko ngen/mc.macos.toml ngen`); ainda
 NÃO ligado ao CI (S4.3 decide isso). `ngen/mc.toml` é o **único** arquivo deste crumb que muda fora
 da adição de arquivos novos — a nota do §4 abaixo reflete essa autorização pontual.
+
+**S2 LANDADO** (`ngen/core_teko.mc`, `ngen/teko.mc`, `ngen/mc.toml`, `.github/workflows/ngen.yml` —
+plano §64/§66): `teko` ganhou driver próprio. `main()` troca `mc_build_init()` (D64.3) pelas peças
+públicas que ela é feita de (`lex_set_libs`/`sysroots_init`/`on_plan(&mc_plan)`) + a tabela própria
+de subcomandos (`tk_build`/`tk_limits`), e intercepta `argc < 2` para chamar `subcommand_usage()`
+direto — achado fora do §64(c): `mc` sem argumento cai primeiro nas três linhas fixas de `cli.mc`'s
+`usage()`, que este arquivo não pode editar (`src/` do mc intocado). `tk_build` (D64.4/D64.5) resolve
+`DIR/teko.toml` antes de `DIR/mc.toml`, sem `--config`, e delega a `drv_build` sem reimplementar o
+driver; `tk_limits` (achado adicional, dentro do escopo — é o próprio critério de aceite do §64(f))
+faz o mesmo para o `.tk` que o `drv_is_source` do núcleo (só `.mc`) não reconhecia. `[compiler].out`
+virou `"build/teko"` (única chave tocada); `ngen.yml` trocou a UMA linha que nomeava
+`ngen/build/mc-teko` (o laço de fixtures) por `ngen/build/teko`. Prova: build do zero, **45/45**
+via `teko build ... --entry-only`; `--dump-ast` das 45 contra a base `477ea715` — `same=45 diff=0`;
+`mc limits ngen` `verdict ok`; `teko` sem argumento — só as duas linhas, exit 1; `teko limits
+ngen/tests/hello.tk` roda (exit 3, o "grew" normal de um arquivo avulso sem plano de projeto).
+Detalhe completo em `docs/design/plano-ngen-entrega4.md` §66.
+
+**S2d LANDADO** (mesmo crumb, plano §66 + `ngen/README.md`): censo `type_disable`/
+`intrinsic_disable` (D64.6) — **lista vazia**. `bool`/`char`/`byte`/`isize`/`usize`/`ptr`/`str` são
+`type_alias` (identidade, nada a desabilitar); `f32`/`f64` vêm do `type_new` de `<float>`, só
+conectados; `i32`/`ld64`/`st64`/`ld8`/`st8`/`ld32`/`callp` são usados pelas fixtures E pelos fontes
+do núcleo (desabilitar qualquer um quebraria a auto-hospedagem da etapa 4). Nenhum código muda.
 
 ## 5.1 Armadilhas já pagas (não repita)
 

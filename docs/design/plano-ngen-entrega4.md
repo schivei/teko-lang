@@ -3710,3 +3710,91 @@ CONFIG`. POSIX `sh`, sem bashismo; roda local hoje, não ligado ao CI ainda (S4.
 
 Nada no §64(f) mudou de rumo; isto só registra os números que a tabela da etapa 1 previu como
 "medição feita nesta sessão" — a mesma sessão que agora landou o crumb.
+
+## 66. Errata do §64 — S2 landado; censo S2d (2026-09-06)
+
+**S2 landado** (`ngen/core_teko.mc`, `ngen/teko.mc`, `ngen/mc.toml`,
+`.github/workflows/ngen.yml`): `main()` para de chamar `mc_build_init()`
+(D64.3) e chama as três peças públicas que ela era feita de —
+`lex_set_libs(&libs_open)`, `sysroots_init()`, `on_plan(&mc_plan)` — mais a
+tabela própria de subcomandos, `subcommand("build", &tk_build, ...)` e
+`subcommand("limits", &tk_limits, ...)`. `sysroot` fica de fora (só a perna
+Windows do CI precisa, e ela já monta o sysroot com o `mc` de release, nunca
+com `teko` — `ngen.yml`'s own "build the Windows sysroot" step).
+
+Achado durante a implementação, fora do que o §64(c) previu: `mc` sem
+subcomando reconhecido cai em `cli.mc`'s `usage()`, que imprime TRÊS linhas
+fixas próprias (`usage: mc [--dump-tokens|...] source.mc [-o out]`,
+`mc --host`, `mc --version`) ANTES de chamar `subcommand_usage()` — linhas
+que este arquivo não pode editar (`src/` do mc é intocado). Registrar só a
+tabela própria não bastava para "`teko` sem argumento imprime SÓ a usage do
+teko": `main()` intercepta o caso `argc < 2` (o único que cai nesse caminho
+sem nada de fato para compilar) e chama `subcommand_usage()` diretamente,
+nunca `mc_main`'s own `usage()`. Prova: `ngen/build/teko` sem argumento
+imprime exatamente as duas linhas de `teko build`/`teko limits`, exit 1.
+
+D64.4: `tk_build(argc, argv)` (`ngen/teko.mc`) faz uma varredura leve (só
+`--config`/`--sysroot-dir`/`--libs-dir`, o bastante para achar DIR e saber
+se `--config` já foi dado) e delega a `drv_build` do núcleo — a lógica real
+do build não é reimplementada. D64.5: sem `--config`, `DIR/teko.toml` vence
+quando existe (`path_exists`, `path_norm(tm_cat(dir, "/teko.toml"))`);
+senão, `DIR/mc.toml` (o default do próprio `drv_build`) aplica-se
+inalterado — prova por probe: um `ngen/teko.toml` avulso (out distinto) fez
+`teko build ngen --entry-only` (sem `--config`) escrever no `out` do
+`teko.toml`, não no de `ngen/mc.toml`; `--config` explícito continuou
+vencendo os dois.
+
+Achado adicional, também fora do §64(c): `drv_limits` (núcleo) distingue
+"arquivo único" de "diretório de projeto" com `drv_is_source`, que exige
+sufixo `.mc` — uma fonte teko é `.tk`, então `teko limits
+ngen/tests/hello.tk` com `&drv_limits` cru caía no ramo de diretório e
+morria com `cannot open: .../mc.toml`. `tk_limits` (`ngen/teko.mc`) resolve:
+mesma varredura leve de `tk_build`, e um caminho `.tk` (`tk_is_source`, o
+mesmo teste de três bytes de `drv_is_source`, com `t`/`k` no lugar de
+`m`/`c`) toma as três chamadas públicas que `drv_limits` tomaria para um
+`.mc` (`lim_compile_file`/`lim_report`/`lim_exit_code`, `src/limits.mc`);
+qualquer outro caso (diretório, `.mc`, sem argumento, flag desconhecida) cai
+em `drv_limits` inalterado. Isto está dentro do escopo de S2 (não um item
+adjacente): é exatamente o critério de aceite do §64(f) —
+"`teko limits ngen/tests/hello.tk` funciona" — e sem ele não funcionava.
+
+`[compiler].out` virou `"build/teko"` em `ngen/mc.toml` (única chave
+tocada, D64.5's own authorization); `.github/workflows/ngen.yml` trocou a
+UMA linha que nomeava `ngen/build/mc-teko` (o laço de fixtures) por
+`ngen/build/teko` — nenhuma outra linha do workflow muda, `mc build ngen
+--config ngen/mc.ci.toml` (a etapa que ENSINA o compilador com o `mc` de
+release) continua igual, ela nunca nomeou o binário produzido.
+
+Prova (host macOS/aarch64, `mc` 0.15.5, config derivado por `sed` como o
+CI faz): build do zero, **45/45** fixtures via `teko build ngen --config
+... --entry-only`; `--dump-ast` das 45 contra o compilador da base
+(`477ea715`, `mc-teko` cru) — **`same=45 diff=0`**; `mc limits ngen`
+`verdict ok`; `teko` sem argumento — as duas linhas, exit 1; `teko limits
+ngen/tests/hello.tk` — roda e reporta (exit 3, o mesmo "grew" que qualquer
+`mc limits arquivo.mc` avulso dá sem um plano de projeto — não é regressão,
+é o comportamento correto de arquivo único).
+
+### S2d — censo `type_disable`/`intrinsic_disable` (D64.6)
+
+**Lista: VAZIA.** Confirmado sobre o `ngen/*.mc` atual (`ngen/teko_type.mc`,
+`ngen/teko_float.mc`):
+
+* `bool`, `char`, `byte`, `isize`, `usize`, `ptr`, `str` são `type_alias`
+  sobre um tipo do núcleo (`TY_U8`/`TY_U32`/`TY_I64`/`TY_U64`/`TY_UPTR`) —
+  IDENTIDADE, não um segundo tipo: não há o que desabilitar, a palavra do
+  núcleo continua sendo o mesmo tipo.
+* `f32`/`f64` vêm do `type_new` da própria lib `<float>` (M24) — a teko só
+  liga (`float_init()` + as tabelas de máquina), não redefine nem substitui
+  palavra nenhuma.
+* `i32` é do núcleo (M45) — a teko o QUER, não o disputa.
+* `ld64`/`st64`/`ld8`/`st8`/`ld32`/`callp` são usados diretamente pelas
+  fixtures (`primitives_ptr.tk`, `surface_import.tk`) e pelos próprios
+  fontes do núcleo — `intrinsic_disable` em qualquer um deles quebraria a
+  auto-hospedagem da etapa 4 (rota A, §64(e)), que precisa compilar os
+  fontes do núcleo tal como estão.
+
+**Regra (D64.6, liga a etapa 2 à 4):** um `type_disable`/`intrinsic_disable`
+só é legítimo quando a palavra (i) é de fato proibida na superfície teko E
+(ii) não aparece nos fontes do núcleo — a lista de hoje não tem um único
+candidato que passe as duas. Lista vazia é um resultado válido, registrado
+aqui e em `ngen/README.md`; nenhum código muda.

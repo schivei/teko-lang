@@ -72,11 +72,12 @@ ngen/build/teko-hello   # exits 42
 ```
 
 Two steps come out of `mc build` (`docs/build.md` in the `mc` repository):
-first it links `teko.mc` into a taught compiler (`ngen/build/mc-teko`), then it
+first it links `teko.mc` into a taught compiler (`ngen/build/teko`), then it
 uses THAT binary to compile `ngen/tests/hello.tk` into `ngen/build/teko-hello`.
 Nothing in `mc`'s own `src/` changes, and nothing in this repository's `src/`
 changes either. `.github/workflows/ngen.yml` then uses that same `ngen/build/
-mc-teko` directly (`--exe`, bypassing `mc.toml`'s single `[project]` entry) to
+teko` directly (`build ngen --config ... --entry-only`, since §64's S2 gave
+it its own driver) to
 compile and run each `ngen/tests/primitives_*.tk` and `ngen/tests/types_*.tk` fixture, one
 process per fixture — see § Fixtures below.
 
@@ -173,3 +174,18 @@ entrega 1's `bool`); locally, the argument splits by whether the new word is a
   load through a shared eight-byte scratch cell. Running `primitives_float.tk`
   end to end needs the same runnable, self-hosted `mc` the § above is missing;
   CI has it.
+
+## `type_disable`/`intrinsic_disable` (D64.6, `docs/design/plano-ngen-entrega4.md` §66)
+
+The core (`src/hooks.mc`) lets a taught compiler remove a word from its own
+surface — `type_disable(ty)` takes a *type* out (`u32 x;` refused),
+`intrinsic_disable(name)` takes a *call name* out (`ld64(p)` refused). teko's
+own list of either is **empty today**, by rule: a removal is only legitimate
+when the word is genuinely forbidden on the teko surface AND does not appear
+in the core's own sources (a word the core uses to compile itself cannot be
+disabled without breaking S4's rota A auto-hosting). `bool`/`char`/`byte`/
+`isize`/`usize`/`ptr`/`str` are `type_alias`, identity over a core type — no
+second type exists to disable; `f32`/`f64` are `<float>`'s own `type_new`,
+wired, not redefined; `i32` (M45) and `ld64`/`st64`/`ld8`/`st8`/`ld32`/
+`callp` are wanted, and used by both the fixtures and the core's own
+sources. Nothing here is code — the empty list is the result.
