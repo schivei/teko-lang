@@ -4563,6 +4563,11 @@ mesma fixture sai **131** (`130 + 1`, o `ref f64`); contra o tip, 42.
 
 ### (b) O que o item A NÃO conserta — dois pedidos ao mc, sem contorno
 
+> **FECHADO (2026-09-06, §79):** os dois pedidos saíram no **mc 0.15.13** e o V1 consumiu o
+> contrato nos cinco construtores de `callp` da teko. O texto abaixo fica como o registro do
+> defeito; a errata está no §79(a). A dívida adjacente do fim desta seção (`params` sem tipo de
+> elemento) continua ABERTA.
+
 1. **`callp` é tipado `TY_I64` pelo núcleo** (`src/gen_resolve.mc:446`), então `walk_ret_type()` numa
    chamada INDIRETA sempre responde inteiro e o `fa_result` de `<float>`
    (`lib/machine_arm64_float.mc:492` e o gêmeo x86_64) nunca move `d0`/`xmm0` para o registrador de
@@ -4983,3 +4988,73 @@ mesmo programa, o objeto é COFF de máquinas diferentes.
 191 586 linhas diff vazio — e o MESMO run por `--linker-toml` com um bloco `cc` equivalente
 reproduz os três hashes byte a byte, que é a prova de que a substituição do `[linker]` deriva um
 config equivalente.
+
+## 79. V1 — retorno float por chamada indireta: o que landou, e a errata do §74(b)
+
+Crumb executado a partir de `docs/design/plano-v1-float-callp.md` (desenho antecipado), base
+`a66b80c9`, branch `feat/ngen-v1-float-callp`, cinco commits (bump do `mc`, delegate, virtual,
+itab, docs). Descrição do que landou no `ngen/HANDOFF.md` §5, bloco **V1**; a armadilha da regra de
+identidade virou o item **33** do §5.1.
+
+### (a) Errata do §74(b) — os dois pedidos ao mc estão FECHADOS
+
+1. **`callp` tipado `TY_I64`** — fechado pelo **mc 0.15.13**: um cast aplicado DIRETAMENTE ao
+   `callp` declara o retorno (`res_expr`, arm `N_CAST` de `mc/src/gen_resolve.mc`, empurra
+   `nd_type` para o nó do intrínseco). Do lado da teko, `tk_callp_ret` (`ngen/teko_array.tk`) põe
+   esse cast nos cinco construtores de `callp`. O repro do §74(b) responde **5.0** escrito
+   `1.0 + (f64) callp(p, 2.0)` e **3.0** sem o cast, no MESMO binário — ou seja: o contrato do
+   núcleo já valia antes deste crumb, o que faltava era a teko EMITIR o cast.
+2. **Conversões single do `<float>` em arm64** — fechado na mesma release (`FI_SCVTF_D..FI_UCVTF_D`
+   e `FI_FCVTZS_D..FI_FCVTZU_D` com `+2`). Re-conferido por probe: `i64 main() { f32 y = 2.5f;
+   return (i64) (y * 10.0f); }` dá **25** na base e no tip. **Zero código do lado da teko**, e a
+   ressalva do §74(a) ("fixture e probes de `f32` comparam contra literais em vez de castar") deixa
+   de ser necessária — `fdcheck` compara contra literal `f32` por preferência de leitura, não por
+   contorno.
+
+A **dívida adjacente do §74(b) (lista `params` sem tipo de ELEMENTO) continua ABERTA** e é
+superfície, não V1 — ver (c) item 3.
+
+### (b) O que divergiu do `plano-v1-float-callp.md`
+
+O desenho foi seguido inteiro: o shaper saiu como escrito (§3 do plano, incluído verbatim), os
+cinco sítios são exatamente os do censo (§2), a ordem de commits e o gate por commit valeram, e a
+partição de AST bateu a previsão do §4 na vírgula — `same=44 diff=1` por commit, **`same=42
+diff=3`** acumulado. Divergências, todas de MEDIÇÃO, nenhuma de desenho:
+
+1. **O diff das três fixtures tocadas não é só aditivo.** Além das linhas `CAST type=f64`/`f32` (6
+   em `surface_delegate`, 5 em `types_class`, 3 em `types_interface`), cada uma tem linhas
+   REMOVIDAS: são os temporários `$gN` renumerados, porque o caso novo entra antes do resto do
+   corpo. Verificado que **toda** linha removida é um `$gN` deslocado (`grep '^<' | grep -v '\$g'`
+   vazio nas três) — a previsão "byte-idêntico exceto as três" vale, mas a forma do diff não é a
+   puramente aditiva que crumbs anteriores mediram.
+2. **O probe 1 não roda no `mc` de prateleira.** O repro do §74(b) é código do dialeto do mc, mas
+   os tipos `f32`/`f64` vêm do COMPILADOR (`<float>`, M24), não de um include: `mc --exe` sobre ele
+   para em `float_rt:46: type expected in parameter`. Rodou-se pelo compilador ENSINADO, que é
+   quem tem os tipos — e é também o que torna a medição interessante (mesmo binário, com e sem
+   cast). O `mc` cobre o caso puro na própria suíte (`tests/float/023-callp-f64.mc`).
+3. **O virtual erra mais fundo que o delegate na base.** O §74(b) descrevia "acerta por
+   coincidência de registrador"; medido, o delegate acerta a forma DIRETA (`d(2.0)` = 4.0) e erra a
+   aninhada, enquanto o virtual e a interface erram **já na forma direta** (`p.area() != 3.0`), com
+   a profundidade zero. Não muda o conserto — muda o que um probe de uma linha só teria concluído.
+
+### (c) Achados medidos (o §8 do plano pedia REPORTAR, não virar item)
+
+1. **O estreitamento inteiro por despacho indireto JÁ estava certo na base** nos sítios #2–#5
+   (`virtual i32`, `virtual u8`, `override`, por `this` implícito, por parâmetro de tipo base,
+   `interface i32`): 42 na base e 42 no tip. Quem estende é o CALLEE (extensão M45), então o cast
+   que o shaper unificado passa a pôr nesses quatro é cinto-e-suspensório — o `sxtw` idempotente
+   que o próprio contrato do núcleo prevê. Não havia defeito vivo; o #1 (delegate) moldava desde o
+   K2w e segue moldando pelo mesmo shaper.
+2. **O reclaim não notou o envelope.** Laço de 100 closures `f64` com `rt_live() == 0` no fim: 42
+   na base e no tip. A regra de identidade (§5.1 item 33) é o que garante isso — os quatro sítios
+   que copiam o resultado para a árvore (`node_assign`/`tk_node_replace`) copiam o nó de FORA.
+3. **`params` + float por chamada indireta: metade fecha, metade continua aberta.** Com o cast na
+   árvore, `tk_va_arg_ty` (`teko_params.tk`, que lê `N_CAST`) passa a enxergar o float vindo das
+   formas construídas no PARSE — `total(p.area())` agora é recusado com ``teko: a `params` list
+   holds words; a float argument is not taught yet``, onde a base compilava e devolvia lixo. A
+   forma DELEGATE continua silenciosa (base 48, tip 32 — lixo dos dois lados): `tk_params_pass`
+   roda ANTES do `tk_deleg_pass` (ordem em `teko.tk`), então o argumento ainda é um `N_CALL` cru
+   quando a checagem o examina. Fechar isso é a dívida de superfície do §74(b)/§76 (dar tipo de
+   ELEMENTO a uma `params`, grafia `params T[]`) ou mover a checagem para depois do passe de
+   delegate; palpitar pela tabela `tk_slv_find` recusaria programa CORRETO (armadilha 27), então
+   não se palpita.

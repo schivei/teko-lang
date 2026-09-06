@@ -1,5 +1,9 @@
 # V1 — retorno float por chamada indireta (`(T) callp(...)`)
 
+> **LANDADO** (2026-09-06, branch `feat/ngen-v1-float-callp`). Errata — o que divergiu deste
+> desenho, os achados medidos e o §74(b) fechado — em `plano-ngen-entrega4.md` §79; o que ficou na
+> árvore, em `ngen/HANDOFF.md` §5 (bloco V1) e §5.1 item 33.
+
 Fecha o item 1 do §74(b) do `plano-ngen-entrega4.md`: `callp` é tipado `TY_I64` pelo núcleo, `walk_ret_type()` numa
 chamada INDIRETA sempre responde inteiro, o `fa_result` de `<float>` nunca move `d0`/`xmm0` para o destino — e as
 três formas indiretas (delegate, virtual, interface) só acertam por coincidência de registrador.

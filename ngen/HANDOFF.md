@@ -2997,6 +2997,74 @@ plano §78. Zero mudança em `ngen/*.tk`, `ngen/mc.toml` e `ngen/tests/`.
   equivalente reproduz os três hashes byte a byte (é a prova de que a substituição do `[linker]`
   deriva um config equivalente); `ngen/*.tk`, `ngen/mc.toml` e `ngen/tests/` intocados.
 
+**V1 — RETORNO FLOAT POR CHAMADA INDIRETA LANDADO** (plano §79 e
+`docs/design/plano-v1-float-callp.md`, 2026-09-06, base `a66b80c9`, cinco commits): o segundo crumb
+do desvio "v0.1.0 estável", e o último resultado errado silencioso conhecido. `callp` não nomeia
+callee, então o núcleo tipava o nó `TY_I64`, `walk_ret_type()` respondia inteiro em TODA chamada
+indireta e o `fa_result` do `<float>` nunca movia `d0`/`xmm0` para o destino — delegate, método
+virtual e método de interface (as três são `callp`) só acertavam por coincidência de registrador.
+Com o **mc 0.15.13** (§3.2) um cast DIRETAMENTE sobre o `callp` declara o retorno, e é essa a única
+grafia possível: a teko passa a emiti-la nos cinco construtores.
+
+- **UM shaper, `tk_callp_ret(ret, call)`** (`ngen/teko_array.tk`, logo abaixo de `tk_cast`): envolve
+  num cast o retorno FLOAT e o INTEIRO ESTREITO — este pela regra do próprio núcleo (`walk_narrow`,
+  `mc/src/gen_walk.mc`: `uptr` é a palavra da máquina e nunca é estreito, o que não é `TK_INT`/
+  `TK_SINT` é do módulo, `void` não toma cast) — e devolve a chamada intocada no resto. Espelhar a
+  regra do núcleo em vez de chamar `walk_narrow` é deliberado: é símbolo INTERNO de `gen_walk.mc`, e
+  a 0.15.12 já quebrou a teko renomeando internos (§3.2).
+- **`tk_deleg_ret_narrow` APAGADO** (`teko_deleg.tk`): existia só para manter o float LONGE de um
+  cast que, sem o contrato do núcleo, converteria o resultado inteiro da chamada. Com o contrato, os
+  dois casos são a mesma declaração na mesma sintaxe, e o shaper único os cobre.
+- **Os cinco sítios**, todos envolvendo DENTRO do construtor: `tk_deleg_build`
+  (`teko_deleg.tk`, delegate/lambda, `dg_ret_at`), `tk_emit_call` (`teko_expr.tk`, virtual por
+  receptor tipado no parse), `tk_this_emit` (`teko_this.tk`, virtual pelo `this` implícito),
+  `tk_pend_emit_call` (`teko_typeof.tk`, virtual por receptor que só o oráculo tipa) e
+  `tk_itab_emit` (`teko_iface.tk`, interface, `im_ret_at(sr_m0_at(si) + j)`). Todo call-site funila
+  num desses cinco — DI e lambda não têm forma própria (lambda é delegate; serviço injetado é campo
+  ou local e cai no virtual/itab).
+- **ARMADILHA — a regra de identidade** (quebra em SILÊNCIO, compila e devolve o valor errado de
+  novo): o núcleo casa o cast com o filho **IMEDIATO** do `callp`, então (a) o envelope só pode
+  acontecer no sítio que CONSTRÓI a chamada — um nó inserido depois, entre o cast e o `callp`,
+  desfaz o casamento sem erro nenhum; e (b) todo registro por POSIÇÃO de nó (`tk_xt_put`/`tk_xt_add`
+  e o `node_assign`/`tk_node_replace` que copia o resultado para o nó da árvore) vale sobre o nó que
+  o shaper DEVOLVE, nunca sobre o `callp` interno — em `tk_emit_call` o `tk_xt_add` vem
+  deliberadamente DEPOIS do shaper.
+- **Fixtures, um caso por forma de despacho, nenhuma fixture nova:** `surface_delegate.tk`
+  `fdcheck` (`delegate f64 Scale(f64 x)` sobre função nua, sobre `new Scale(dbl)`, de campo de
+  classe, aninhado em `1.0 + d(2.0)`, e o gêmeo `f32`), `types_class.tk` `fvcheck`
+  (`virtual f64 area()` + `override`, pelo receptor escrito, pelo `this` implícito e por parâmetro
+  tipado na BASE) e `types_interface.tk` `ficheck` (membro `f64 span()` por receptor de tipo
+  interface e por parâmetro). `expect-exit: 42` nas três.
+- **Probes (`ngen/_probe/`, apagado), base → tip:** o repro do §74(b) sem nada do ngen — o MESMO
+  binário responde 5 com o cast e 3 sem ele, isto é, o contrato do núcleo já valia e o que faltava
+  era a teko EMITIR o cast; delegate `f64`/`f32` (base `1.0 + d(2.0)` = 3.0, erro no 2º check → tip
+  42); virtual `f64` (base erra já no `p.area()` DIRETO, mais fundo que o delegate → tip 42);
+  interface `f64` (base erra no direto → tip 42); laço de 100 closures `f64` com `rt_live()==0`
+  (42 nos dois — o reclaim continua lendo o nó certo); `(i64)(f32 * 10.0f)` em arm64 (25 nos dois, a
+  conversão single que a 0.15.13 trouxe).
+- **Achado do plano §5 probe 4, MEDIDO: o estreitamento inteiro por despacho indireto JÁ estava
+  certo na BASE** nos sítios #2–#5 (`virtual i32`/`u8`, `override`, por `this`, por parâmetro,
+  `interface i32`: 42 na base e no tip). Quem estende é o CALLEE (extensão M45), então o cast que o
+  shaper unificado passa a pôr nesses quatro é cinto-e-suspensório, não conserto — o `sxtw`
+  idempotente que o §74(b) previa. Não era defeito vivo.
+- **Dívida ADJACENTE, medida e NÃO fechada (não é regressão, é a dívida de superfície do `params`):**
+  um float vindo de chamada indireta como argumento de uma lista `params`. Com V1 a recusa do V0
+  item 1 passa a alcançar as formas construídas no PARSE — `total(p.area())` agora para em
+  ``teko: a `params` list holds words; a float argument is not taught yet`` —, mas **não** a forma
+  delegate: o `tk_params_pass` roda ANTES do `tk_deleg_pass` (ordem em `teko.tk`), então
+  `total(d(2.0))` ainda é um `N_CALL` cru quando `tk_va_arg_ty` o examina e segue em silêncio (base
+  48, tip 32 — lixo dos dois lados, mesma classe). Fechar exige o tipo de ELEMENTO da `params`
+  (`params T[]`, decisão de superfície do §74(b)/§76) ou mover a checagem para depois do passe de
+  delegate; um palpite pela tabela `tk_slv_find` recusaria programa CORRETO (armadilha 27).
+- Gate (host macOS/aarch64, `mc` **0.15.13**): `rm -rf ngen/build`, build do zero; `--entry-only`
+  **45/45**; `--dump-ast` das 45 contra o compilador+árvore da base `a66b80c9`, com o MESMO mc dos
+  dois lados: **`same=42 diff=3`** — só as três fixtures tocadas, e o diff de cada uma é ADITIVO
+  fora da renumeração dos temporários `$gN` (nenhuma linha removida que não seja um `$gN`
+  deslocado); `mc limits ngen --config` `verdict ok`, `intrin 8/16`, `passes 15/30` — os mesmos da
+  base; `sh ngen/scripts/bootstrap.sh` → **`FIXPOINT OK`** (teko1.o == teko2.o == teko3.o,
+  `8482faa6…`, `--dump-asm` 191 811 linhas diff vazio, teko1 compila as 45); `ngen/mc.toml`,
+  `ngen/lib/rt.tk`, `ngen/scripts/` e `.github/` intocados; `git status` limpo.
+
 ## 5.1 Armadilhas já pagas (não repita)
 
 1. **`mc --exe` emite Mach-O SEMPRE.** `minicompiler/mc` `src/main.mc:227` faz
@@ -3273,6 +3341,17 @@ plano §78. Zero mudança em `ngen/*.tk`, `ngen/mc.toml` e `ngen/tests/`.
     `ngen/build/teko.exe` (alvo) — `exit 127`, com o binário ali. **A cura não é adivinhar sufixo:
     é RECUSAR alvo ≠ máquina**, porque a escada executa todo estágio que constrói e um ponto fixo
     que não roda não é ponto fixo. `bootstrap.sh` confere `--os`/`--arch` contra `mc --host`.
+
+33. **Um cast que DECLARA (não converte) só vale colado no nó que ele tipa — e o registro por
+    posição vale sobre o nó de FORA.** O contrato do núcleo para o retorno de uma chamada indireta
+    (`(f64) callp(...)`, mc 0.15.13) casa o cast com o filho **IMEDIATO**: qualquer nó inserido
+    entre os dois desfaz o casamento **em silêncio** — compila, roda, devolve o valor errado de novo
+    —, então o envelope acontece no sítio que CONSTRÓI a chamada (`tk_callp_ret`, V1) e nunca num
+    passe posterior. E como o `callp` deixa de ser o nó devolvido, todo registro por POSIÇÃO
+    (`tk_xt_put`/`tk_xt_add`, e o `node_assign`/`tk_node_replace` que copia o resultado para a
+    árvore) tem de cair sobre o nó que o shaper DEVOLVE: registrar no `callp` interno é a mesma
+    classe do bug K1b (contagem lida sob o nó órfão), invisível até um retorno CONTADO passar pelo
+    shaper. Em `tk_emit_call` é por isso que o `tk_xt_add` vem depois do envelope, não antes.
 
 
 ## 5.2 Canal com a sessão do mc
