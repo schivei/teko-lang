@@ -493,6 +493,12 @@ void tk_deleg_walk(i64 n) {
 uptr lamref_name[TK_MAXLAMREF];       // allocator names whose lambda owns >= 1 by-reference capture
 i64  tk_nlamref = 0;
 i64  tk_nlam = 0;                     // gensym counter, unique over the whole unit
+i64  tk_lam_body_depth = 0;           // > 0 while the token stream is reading a lambda's own body
+
+// teko_di.mc (included before this file) reads this to refuse an `inject`
+// lexically inside a lambda's own body that is itself lexically inside an
+// open `scope { }` (DI4).
+i64 tk_lam_in_body() { return tk_lam_body_depth > 0; }
 
 void tk_lamref_add(uptr name) {
     if (tk_nlamref == TK_MAXLAMREF) err_at(tk_file, tk_line, "teko: too many capturing lambdas");
@@ -857,6 +863,7 @@ i64 tk_lambda_finish(i64 si, uptr name, uptr saved, i64 params, i64 line, uptr f
     i64 ret = dg_ret_at(si);
     uptr envname = "__env";
     i64 allparams = list_append(param_new(TY_UPTR, envname), params);
+    tk_lam_body_depth = tk_lam_body_depth + 1;
     i64 f;
     if (p_id() == K_LBRACE) {
         f = parse_function(ret, name, allparams);
@@ -867,6 +874,7 @@ i64 tk_lambda_finish(i64 si, uptr name, uptr saved, i64 params, i64 line, uptr f
         else                body = tk_blk(tk_ret(e));
         f = tk_func(ret, name, allparams, body);
     }
+    tk_lam_body_depth = tk_lam_body_depth - 1;
     set_nd_a(nd_b(f), list_append(tk_lambda_prologue(envname), nd_a(nd_b(f))));
     tk_nscope = 0;
     tk_ty_scope_params(allparams);
