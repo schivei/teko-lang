@@ -2850,3 +2850,32 @@ Probe (fora de `ngen/tests/`, descartado): `box_value(Box b) { return b.get(); }
 `class Box { ... }`, os dois dentro de um `#include "parts/x.tk"` cru puxado por `main.tk` --
 compilador da base recusa com `type expected in parameter`; com o callback, compila e roda
 (exit 42). Sem PR, sem dreno -- branch `feat/ngen-onsource`, forward-only para `fix/retirement`.
+
+## 56. Errata I1b — propriedade herdada de interface (2026-09-06)
+
+A ressalva que o I1 (§50/§54) deixou aberta: `tk_iface_member_of` decidia "é propriedade?" por
+`tk_prop_find(si, m)` (`teko_prop.mc`), que só percorre `sr_base_at` (cadeia de CLASSE), nunca as
+arestas de herança de interface (`tk_iface_nbase`/`tk_iface_base_at`) que o I1 introduziu. Uma
+`interface I2 : I1` com `I1` declarando uma propriedade e `I2` não a redeclarando dava `unknown
+member of I2: X` num valor tipado `I2`, embora `I1 x = s; x.X` funcionasse.
+
+Fechado com `tk_ifprop_find_deep(si, m, pdecl)` (`teko_prop.mc`, ao lado de `tk_prop_find`),
+espelhando `tk_ifmeth_find_deep` -- própria primeiro, senão recursa nas bases de interface,
+devolvendo a DECLARANTE em `pdecl`. Três sítios trocados para receber a declarante em vez do tipo
+estático do receptor: `tk_iface_member_of`/`tk_iface_prop_use` (teko_expr.mc, parse), `tk_pend_
+iface`/`tk_pend_iface_prop` (teko_typeof.mc, pass, receptor só o oráculo tipa) e `tk_this_iface_
+prop` (teko_this.mc, `X` bare dentro de um corpo default que herda a propriedade de uma base).
+`tk_prop_find` em si não muda -- fazer uma CLASSE também percorrer `tk_iface_nbase` aceitaria a
+propriedade abstrata de uma interface implementada-mas-não-redeclarada, despachando para um
+acessor nunca compilado.
+
+`surface_iface_inherit.tk` cresceu: `I1.Value { get; set; }`, `I2.doubled()` (default lendo `Value`
+bare, só de `I1`), `Sq.Value` (auto-propriedade própria, satisfaz a conformidade), `bump_via_i2(I2
+v)` (parâmetro, sítio pass-deferred). `checks()` cobre os quatro sítios.
+
+Gate: `rm -rf ngen/build`, build do zero; `--entry-only` **42/42**; `--dump-ast` das **41 fixtures
+não tocadas byte-idêntico** ao compilador da base `0a0bd0f4` (`same=41 diff=0`); `mc limits`
+`verdict ok`, `intrin` 8/8, `passes`/`syntax` 14/14 (zero intrínseco/pass/palavra nova). Probe
+(fora de `ngen/tests/`, descartado): o mesmo programa contra o compilador PRÉ-fix reproduz
+`teko: unknown member of I2: Value` ao pé da letra; com o fix, roda. Sem PR, sem dreno -- branch
+`feat/ngen-onsource`, forward-only para `fix/retirement`.

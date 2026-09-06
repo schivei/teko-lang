@@ -387,20 +387,26 @@ void tk_this_iface_call(i64 n) {
     tk_xt_put(n, tk_struct_by_ty(im_ret_at(k)), im_ret_at(k), 0);
 }
 
+// `X` / `X = e` inside a default body: `X` may be `tk_pass_class`'s own
+// property or one it reaches only by extending another interface (item 2 of
+// this crumb, the same closure `tk_this_iface_call` above already walks for
+// a method) -- dispatch goes through whichever interface actually declares it.
 void tk_this_iface_prop(i64 n, i64 wantset) {
     uptr m = nd_name(n);
     if (tk_ty_scope_find(m) >= 0) return;
-    if (tk_prop_find(tk_pass_class, m) < 0) return;
+    uptr pdecl = xalloc(8);
+    if (!tk_ifprop_find_deep(tk_pass_class, m, pdecl)) return;
+    i64 di = ld64(pdecl);
     tk_this_at(n);
     i64 args = 0;
     if (wantset) args = nd_a(n);
-    i64 j = tk_ifprop_pick(tk_pass_class, m, wantset, tk_line, tk_file);
-    i64 r = tk_itab_emit(tk_this_recv(), tk_pass_class, j, args, m, tk_line, tk_file);
+    i64 j = tk_ifprop_pick(di, m, wantset, tk_line, tk_file);
+    i64 r = tk_itab_emit(tk_this_recv(), di, j, args, m, tk_line, tk_file);
     if (wantset) {
         tk_node_replace(n, tk_stmt(r));
         return;
     }
-    i64 rty = im_ret_at(sr_m0_at(tk_pass_class) + j);
+    i64 rty = im_ret_at(sr_m0_at(di) + j);
     tk_node_replace(n, r);
     tk_xt_put(n, tk_struct_by_ty(rty), rty, 0);
 }

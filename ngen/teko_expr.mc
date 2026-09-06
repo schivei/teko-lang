@@ -355,8 +355,10 @@ i64 tk_iface_call(i64 left, i64 si, uptr m, i64 line, uptr fl) {
     return r;
 }
 
-// `s.X` / `s.X = e` where `s` is of interface type: the accessor the interface
-// declared, reached through the same itab the methods are reached through
+// `s.X` / `s.X = e` where `s` is of interface type: `si` here is already the
+// interface that DECLARES `X` (§50 I1-adjacent: the caller resolved the
+// closure), so the accessor is reached through that same interface's own
+// itab entry
 i64 tk_iface_prop_use(i64 left, i64 si, uptr m, i64 line, uptr fl) {
     if (p_id() == K_LPAR) err_at2(fl, line, "teko: the member is a property; it is not called", m);
     i64 wantset = 0;
@@ -372,10 +374,15 @@ i64 tk_iface_prop_use(i64 left, i64 si, uptr m, i64 line, uptr fl) {
     return r;
 }
 
-// the member of a receiver of interface type: a property of it, or a method
+// the member of a receiver of interface type: a property of it, or a method.
+// `m` may live in `si` itself or in an interface it extends (item 2 of this
+// crumb, the ressalva §50 I1 left open for properties): `tk_ifprop_find_deep`
+// hands back the interface that actually declares it, the one dispatch has
+// to go through.
 i64 tk_iface_member_of(i64 left, i64 si, uptr m, i64 line, uptr fl) {
     tk_check_type_use(si, line, fl);             // an interface's members are public
-    if (tk_prop_find(si, m) >= 0) return tk_iface_prop_use(left, si, m, line, fl);
+    uptr pdecl = xalloc(8);
+    if (tk_ifprop_find_deep(si, m, pdecl)) return tk_iface_prop_use(left, ld64(pdecl), m, line, fl);
     return tk_iface_call(left, si, m, line, fl);
 }
 

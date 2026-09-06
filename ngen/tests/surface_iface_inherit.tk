@@ -11,6 +11,12 @@
 // (C# 11): `Sq.unit()` answers it directly, unaffected by which interface's
 // `:` list happened to name it.
 //
+// `I1.Value` is an inherited PROPERTY (item 2 of this crumb's own §55 -- the
+// ressalva `tk_ifmeth_find_deep` left open): `tk_ifprop_find_deep` walks the
+// same closure for a property, so `i2.Value`'s getter AND setter reach `I1`'s
+// itab entry through an `I2`-typed value, a PASS-deferred parameter
+// (`bump_via_i2`) and `I2`'s own default body (`doubled`) all resolve it.
+//
 // `IC : IA, IB`, both declaring `m()` at the same signature, is the diamond
 // C# accepts: `Box` implements `m` once, and the itab entries of `IA`, `IB`
 // AND `IC` (which declares nothing of its own) all point at the same symbol.
@@ -22,6 +28,8 @@
 interface I1 {
     i64 side();
 
+    i64 Value { get; set; }
+
     i64 area() {
         return this.side() * this.side();
     }
@@ -31,10 +39,15 @@ interface I1 {
 
 interface I2 : I1 {
     i64 tag();
+
+    i64 doubled() {
+        return Value * 2;
+    }
 }
 
 class Sq : I2 {
     public i64 w;
+    public i64 Value { get; set; }
 
     public i64 side() {
         return w;
@@ -47,6 +60,11 @@ class Sq : I2 {
     public static i64 unit() {
         return 5;
     }
+}
+
+i64 bump_via_i2(I2 v) {
+    v.Value = v.Value + 5;
+    return v.Value;
 }
 
 interface IA {
@@ -77,6 +95,13 @@ i64 checks() {
     I1 x = q;
     if (x.area() != 9) return 3;                 // the same default, through I1 directly
     if (Sq.unit() != 5) return 4;                // static abstract, inherited from I1
+
+    q.Value = 10;
+    if (i2.Value != 10) return 9;                // I1's inherited getter, through an I2-typed value
+    i2.Value = 20;
+    if (q.Value != 20) return 10;                // I1's inherited setter, through an I2-typed value
+    if (i2.doubled() != 40) return 11;           // I2's own default body reading I1's property
+    if (bump_via_i2(i2) != 25) return 12;        // a PASS-deferred I2 parameter, get and set
 
     Box bx = new Box;
     bx.v = 4;
