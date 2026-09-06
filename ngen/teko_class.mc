@@ -1073,6 +1073,13 @@ i64 tk_member(i64 ci, uptr name, i64 off, i64 ti) {
 // that ask for it: a base class has to be whole before a class derives from it
 void tk_close_open(i64 si);
 
+// §58 DI1 (`teko_di.mc`, included after this file): a service lifetime is a
+// NAME the `:` list reads before any lookup at all, and the scratch it leaves
+// is consumed the moment the row it names exists.
+i64 tk_di_marker(uptr nm);
+void tk_di_conf_mark(i64 life, i64 line, uptr fl);
+void tk_di_conf_apply(i64 ci);
+
 // `class Dog : Animal` above `class Animal` (§50 O3, decision 11): the base's
 // row has to be WHOLE -- fields, virtual slots, itab, constructor -- before
 // `tk_base_take` below can lay the derived object out, so its declaration is
@@ -1163,6 +1170,10 @@ i64 tk_conf_name(i64 base, i64 proj) {
     uptr nm = tk_ns_read_path(seg0mem);
     uptr disp = tk_ns_dotted(nm);                 // what a message shows: the dev's own `A.B` spelling
     i64 bare = str_eq(nm, ld64(seg0mem));
+    if (bare) {
+        i64 life = tk_di_marker(nm);
+        if (life >= 0) { tk_di_conf_mark(life, line, fl); return base; }
+    }
     i64 si = 0 - 1;
     if (bare) si = tk_struct_find(nm);
     else si = tk_struct_find_exact(nm);
@@ -1202,6 +1213,7 @@ i64 tk_conf_name(i64 base, i64 proj) {
 i64 tk_class_conf(i64 proj) {
     i64 base = 0 - 1;
     tk_nconf = 0;
+    tk_conf_life = 0 - 1;
     loop {
         base = tk_conf_name(base, proj);
         if (!p_accept(K_COMMA)) break;
@@ -1409,6 +1421,7 @@ void tk_conf_apply(i64 ci) {
         tk_iface_conf_close(ci, conf_if_at(c));
         c = c + 1;
     }
+    tk_di_conf_apply(ci);
 }
 
 // `: Base, Iface` on a part that is not the first. The interfaces are a UNION
@@ -1518,6 +1531,7 @@ void tk_class() {
     }
     i64 base = 0 - 1;
     tk_nconf = 0;
+    tk_conf_life = 0 - 1;
     if (p_accept(K_COLON)) base = tk_class_conf(proj);
     tk_line = head_line;                         // closing a partial base moved it
     tk_file = head_file;
