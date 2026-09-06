@@ -2776,3 +2776,11 @@ Gate: `rm -rf ngen/build`, build do zero; `--entry-only` **41/41** (as 40 anteri
 `--dump-ast` das **40 anteriores byte-idêntico** ao compilador da base `7113acbd` (`same=40 diff=0`);
 `mc limits` `verdict ok`, `intrin`/`passes`/`syntax` idênticos nos dois lados (zero intrínseco, zero
 pass, zero palavra nova).
+
+**O3b (reprovação corrigida, 2026-09-06):** `kwstart` (item 1) parava na palavra `class`/`struct`/
+`interface`, deixando `public`/`internal`/`abstract`/`partial` fora do span materializado -- uma
+base `abstract` abaixo do uso nascia concreta. `tk_fwd_scan` agora recua `kwstart` sobre a sequência
+de modificadores contígua antes da palavra; `tk_class`/`tk_interface` validam `vis`/`abst` contra a
+linha materializada ao pular a declaração real (`tk_fwd_check_materialized`, backstop defensivo).
+Gate: `--entry-only` **41/41**; `--dump-ast` das 40 fixtures não tocadas `same=40 diff=0` contra
+`d23b17ec`; `mc limits` `verdict ok`.
