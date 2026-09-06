@@ -2372,6 +2372,60 @@ linha nova `source_claim 1/8` e `intrin 8/8` (zero intrínseco novo); nenhuma fi
 (`ngen/tests/` intocado); `ngen/scripts/bootstrap.sh` chega ao **stage 1** e para no bloqueio acima,
 com a mensagem do compilador impressa. Detalhe completo em `docs/design/plano-ngen-entrega4.md` §70.
 
+**HIGIENE 3 LANDADO** (plano §71, 2026-09-06, base `0fd12888`, dois commits): as DUAS dívidas que o
+verificador da higiene 2 registrou acima, as duas fechadas.
+
+- **Item A -- `ref`/`out` de ESCALAR passa a ser checado (fechado, `4052205f`).**
+  `tk_ref_check_pointee` (teko_ref.tk) saía cedo para todo apontado que não fosse classe/struct;
+  agora a IDENTIDADE do apontado decide para TODO tipo (`ref i64` recusa um `ref u8`, com
+  `teko: a value of type u8 does not convert to i64`), e o deriva/implementa segue recusado
+  (`ref` não é covariante, C#). A peça nova é `tk_ref_arg_pointee`: a tag de parse
+  (`tk_rfarg_pointee` -> `tk_slv_find`) é unit-wide e **nunca vê um PARÂMETRO**, então o repass
+  `lvl_c(ref x)` dentro de `lvl_b(ref i64 x)` responderia com o `Box x` de `outcheck` e recusaria
+  uma fixture correta -- com classe-contra-classe isso nunca aparecia porque o `pty` escalar saía
+  antes do lookup. A pass pergunta à DECLARAÇÃO que percorre (`tk_ref_cur_fn`): parâmetros
+  primeiro, depois o `N_VAR` do corpo; um global, ou um nome que dois blocos irmãos declaram sob
+  tipos diferentes, responde -1 e é silêncio (a regra do `tk_check_field_store`). Limite:
+  `type_alias` é identidade pura, então `bool`/`byte`/`u8` (e `char`/`u32`, e `str`/`ptr`/`uptr`)
+  são o mesmo apontado aqui. Fixture: `surface_refout.tk` ganha `scopecheck`; mismatch é probe.
+- **Item B -- as capturas de uma lambda não custam mais um parâmetro cada (fechado, `6ef10a24`).**
+  O alocador do closure recebia UM parâmetro por captura, então o `MAXPARAMS=12` do ABI do mc ficava
+  na frente do `TK_MAXLAMCAP`: treze capturas morriam em `io:N: at most 12 parameters` (mensagem do
+  núcleo, arquivo errado). Agora **o alocador recebe o OBJETO** (`uptr p`) e nada mais, e o bloco é
+  alocado no SÍTIO DE CRIAÇÃO já com as capturas escritas -- `tk_lambda_capture_chain` encadeia um
+  `tk_cap_put`/`tk_cap_own` (duas funções novas em `lib/rt.tk`) por captura sobre `rt_alloc(objsize)`,
+  cada elo devolvendo o bloco, a mesma forma da lista de `params` e pela mesma razão (um store é
+  instrução; o closure tem de ser UMA expressão). `tk_cap_own` faz o `rc_inc` que o alocador fazia.
+  **Nada mais mudou**: layout `{vt, rc@+8, code@+16, captures@+24…}`, prólogo, release -- e o nó mais
+  EXTERNO do inicializador continua sendo a chamada ao alocador (a cadeia é o argumento dela), então
+  `tk_lam_escapes`/coerção de delegate/`tk_xt_add` leem o que sempre leram. Slot de captura é uma
+  PALAVRA (grava `st64`, o prólogo lê com `tk_ldn`); `f64` atravessa bit a bit (medido). Teto real
+  agora é só `TK_MAXLAMCAP`: **32 capturas somadas sobre as lambdas em voo**, 33 recusada pela
+  mensagem da teko com arquivo/linha certos (14/20/31/32 compilam e rodam). Fixture:
+  `surface_lambda.tk` ganha `manycap_check`, quinze capturas.
+
+Gate (host macOS/aarch64, `mc` 0.15.8): `rm -rf ngen/build`, build do zero; `--entry-only` **45/45**
+(nenhuma fixture nova, duas tocadas); `mc limits ngen --config` `verdict ok`, `intrin 8/8`;
+`ngen/mc.toml` intocado. `--dump-ast` das 45 contra o compilador da base `0fd12888`: **3
+byte-idênticas** (as que não incluem `lib/rt.tk`), **40 com o MESMO diff** (hash igual, 29 linhas =
+as duas declarações novas de `lib/rt.tk`, nada mais), **2 com diff próprio** (as tocadas). Isto
+desvia do "43 byte-idênticas" que o crumb pediu, e o motivo é estrutural: um helper novo em
+`lib/rt.tk` aparece na árvore de TODA unidade que a inclui. A alternativa era emitir a cadeia com o
+`tk_va_put` do `params` (zero diff, mas acopla closure a variádico por um nome que mente) --
+preferiu-se a superfície própria com a prova mecânica de que os 40 diffs são o mesmo byte a byte.
+
+**Dívida ADJACENTE achada (fora do escopo deste crumb, para o integrador): `ref T`/`out T` de um
+escalar mais ESTREITO que uma palavra é quebrado em runtime desde o K2.** Um parâmetro `ref T` é
+declarado com o tipo do APONTADO (desenho do K2, é o que dá oráculo e overload de graça) mas carrega
+um ENDEREÇO, e o mc trunca um ponteiro passado a um parâmetro de largura 1/2/4: `void bumpb(ref u8 x)`
+com um `u8` segfalta (139) -- e o mesmo em dialeto mc puro (`void poke(u8 x) { st8(x, 5); }` com `&b`)
+segfalta igual, então não é lowering da teko, é o tipo declarado do parâmetro. Largura 8
+(`ref i64`/`ref uptr`/`ref` de classe) não é afetada, e é o que todas as fixtures usam. Corrigir =
+o parâmetro nascer com largura de ponteiro e todo consumidor de `nd_type(p)` (mangling `tk_ty_sfx`,
+`tk_arr_load`/`tk_arr_store`, `tk_is_counted`, `tk_rc_assign`, `tk_ty_scope_params`) ler o apontado
+de `tk_rp_pointee` -- redesenho do K2, não higiene. A checagem do item A não mascara isso (recusa a
+MISTURA de larguras, não o uso correto de um `ref u8`).
+
 ## 5.1 Armadilhas já pagas (não repita)
 
 1. **`mc --exe` emite Mach-O SEMPRE.** `minicompiler/mc` `src/main.mc:227` faz
@@ -2583,6 +2637,25 @@ com a mensagem do compilador impressa. Detalhe completo em `docs/design/plano-ng
     `TK_MAXARR`, `TK_MAXODECL`) -- cada um com mensagem própria e clara, nenhum com corrupção
     silenciosa. Ao subir, subir contra uma CONTAGEM medida na árvore (grep das declarações), não a
     olho: é o que separa `4096` de um número mágico.
+27. **Uma tabela "o mais recente vence" da unidade inteira não responde por um PARÂMETRO -- e a
+    resposta errada dela só aparece quando a checagem passa a valer para tipos COMUNS.**
+    `tk_slv_find` (teko_struct.tk) guarda todo local da unidade e devolve a declaração mais
+    recente do nome; parâmetro nenhum entra ali. Enquanto a checagem de apontado do `ref`/`out`
+    só valia para classe/struct (higiene 2), o `pty` escalar saía antes do lookup e o furo ficava
+    invisível; ao estender para escalar (higiene 3), `lvl_c(ref x)` dentro de `lvl_b(ref i64 x)`
+    passou a "ver" o `Box x` que outra função declarara antes -- recusando uma fixture CORRETA.
+    Regra: numa PASS, o tipo de um nome se pergunta à DECLARAÇÃO que se está percorrendo (a lista
+    de parâmetros, depois o `N_VAR` do corpo), não a uma tabela global de parse; e o que ela não
+    souber responde -1 (silêncio), nunca um palpite.
+28. **Gerar uma função com um parâmetro por ITEM de uma lista variável põe o `MAXPARAMS` do ABI
+    (12) na frente do teto que o módulo acha que manda.** O alocador de closure do K4 recebia uma
+    captura por parâmetro, então `TK_MAXLAMCAP` (32) era decorativo: treze capturas morriam na
+    mensagem do NÚCLEO (`io:N: at most 12 parameters`), com nome de arquivo que o programa nunca
+    escreveu -- um teto invisível, com diagnóstico que aponta para o lugar errado. A saída não é
+    subir nada: é o dado sair do ABI e ir para a MEMÓRIA (o objeto), escrito no sítio de criação
+    por uma cadeia de chamadas que devolve o bloco (`tk_cap_put`, o mesmo desenho do `tk_va_put`
+    de `params`, porque um store é instrução e a construção tem de ser uma expressão só). Vale
+    para qualquer construto futuro com N partes: N nunca vira N parâmetros.
 
 
 ## 5.2 Canal com a sessão do mc
