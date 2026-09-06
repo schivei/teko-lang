@@ -4482,7 +4482,12 @@ intocado, e é ele que mantém o `.o` em disco para o `cmp`.
 | `teko1.o` = `teko2.o` | 2 062 312 B | 1 714 920 B |
 | `sha256(teko2.o)` | `33e7df95…` | `689dc9a6…` |
 
-`teko1.o == teko2.o` nos dois: o compilador já está no ponto fixo na PRIMEIRA volta, o mesmo que
+`teko1.o == teko2.o` nos dois runs do CI -- **mas NÃO é estável (verificador, 2026-09-06):** em duas
+escadas locais iguais (mesmo commit, máquina e mc 0.15.10, `ngen/build` limpo) a 1ª deu `teko1.o` =
+`90485ed5…` ≠ `teko2.o` = `teko3.o` = `689dc9a6…`, a 2ª deu os três iguais. O ponto fixo
+(`teko2.o == teko3.o`, hash final `689dc9a6…`) fechou em 100% das corridas; o que oscila é a SAÍDA DO
+teko0 (mc estoque + módulos teko compilando `mc_teko.tk`) -- não-determinismo a caçar (higiene 4,
+item B) ANTES de qualquer golden pinado. Quando é igual, o compilador está no ponto fixo na primeira volta, o mesmo que
 o §70 mediu no host. O objeto de macos/aarch64 do CI é **byte-idêntico ao construído localmente**
 (mesmo `689dc9a6…`), o que é a primeira evidência de reprodutibilidade entre máquinas — e os dois
 runs consecutivos da branch (`34043945146` e `34044112521`, o segundo só com mudança de doc)

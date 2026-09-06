@@ -2545,6 +2545,10 @@ Descrição no §3.1 acima; detalhe e medições no plano §73.
   `teko1.o == teko2.o` = 1 714 920 B, `sha256` `689dc9a6…` — **byte-idêntico ao objeto do host
   local**, primeira evidência de reprodutibilidade entre máquinas; e dois runs consecutivos da
   branch deram o MESMO `sha256` nos dois pares (evidência entre runs).
+- **`teko1.o` NÃO é determinístico entre corridas (verificador do S4.3):** mesma máquina/commit, duas
+  escadas: numa `teko1.o` (`90485ed5…`) ≠ `teko2.o`; noutra os três iguais. `teko2.o == teko3.o` e o hash
+  final (`689dc9a6…`) fecharam sempre. Causa a caçar do lado do teko0 (leitura de memória não inicializada
+  em tabela/pass? ordem dependente de endereço?) -- dívida da higiene 4, pré-requisito do golden.
 - **Não é gate (ainda):** o `sha256` é impresso no `summary`, não comparado; vira golden
   versionado quando estabilizar (molde do `tests/golden/mc2.sha256` do mc). O agregador
   `mc build ngen && run` segue dependendo só da matriz `leg`.
