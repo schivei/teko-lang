@@ -35,20 +35,19 @@ Contexto: `docs/design/port-teko-mc.md`, entradas D211–D214 e D225–D230 de `
 cat MC_VERSION        # => x.y.z
 mc --version          # => precisa dizer x.y.z
 
-# 2. Derive o config da perna
-awk '/\[linker\]/,/^$/ { next } { print }' mc.toml >teko.toml
-sed -i '' \
-  -e 's/^os   =.*/os   = "linux"/' \
-  -e 's/^arch =.*/arch = "x86_64"/' \
-  teko.toml
+# 2. Derive o config da perna (a partir de teko.toml)
+sed -e "s#^os   =.*#os   = \"linux\"#" -e "s#^arch =.*#arch = \"x86_64\"#" \
+    teko.toml >mc.host.toml
 
 # 3. Build e run dos testes
-mc build . --config teko.toml   # => constrói o compilador ensinado
+mc build . --config mc.host.toml   # => constrói o compilador ensinado
 for t in tests/*.tk; do
   n=$(basename "$t" .tk)
   w=$(grep -m1 '// expect-exit:' "$t" | sed 's/.*expect-exit: *//')
-  ./build/teko build . --config teko.toml --entry-only --project-entry "tests/$n.tk" --project-out "build/$n"
-  ./build/$n; echo "$n exit=$?  want=$w"
+  sed -e "s#^entry = .*#entry = \"tests/$n.tk\"#" -e "s#^out   = .*#out   = \"build/$n\"#" \
+      mc.host.toml >"mc.$n.toml"
+  ./build/teko build . --config "mc.$n.toml" --entry-only && ./build/$n
+  echo "$n exit=$?  want=$w"; rm -f "mc.$n.toml"
 done
 
 # 4. Fixpoint (teko0→teko1→teko2→teko3)
