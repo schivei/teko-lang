@@ -25,9 +25,11 @@ estado `disabled_manually` não viaja entre repositórios.
 
 Hoje nenhum ruleset ativo da org exige status check. Os contexts que os workflows vivos produzem:
 `ngen (linux/x86_64)`, `ngen (linux/aarch64)`, `ngen (macos/aarch64)`, `ngen (windows/x86_64)`,
-`ngen (windows/aarch64)`, `fixpoint (linux/x86_64)`, `fixpoint (macos/aarch64)`, o agregador
-**`mc build ngen && run`** (o que o ruleset deve exigir), `Branch policy gate` e `Analyze (actions)`
-(o CodeQL perdeu a perna `c-cpp` no R1: compilava o `src/runtime/teko_rt.c` congelado).
+`ngen (windows/aarch64)`, `fixpoint (linux/x86_64)`, `fixpoint (linux/aarch64)`,
+`fixpoint (macos/aarch64)`, `fixpoint (windows/x86_64)`, `fixpoint (windows/aarch64)` (o S4.3b levou
+a escada aos cinco pares — plano §78), o agregador **`mc build ngen && run`** (o que o ruleset deve
+exigir), `Branch policy gate` e `Analyze (actions)` (o CodeQL perdeu a perna `c-cpp` no R1:
+compilava o `src/runtime/teko_rt.c` congelado).
 
 ## 3. Workflows: org × fork
 
@@ -68,9 +70,9 @@ vira um conjunto de módulos-hook do mc (minicompiler/mc), 31 módulos `.tk` +
 CI novo (`ngen.yml`): cinco pernas NATIVAS (linux/x86_64, linux/aarch64,
 macos/aarch64, windows/x86_64, windows/aarch64), cada uma no runner do próprio
 par, `mc --host` asserido, 45 fixtures executadas (`// expect-exit`);
-agregador `mc build ngen && run`. Sexta perna `fixpoint` (linux/x86_64,
-macos/aarch64): teko0→teko1→teko2→teko3 sobre `ngen/mc_teko.tk`, `cmp` dos
-objetos, diff de `--dump-asm`, 45 fixtures pelo teko1.
+agregador `mc build ngen && run`. Sexta perna `fixpoint`, nos MESMOS cinco pares:
+teko0→teko1→teko2→teko3 sobre `ngen/mc_teko.tk`, `cmp` dos objetos, diff de
+`--dump-asm`, 45 fixtures pelo teko1.
 
 O CI legado do compilador antigo sai do repo; `src/` não se toca.
 Squash de 2975 commits de `fix/retirement`; a história permanece nessa branch.
@@ -97,7 +99,7 @@ nem pelo trabalho seguinte. Fica no repositório como registro.
 |---|---|
 | `ngen (<os>/<arch>)` ×5 | cada perna no runner do próprio SO e arquitetura, `mc --host` asserido, 45 fixtures executadas — nada cross-compilado e deixado sem rodar |
 | `mc build ngen && run` | agregador das cinco pernas; o nome que o ruleset deve exigir |
-| `fixpoint (linux/x86_64)`, `fixpoint (macos/aarch64)` | teko0→teko1→teko2→teko3 sobre `ngen/mc_teko.tk`: `cmp` dos objetos, `--dump-asm` idêntico, 45 fixtures |
+| `fixpoint (<os>/<arch>)` ×5 | os MESMOS cinco pares: teko0→teko1→teko2→teko3 sobre `ngen/mc_teko.tk`, `cmp` dos objetos, `--dump-asm` idêntico, 45 fixtures — o compilador se reproduz na máquina onde foi escrito |
 | `Branch policy gate`, `Analyze (actions)` | inalterados (CodeQL sem a perna `c-cpp`) |
 
 ## Releases
@@ -108,7 +110,7 @@ registro do mc gated por variável até o pacote `teko` estar registrado.
 
 ## O que a org precisa mudar
 
-- Ruleset `main` (17770407): exigir `mc build ngen && run` (opcional: as duas
+- Ruleset `main` (17770407): exigir `mc build ngen && run` (opcional: as cinco
   pernas `fixpoint`).
 - Ruleset `Merge gate` (18592101): apagar ou reescrever (contexts fantasma).
 - Ruleset `coverage` (18593042): apagar.

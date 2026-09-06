@@ -136,15 +136,19 @@ antes o sysroot que o link precisa, tudo com o próprio `mc` + LLVM da imagem:
 `minicompiler/mc` `scripts/sysroot-windows.sh`). A linha de link é a do próprio `mc`
 (`src/mc.windows-*.toml`): `-entry:mc_start -nodefaultlib -stack:8388608`.
 
-### A SEXTA perna: `fixpoint` (S4.3, 2026-09-06)
+### A SEXTA perna: `fixpoint` — as MESMAS CINCO pernas (S4.3 + S4.3b, 2026-09-06)
 
-Job **`fixpoint`**, fora da matriz `leg`, em **dois** runners — `fixpoint (linux/x86_64)`
-e `fixpoint (macos/aarch64)`. Roda `sh ngen/scripts/bootstrap.sh --os <os> --arch <arch>`:
-teko0 (`mc build ngen --compiler-only`, mc de prateleira) → teko1 → teko2 → teko3 sobre
-`ngen/mc_teko.tk`, com os TRÊS critérios do plano §64(f) — `cmp` dos objetos
-`teko2.o`/`teko3.o`, `--dump-asm` de teko2 vs teko3 com diff vazio, e teko1 compilando e
-rodando as 45 fixtures. As pernas provam "a fixture sai 42"; esta prova "o compilador se
-reproduz". O script imprime o tempo de CADA estágio e o tamanho de cada objeto/binário.
+Job **`fixpoint`**, fora da matriz `leg`, nos **cinco** pares que as pernas nativas cobrem —
+`fixpoint (linux/x86_64)`, `fixpoint (linux/aarch64)`, `fixpoint (macos/aarch64)`,
+`fixpoint (windows/x86_64)` e `fixpoint (windows/aarch64)`. Roda
+`sh ngen/scripts/bootstrap.sh --os <os> --arch <arch>`: teko0 (`mc build ngen
+--compiler-only`, mc de prateleira) → teko1 → teko2 → teko3 sobre `ngen/mc_teko.tk`, com os
+TRÊS critérios do plano §64(f) — `cmp` dos objetos `teko2.o`/`teko3.o`, `--dump-asm` de teko2
+vs teko3 com diff vazio, e teko1 compilando e rodando as 45 fixtures. As pernas provam "a
+fixture sai 42"; esta prova "o compilador se reproduz". O script imprime o tempo de CADA
+estágio e o tamanho de cada objeto/binário. **Cinco e não três porque o que a escada prova é
+propriedade DE UMA MÁQUINA** — provar em três e afirmar em cinco seria exatamente a afirmação
+cross-compilada que este workflow existe para recusar.
 
 **O que o job reporta e NÃO barra:** o passo de `summary` publica tamanho e **`sha256` de
 `teko0`/`teko1.o`/`teko2.o`/`teko3.o`** (o `teko0` entrou na higiene 4: é o único estágio que o
@@ -160,10 +164,30 @@ ponto fixo; se o `teko2.o` é byte-idêntico ENTRE runs e ENTRE máquinas é out
 o nome é o que o ruleset exige e o significado dele fica sendo o que diz. Promover a escada
 a check obrigatório é decisão de ruleset, fora deste workflow.
 
-**Windows fica FORA desta fatia (dívida registrada).** A escada precisa do `<out>.o` em
-disco, o que exige `[linker]`; no Windows isso é o `lld-link` + o sysroot de três arquivos
-que a perna monta para si. Trazer a escada para lá é montar o sysroot também no job de
-fixpoint — trabalho real, não configuração.
+**Como o Windows entra (S4.3b).** A escada precisa do `<out>.o` em disco, o que exige
+`[linker]` — e no Windows não há `cc` nem C runtime: o link é `lld-link` contra o sysroot de
+três arquivos (`winstart.obj`, `mcrt.obj`, `kernel32.lib`). Duas peças, nenhuma duplicada:
+
+- **`.github/actions/windows-sysroot`** (action composta) monta o sysroot e é usada pelos DOIS
+  jobs Windows (a perna e o fixpoint), que antes teriam a mesma montagem escrita duas vezes.
+  Ela também põe o LLVM no `$PATH` em forma WINDOWS (o `mc` chama o linker por
+  `CreateProcessA`, que lê o PATH do Win32) e aponta o `TMPDIR` para o temp do runner (o `mc`
+  nativo não abre os caminhos `/tmp/...` do MSYS).
+- **`bootstrap.sh --linker-toml FILE`** troca o `[linker] cc` do `ngen/mc.toml` pelos blocos
+  `[sysroot]`/`[linker]` do arquivo (a matriz do job escreve a MESMA linha que a perna usa).
+  O `awk` que remove o bloco velho é o mesmo do config das pernas.
+
+No Windows todo estágio se chama `<nome>.exe` (o `mc` já anexa o sufixo ao `[compiler].out`
+sozinho; o `[project].out` é o script que nomeia), e como o `mc` deriva o objeto do `out` por
+`+ ".o"`, o critério compara `teko2.exe.o` com `teko3.exe.o` — COFF, mesmo `cmp`. O `--dump-asm`
+não muda. O `mc` vai para o `$GITHUB_PATH` em forma Windows (`cygpath -w`) pelo mesmo motivo do
+LLVM.
+
+**`--os`/`--arch` agora são CONFERIDOS contra `mc --host`.** O compilador ensinado do estágio 0
+é escrito pelo backend de executável do **HOST** de qualquer jeito, e a escada **executa** todo
+estágio que constrói — então um alvo que não é esta máquina nunca foi ponto fixo, é um
+cross-build sem nada para rodar. Recusa imediata, com a causa, em vez de `exit 127` três
+estágios depois (foi assim que o sufixo `.exe` se revelou o do HOST, não o do `[target]`).
 
 **`[target]` de linux, achado do CI:** o compilador ensinado é escrito pelo backend de
 executável do **HOST**, e o writer ELF do mc põe interpretador/soname **musl** por padrão;
@@ -172,7 +196,7 @@ num runner glibc o `ngen/build/teko` existe e mesmo assim não executa (`not fou
 `[target]` derivado **quando o alvo é linux e aquele loader existe na máquina**; máquina
 musl não anexa nada. (As pernas não sofriam: elas já traziam `interp`/`libc` na matriz.)
 
-O passo que baixa e verifica o `mc` é o MESMO nas seis: `.github/actions/setup-mc` (action
+O passo que baixa e verifica o `mc` é o MESMO nas dez: `.github/actions/setup-mc` (action
 composta) resolve a versão **PINADA por `ngen/MC_VERSION`** (§3.2) — `latest` só se o
 chamador pedir explicitamente por `inputs.version` —, baixa o asset do par, confere o
 `.sha256` e assere `mc --host` — nenhum job pode testar um compilador diferente do outro.
@@ -2883,6 +2907,53 @@ ARGUMENTO de uma chamada por vtable morre em `expression with no codegen` — o 
 walk da instância porque a chamada já foi rebaixada a `callp` no parse. Reproduzido na BASE e no tip
 (não é regressão), registrado aqui.
 
+**S4.3b LANDADO — o `fixpoint` cobre as CINCO pernas** (plano §78, 2026-09-06, base `756fd924`,
+branch `feat/ngen-s43b-fixpoint-all`, três commits): a escada deixa de rodar em dois pares e passa
+a rodar nos **mesmos cinco** que as pernas nativas cobrem. Descrição no §3.1 acima; medições no
+plano §78. Zero mudança em `ngen/*.tk`, `ngen/mc.toml` e `ngen/tests/`.
+
+- **linux/aarch64** (`ubuntu-24.04-arm`) era só custo de runner: o par já tinha perna e o
+  `write_target_tail` já conhecia o loader dele (`/lib/ld-linux-aarch64.so.1`). Terceira entrada
+  da matriz, nada mais.
+- **Windows** (as duas arquiteturas) exigiu as duas peças que a dívida previa.
+  **`.github/actions/windows-sysroot`** (nova) é a montagem do sysroot fatorada para fora da perna
+  — os dois jobs Windows a usam, então não há como montarem sysroots diferentes; ela também põe o
+  LLVM no `$PATH` em forma Windows e aponta o `TMPDIR` para o temp do runner. E
+  **`bootstrap.sh --linker-toml FILE`** troca o `[linker] cc` do `ngen/mc.toml` pelos blocos
+  `[sysroot]`/`[linker]` do arquivo (a matriz escreve a MESMA linha `lld-link` da perna). POSIX
+  `sh`, sem `set -e`, status por passo, como o resto do arquivo.
+- **Nomes com `.exe` e o objeto que o critério compara.** O `mc` anexa o sufixo do host ao
+  `[compiler].out` sozinho; o `[project].out` é o script que nomeia, e o objeto sai de `out + ".o"`
+  — logo no Windows o `cmp` é entre `teko2.exe.o` e `teko3.exe.o` (COFF). O laço das 45 fixtures
+  roda `.exe`. **Nada foi preciso do lado do `mc`:** `--dump-asm` de COFF, `--entry-only`,
+  `--compiler-only` e o link por `[linker]` funcionaram como nos outros pares, na 0.15.12 pinada.
+- **`--os`/`--arch` agora são conferidos contra `mc --host`** (armadilha nova, §5.1 item 32): a
+  escada executa todo estágio que constrói, então alvo ≠ máquina é cross-build sem nada para rodar.
+- **Medido no CI** (run `34052547541`, mc 0.15.12, **11/11 verde** — 5 pernas + 5 fixpoint +
+  agregador), estágios teko0 / 0→1 / 1→2 / 2→3 e `sha256(teko2.o)`:
+
+  | par | teko0 | 0→1 | 1→2 | 2→3 | total | `--dump-asm` | `sha256(teko2.o)` |
+  |---|---:|---:|---:|---:|---:|---:|---|
+  | linux/x86_64 | 1,494 s | 3,183 s | 3,157 s | 3,163 s | 20,682 s | 192 502 linhas | `d37e4cb3…` |
+  | linux/aarch64 | 2,578 s | 7,457 s | 7,189 s | 7,519 s | 41,938 s | 191 667 linhas | `6e80a42e…` |
+  | macos/aarch64 | 2,805 s | 5,792 s | 4,166 s | 4,199 s | 33,751 s | 191 586 linhas | `034843cd…` |
+  | windows/x86_64 | 2,360 s | 4,842 s | 4,835 s | 4,857 s | 41,930 s | 191 564 linhas | `a45444fd…` |
+  | windows/aarch64 | 3,062 s | 7,491 s | 7,409 s | 7,405 s | 71,524 s | 191 564 linhas | `30aed5f0…` |
+
+  45/45 fixtures e `teko1.o == teko2.o == teko3.o` nos CINCO. O objeto de macos/aarch64
+  (`034843cd…`) é **byte-idêntico ao do host local**, a mesma evidência entre-máquinas que o §73
+  registrou.
+- **Dívida que FICA:** o `sha256` segue **reportado, não barrado** (golden versionado só quando
+  estabilizar, molde do `tests/golden/mc2.sha256` do mc) e o **agregador não mudou** — `mc build
+  ngen && run` continua dependendo só da matriz `leg`; promover a escada a check obrigatório é
+  decisão de ruleset. Os cinco nomes novos de context estão listados em
+  `docs/design/pr-org-ngen.md` §2/§5.
+- Gate local (host macOS/aarch64, `mc` 0.15.12): `rm -rf ngen/build`;
+  `sh ngen/scripts/bootstrap.sh` → **`FIXPOINT OK`**, 45/45, `034843cd…` nos três objetos,
+  `--dump-asm` 191 586 linhas diff vazio; e o MESMO run por `--linker-toml` com um bloco `cc`
+  equivalente reproduz os três hashes byte a byte (é a prova de que a substituição do `[linker]`
+  deriva um config equivalente); `ngen/*.tk`, `ngen/mc.toml` e `ngen/tests/` intocados.
+
 ## 5.1 Armadilhas já pagas (não repita)
 
 1. **`mc --exe` emite Mach-O SEMPRE.** `minicompiler/mc` `src/main.mc:227` faz
@@ -3149,6 +3220,16 @@ walk da instância porque a chamada já foi rebaixada a `callp` no parse. Reprod
     expressão maior (`1.0 + f(2.0)`), que muda a profundidade e portanto o registrador de destino.
     Regra: para float, decida por `type_kind(ty) == TK_FLOAT` antes da largura, e DECLARE `f32`/
     `f64` em todo parâmetro por onde o valor passa.
+
+32. **O sufixo `.exe` do compilador ENSINADO é o do HOST, não o do `[target]`.** `drv_teach`
+    (`minicompiler/mc` src/driver.mc) monta o nome do binário com `host_exe_suffix()`, porque o
+    compilador ensinado tem de RODAR na máquina que o escreveu; já o `[project].out` das etapas
+    seguintes é literal — o `mc` não anexa nada e o objeto sai de `out + ".o"`. Consequência: quem
+    nomeia os estágios da escada tem de usar o sufixo do HOST nos dois lugares, e um
+    `--os windows` numa máquina macOS produz `ngen/build/teko` (host) enquanto o script procura
+    `ngen/build/teko.exe` (alvo) — `exit 127`, com o binário ali. **A cura não é adivinhar sufixo:
+    é RECUSAR alvo ≠ máquina**, porque a escada executa todo estágio que constrói e um ponto fixo
+    que não roda não é ponto fixo. `bootstrap.sh` confere `--os`/`--arch` contra `mc --host`.
 
 
 ## 5.2 Canal com a sessão do mc
