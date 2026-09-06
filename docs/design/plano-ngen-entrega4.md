@@ -2688,3 +2688,38 @@ positivo do varredor) não disparou em nenhuma das 40 fixtures nem nos quatro pr
 próprio probe pensado para `tk_fwd_pass` (decisão 14) não encontrou um programa Teko-sobre-mc
 sintaticamente válido que dispare SÓ esse backstop sem abortar antes por outro erro, o que é o
 sinal esperado de um desenho correto, registrado em HANDOFF.md em vez de forçado.
+
+## 52. Errata — O2 landed (2026-09-06)
+
+O crumb O2 (§50 (b2)/(c)) landou como desenhado — `.`/`new`/`Tipo.membro` estático sobre uma linha
+`TK_PFWD` deferem para `tk_fwd_pass` — e fechou duas das três ressalvas do verificador do O1, com um
+achado que o (b2) não previa:
+
+1. **Ressalva 3 (a mais séria) fechou por guarda no CALL SITE, não por filtrar `tk_struct_find`
+   globalmente.** A primeira ideia — fazer `tk_struct_find` ignorar `TK_PFWD` para todo chamador —
+   quebraria os sítios de COLISÃO (`teko_generic.mc`/`teko_trait.mc` checando "o nome já é um tipo"
+   antes de registrar um genérico/trait): esses PRECISAM enxergar a linha PFWD, porque o nome já
+   está reservado. A correção ficou nos DOIS sítios que precisam do corpo e nada mais —
+   `tk_deleg_find` (teko_deleg.mc) e `tk_conf_name` (teko_class.mc) — cada um tratando
+   `sr_part_at(si) == TK_PFWD` como "não encontrado" localmente.
+2. **Ressalva 2 (`A.Item` qualificado acima da declaração) escondia um segundo problema, fora do
+   (b2): o SEGMENTO (`A`/`geo`) só vira palavra reservada (`tk_ns_seg_register`) quando a
+   declaração REAL de `namespace A { ... }` é lida — nunca pela varredura.** Sem isso, `A.Item`
+   escrito acima do namespace nem chega a `tk_ns_seg_stmt`; o núcleo lê dois tokens soltos e erra
+   antes de qualquer tabela de forward existir. Fechado ensinando `tk_fwd_try_namespace` a chamar
+   `tk_ns_seg_register(seg0)` no mesmo instante em que reconhece o cabeçalho (idempotente, mesma
+   função que a declaração real chama) — só então `tk_ns_walk`/`tk_ns_seg_stmt`/`tk_ns_seg_expr`
+   ganharam o tratamento de PFWD que a decisão 8/10 já dava ao caminho não-qualificado. Registrado
+   em HANDOFF.md §5.1 item 22.
+3. **Ressalva 1 (`#include "x.tk"` cru) permanece dívida — não fechada.** Nenhuma forma encontrada
+   de varrer o arquivo incluído sem tocar o núcleo do `mc` (não há hook para um `#include` cru, e
+   ler o arquivo do disco por fora do lexer exigiria uma primitiva de I/O que a superfície atual não
+   dá a um módulo). O pedido `on_source(&fn)` do §50(d) resolveria isto de graça — não é um pedido
+   NOVO, o mesmo já registrado permanece a resposta certa.
+4. **Coerção de delegate posterior (`Op f = add;` com `delegate` abaixo) não precisou de código
+   novo** — o (b2) já descrevia o estado correto (`tk_deleg_var_stmt`/`tk_deleg_coerce` rodam tarde
+   o bastante, em `tk_deleg_pass`), só faltava provar com uma fixture.
+
+Gate: `--entry-only` 40/40 (nenhuma fixture nova, `order_types.tk` cresceu); `--dump-ast` das 39
+anteriores byte-idêntico (`same=39 diff=0`); `mc limits` `verdict ok`, `intrin` 8/16 nos dois lados
+(zero intrínseco novo), `passes` 14/13 — a mesma `tk_fwd_pass` do O1, sem `pass()` nova.
