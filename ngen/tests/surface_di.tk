@@ -1,5 +1,10 @@
-// surface_di.tk -- §58 DI1 (D229): a class names a service lifetime in its
-// own `:` list, and `inject` resolves it at comptime, no runtime container.
+// surface_di.tk -- §58 DI1/DI2 (D229): a class names a service lifetime in
+// its own `:` list, and `inject` resolves it at comptime, no runtime
+// container. DI2 grows this into a THREE-LEVEL chain resolved by
+// CONSTRUCTOR: Svc(IRepo, IClock) <- Repo(IDb) <- Db, with Db's own
+// constructor filling a DEFAULT nobody passes, and a call through the
+// INTERFACE (`r.load()`) proving the itab still dispatches to a singleton
+// this graph built.
 //
 // Clock names IServiceSingleton -- a marker, never a base or an interface --
 // and answers to TWO keys: the interface it implements, and its own concrete
@@ -15,6 +20,14 @@ interface IClock {
     i64 tick();
 }
 
+interface IDb {
+    i64 query();
+}
+
+interface IRepo {
+    i64 load();
+}
+
 class Clock : IClock, IServiceSingleton {
     i64 n;
 
@@ -24,11 +37,55 @@ class Clock : IClock, IServiceSingleton {
     }
 }
 
+class Db : IDb, IServiceSingleton {
+    i64 n;
+
+    public Db(i64 seed = 5) {
+        n = seed;
+    }
+
+    public i64 query() {
+        n = n + 1;
+        return n;
+    }
+}
+
+class Repo : IRepo, IServiceSingleton {
+    IDb db;
+
+    public Repo(IDb db) {
+        this.db = db;
+    }
+
+    public i64 load() {
+        return this.db.query();
+    }
+}
+
+class Svc : IServiceSingleton {
+    IRepo repo;
+    IClock clock;
+
+    public Svc(IRepo repo, IClock clock) {
+        this.repo = repo;
+        this.clock = clock;
+    }
+
+    public i64 run() {
+        return this.repo.load() + this.clock.tick();
+    }
+}
+
 i64 main() {
     IClock a = inject IClock;
     Clock b = inject Clock;
     if (a.tick() != 1) return 1;
     if (b.tick() != 2) return 2;
     if (rt_live() != 1) return 3;
+    IRepo r = inject IRepo;               // through the interface: proves the itab
+    if (r.load() != 6) return 4;          // Db's own default (5), then one query()
+    Svc s = inject Svc;                   // built by CONSTRUCTOR: IRepo and IClock
+    if (s.run() != 10) return 5;          // the SAME Repo and Clock singletons
+    if (rt_live() != 4) return 6;         // Clock, Db, Repo, Svc -- never more
     return 42;
 }
