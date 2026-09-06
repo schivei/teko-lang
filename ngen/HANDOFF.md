@@ -1447,6 +1447,68 @@ genérico.
 Plano: `docs/design/plano-ngen-entrega4.md` §49 (fechamento da série, próxima onda). Sem PR, sem
 dreno — branch `feat/ngen-k5-foreach`, forward-only para `fix/retirement`.
 
+**O1 LANDADO** (§50, 2026-09-05): ordem LIVRE de declaração de tipos, o débito do C6 -- um campo,
+um parâmetro, um tipo de retorno, um local ou um global agora resolvem um `class`/`struct`/
+`interface`/`delegate` declarado ABAIXO. A causa-raiz: `ngen/teko_fwd.mc` (novo) varre os BYTES
+crus da fonte de entrada (`tk_fwd_init`, primeira linha de `user_init`, ANTES do prelúdio de
+`tk_loop_init`) e de todo arquivo que um `import` empurra (`tk_ns_pass`-side, `teko_ns.mc`'s
+`tk_import`), pulando comentário/string/char/diretiva, seguindo `namespace A.B {`/`namespace
+A.B;` e reservando a PALAVRA (`type_new` + `syntax_expr`/`syntax_stmt`, mais `tk_ns_register` para
+o nome curto namespaced) de cada declaração encontrada NA PROFUNDIDADE de um namespace/top-level
+(D220: tipo aninhado nunca registrado) e que não seja um genérico (`Nome<` é pulado). A LINHA
+`sr_*` continua nascendo tarde -- no primeiro USO (`tk_struct_find_fwd`/`tk_struct_by_ty`, ambos
+com um fallback `tk_fwd_row`/`tk_fwd_row_by_ty` que materializa um placeholder `TK_PFWD`,
+teko_struct.mc) ou na declaração real (`tk_type_add`, que ADOTA o placeholder em vez de acrescentar
+outra linha) -- porque o índice da linha é EMITIDO em `tk_itab` (teko_iface.mc), e criar linhas
+durante a varredura reordenaria todo slot de vtable de interface. `trait` não ganha `type_new`
+(D216): a varredura captura o SPAN inteiro do corpo (contando chaves/comentários/strings) e o
+arquiva direto na tabela de traits (`tk_trait_scan`, teko_trait.mc); a declaração real sobrescreve
+com o span autoritativo de `p_skip_balanced` e marca `tr_declared_at`, então `use T;` acima de
+`trait T` funciona sem esperar nada.
+
+Sítios identidade-só (campo/parâmetro/retorno via `tk_gen_ty`→core `p_type()` ou
+`tk_ns_param_ty`→`tk_ns_resolve_fwd`; local via `tk_type_stmt`→`tk_struct_find_fwd`;
+`on_stmt`/`tk_is_counted` via `tk_struct_by_ty`) resolvem cedo; um sítio que precisa do CORPO --
+`tk_conf_name` (base/interface), `tk_new`/`tk_deleg_find` (construção) -- continua na função
+`tk_struct_find`/`tk_ns_resolve` ORIGINAL, nunca a `_fwd`, e recusa exatamente como antes quando o
+tipo não foi declarado ainda (O2/O3). `tk_newname` ganha o ramo `tk_fwd_pending` (a palavra é um
+forward ainda não declarado → aceita, `p_next()`+retorna) ANTES do ramo namespaced existente;
+`tk_type_word` fica idempotente (reusa o `ty` da varredura em vez de chamar `type_new` de novo, o
+que orfanaria o id -- `alias_add` nunca recusa uma segunda registração do mesmo nome). `tk_fwd_pass`
+(logo após `tk_ns_pass`) varre a tabela da varredura: uma linha ainda `TK_PFWD` no fim da unidade é
+o backstop de um falso positivo (decisão 14) -- `is used but never declared`.
+
+Fixture: `ngen/tests/order_types.tk` (`expect-exit: 42`) -- `Holder`/`ShapeUser` usam `Circle`
+(namespaced, via `using Geo;` escrito ANTES do `namespace Geo { class Circle }`) e `Shape` (tipo
+plano) como campo, parâmetro e retorno, ambos declarados abaixo; `BoxUser`/`OpUser` têm um local
+`Box b = null;`/`Op f = null;` de classe e delegate declarados mais abaixo ainda; `TraitUser` tem
+`use T;` acima de `trait T`; tudo é declarado e usado normalmente em `main()`.
+
+Gate: `--entry-only` **40/40** (as 39 anteriores + a nova); `--dump-ast` das 39 anteriores
+**byte-idêntico** ao compilador da base `9acc3eda` (`same=39 diff=0`); `mc limits ngen` `verdict
+ok`, `intrin` 8/16 em ambos os lados (zero intrínseco novo), `passes` 14/13 (a `tk_fwd_pass` nova,
+esperada). Probes (fora de `tests/`, descartadas depois de rodar): nome de tipo usado como
+VARIÁVEL antes da declaração -- `teko: name reserved by a syntax/type_alias registration: Box`
+(divergência de C# documentada: a palavra é reservada pelo PROGRAMA inteiro, não por escopo);
+`class`/`interface` mencionado dentro de um comentário `//`/`/* */` e de uma string literal --
+NÃO reserva a palavra (compila normal, os identificadores ficam livres); `new B();` antes de
+`class B` (sem nenhum uso anterior que materialize a linha) -- `teko: unknown struct or class
+after \`new\`: B`, a recusa de sempre, intacta (O2). O backstop `is used but never declared`
+(decisão 14) foi verificado por revisão de código/rastreamento manual do `tk_fwd_pass`, não por um
+programa construído: disparar SÓ ele exige um falso positivo genuíno da varredura (o whole-word
+match + skip de comentário/string/diretiva + o gate de profundidade D220 blindam contra os casos
+óbvios), e todo caminho tentado para simular um (`#include` não varrido, genérico, trait com corpo
+malformado, namespace mal-aninhado) dispara um erro MAIS CEDO — a compilação aborta antes de
+`tk_fwd_pass` sequer rodar, o que é o sinal de que o desenho está correto, não uma lacuna.
+
+Dívidas (decisão (d), nada escondido): base/interface QUALIFICADA ou de outro namespace declarada
+abaixo (O3); `.`/`new`/`Tipo.membro` estático sobre um tipo ainda não declarado (O2); herança de
+interface (`I2 : I1`, I1); `T[]` GLOBAL; `#include "x.tk"` cru não varrido (use `import`); lambda
+contextual contra um `delegate` declarado abaixo.
+
+Plano: `docs/design/plano-ngen-entrega4.md` §50 (O1 desta série; O2/O3/I1/G1 seguem na fila). Sem
+PR, sem dreno -- branch `feat/ngen-o1-fwd`, forward-only para `fix/retirement`.
+
 ## 5.1 Armadilhas já pagas (não repita)
 
 1. **`mc --exe` emite Mach-O SEMPRE.** `minicompiler/mc` `src/main.mc:227` faz
@@ -1583,6 +1645,29 @@ dreno — branch `feat/ngen-k5-foreach`, forward-only para `fix/retirement`.
     build local (`for (;;) { infCount++; if (infCount == 4) break; }` de `surface_loops.tk` só
     para no valor certo por causa disso) antes de escrever K5 -- reusar `tk_loop_rewrite_stmt` sem
     entender essa assimetria teria parecido "óbvio" e estaria errado.
+20. **Uma varredura léxica pré-parse (§50 O1) roda ANTES do primeiro token, então `p_file()`
+    ainda responde 0 -- só `lex_file()` (o topo da pilha de frames do lexer, sem depender de
+    lookahead algum) dá o nome do arquivo sendo varrido, tanto no `tk_fwd_init()` de `user_init()`
+    quanto logo após um `import` empurrar um novo arquivo (`p_push_source`'s própria ressalva:
+    "the push does not touch the pending lookahead token", então `p_file()` ali ainda responderia
+    pelo arquivo INCLUIDOR). Usar `p_file()` em vez de `lex_file()` nesse ponto não erra alto —
+    devolve um ponteiro nulo que corrompe qualquer coisa que o trate como string (`tk_origin_of_file`
+    tem uma guarda `if (f == 0) return 0`, mas um `out_str`/`cstrlen` direto sobre ele segfaulta).
+    Também vale a ordem: `tk_access_init()` (que fixa `tk_proj_dir`/`tk_proj_len` a partir de
+    `cfg_file`/`lex_file()`) tem que rodar ANTES da varredura, não depois — ela não toca a posição
+    do lexer (sem `p_push_source`, ao contrário de `tk_loop_init`), então adiantá-la é seguro e é
+    o que dá à varredura um `tk_origin_of_file` que responde certo (um `trait` usado antes de
+    declarado, cujo `use` compara a origem do placeholder contra a da classe que o usa, foi o que
+    expôs a ordem errada -- "internal to another project" num programa de um projeto só).
+21. **Um estado "adotado" separado do próprio `sr_part` do tipo mente sobre o caminho comum.** A
+    primeira versão do backstop `tk_fwd_pass` (§50 O1) marcava uma linha `fw_adopted` só dentro do
+    ramo de ADOÇÃO de `tk_type_add` (quando a linha já existia como `TK_PFWD`) -- e um tipo
+    declarado NA ORDEM NORMAL (nunca usado antes, então `tk_type_add` só acrescenta uma linha
+    `TK_PWHOLE` fresca, nunca passa pelo ramo de adoção) nunca settava essa flag, disparando "is
+    used but never declared" para TODO tipo do programa, mesmo os 39 fixtures antigos que não têm
+    nada a ver com O1. A correção: não existe um segundo bit — `sr_part_at(si) == TK_PFWD` no fim
+    da unidade JÁ significa "foi materializado por um uso e nunca adotado"; qualquer outro estado
+    (inclusive o `TK_PWHOLE` de uma declaração comum) significa "resolvido", sem tabela extra.
 
 ## 5.2 Canal com a sessão do mc
 

@@ -2655,3 +2655,36 @@ I2>` em posição de ARGUMENTO sobrecarregado (a sobrecarga não conhece o fecho
 7. **Emissão em outra ordem** para o programa que USA a liberdade nova (a base materializada é emitida
    no sítio que a pediu): correto para o linker, invisível para as 39 fixtures, e reconfirmado por
    `--dump-ast` a cada crumb.
+
+## 51. Errata — O1 landado (2026-09-05)
+
+O crumb O1 (§50 (c)) landou como desenhado, com dois ajustes medidos contra o código real:
+
+1. **A gate `depth == top_depth` (decisão 3) não é uma constante fixada uma vez** — `top_depth` é
+   **0 fora de qualquer namespace ou dentro de um `namespace A.B;` file-scoped, e `ns_depth`
+   (a profundidade logo após o `{` do bloco) dentro de um `namespace A.B { ... }`**, recomputado a
+   CADA palavra candidata da varredura (`ns_block`/`ns_depth` mudam ao longo do arquivo). Uma
+   primeira versão fixava `top_depth = 0` uma vez e nunca a atualizava ao entrar num bloco de
+   namespace — nenhuma classe DENTRO de um `namespace X { ... }` era registrada. Corrigido antes de
+   landar (nenhuma fixture chegou a ver o bug).
+2. **`p_file()` não responde nada útil no ponto em que a varredura roda** (nem na primeira linha de
+   `user_init`, antes do primeiro token, nem logo após um `import` empurrar um arquivo — o
+   contrato de `p_push_source` não toca o lookahead pendente). `lex_file()` é a resposta certa nos
+   dois pontos (HANDOFF.md §5.1 item 20). Sem isso, o `tk_origin_of_file` que decide o `proj`
+   default de um placeholder saía 0 (ou segfaultava, se algo tentasse ler o ponteiro nulo como
+   string) — só apareceu porque `use T;` acima de `trait T` compara essa origem contra a da classe
+   que usa o trait.
+3. **`tk_fwd_pass` (decisão 14) não precisa de um bit "adotado" separado** — `sr_part_at(si) ==
+   TK_PFWD` no fim da unidade já é exatamente "materializado por um uso, nunca adotado"; qualquer
+   outro estado (inclusive `TK_PWHOLE` de uma declaração nunca usada antes de si mesma, o caminho
+   comum das 39 fixtures) é "resolvido". Uma tabela `fw_adopted` paralela, setada só no ramo de
+   adoção de `tk_type_add`, dava falso positivo para TODO tipo declarado na ordem normal (HANDOFF.md
+   §5.1 item 21) — corrigido antes de landar.
+
+Fora isso, o desenho do (a)-(e) resistiu sem desvio: a régua de ordem das linhas `sr_*` (risco 1)
+segurou (`--dump-ast` das 39 anteriores byte-idêntico, `same=39 diff=0`), o ramo de `tk_newname`
+aceita a palavra pendente exatamente como a decisão 6 previu, e o backstop do risco 2 (falso
+positivo do varredor) não disparou em nenhuma das 40 fixtures nem nos quatro probes -- inclusive o
+próprio probe pensado para `tk_fwd_pass` (decisão 14) não encontrou um programa Teko-sobre-mc
+sintaticamente válido que dispare SÓ esse backstop sem abortar antes por outro erro, o que é o
+sinal esperado de um desenho correto, registrado em HANDOFF.md em vez de forçado.
