@@ -3413,3 +3413,268 @@ the K3 guard's own additive lines (item 2, universal via `#include "../lib/rt.mc
      unrelated line inside the file that DOES change (`ternary_check`'s own hoisted temporary) is
      item 1's ternary fix, not this item's. Probe (a genuinely unknown name inside a lambda) confirms
      the deferred rejection still fires, outside `ngen/tests/`, not committed.
+
+## 64. D225 — auto-hospedagem da teko sobre o mc: desenho das 4 etapas (architect-first, 2026-09-06)
+
+Desenho, não entrega. Base `ce5b5863` (45 fixtures, 5 pernas verdes), mc 0.15.5. **Nenhuma
+mudança de superfície em nenhuma das 4 etapas** — nada de fixture nova: o gate é sempre 45/45 nas
+5 pernas, e o artefato novo é *script*, não teste (a lei "não se escreve teste para o que o
+próprio build exercita" vale aqui: as 45 já são a suíte).
+
+### (a) Decisões
+
+**D64.1 — o conjunto de partes do compilador teko é `core_min + core_machines + core_writers +
+core_build + core_bundle`, com `main()` próprio; ficam FORA `<mc/core_pkg>`, `<mc/core_sandbox>`
+e `<mc/main>`.** Por perna: as 5 usam as DUAS máquinas (`<float>` deriva de `arm64` E de
+`x86_64`) e os quatro writers (macOS = `macho`+`backend_exe`; linux = `backend_elf`+
+`backend_elf_exe`; windows = `backend_coff`); `core_build` porque o CI compila CADA fixture com
+`build … --entry-only`; `core_bundle` porque `lib/rt` inclui `<sys>`. `core_pkg` e `core_sandbox`
+não têm um único chamador no ngen — precedente `tests/pkg/nopkg.mc`: sem `core_pkg` o compilador
+ainda constrói de `mc.lock` + `deps/`.
+
+**D64.2 — o bundle PRÓPRIO (§6 de `bundle.md`, −364 KB de blob) é REJEITADO.** É a maior economia
+disponível na etapa 1 e mesmo assim não se faz: a etapa 4 (rota A, D64.9) exige `<mc/host>` +
+`<mc/core_min>` + as partes DENTRO do blob do próprio teko, senão o teko não consegue compilar o
+próprio compilador. O destino manda na otimização local.
+
+**D64.3 — a etapa 2 não chama `mc_build_init()`; escreve a tabela de subcomandos do teko à mão.**
+`mc_build_init()` (mc `src/core_build.mc`) é `lex_set_libs(&libs_open)` + `sysroots_init()` +
+três `subcommand()` + `on_plan(&mc_plan)` — todas públicas. Registrar `build` por cima
+duplicaria a linha de usage (`subcommand_usage()` imprime TODAS as entradas, embora o *dispatch*
+seja last-wins — `src/hooks.mc:1029`). Chamando as quatro peças na mão o teko fica com a sua
+própria tabela, sem duplicata e sem pedir nada ao mc.
+
+**D64.4 — `teko build` = `tk_build` resolve o config e delega ao `drv_build` do núcleo.** Ordem:
+`--config FILE` explícito → `DIR/teko.toml` → `DIR/mc.toml`. `drv_build(argc, argv)` já lê
+`--config` do argv (`src/driver.mc:794`), então `tk_build` sintetiza o argv e delega — zero
+reimplementação do driver.
+
+**D64.5 — o config do dev teko é `teko.toml`, MESMO esquema do `mc.toml`, mesmo leitor.**
+`[project]`, `[target]`, `[linker]`, `[include]`, `[limits]` — idênticos. `[compiler]` deixa de
+fazer sentido para o dev (o compilador É o binário `teko`) e `teko build` o ignora. `[deps]` do
+mc é de quem ENSINA o compilador; o sistema de pacotes DA TEKO (imports/namespaces) é superfície
+da linguagem e não é escopo aqui (§26). O `ngen/mc.toml` CONTINUA, com o papel de sempre: é o que
+`mc build` usa para construir o compilador. Dois arquivos, dois papéis.
+
+**D64.6 — `type_disable`/`intrinsic_disable`: a lista concreta é VAZIA hoje, e a regra é dura.**
+Censo: os `type_alias` da teko (`bool`→`u8`, `char`→`u32`, `byte`→`u8`, `isize`→`i64`,
+`usize`→`u64`, `ptr`/`str`→`uptr`) são IDENTIDADE — não há segundo tipo, nada a remover;
+`f32`/`f64` vêm do `type_new` do `<float>` e não substituem palavra; `i32` é do núcleo (M45) e a
+teko o QUER; `ld64`/`st64`/`callp` são usados pelas fixtures e pelo núcleo. **Regra (liga a etapa
+2 à 4): um disable só é legítimo se a palavra (i) for de fato proibida na superfície teko E
+(ii) não aparecer nos fontes do núcleo** — senão, na rota A, o teko deixa de compilar a si mesmo.
+
+**D64.7 — a etapa 3 é UM pacote, "ambos", com o runtime DENTRO.** `lib = "lib/rt.tk"` (o que um
+PROGRAMA inclui), `module = "teko.tk"` (o que um COMPILADOR inclui). `teko_rt` NÃO vira pacote
+separado: módulo e runtime são versionados juntos (o módulo EMITE chamadas `tk_*` que o runtime
+define — defasagem entre os dois é miscompilação silenciosa), e o precedente do mc é esse
+(`<float>` = módulo + `<float_rt>` num pacote só).
+
+**D64.8 — `.tk` ⊇ superfície do núcleo mc: a "reescrita" da etapa 4 é transliteração + adoção por
+ondas.** Medido: `extern`, `uptr`/`ptr`, `ld64`/`st64`/`ld8`/`st8`, `callp`, `&fn` cru
+(`uptr p = &twice;`, `surface_import.tk:41`), `#define`, `#include` de `.mc`, arrays globais,
+`switch`, `while`/`for`/`do` já são superfície `.tk` HOJE. Logo **um `teko_x.mc` já É um
+`teko_x.tk` válido**, e "reescrever os módulos em teko" (D225) se parte em duas: (1) o arquivo
+vira `.tk` e passa a ser compilado PELO PRÓPRIO TEKO — isso é a auto-hospedagem; (2) adotar
+construtos teko é **onda por módulo, depois, com o fixpoint como prova**. Pedir (2) antes de (1)
+é reescrever 16 838 linhas sem rede.
+
+**D64.9 — a montagem do compilador auto-hospedado: rota A (UMA unidade) é o destino; rota B (dois
+objetos) é o plano que não bloqueia.** Ver (e). Recomendação: **A**, com o pedido ao mc de (g).
+
+### (b) Etapa 1 — o compilador das partes (MEDIDO)
+
+Régua: `scripts/check-parts.sh` do mc (a mesma forma: `--dump-syms` por seção + `wc -c` do
+executável) e a tabela de `docs/guide/98-recreating-the-compiler.md`. **Medição feita nesta
+sessão** (host macOS/arm64, `mc` 0.15.5 do `PATH`, `mc --exe`, nada escrito no repo):
+
+| grafia | bytes | Δ |
+|---|---|---|
+| `<mc/host>` + `<mc/core>` + `<user_default>` | 1 153 028 | — |
+| as 5 partes de D64.1 + `main()` próprio | 1 037 139 | **−115 889 (−10,05 %)** |
+| `<mc/host>` + `<mc/core>` + `ngen/teko.mc` (o mc-teko de hoje) | 1 588 677 | — |
+| as 5 partes + `ngen/teko.mc` + `main()` próprio | **1 489 365** | **−99 312 (−6,25 %)** |
+
+As duas grafias com `teko.mc` COMPILARAM e LINKARAM — o conjunto de D64.1 basta no nível de
+compilação/link; falta a prova de comportamento (45/45 × 5 pernas), que é o gate de S1. `mc
+limits` entra na mesma medição (`[limits].tolerance = 1.0`: menos partes = menos fonte no pré-scan).
+
+Forma: `[compiler] core = "<mc/core_min>"` (a forma `<` é a única que garante o
+`#include <mc/host>` emitido antes) e `modules = ["core_teko.mc", "teko.mc"]`, onde
+`ngen/core_teko.mc` traz as outras quatro partes e o `main()`:
+
+```c
+#include <mc/core_machines>
+#include <mc/core_writers>
+#include <mc/core_build>
+#include <mc/core_bundle>
+
+i64 main(i64 argc, uptr argv, uptr envp) {
+    host_init(envp);
+    mc_machines_init(); mc_writers_init(); mc_bundle_init();
+    return mc_main(argc, argv, envp);
+}
+```
+
+(`mc_build_init()` sai daqui na S2, por D64.3; na S1 ele ainda é chamado, para a S1 ser
+puramente "menos partes".) Riscos: **(i)** parte que esconde dependência de outra — o mc já pagou
+isso no M41 (`tm_cat`, `MODE_755`, `R_X86_PC32`) e `check-parts.sh` prova o contrário hoje;
+**(ii)** sumir uma usage line (`sandbox`/`pkg`/`update`) é observável — é o que se QUER, mas o CI
+não olha usage.
+
+### (c) Etapa 2 — `teko build`
+
+`teko.mc`/`core_teko.mc` passam a registrar:
+
+```c
+subcommand("build",  &tk_build,     "usage: teko build [DIR] [--config FILE] [--entry-only] ...\n");
+subcommand("limits", &drv_limits,   "       teko limits [DIR|FILE.tk]\n");
+```
+
+e `main()` chama `lex_set_libs(&libs_open)`, `sysroots_init()`, `on_plan(&mc_plan)` no lugar de
+`mc_build_init()` (D64.3). `sysroot` fica de fora (só a perna Windows o usa, e ela já monta o
+sysroot no workflow). `[compiler].out = "build/teko"`. O dev vê `teko build .` com `teko.toml`
+(D64.5); o CI troca `mc-teko build ngen --config … --entry-only` por `teko build …` — mesma forma.
+
+### (d) Etapa 3 — o pacote `teko`
+
+```toml
+[package]
+name   = "teko"
+lib    = "lib/rt.tk"
+module = "teko.tk"
+files  = ["teko.tk", "teko_access.tk", …, "lib/rt.tk"]
+check  = ["teko.tk", "lib/rt.tk"]
+```
+
+`teko.tk` deixa de definir `user_init` e exporta `void teko_init()`; `ngen/user.mc` (do PROJETO,
+não do pacote) é `void user_init() { teko_init(); }` — a regra M44 é dura: um pacote nunca define
+`user_init`. `check`: duas unidades, compiladas isoladas na caixa linux/x86_64 do registro —
+`teko.tk` (o módulo, que inclui os 30 irmãos) e `lib/rt.tk` (o runtime, que inclui `<sys>`);
+toda entrada de `check` tem de estar em `files`. Publicação: Release do GitHub com tag `vX.Y.Z`,
+`sha256` = o **tree hash** (não o do tarball), PR no `minicompiler/mc-registry`. Nome `teko` é
+válido (`[a-z][a-z0-9_]*`) e não é reservado. **Bloqueio:** o registro do mc ainda não abriu; tudo
+menos a publicação pode ser feito hoje (o `[package]` é inerte para `mc build`, e `mc pkg hash`
+já dá o número).
+
+### (e) Etapa 4 — auto-hospedagem
+
+**Auditoria de superfície (MEDIDA sobre os 16 838 linhas de `ngen/*.mc` + `lib/rt.mc`):**
+
+| construção usada no `.mc` | existe em `.tk`? | crumb |
+|---|---|---|
+| `#define` (110×), `#include "..."`/`<...>` (34×) | sim (diretiva do núcleo, e `.tk` já inclui `.mc`) | — |
+| `extern T f(...)` | sim (`surface_overload_free.tk`) | — |
+| `ld64`/`st64`/`ld8`/`st8`/`ld32` (680×) | sim (`primitives_ptr.tk`) | — |
+| `callp` (8×) e `&fn` CRU → `uptr` | sim (`surface_import.tk:41,44`) — o delegate contado é OUTRA grafia, não substitui | — |
+| `uptr`/`str`/`ptr` crus | sim (aliases de `TY_UPTR`, D213) | — |
+| arrays globais fixos (233 decls) | sim (§39/G1) | — |
+| `while`/`for`/`do`/`switch`/`if`/`return` | sim | — |
+| API do núcleo: **110 nomes** (`p_*`, `nd_*`, `parse_*`, `syntax*`, `err_at`, `type_*`, …) | sim na rota A (mesma unidade); na rota B, `extern` gerado | S4.2 |
+| `#define`s do núcleo: **71** (`N_*`, `K_*`, `TY_*`, `T_*`, `MAXPARAMS`, `TK_SINT`) | sim na rota A; na rota B, espelho gerado | S4.2 |
+| **global do núcleo lido direto: `nnodes`** (2 sítios, `teko_class.mc`/`teko_ns.mc`) | rota A sim; **rota B NÃO** (`extern` do mc é só função) | S4.2/(g) |
+
+**Não há lacuna de superfície na linguagem.** A única lacuna é de MONTAGEM, e é uma colisão de
+palavras — medida e reproduzida:
+
+* **Sonda de transparência EXECUTADA:** o mc-teko das partes, mandado compilar
+  `<mc/host>+<mc/core_min>+…`, morre em `mc/objmodel:293: name expected` — a linha é
+  `void reloc_add(i64 sec, i64 off, i64 sym, i64 type, i64 pcrel, i64 len)`. Causa-raiz:
+  `syntax("type", …)` chama `word_add` → `tok_add` (`src/lex.mc:217`), e uma palavra na tabela de
+  tokens deixa de lexar como identificador **em todo lugar**.
+* **Censo completo das colisões** (comentários e strings descontados) entre as 36 palavras que a
+  teko registra e os fontes das 5 partes: **`type` (23 sítios**: `objmodel.mc:293,309`,
+  `gen_resolve.mc:167,172,180,197,201,217,221`, `parse.mc:1005`, `gen_walk.mc:443,447`, +11 nos
+  writers/driver) e **`out` (43 sítios**: `sha256.mc` como parâmetro `uptr out`, `cli.mc:161,209,378`).
+  Nenhuma outra. `base`, `params`, `value`, `static`, `operator`, `get`/`set`, `case`, `in`, `or`,
+  `use` NÃO colidem — a teko os lê contextualmente, sem `tok_add`.
+* **Dentro do próprio ngen** as colisões são `scope` (21) e `out` (37) — ~58 sítios mecânicos.
+
+**Rota A (UMA unidade) — recomendada.** `mc_teko.tk` = `#include <mc/host>` + as 5 partes + os
+módulos `.tk` + `main()`; teko0 compila tudo, um objeto, um link, nenhum espelho de API,
+macOS segue sem `[linker]`, e o fixpoint cobre **100 % do binário**. Custo: o pedido de (g) —
+renomear `type`/`out` nos fontes do núcleo (o mc já moveu 4 nomes por essa mesma razão no M41).
+
+**Rota B (DOIS objetos) — não bloqueia, e é pior.** `core.o` (as partes + `main` + `user.mc`,
+`.mc`, compilado por mc estoque) + `teko.o` (os módulos `.tk`, compilado por teko0), linkados
+pelo `cc`/`lld-link` (a perna Windows já linka 3 objetos). Custo: ~100 `extern` + 71 `#define`
+gerados e um check de deriva; `nnodes` sem solução (pede acessor ao mc); macOS perde o
+`macho-exe` embutido e passa a exigir `cc`; e o fixpoint cobre só a METADE teko.
+
+**Rito do fixpoint** (protocolo do `scripts/bootstrap.sh` do mc, verbatim):
+`teko0` = `mc build ngen` (mc estoque, hoje) → `teko1` = `teko0 build . --config bootstrap.toml
+--entry-only` sobre `mc_teko.tk` → `teko2` = idem com `teko1` → `teko3` = idem com `teko2` →
+**`cmp` dos OBJETOS `teko2.o`/`teko3.o`** (não do executável: assinatura/`interp` variam por
+perna) **+ `--dump-asm` com diff vazio**. `teko2 == teko3` é o único fixpoint que importa daqui
+para a frente (o `gen2==gen3` do `src/` congelado morreu com o D211).
+
+### (f) Sequência de crumbs
+
+| # | o que | arquivos | gate |
+|---|---|---|---|
+| **S1** | partes em vez do bundle (D64.1) | `ngen/core_teko.mc` (novo), `ngen/mc.toml` (`core`, `modules`) | 45/45 × 5 pernas; tamanho MEDIDO cai (baseline 1 588 677 B); `mc limits` sem regressão |
+| **S1m** | régua de medição | `ngen/scripts/measure.sh` (novo) | roda nas 5 pernas, imprime seções + bytes + `limits` |
+| **S2** | `teko build`, tabela de subcomandos própria (D64.3/D64.4/D64.5) | `core_teko.mc`, `teko.mc` (`tk_build`), `mc.toml` (`out = "build/teko"`), `.github/workflows/ngen.yml` | 45/45; `teko` sem argumento imprime SÓ a usage do teko; `teko build` acha `teko.toml` e `mc.toml` |
+| **S2d** | censo `type_disable`/`intrinsic_disable` (D64.6) | só §64 / `README.md` | lista vazia registrada com a regra |
+| **S3** | `teko_init()` + `[package]` (D64.7) | `teko.mc`→`teko_init`, `ngen/user.mc` (novo), `ngen/mc.toml` `[package]` | 45/45; `mc pkg hash ngen` estável entre dois runs |
+| **S4.0** | sonda de transparência | nenhum (script descartável) | **JÁ FEITA** — resultado em (e); repetir após S1 |
+| **S4.1** | transliteração `.mc`→`.tk` + renome de `scope`/`out` internos (~58 sítios) | os 31 `ngen/*.mc` → `.tk`, `lib/rt.mc` → `lib/rt.tk`, `mc.toml` | 45/45; `--dump-ast` das 45 idêntico; objeto do compilador idêntico a menos das strings de nome de arquivo |
+| **S4.2** | `mc_teko.tk` + `ngen/scripts/bootstrap.sh` | novos | teko1 compila as 45; **`cmp teko2.o teko3.o`** vazio; `--dump-asm` diff vazio — **rota A: BLOQUEADO no pedido (g1)** |
+| **S4.3** | perna de fixpoint no CI | `.github/workflows/ngen.yml` | a 6ª perna verde |
+| **S4.4+** | teko-ificação por módulo (D64.8, uma onda por módulo) | um `.tk` por vez | 45/45 + fixpoint a CADA módulo |
+
+S1→S2→S3 são independentes de S4 e podem ir já. S4.1 é independente da rota e pode ir já. Só
+S4.2 espera o pedido.
+
+### (g) Pedidos e forks
+
+**(g1) Pedido ao mc — texto pronto.** "Ao montar um compilador de dialeto sobre `<mc/core_min>` e
+as partes, uma palavra que o módulo registra (`syntax`/`syntax_stmt`/`syntax_expr` → `word_add` →
+`tok_add`) vira token em TODO fonte, inclusive nos fontes do próprio núcleo servidos pelo bundle.
+Com o dialeto teko o núcleo deixa de compilar em `mc/objmodel:293: name expected` (o parâmetro
+`i64 type` de `reloc_add`). O censo completo das colisões com as 36 palavras da teko é `type`
+(23 sítios: `objmodel.mc`, `gen_resolve.mc`, `parse.mc`, `gen_walk.mc` + writers/driver) e `out`
+(43 sítios: `sha256.mc`, `cli.mc`) — mais nada. Pedimos UMA das duas: **(1)** renomear esses
+parâmetros/locais (`type`→`rty`, `out`→`dst`), mudança mecânica e sem efeito em código gerado, na
+mesma classe dos 4 nomes que o M41 moveu para as partes se sustentarem; ou **(2)**, melhor e
+geral, um modo de escopar as palavras de um módulo às fontes que ele reivindica (o `on_source` já
+diz qual fonte está aberta), que tornaria QUALQUER dialeto componível com o núcleo para sempre.
+Se a resposta for (1), registrem que os fontes do núcleo passam a evitar 36 palavras — mandamos a
+lista. Secundário: `subcommand_usage()` imprime todas as entradas enquanto o dispatch é
+last-wins (`hooks.mc:1029`) — re-registrar um nome duplica a linha de usage; contornamos sem
+pedir nada (D64.3), mas o desacordo entre dispatch e usage parece defeito. Terceiro (só se a
+rota B for a escolhida): um acessor `i64 ast_nnodes()`, porque `extern` declara função e não
+variável, e dois sítios nossos leem o global `nnodes`."
+
+**(g2) Fork para o dono — rota A ou rota B.** A rota A (uma unidade) dá o fixpoint sobre o binário
+INTEIRO, não pede espelho de API nem linker no macOS, e é o que "auto-hospedagem" quer dizer —
+mas depende do mc aceitar (g1). A rota B fecha hoje, sem pedir nada, ao custo de ~175 linhas
+geradas de espelho + um check de deriva + um acessor que falta + o fixpoint cobrindo só a metade
+teko. **Recomendação: A**, com B escrita como fallback e S4.1 (que serve às duas) indo já.
+
+**(g3) Ratificação — o que "reescrever os módulos em teko" significa (D64.8).** Como `.tk` já
+contém a superfície do núcleo, a transliteração é imediata e a auto-hospedagem se prova no
+fixpoint; a adoção de `class`/`foreach`/`T[]` dentro do compilador é uma onda POSTERIOR, por
+módulo. Se o dono quiser o contrário (só considerar "reescrito" o que usa construtos teko), S4.4+
+deixa de ser opcional e vira 31 crumbs obrigatórios — dizer qual.
+
+### (h) Riscos
+
+1. **Colisão de palavras (alta, medida).** É o único bloqueio real; (g1) é a saída. Mitigação
+   local disponível: a teko pode DEIXAR de registrar `type` (é só honest-stop hoje) e cortar 23
+   dos 66 sítios — `out` é load-bearing e não tem essa saída.
+2. **Regressão de comportamento por parte omitida (média).** `core_pkg`/`core_sandbox` somem com
+   as usage lines e com `mc pkg`/`mc sandbox`; o CI não olha usage — S1 acrescenta a asserção ao
+   `measure.sh`, não uma fixture.
+3. **`lex_set_libs`/`on_plan` esquecidos ao trocar `mc_build_init()` por peças (média).** Sintoma:
+   `<name>` deixa de resolver por lock, ou as tabelas param de ser pré-dimensionadas (o pico de
+   memória sobe e `mc limits` acusa). O `measure.sh` do S1m é quem pega.
+4. **Deriva do espelho de API na rota B (alta, só na B).** 110 funções + 71 `#define` copiados de
+   uma versão do mc que o CI resolve como "latest" — versão do mc tem de ser PINADA se a rota B
+   for escolhida.
+5. **Passes da teko sobre 8 500 linhas de núcleo, na rota A (média).** Tempo de compilação e
+   pressão de tabela sobem; e um pass que reescrevesse nó de núcleo seria bug silencioso. O gate
+   é forte e barato: o objeto que o teko0 produz para os fontes do núcleo tem de ser
+   **byte-idêntico** ao que o mc estoque produz — a transparência vira fato medido, não promessa.
+6. **Baixos:** a troca `mc-teko`→`teko` toca 4 lugares do workflow (falha barulhenta); e a
+   publicação do pacote depende do registro do mc abrir (tudo menos o PR é fazível hoje).
