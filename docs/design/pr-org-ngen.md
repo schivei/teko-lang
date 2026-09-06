@@ -132,3 +132,11 @@ registro do mc gated por variável até o pacote `teko` estar registrado.
 7. Registrar o pacote `teko` em minicompiler.dev/me; criar a variável de Actions que o
    `release.yml` lê para liberar a publicação (nome no HANDOFF §3.1).
 8. `ORG_PR_TOKEN` deixa de ser necessário quando `mirror-pr-to-org.yml` sair.
+
+## 7. Registro do mc (resposta da sessão do mc, 2026-09-06)
+
+O registro opera (`mc` 0.15.6..0.15.12 publicados). Para o `teko`: o manifesto do pacote tem que estar
+na **raiz do repo** (`mc.toml` raiz com `[package]` e `lib`/`check`/`files` em `ngen/...`; subpath só
+depois do R1 do registro); **sem `[project]`** no manifesto do pacote (a caixa roda sobre mc.toml + files);
+validador com mc **pinado** (0.15.12); proposta `[package].mc = ">= x"`. Consequência: `[package]` sai de
+`ngen/mc.toml` (que fica com `[project]`/`[compiler]`/… para `mc build ngen`) e vai para `/mc.toml`.
