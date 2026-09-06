@@ -26,6 +26,12 @@
 #   sh ngen/scripts/bootstrap.sh                 # host from `mc --host`
 #   sh ngen/scripts/bootstrap.sh --os linux --arch x86_64
 #
+# `mc` has to already be on PATH -- this script never downloads one. The `mc`
+# the CI puts on PATH before this script runs is the version PINNED by
+# `ngen/MC_VERSION` (`cat ngen/MC_VERSION`, read by `.github/actions/setup-mc`;
+# `ngen/HANDOFF.md` §3.2/§4), so a local run against a different `mc` is
+# comparing against a different fixed point than CI's.
+#
 # KNOWN BLOCKER, mc side (docs/design/plano-ngen-entrega4.md §70(f)): stage 1
 # stops at `mc/objmodel:212: expected ; after expression`. `word_add` marks the
 # token ENTRY, and the entry is shared with the `#rule` road, so teaching

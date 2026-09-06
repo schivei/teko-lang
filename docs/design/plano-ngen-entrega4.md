@@ -4850,3 +4850,29 @@ separar correção de regressão):
 `xs[0]` de uma lista `params` usado como ARGUMENTO de uma chamada por vtable morre em `expression
 with no codegen`: a chamada já foi rebaixada a `callp` no parse e o `N_INDEX` sobrevive ao walk da
 instância. Reproduzido na BASE e no tip — não é regressão desta onda, e fica registrado.
+
+## 77. V2 — pinar a versão do mc no CI + README do `ngen/` (2026-09-06)
+
+Segundo crumb do desvio "v0.1.0 estável". Dois itens, nenhuma superfície nova.
+
+### (a) Item 1 — o CI para de resolver `latest`
+
+A 0.15.12 provou o risco: um patch release do mc pode renomear/mover superfície (o driver
+perdeu 12 globais por acessores, §3.2) e `.github/actions/setup-mc` resolvia `releases/latest`
+sempre, então a quebra entraria em CI **sem aviso**, no primeiro PR aberto depois do release.
+Corrigido movendo a fonte da verdade para um arquivo: **`ngen/MC_VERSION`** (uma linha, `0.15.12`,
+sem `v`). `setup-mc` ganhou o input `version` — vazio (o default, o que os três chamadores usam
+hoje) lê o arquivo; `latest` só resolve quando `inputs.version` pede explicitamente; qualquer
+outra string pina aquela tag (`releases/tags/v<versão>` em vez de `releases/latest`, que também
+prova que a tag existe). Os TRÊS consumidores da action (as cinco pernas, os dois runners de
+`fixpoint`, e `publish-to-registry` do `release.yml`) herdam o pin sem mudança própria — nenhum
+passa `version`. `ngen/scripts/bootstrap.sh` e `ngen/HANDOFF.md` §3.1/§3.2/§4 passam a citar
+`ngen/MC_VERSION` como a resposta a "qual mc o CI usa" (`cat ngen/MC_VERSION`), e §3.2 ganha o
+processo de bump: baseline local 45/45 + `bootstrap.sh` → `FIXPOINT OK` contra o mc NOVO, **antes**
+de trocar o arquivo — nunca o inverso. `[package].mc = ">= x"` (a proposta do lado do mc, D230
+adendo 2 item 3) não entra: é superfície do validador deles, ainda não publicada; fica só citada
+como rumo futuro, não em `ngen/mc.toml` (mexer no `[package]` muda o hash de árvore do pacote).
+
+Gate: `ngen.yml` (5 pernas + `fixpoint`×2) verde na branch, com o log mostrando `pinned
+minicompiler/mc v0.15.12` (não `resolved minicompiler/mc latest`); `sh ngen/scripts/bootstrap.sh`
+local → `FIXPOINT OK`; `ngen/*.tk`, `ngen/mc.toml` e `ngen/tests/` intocados.

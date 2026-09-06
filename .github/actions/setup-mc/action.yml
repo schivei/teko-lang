@@ -1,11 +1,13 @@
 name: set up the mc toolchain
 description: >
-  Resolve the LATEST minicompiler/mc release, download the asset built for one
-  (os, arch) pair, verify its `.sha256` and assert that `mc --host` agrees with
-  that pair. Every `ngen` job -- the five native legs and the fixpoint ladder --
-  obtains `mc` through this one action, so no two jobs can silently disagree
-  about which compiler they tested, and `latest` is resolved by a single piece
-  of code.
+  Resolve the mc release this repository is PINNED to (`ngen/MC_VERSION`, or
+  `inputs.version` when the caller names one explicitly), download the asset
+  built for one (os, arch) pair, verify its `.sha256` and assert that
+  `mc --host` agrees with that pair. Every `ngen` job -- the five native legs,
+  the fixpoint ladder and the release publisher -- obtains `mc` through this
+  one action, so no two jobs can silently disagree about which compiler they
+  tested. `latest` resolves the newest minicompiler/mc release, but only when
+  asked for: an unannounced release must never change what CI tests.
 
 inputs:
   os:
@@ -19,6 +21,14 @@ inputs:
     required: true
   exe:
     description: 'suffix an executable carries on this operating system (`.exe` on Windows)'
+    required: false
+    default: ''
+  version:
+    description: >
+      mc version to install (e.g. `0.15.12`) or `latest` to resolve the newest
+      minicompiler/mc release. Empty (the default) reads `ngen/MC_VERSION`,
+      this repository's pin -- the source of truth `ngen/HANDOFF.md` §3.2
+      documents.
     required: false
     default: ''
   token:
@@ -42,30 +52,48 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: resolve latest mc release
+    - name: resolve the pinned mc release
       id: release
       shell: bash
       env:
         GITHUB_TOKEN: ${{ inputs.token }}
+        MC_VERSION_INPUT: ${{ inputs.version }}
       run: |
         set -eu
+        requested="$MC_VERSION_INPUT"
+        if [ -z "$requested" ]; then
+          if [ ! -f ngen/MC_VERSION ]; then
+            echo "::error::no version given and ngen/MC_VERSION does not exist" >&2
+            exit 1
+          fi
+          requested="$(tr -d '[:space:]' <ngen/MC_VERSION)"
+        fi
+        if [ "$requested" = "latest" ]; then
+          api="https://api.github.com/repos/minicompiler/mc/releases/latest"
+        else
+          api="https://api.github.com/repos/minicompiler/mc/releases/tags/v${requested#v}"
+        fi
         resp="$(curl -fsSL \
           -H "Accept: application/vnd.github+json" \
           -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-          "https://api.github.com/repos/minicompiler/mc/releases/latest")" || {
-          echo "::error::could not reach the minicompiler/mc releases API" >&2
+          "$api")" || {
+          echo "::error::could not reach the minicompiler/mc releases API ($api)" >&2
           exit 1
         }
         tag="$(printf '%s' "$resp" | jq -r '.tag_name // empty')"
         if [ -z "$tag" ]; then
-          echo "::error::minicompiler/mc has no releases (or the API response has no tag_name)" >&2
+          echo "::error::minicompiler/mc has no release matching '$requested' (or the API response has no tag_name)" >&2
           printf '%s\n' "$resp" >&2
           exit 1
         fi
         ver="${tag#v}"
         echo "tag=$tag"     >>"$GITHUB_OUTPUT"
         echo "version=$ver" >>"$GITHUB_OUTPUT"
-        echo "resolved minicompiler/mc $tag"
+        if [ "$requested" = "latest" ]; then
+          echo "resolved minicompiler/mc latest -> $tag"
+        else
+          echo "pinned minicompiler/mc $tag"
+        fi
 
     # The toolchain is unpacked INSIDE the workspace and addressed by a
     # relative path from here on: every step runs with the repository root as
