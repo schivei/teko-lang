@@ -19,8 +19,8 @@ name: ngen (mc) CI
 # (`mc build ngen && run`) and fails if any leg failed.
 #
 # The SIXTH job is `fixpoint` (S4.3): the self-hosting ladder teko0 -> teko1 ->
-# teko2 -> teko3 over `ngen/mc_teko.tk`, on linux/x86_64 and macos/aarch64. It
-# proves a different thing from the legs -- that the compiler reproduces itself,
+# teko2 -> teko3 over `ngen/mc_teko.tk`, on linux/x86_64, linux/aarch64 and
+# macos/aarch64. It proves a different thing from the legs -- that the compiler reproduces itself,
 # not that a fixture exits 42 -- and it is deliberately NOT wired into the
 # aggregator: `mc build ngen && run` is the name the ruleset requires and its
 # meaning stays exactly what it says. Promoting the ladder to a required check
@@ -430,17 +430,18 @@ jobs:
   # the OBJECTS teko2.o/teko3.o, an empty diff between the two `--dump-asm`
   # dumps, and teko1 compiling and running all 45 fixtures.
   #
-  # Two runners, not five. linux/x86_64 is the default pair of `ngen/mc.toml`
-  # and macos/aarch64 is where the ladder was measured closing (§70); Windows is
-  # out of this slice on purpose -- the ladder needs `<out>.o` on disk, which
-  # means a `[linker]`, which on Windows means the `lld-link` + sysroot the leg
-  # builds for itself. Registered as debt in `ngen/HANDOFF.md` §3.1.
+  # Three runners: linux/x86_64, the default pair of `ngen/mc.toml`,
+  # macos/aarch64, where the ladder was measured closing (§70), and
+  # linux/aarch64, which has a leg of its own and whose loader the script
+  # already knows -- it was out of S4.3 only to keep the new job at two
+  # runners. Windows is still out; bringing it in is S4.3b's second item.
   #
-  # The derived configs the script writes KEEP `ngen/mc.toml`'s `[linker] cc`
-  # for exactly that reason: with a linker `mc` writes the object and hands it
-  # to `cc`, and without one the built-in executable backend writes the binary
-  # and no object at all. Both runners have a `cc`; the five legs link
-  # differently (built-in backends) and are unaffected.
+  # The derived configs the script writes KEEP `ngen/mc.toml`'s `[linker] cc`:
+  # with a linker `mc` writes the object and hands it over, which is what
+  # leaves `<out>.o` on disk for the `cmp`, and without one the built-in
+  # executable backend writes the binary and no object at all. All three
+  # runners have a `cc`; the five legs link differently (built-in backends)
+  # and are unaffected.
   fixpoint:
     name: fixpoint (${{ matrix.os }}/${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
@@ -449,7 +450,7 @@ jobs:
       run:
         shell: bash
     strategy:
-      # both pairs report; a red one must not hide the state of the other
+      # every pair reports; a red one must not hide the state of the others
       fail-fast: false
       matrix:
         include:
@@ -457,6 +458,10 @@ jobs:
             os: linux
             arch: x86_64
             asset: x86_64
+          - runner: ubuntu-24.04-arm
+            os: linux
+            arch: aarch64
+            asset: arm64
           - runner: macos-latest
             os: macos
             arch: aarch64
