@@ -32,14 +32,9 @@
 # `ngen/HANDOFF.md` §3.2/§4), so a local run against a different `mc` is
 # comparing against a different fixed point than CI's.
 #
-# KNOWN BLOCKER, mc side (docs/design/plano-ngen-entrega4.md §70(f)): stage 1
-# stops at `mc/objmodel:212: expected ; after expression`. `word_add` marks the
-# token ENTRY, and the entry is shared with the `#rule` road, so teaching
-# `while`/`for` (teko does: its handlers do scope/RC and `break N` rewriting)
-# takes the prelude's own `while` away from every source the dialect does not
-# claim -- the core's, which use it ~150 times. With that one item fixed the
-# ladder closes: measured with the two registrations commented out, teko2.o ==
-# teko3.o (and teko1.o == teko2.o).
+# Needs mc >= 0.15.10 (`ngen/MC_VERSION`): before it, `source_claim` hid the
+# prelude's `while`/`for` from the core sources once the dialect taught the same
+# lexeme (plano §70(f)); 0.15.10's TE_RULE fixed it and the ladder closes.
 #
 # The derived configs are written next to `ngen/mc.toml` (an entry path is
 # resolved against the CONFIG's own directory, so a config in a scratch
