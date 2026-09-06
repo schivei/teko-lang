@@ -288,7 +288,7 @@ i64 tk_ref_addr(i64 line, uptr fl, i64 pty) {
         set_pty(pty, av_ty_at(li));
         return tk_arr_addr(tk_id(name), av_ty_at(li), idx);
     }
-    set_pty(pty, 0 - 1);
+    set_pty(pty, tk_slv_find(name));              // higiene 2, item 2: a bare local's own declared type
     return tk_addr(name);
 }
 
@@ -346,6 +346,27 @@ void tk_ref_rewrite_assign(i64 n, i64 pn) {
     set_nd_a(n, store);
 }
 
+// higiene 2, item 2: a `ref`/`out` argument's own POINTEE against the
+// parameter's, IDENTICAL only -- C#'s own `ref`/`out` rule, narrower than
+// `tk_row_fits`'s derives/implements one (a `ref Square` slot does not widen
+// to hold a `ref Circle`, even were one to derive from the other): `ti != ei`
+// alone decides it, never `tk_row_fits`'s base-walk. Either pointee unknown
+// at PARSE TIME (a member/element ref, or a bare local `tk_slv_find` never
+// saw) is silently skipped, the same rule `tk_check_field_store` gives an
+// unknown source.
+void tk_ref_check_pointee(i64 pn, i64 a, i64 line, uptr fl) {
+    i64 pty = nd_type(pn);
+    i64 ti = tk_struct_by_ty(pty);
+    if (ti < 0) return;
+    i64 aty = tk_rfarg_pointee(a);
+    if (aty < 0) return;
+    i64 ei = tk_struct_by_ty(aty);
+    if (ei == ti) return;
+    uptr aname = type_name(aty);
+    if (ei >= 0) aname = sr_name_at(ei);
+    tk_reject_compat(aname, sr_name_at(ti), line, fl);
+}
+
 // a call to a name declared exactly ONCE in the unit (teko_default.tk's own
 // decl-count guard: an overloaded name is left to teko_over.tk's own
 // kind-aware match, run over every declaration together) -- every argument
@@ -370,6 +391,7 @@ void tk_ref_check_call(i64 n) {
                    tk_join(tk_join3("teko: argument ", tk_num(i + 1), " needs `"),
                            tk_join(tk_ref_kindname(pk), "` at the call site")));
         }
+        if (pk != TK_RP_NONE) tk_ref_check_pointee(pn, a, nd_line(a), nd_file(a));
         i = i + 1;
         a = nd_next(a);
     }
