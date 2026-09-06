@@ -3306,3 +3306,110 @@ explícita e serviço com chave (`[FromKeyedServices]`); `inject` em inicializad
    block would not be a name that function's own scope ever sees. An `inject` of a Singleton inside
    a lambda with NO `scope { }` open is untouched (confirmed by probe): nothing is ever prepended
    for it, so there is nothing to be unreachable.
+
+## 63. Assignment compatibility + K3 null guard + lambda statics (D226, 2026-09-06)
+
+Three independent items, one crumb, each landed with its own fixture proof; 45/45 in exit,
+`--dump-ast` of the 43 fixtures neither item touches byte-identical against `088bf795` except for
+the K3 guard's own additive lines (item 2, universal via `#include "../lib/rt.mc"`).
+
+1. **Item 1 -- C#'s implicit reference conversion, checked for real.** `Unrelated y = x;` used to
+   compile in silence; now `tk_row_fits` (teko_struct.mc, next to `tk_struct_of_expr`) answers
+   identical / class-derives-from / implements (`tk_impl_has` already flattens interface-extends-
+   interface and a base's own interfaces, so one call answers both), and `null` (teko_struct.mc's
+   `tk_is_null_lit`, the exact shape `tk_null` builds) fits any class/interface/struct/delegate/`T[]`
+   slot. `T[]`/delegate accept only their own identity (checked ahead of the derives/implements
+   rule). Two call sites, by TIMING, not by choice: **parse time** (`tk_check_field_store`,
+   teko_struct.mc) for a field/array-field store on a receiver already typed then -- `tk_struct_of_expr`
+   is the only oracle that exists yet, so an unknown-at-parse source (a call whose return the pass
+   will resolve) is silently skipped, never guessed at; **pass time** (`tk_check_compat`,
+   teko_typeof.mc, using the full `tk_ty_of` oracle) for `T x = e;`/`x = e;`/`return e;`
+   (teko_rc.mc's own `tk_rc_var`/`tk_rc_assign`/`tk_rc_return`, run BEFORE the `tk_is_counted` gate
+   that used to skip a `struct` target entirely), a deferred field/array-field store
+   (`tk_pend_field`'s two STORE branches, teko_typeof.mc), a heap-array element store (`tk_ha_store`,
+   teko_heaparr.mc, one choke point for local/global/compound), and a CALL's own arguments
+   (`tk_rc_call_args`, teko_rc.mc, hooked into `tk_rc_walk`) -- the last one needed NO new table at
+   all: `decl_param_type`, the core's own API, already answers by index for whatever `decl_find`
+   resolves, and by the time `tk_rc_pass` runs (registered LAST) every overload already carries its
+   final, unambiguous name (teko_over.mc's rename, teko_default.mc's fill, both ahead of it), so a
+   free function, a direct (non-virtual) method and a constructor's own allocator are all covered for
+   free -- a virtual/interface call (`callp`, never a name `decl_find` would know) is NOT, a
+   registered gap, arity still the only thing checked there. Argument-type checking is scoped to
+   "both sides a teko row" per the crumb's own hedge; the other four sites reject a scalar-typed
+   source too (`Point p = 5;`), since the target alone decides whether the check is in scope.
+   `tk_rc_pass`'s own gate widened from "the unit needs the reclaim" (`tk_rc_needed`, counted types
+   only) to `tk_rc_needed() || tk_compat_needed()` (`tk_nstruct > 0`) so a `struct`-only unit (no
+   class/interface/delegate/array at all) still gets the walk -- every RC-injecting function already
+   gated its OWN rewrite on `tk_is_counted`, so the walk is a no-op reshuffle (still byte-identical,
+   confirmed against `types_struct.tk`) everywhere the new check does not fire.
+   - **Two real bugs the new check surfaced, fixed at the root, not banded over.** (a) A struct's own
+     allocator (`tk_ctor`, teko_struct.mc) returns its `p` local -- declared `uptr`, the raw
+     `rt_alloc` result -- as the function's own struct-typed return; untagged, the oracle saw `uptr`
+     where the return type is the struct, and rejected every struct in the tree. Fixed by tagging the
+     returned identifier with the struct's own row (`tk_xt_add`), the exact same move `tk_new_fn`
+     (teko_class.mc, a class's own allocator) already made -- the struct path just never had it.
+     (b) A ternary/switch-expression's own hoisted temporary (`tk_tern_lower`, teko_ternary.mc) is
+     declared `i64 $t = 0;` ahead of the `if` that actually assigns it, `0` being a placeholder never
+     read before both branches overwrite it -- for a teko-typed arm (the ternary/switch coerces two
+     function names into one `Op`, `surface_lambda.tk`'s own `ternary_check`) that placeholder is now
+     `tk_null()` instead of a plain `i64` literal, matching the shape the new check already accepts.
+     Neither fix changes ANY existing fixture's behavior; the AST moves by exactly one node each
+     (`INT type=i64` -> `INT type=uptr`/a struct's own row tag), confirmed by `--dump-ast` diff.
+   - **A DI-resolved constructor argument (`tk_di_ctor_args`, teko_di.mc) needed the SAME tag,
+     with `pure` doing real work.** A Singleton/root-resolved `inject` becomes a call to a memoized
+     getter declared `uptr` (no type of its own to fall back on, unlike a Transient's own allocator
+     or a Scoped's own local, both already correctly typed); tagged `tk_xt_add(a, sv_cls_at(implsv),
+     sv_life_at(implsv) != TK_SVC_TRANSIENT)` -- the service's own class (not the parameter's key,
+     so the derives/implements rule still does the work when they differ), `pure` set to 1 for
+     anything that is NOT a fresh Transient allocation. Getting `pure` wrong here is not cosmetic:
+     the first cut tagged every branch `pure=0` (matching `tk_new_expr`'s own `new` convention) and
+     `surface_di.tk` failed at RUNTIME with "reference count below zero" -- the memoized getter hands
+     back a BORROWED reference (no `rc_inc` on a cache hit), and `tk_rc_own`'s `xt_pure_at` check is
+     exactly what tells the reclaim a value is borrowed regardless of whether its type is counted.
+   - **Fixture:** `surface_iface_inherit.tk` grows an `Animal`/`Dog` pair (D226's own probe) proving
+     derived-into-base ON TOP of the file's existing class-into-interface (`I2 i2 = q;`) and
+     interface-diamond (`IA a = bx;`) coverage; the AST of the 18 lines before it is untouched
+     (pure append, confirmed by `--dump-ast`). Rejections (unrelated class, un-implemented interface,
+     downcast, `T[]` of a different element, wrong-typed argument, wrong-typed return) confirmed by
+     probe outside `ngen/tests/` (deleted after verification, per this crumb's own instruction), not
+     committed.
+
+2. **Item 2 -- K3's own null-array guard.** `tk_arr_at` (`ngen/lib/rt.mc`) segfaulted on a `T[]`
+   local/field/global never assigned (`a == 0`, `ld64(a + 16)` reading offset 16 of address 0); one
+   guard line, `panic("index into a null array")`, ahead of the length load -- the same `exit(70)`
+   every other guard in this file already raises. Additive only: every one of the 42 fixtures that
+   `#include`s this file gains the SAME seven-line `IF`/`panic` block at the SAME position in its
+   `--dump-ast`, nothing else moves. Confirmed by probe (`i64[] xs; return xs[0];` -> exit 70,
+   outside `ngen/tests/`, not committed).
+
+3. **Item 3 -- a lambda's own body sees the program's STATICS, C#'s own rule.** `tk_lam_check_name`
+   (teko_deleg.mc) refused a global, a `const` or (in the one shape that actually reaches it, `&f`)
+   a free function exactly as it refused a genuine typo -- there is no hook over a top-level
+   declaration (teko_array.mc's own header explains why: `parse_top`, not `parse_stmt`), so the
+   answer was not knowable while the lambda's own body was still being read. Deferred instead of
+   guessed: a name none of the four existing checks places is recorded (`tk_lg_add`, a small
+   `lg_node` table) rather than refused on the spot, and `tk_deleg_pass` -- ALREADY the pass every
+   lambda-bearing unit runs (`tk_any_deleg`), with the whole unit's `N_GLOBAL` rows finally in the
+   tree -- resolves each one at its end (`tk_lam_resolve_globals`, a plain root scan for a matching
+   `N_GLOBAL`): found, it is a global, and an ordinary `N_IDENT` read/write already resolves it with
+   no rewrite needed (the core's own codegen looks a global up by symbol, lambda or not); not found,
+   the SAME "is not captured" message fires, at the SAME position, just later. A WRITE to a global
+   from inside a lambda (`counter = counter + 1;`) was already unchecked and already correct (an
+   `N_ASSIGN`'s own target name is never walked through `tk_lam_check_name` at all, only its RHS is)
+   -- confirmed by fixture, not fixed, because there was nothing broken there. `const` (a plain,
+   non-namespaced one) was already fine too: `def_add`'s `#define` is resolved by the core's own
+   `parse_primary` at the moment the token is read, lambda body or not, so it never reaches an
+   `N_IDENT` for this check to see in the first place. **Not implemented** (registered debt, the
+   crumb's own "?"): `use (g)` on a global still refuses with the generic "captures a local; this
+   name is not one" instead of a global-specific "globals are visible without use" -- doing that
+   would mean deferring `tk_lambda_use`'s OWN eager rejection, which feeds `lc_ty` (the capture
+   table's structural backbone) synchronously; a genuinely global-only wording was judged not worth
+   that risk for a cosmetic improvement C# does not even surface this way.
+   - **Fixture:** `surface_lambda.tk` gains `global_const_free_check` (item 16) -- a lambda with NO
+     `use (...)` at all that reads a global TWICE across two calls (proving it reads the LIVE value,
+     not a frozen one the way `use (k)` would), calls a free function, reads a `const`, and writes
+     the global back from inside a SECOND lambda, the write visible to the caller afterward. The
+     AST of the 15 checks before it is untouched (pure append, confirmed by `--dump-ast`); the one
+     unrelated line inside the file that DOES change (`ternary_check`'s own hoisted temporary) is
+     item 1's ternary fix, not this item's. Probe (a genuinely unknown name inside a lambda) confirms
+     the deferred rejection still fires, outside `ngen/tests/`, not committed.
