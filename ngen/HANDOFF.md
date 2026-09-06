@@ -272,9 +272,12 @@ done
 absoluto o módulo trata todo arquivo como "fora do projeto" e a checagem de `internal` fica
 cega — o CI pegou um defeito que a validação absoluta não via (D224).
 
-Hoje isso dá **18/18 em exit 42**. `ngen/mc.macos.toml`, os `ngen/mc.*.toml` transientes
-e `ngen/build/` **nunca se commitam**, e `ngen/mc.toml` fica **intacto** — alterá-lo
-quebra o CI.
+Hoje isso dá **45/45 em exit 42/70** (o número de fixtures cresceu desde que este texto foi
+escrito; o laço em si não mudou). `ngen/mc.macos.toml`, os `ngen/mc.*.toml` transientes
+e `ngen/build/` **nunca se commitam**, e `ngen/mc.toml` fica intacto por padrão — só o
+**crumb que o autoriza explicitamente** (S1, plano §64/§65: `[compiler]` ganhou `core`/
+`modules`) pode tocá-lo, e só as chaves que esse crumb nomeia. Editá-lo fora de um crumb
+autorizado quebra o CI.
 
 **O `mc` NÃO emite C.** Ele emite objeto nativo e linka; não existe passo de `gcc`
 sobre saída do compilador ensinado. Compile sempre por `mc build DIR --config FILE`
@@ -2052,6 +2055,30 @@ explícita, decoração/substituição de registro, serviço com chave (`[FromKe
   implementada, downcast, `T[]`/delegate de tipo diferente, argumento errado, retorno errado; item 2:
   índice em array nulo, exit 70; item 3: nome genuinamente desconhecido) rodados fora de
   `ngen/tests/` e descartados, não commitados.
+
+**S1 LANDADO** (D225, plano §64/§65 — auto-hospedagem etapa 1, "as partes em vez do bundle").
+`ngen/core_teko.mc` (novo) traz `<mc/core_machines>`/`<mc/core_writers>`/`<mc/core_build>`/
+`<mc/core_bundle>` + `main()` (`host_init`, os quatro `*_init`, `mc_build_init()` — S1 ainda o
+chama, D64.3 tira na S2 — e `mc_main`); `ngen/mc.toml` `[compiler]` ganhou `core = "<mc/core_min>"`
+e `modules = ["core_teko.mc", "teko.mc"]`. `<mc/core_pkg>`/`<mc/core_sandbox>` ficam de fora — nada
+sob `ngen/` chama `pkg`/`update`/`sandbox`. Medido no host macOS/aarch64, `mc` 0.15.5: binário
+**1 489 364 B** contra **1 588 681 B** do bundle inteiro (**−6,25 %**, bate a previsão do §64(b));
+`--dump-ast` das 45 fixtures **byte-idêntico** ao compilador da base `63e28f90` (`same=45 diff=0`
+— menos partes não muda a árvore de nenhuma); `mc limits ngen` `verdict ok` em toda tabela, sem
+`grew`, os números da compilação do próprio `teko.mc` MENORES (menos fonte no pré-scan, esperado);
+usage sem argumento perdeu as 5 linhas de `pkg`/`update`/`sandbox`, manteve as 6 de
+`mc`/`build`/`limits`/`sysroot`. `--entry-only` **45/45**. A derivação por perna do CI
+(`.github/workflows/ngen.yml`) foi conferida contra o `mc.toml` novo: o `awk`/`sed` preserva
+`[compiler]` (a diferença de espaçamento entre `out   = ` de `[project]`, 3 espaços, e
+`out     = ` de `[compiler]`, 5, é o que impede o `sed` de tocar o segundo) — nenhuma mudança em
+`ngen.yml`. Tabela completa em `docs/design/plano-ngen-entrega4.md` §65.
+
+**S1m LANDADO** (mesmo crumb): `ngen/scripts/measure.sh`, POSIX `sh`, dado o binário + o config
+imprime bytes, seções (`--dump-syms` sobre o `.mc` gerado, técnica de `scripts/check-parts.sh` do
+mc, sem nome de seção hardcoded — Mach-O/ELF/COFF diferem) e `mc limits DIR --config CONFIG`.
+Roda local hoje (`sh ngen/scripts/measure.sh ngen/build/mc-teko ngen/mc.macos.toml ngen`); ainda
+NÃO ligado ao CI (S4.3 decide isso). `ngen/mc.toml` é o **único** arquivo deste crumb que muda fora
+da adição de arquivos novos — a nota do §4 abaixo reflete essa autorização pontual.
 
 ## 5.1 Armadilhas já pagas (não repita)
 
