@@ -37,7 +37,10 @@
 #define TK_DGOBJSIZE 24                // vtable + count + code, no capture (K1)
 #define TK_MAXDGI 64                   // (delegate, function) pairs one unit wraps
 
-#define TK_MAXLAMCAP 8                 // `use (...)` names, one lambda
+#define TK_MAXLAMCAP 32                // `use (...)` names, summed across every lambda still in
+                                       // flight (higiene 2, item 6: a nested lambda's own captures
+                                       // share this table with every enclosing one's, unreleased
+                                       // until each returns) -- 8 per lambda nested four deep
 #define TK_MAXLAMREF 64                // lambdas that capture at least one name by reference
 #define TK_MAXLAMGLOB 64               // D226 compat crumb: lambda-body names a global read
                                        // might be, resolved once teko_array.tk's own `N_GLOBAL`
@@ -594,17 +597,28 @@ i64 tk_lam_taint_stmt(i64 n) {
 }
 
 // ---- `use (a, &b)`: the captures of the lambda being read right now ----
+// higiene 2, item 6: ONE table over the whole unit, not reset per lambda --
+// a lambda literal built INSIDE another one's own body (`new Op(...) use (k)
+// => new Op(...) use (k) => ...`) is fully finished (its own `use`, body walk
+// AND cleanup) before the ENCLOSING lambda's body-parse that contains it
+// even returns, so a hard reset to 0 at either end wiped out whatever the
+// outer lambda had already recorded. `tk_lc_base` is the CURRENT lambda's own
+// window into the table (`[tk_lc_base, tk_nlc)`), saved/restored around the
+// body exactly like `p_decl_name` a few lines below -- the table itself only
+// ever grows and shrinks like a stack, never truly clears until the
+// outermost lambda's own `tk_lambda_finish` returns.
 uptr lc_name[TK_MAXLAMCAP];
 i64  lc_byref[TK_MAXLAMCAP];
 i64  lc_ty[TK_MAXLAMCAP];
 i64  tk_nlc = 0;
+i64  tk_lc_base = 0;
 
 uptr lc_name_at(i64 i)  { return ld64(lc_name + i * 8); }
 i64  lc_byref_at(i64 i) { return ld64(lc_byref + i * 8); }
 i64  lc_ty_at(i64 i)    { return ld64(lc_ty + i * 8); }
 
 i64 tk_lc_dup(uptr name) {
-    i64 i = 0;
+    i64 i = tk_lc_base;
     loop {
         if (i >= tk_nlc) break;
         if (str_eq(lc_name_at(i), name)) return 1;
@@ -614,7 +628,7 @@ i64 tk_lc_dup(uptr name) {
 }
 
 i64 tk_lc_find(uptr name) {
-    i64 i = 0;
+    i64 i = tk_lc_base;
     loop {
         if (i >= tk_nlc) break;
         if (str_eq(lc_name_at(i), name)) return i;
@@ -769,10 +783,10 @@ void tk_lam_walk(i64 n) {
 // makes the oracle answer the row's own type and the coercion a no-op.
 i64 tk_lambda_prologue(uptr envname) {
     i64 pre = 0;
-    i64 i = 0;
+    i64 i = tk_lc_base;
     loop {
         if (i >= tk_nlc) break;
-        i64 addr = tk_bin(K_ADD, tk_id(envname), tk_int(24 + 8 * i));
+        i64 addr = tk_bin(K_ADD, tk_id(envname), tk_int(24 + 8 * (i - tk_lc_base)));
         if (lc_byref_at(i)) {
             pre = list_append(pre, tk_var(TY_UPTR, tk_lam_refaddr(i), tk_call("ld64", addr)));
         } else {
@@ -790,11 +804,11 @@ i64 tk_lambda_prologue(uptr envname) {
 // address, never owned, and the code pointer/vtable carry no reference
 i64 tk_lambda_release_fn(uptr relname, i64 objsize) {
     i64 st = 0;
-    i64 i = 0;
+    i64 i = tk_lc_base;
     loop {
         if (i >= tk_nlc) break;
         if (!lc_byref_at(i) && tk_is_counted(lc_ty_at(i))) {
-            i64 addr = tk_bin(K_ADD, tk_id(tk_this_name()), tk_int(24 + 8 * i));
+            i64 addr = tk_bin(K_ADD, tk_id(tk_this_name()), tk_int(24 + 8 * (i - tk_lc_base)));
             st = list_append(st, tk_stmt(tk_call("rc_dec", tk_call("ld64", addr))));
         }
         i = i + 1;
@@ -809,7 +823,7 @@ i64 tk_lambda_release_fn(uptr relname, i64 objsize) {
 // INSTANT, the "frozen copy" D221 decision 20 asks a by-value capture for
 i64 tk_lambda_alloc_params() {
     i64 prs = 0;
-    i64 i = 0;
+    i64 i = tk_lc_base;
     loop {
         if (i >= tk_nlc) break;
         i64 pty = TY_UPTR;
@@ -829,11 +843,11 @@ i64 tk_lambda_alloc_stmts(uptr vtname, uptr relname, uptr lamname, i64 objsize) 
     st = list_append(st, tk_stmt(tk_call2("st64", tk_id("p"), tk_id(vtname))));
     st = list_append(st, tk_stmt(tk_call2("st64", tk_bin(K_ADD, tk_id("p"), tk_int(8)), tk_int(1))));
     st = list_append(st, tk_stmt(tk_call2("st64", tk_bin(K_ADD, tk_id("p"), tk_int(16)), tk_addr(lamname))));
-    i64 i = 0;
+    i64 i = tk_lc_base;
     loop {
         if (i >= tk_nlc) break;
         uptr pname = tk_join("p", tk_num(i));
-        i64 addr = tk_bin(K_ADD, tk_id("p"), tk_int(24 + 8 * i));
+        i64 addr = tk_bin(K_ADD, tk_id("p"), tk_int(24 + 8 * (i - tk_lc_base)));
         if (lc_byref_at(i)) {
             st = list_append(st, tk_stmt(tk_call2("st64", addr, tk_id(pname))));
         } else {
@@ -879,7 +893,8 @@ uptr tk_lambda_gensym(uptr base) {
 // the rest of that declaration's body -- `tk_taint_owner()`'s own bug.
 i64 tk_lambda_finish(i64 si, uptr name, uptr saved, i64 prs, i64 line, uptr fl) {
     tk_lambda_check_params(si, prs, line, fl);
-    tk_nlc = 0;
+    i64 saved_lc_base = tk_lc_base;               // higiene 2, item 6: a stack, not a reset
+    tk_lc_base = tk_nlc;
     if (tk_word("use")) tk_lambda_use(line, fl);
     p_expect(K_ARROW, "expected => after the lambda parameters");
     i64 ret = dg_ret_at(si);
@@ -903,7 +918,7 @@ i64 tk_lambda_finish(i64 si, uptr name, uptr saved, i64 prs, i64 line, uptr fl) 
     tk_lam_walk(nd_b(f));
     tk_nscope = 0;
     top_add(f);
-    i64 objsize = 24 + 8 * tk_nlc;
+    i64 objsize = 24 + 8 * (tk_nlc - tk_lc_base);
     uptr vtname = tk_join(name, "__vt");
     uptr relname = tk_join(name, "__release");
     uptr allocname = tk_join(name, "__new");
@@ -912,7 +927,7 @@ i64 tk_lambda_finish(i64 si, uptr name, uptr saved, i64 prs, i64 line, uptr fl) 
     top_add(tk_lambda_alloc_fn(si, allocname, vtname, relname, name, objsize));
     i64 hasref = 0;
     i64 args = 0;
-    i64 i = 0;
+    i64 i = tk_lc_base;
     loop {
         if (i >= tk_nlc) break;
         if (lc_byref_at(i)) { args = list_append(args, tk_addr(lc_name_at(i))); hasref = 1; }
@@ -922,7 +937,8 @@ i64 tk_lambda_finish(i64 si, uptr name, uptr saved, i64 prs, i64 line, uptr fl) 
     if (hasref) tk_lamref_add(allocname);
     i64 call = tk_call(allocname, args);
     tk_xt_add(call, si, 0);
-    tk_nlc = 0;
+    tk_nlc = tk_lc_base;                          // higiene 2, item 6: pop THIS lambda's own window
+    tk_lc_base = saved_lc_base;
     p_set_decl_name(saved);
     return call;
 }
