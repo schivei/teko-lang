@@ -1,0 +1,309 @@
+// surface_datetime_kind.tk -- `DateTimeKind` as a real `enum`
+// (docs/specs/enum.md § 8, N2c, D48). The surface of `tests/surface_datetime.tk`
+// does not move -- `d.Kind != DateTimeKind.Utc` is spelled the same either way,
+// and that fixture is byte-identical to what C2 landed -- so what this one
+// proves is everything the ALIAS could not do:
+//
+//   DateTimeKind k = d.Kind;           the property answers the enum, not an i32
+//   switch (k) { case DateTimeKind.Utc: ... }   a qualified member as a label
+//   (DateTimeKind) 1 == DateTimeKind.Utc        C#'s explicit cast in
+//   new DateTime(t, k)                 the enum in a constructor argument,
+//                                      from a variable and from a member
+//   d.Kind.ToString()                  "Utc", through the deferred `.`
+//   DateTimeKind.Parse("Local")        the statics every enum has (N2b)
+//   DateTimeKind.TryParse / IsDefined
+//   c ? DateTimeKind.Utc : ...         a ternary over two enum arms
+//   () use (k) => k                    a lambda's by-value capture
+//   new DateTime(t, k)                 ...with `k` a parameter, a forward
+//                                      call's return, a field of a parameter,
+//                                      a global or an overloaded call -- the
+//                                      shapes the PARSER cannot type, whose
+//                                      check the pass makes (D48)
+//
+// The refusals the tightening buys -- `i64 n = d.Kind;`, `DateTimeKind k = 7;`,
+// `new DateTime(t, 7)`, `d.Kind + DateTimeKind.Utc`, and the same `i64` in the
+// kind position through a parameter, a field, a return or an array element --
+// have no harness (D33) and are written down in docs/reference/diagnostics.md.
+//
+// expect-exit: 42
+
+#include "../lib/time.tk"
+
+delegate DateTimeKind KindOp();
+
+// the shapes the PARSER cannot type in a constructor argument, each reaching
+// the enum column through the deferred check (D48, Copilot on #697). Their
+// `i64` twins are refused, in docs/reference/diagnostics.md. What defers is
+// measured, not assumed -- a receiver or an array the parser CAN type carries
+// its type into the node and never reaches the deferred table at all, which is
+// why the field below is read off a PARAMETER and `utc_kind` is declared after
+// `main`:
+//
+//   a parameter               `k` in `at_kind`, and an OPERATOR over one
+//                             (`k | DateTimeKind.Utc` in `at_bitor`)
+//   a forward call's return   `utc_kind()`, declared at the bottom of this file
+//   a field of a parameter    `s.kind` in `at_field`, a deferred `.`
+//   a global                  `g_kind`, in scope in every body
+//   an overloaded call        `kpick`/`tpick`, whose signature is picked by
+//                             `tk_over_pass`, two passes after the walk that
+//                             would otherwise have judged the argument
+//
+// The float column is the same call one row over, and there the picked
+// signature decides the CONVERSION and not only the check: `fpick` is declared
+// float-first so an integer return the guess would not have widened is widened
+// here (`TimeSpan.FromHours`, D48).
+//
+// A LOCAL `DateTimeKind` array's element (`ks[0]` in `main`) does NOT defer:
+// the load carries the element type the declaration gave it, so the parser
+// answers for it. It is its `i64` twin that loses its type at parse (a raw
+// `ld64`) and is refused by the deferred check, in diagnostics.md.
+struct Stamp {
+    public DateTimeKind kind;
+}
+
+DateTime at_kind(i64 t, DateTimeKind k) { return new DateTime(t, k); }
+
+// the receiver of the `.` is a PARAMETER, so the field load is a placeholder
+// the oracle's own pass rebuilds -- untyped where the argument is written
+DateTime at_field(i64 t, Stamp s) { return new DateTime(t, s.kind); }
+
+// a global is in scope in every body, and its declared type is what the oracle
+// answers for it (teko_array.tk's own `tk_ty_global`)
+DateTimeKind g_kind = DateTimeKind.Local;
+
+DateTime at_global(i64 t) { return new DateTime(t, g_kind); }
+
+// two names, two signatures each, and the return type of the signature the
+// ARGUMENTS pick is the only true answer -- in both declaration orders, and in
+// the ticks position as well as the kind one
+DateTimeKind kpick(i64 a) { return DateTimeKind.Utc; }
+i64 kpick(i64 a, i64 b) { return 9; }
+
+i64 tpick(i64 a) { return 7; }
+DateTimeKind tpick(i64 a, i64 b) { return DateTimeKind.Local; }
+
+// ...and a pair over the FLOAT column, where the picked signature decides the
+// CONVERSION and not only the check: the float overload is declared first so
+// the guess would have skipped the widening the integer one needs
+f64 fpick(i64 a, i64 b) { return 2.5; }
+i64 fpick(i64 a) { return 2; }
+
+// ...and a pair whose picked signature answers a PRIMITIVE, declared `i64`
+// FIRST: before D49 the operator pass read two integers where the program
+// wrote two dates; now the oracle asks the overload table, so the pass sees
+// the two `DateTime`s on its first visit and lowers the row's own operator
+i64 dpick(i64 a, i64 b) { return 0; }
+DateTime dpick(i64 a) { return new DateTime(a, DateTimeKind.Utc); }
+
+i64 epick(i64 a, i64 b) { return 0; }
+DateTime epick(i64 a) { return new DateTime(a); }
+
+// an argument that is an EXPRESSION over the shapes above: a bitwise operator
+// keeps the enum (docs/specs/enum.md § 4), so `k | DateTimeKind.Utc` on a
+// parameter is as legal in this column as `k` is -- and it is judged at the one
+// point the deferred check now has, after the overload pick and under the scope
+// `k` is read in (D48, Copilot on #697, fifth pass)
+DateTime at_bitor(i64 t, DateTimeKind k) { return new DateTime(t, k | DateTimeKind.Utc); }
+
+DateTime at_bitand(i64 t, DateTimeKind k) { return new DateTime(t, k & DateTimeKind.Local); }
+
+// `~` answers the enum too, and twice over is the value itself -- once is
+// always negative and is what the run-time kind guard is for
+DateTime at_twiddle(i64 t, DateTimeKind k) { return new DateTime(t, ~~k); }
+
+// a member call whose RECEIVER is a parameter: the `.` is a placeholder the
+// oracle's own pass rebuilds and registers a type for, and the float column
+// then wraps that very node in the cast the picked signature asks for. The
+// registration moves with the value (teko_struct.tk's `tk_xt_move`); left
+// behind on the wrapper it made the last pass widen a second time, `(f64)`
+// over `(f64)` (D48, Copilot on #697, fifth pass).
+class Hours {
+    i64 v;
+    public Hours(i64 v) { this.v = v; }
+    public i64 Get() { return this.v; }
+}
+
+TimeSpan at_member(Hours h) { return TimeSpan.FromHours(h.Get()); }
+
+// the receiver the PARSER cannot type: a parameter, deferred to the oracle's
+// own pass and lowered there against the very same row
+DateTimeKind kind_of(DateTime d) { return d.Kind; }
+
+// an enum parameter and an enum return, over the library's own type
+DateTimeKind flip(DateTimeKind k) {
+    if (k == DateTimeKind.Utc) return DateTimeKind.Local;
+    return DateTimeKind.Utc;
+}
+
+// a `switch` over the three members, read from a local copy of the parameter
+i64 rank(DateTimeKind k) {
+    DateTimeKind c = k;
+    i64 r = 0;
+    switch (c) {
+        case DateTimeKind.Unspecified:
+            r = 10;
+            break;
+        case DateTimeKind.Utc:
+            r = 20;
+            break;
+        case DateTimeKind.Local:
+            r = 30;
+            break;
+        default:
+            r = 40;
+            break;
+    }
+    return r;
+}
+
+i64 main() {
+    i64 t = 638447616000000000;
+    DateTime utc = new DateTime(t, DateTimeKind.Utc);
+    DateTime local = new DateTime(t, DateTimeKind.Local);
+    DateTime plain = new DateTime(t);
+
+    // ---- the property answers the enum ----
+    DateTimeKind k = utc.Kind;
+    if (k != DateTimeKind.Utc) return 1;
+    if (local.Kind != DateTimeKind.Local) return 2;
+    if (plain.Kind != DateTimeKind.Unspecified) return 3;
+    if (k == DateTimeKind.Local) return 4;
+
+    // ...and so does a parameter's, resolved by the pass
+    if (kind_of(utc) != DateTimeKind.Utc) return 5;
+    if (kind_of(plain) != DateTimeKind.Unspecified) return 6;
+
+    // ---- C#'s explicit cast, both ways ----
+    if ((DateTimeKind) 1 != DateTimeKind.Utc) return 7;
+    if ((DateTimeKind) 0 != DateTimeKind.Unspecified) return 8;
+    if ((i64) DateTimeKind.Local != 2) return 9;
+    if ((i64) (utc.Kind) != 1) return 10;    // the cast binds before `.`, so the parentheses are the surface
+
+    // ---- the enum in a constructor argument, from a variable ----
+    DateTime again = new DateTime(t, k);
+    if (again.Kind != DateTimeKind.Utc) return 11;
+    if (again.Ticks != t) return 12;
+    DateTimeKind lk = local.Kind;
+    DateTime relocal = new DateTime(t, lk);
+    if (relocal.Kind != DateTimeKind.Local) return 13;
+    // ...and from another date's own property, in one expression
+    DateTime copy = new DateTime(t, utc.Kind);
+    if (copy.Kind != DateTimeKind.Utc) return 14;
+
+    // the arithmetic keeps the Kind and the comparison ignores it, exactly as
+    // C2 left them -- now typed by the enum
+    if (utc.AddDays(1).Kind != DateTimeKind.Utc) return 15;
+    if (local.Date.Kind != DateTimeKind.Local) return 16;
+    if (!(utc == local)) return 17;
+
+    // ---- an enum parameter, an enum return, a switch ----
+    if (flip(DateTimeKind.Utc) != DateTimeKind.Local) return 18;
+    if (flip(DateTimeKind.Local) != DateTimeKind.Utc) return 19;
+    if (flip(utc.Kind) != DateTimeKind.Local) return 20;
+    if (rank(DateTimeKind.Unspecified) != 10) return 21;
+    if (rank(utc.Kind) != 20) return 22;
+    if (rank(local.Kind) != 30) return 23;
+    if (rank((DateTimeKind) 7) != 40) return 24;
+
+    // ---- the text side every enum has (N2b) ----
+    if (!tk_str_eq(utc.Kind.ToString(), "Utc")) return 25;
+    if (!tk_str_eq(local.Kind.ToString(), "Local")) return 26;
+    if (!tk_str_eq(plain.Kind.ToString(), "Unspecified")) return 27;
+    if (!tk_str_eq(k.ToString(), "Utc")) return 28;
+    if (!tk_str_eq(DateTimeKind.Local.ToString(), "Local")) return 29;
+    if (!tk_str_eq(((DateTimeKind) 7).ToString(), "7")) return 30;
+
+    if (DateTimeKind.Parse("Local") != DateTimeKind.Local) return 31;
+    if (DateTimeKind.Parse("Unspecified") != DateTimeKind.Unspecified) return 32;
+    DateTimeKind out_k = DateTimeKind.Unspecified;
+    if (!DateTimeKind.TryParse("Utc", out out_k)) return 33;
+    if (out_k != DateTimeKind.Utc) return 34;
+    if (DateTimeKind.TryParse("Nope", out out_k)) return 35;
+    if (out_k != DateTimeKind.Utc) return 36;              // untouched on failure
+    if (!DateTimeKind.IsDefined(2)) return 37;
+    if (DateTimeKind.IsDefined(7)) return 38;
+
+    // ---- a ternary over two enum arms, and a by-value capture ----
+    i64 flag = 1;
+    DateTimeKind picked = flag == 1 ? DateTimeKind.Utc : DateTimeKind.Local;
+    if (picked != DateTimeKind.Utc) return 39;
+    DateTimeKind picked2 = utc.Kind == DateTimeKind.Utc ? local.Kind : plain.Kind;
+    if (picked2 != DateTimeKind.Local) return 40;
+
+    DateTimeKind cap = local.Kind;
+    KindOp cap_f = () use (cap) => cap;
+    if (cap_f() != DateTimeKind.Local) return 41;
+
+    // ---- the argument the parser cannot type, and the pass can ----
+    DateTime from_param = at_kind(t, DateTimeKind.Local);
+    if (from_param.Kind != DateTimeKind.Local) return 43;
+    if (from_param.Ticks != t) return 44;
+    DateTime from_ret = new DateTime(t, utc_kind());
+    if (from_ret.Kind != DateTimeKind.Utc) return 45;
+    Stamp st = new Stamp();
+    st.kind = DateTimeKind.Local;
+    DateTime from_field = at_field(t, st);
+    if (from_field.Kind != DateTimeKind.Local) return 46;
+    DateTimeKind ks[2];
+    ks[0] = DateTimeKind.Utc;
+    DateTime from_elem = new DateTime(t, ks[0]);     // typed by the element itself
+    if (from_elem.Kind != DateTimeKind.Utc) return 47;
+    DateTime from_local_field = new DateTime(t, st.kind);   // typed by the local
+    if (from_local_field.Kind != DateTimeKind.Local) return 48;
+
+    // ...a global, which the oracle answers for by its declaration
+    if (at_global(t).Kind != DateTimeKind.Local) return 49;
+
+    // ...and an overloaded call, whose return type is the PICKED signature's:
+    // `kpick`'s enum overload is declared first and `tpick`'s second, and the
+    // `i64` overload of `kpick` lands on the TICKS position, which takes the
+    // value under its own type
+    DateTime from_over = new DateTime(t, kpick(1));
+    if (from_over.Kind != DateTimeKind.Utc) return 50;
+    DateTime from_over2 = new DateTime(t, tpick(1, 2));
+    if (from_over2.Kind != DateTimeKind.Local) return 51;
+    DateTime over_ticks = new DateTime(kpick(1, 2));
+    if (over_ticks.Ticks != 9) return 52;
+    if (over_ticks.Kind != DateTimeKind.Unspecified) return 53;
+
+    // ...and the same call on a FLOAT column, where the picked signature
+    // decides the conversion itself (D48, Copilot on #697, fourth pass): an
+    // integer return is widened where it stands, a float one crosses
+    // untouched, and both declaration orders are here.
+    if (TimeSpan.FromHours(kpick(1, 2)).Ticks != 324000000000) return 54;
+    if (TimeSpan.FromHours(tpick(1)).Ticks != 252000000000) return 55;
+    if (TimeSpan.FromHours(fpick(1)).Ticks != 72000000000) return 56;
+    if (TimeSpan.FromHours(fpick(1, 2)).Ticks != 90000000000) return 57;
+
+    // ...and an argument that is an OPERATOR over one of those shapes, which is
+    // the same column reached through an `N_BINARY`/`N_UNARY` instead of a bare
+    // name -- accepted here because a bitwise operator over an enum answers the
+    // enum, and judged at the same one point (D48, Copilot on #697, fifth pass)
+    if (at_bitor(t, DateTimeKind.Unspecified).Kind != DateTimeKind.Utc) return 58;
+    if (at_bitand(t, DateTimeKind.Local).Kind != DateTimeKind.Local) return 59;
+    if (at_twiddle(t, DateTimeKind.Local).Kind != DateTimeKind.Local) return 60;
+    if (new DateTime(t, utc_kind() | DateTimeKind.Unspecified).Kind != DateTimeKind.Utc) return 61;
+
+    // ...and the float column under a member call the parser cannot type: one
+    // cast, not two
+    Hours hrs = new Hours(2);
+    if (at_member(hrs).Ticks != 72000000000) return 62;
+
+    // ...and an operator over an OVERLOADED call, typed by the pick and not
+    // by the first declaration of the name (D49). `kpick`'s enum overload is
+    // what `kpick(1)` calls, so the operator pass sees the enum on its first
+    // visit and the bitwise operator answers the enum the column asks for...
+    if (new DateTime(t, kpick(1) | DateTimeKind.Unspecified).Kind != DateTimeKind.Utc) return 63;
+
+    // ...and here the pick answers a PRIMITIVE the operator pass would have
+    // read as an `i64` before D49, subtracting the raw eight bytes and carrying
+    // the two `Kind` bits into the `TimeSpan` (`1 << 62` ticks); now it sees
+    // the two `DateTime`s and lowers `DateTime - DateTime`, which masks them off
+    if (TimeSpan.FromTicks(2).CompareTo(dpick(3) - epick(1)) != 0) return 64;
+
+    return 42;
+}
+
+// declared AFTER `main` on purpose: the call above is written before any
+// declaration of the name exists, so neither oracle types it at parse
+DateTimeKind utc_kind() { return DateTimeKind.Utc; }

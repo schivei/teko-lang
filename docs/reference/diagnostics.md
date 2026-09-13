@@ -349,6 +349,12 @@ messages reuse the wordings a declared type already gets; only a handful are its
   operand of an operator over a primitive is an expression the oracle cannot type, such as
   an array element. Bind it to a local first; a primitive operand is exactly where leaving
   the node to the core's raw arithmetic would answer a wrong number.
+- `"teko: the type of this argument is not known here"` — the same rule one position over:
+  an argument landing on a parameter of primitive or `enum` type, in a row of the member
+  table, whose type nothing can tell even after the oracle has run — a local array's
+  element (`new DateTime(t, a[0])`, `d.CompareTo(a[0])`) is today's one shape. That
+  position converts with a cast, so an unread value would cross under the column's name
+  instead of being refused. Bind it to a local first.
 - `"teko: this primitive has no constructor"` — `new` on a primitive whose table declares
   no constructor row. `TimeSpan` declares one, so nothing in v0.4.0 reaches this; it is the
   mechanism's own guard for the primitives the specs still have coming.
@@ -365,8 +371,174 @@ messages reuse the wordings a declared type already gets; only a handful are its
   `Today`: the three need a wall clock, which is one symbol per operating system and `mc`'s
   to give ([the spec](../specs/datetime.md) § 8). The member is named by the table so that
   the site says so, instead of reading as a member nobody declared.
-- `"teko: unknown static member of DateTimeKind"` — completed by the member: the three
-  values are `Unspecified`, `Utc` and `Local`.
+### `DateTimeKind`, since it became an `enum`
+
+`DateTimeKind` is an ordinary `enum` declared in `lib/time.tk` (N2c), not a compiler
+registration, so it refuses what [every enum refuses](#enums) and under the same wordings.
+Four of them are what the crumb bought, and each used to compile:
+
+```teko
+// no-run
+#include "../lib/time.tk"
+
+i64 main() {
+    DateTime d = new DateTime(1, DateTimeKind.Utc);
+    i64 n = d.Kind;              // teko: a value of type DateTimeKind does not convert to i64
+    DateTimeKind k = 7;          // teko: a value of type i64 does not convert to DateTimeKind
+    DateTime e = new DateTime(1, 7);   // teko: a value of type i64 does not convert to DateTimeKind
+    i64 s = d.Kind + DateTimeKind.Utc; // teko: no operator `+` takes these operands
+    return 0;
+}
+```
+
+**The same refusal when the value's type is only the PASS's to tell.** The constructor's
+kind argument converts with a cast, so an argument the parser cannot type used to cross as
+the underlying `i64` and reach the run-time kind guard instead; the check is deferred to
+the pass now, and every one of these is a compile-time refusal (D48, the review finding on
+[#697](https://github.com/teko-org/teko-lang/pull/697)):
+
+```teko
+// no-run
+#include "../lib/time.tk"
+
+struct S { public i64 k; }
+
+i64 seven() { return 7; }
+DateTime from_param(i64 k) { return new DateTime(1, k); }
+                             // teko: a value of type i64 does not convert to DateTimeKind
+
+i64 main() {
+    S s = new S();
+    s.k = 7;
+    DateTime a = new DateTime(1, s.k);      // teko: a value of type i64 does not convert to DateTimeKind
+    DateTime b = new DateTime(1, seven());  // teko: a value of type i64 does not convert to DateTimeKind
+    i64 arr[2];
+    arr[0] = 7;
+    DateTime c = new DateTime(1, arr[0]);   // teko: the type of this argument is not known here
+    return 0;
+}
+```
+
+**And an argument that is a CALL is judged by the signature the ARGUMENTS pick.** A name
+may carry more than one, and the symbol a site calls is written two passes after the walk
+that would otherwise judge the argument, so the check waits for it — in both declaration
+orders, and with no wording of its own:
+
+```teko
+// no-run
+#include "../lib/time.tk"
+
+DateTimeKind pick(i64 a) { return DateTimeKind.Utc; }
+i64 pick(i64 a, i64 b) { return 7; }
+
+i64 main() {
+    DateTime d = new DateTime(1, pick(1, 2));
+    // teko: a value of type i64 does not convert to DateTimeKind
+    return 0;
+}
+```
+
+`new DateTime(1, pick(1))` in that same program is accepted, and so is the mirror pair —
+an `i64` overload landing on the ticks position of a name whose other overload answers the
+enum. What decides is the overload, never the first declaration of the name.
+
+**A FLOAT position of a primitive row waits for that pick too**, because there the picked
+signature decides the conversion and not only the check: an integer return is widened to
+the float the lowering symbol declares (`TimeSpan.FromHours(2)` is `FromHours(2.0)`) and
+anything else is not, so a guess would write the wrong node and then hide the argument
+behind it. Deciding it late is what makes this a refusal instead of a value read as a
+mantissa (D48, the fourth review pass on
+[#697](https://github.com/teko-org/teko-lang/pull/697)):
+
+```teko
+// no-run
+#include "../lib/time.tk"
+
+i64 pick(i64 a) { return a; }
+DateTimeKind pick(i64 a, i64 b) { return DateTimeKind.Utc; }
+
+i64 main() {
+    TimeSpan t = TimeSpan.FromHours(pick(1, 2));
+    // teko: a value of type DateTimeKind does not convert to f64
+    return 0;
+}
+```
+
+`TimeSpan.FromHours(pick(1))` in that same program is accepted and widened, in either
+declaration order, and an overload that answers a float of its own crosses with no cast at
+all.
+
+**An OPERATOR over one of those shapes is judged the same way**, because a bitwise
+operator over an enum answers the enum ([enum.md](../specs/enum.md) § 4): `k |
+DateTimeKind.Utc` on a `DateTimeKind` parameter is as legal in the kind position as `k` is,
+and the `i64` twin is refused with the type it really has rather than with "not known
+here":
+
+```teko
+// no-run
+#include "../lib/time.tk"
+
+DateTime f(i64 x) { return new DateTime(1, x | 1); }
+                    // teko: a value of type i64 does not convert to DateTimeKind
+```
+
+**...and the operator is judged on the PICK, wherever it is written.** The type of a call
+to an overloaded name is the return type of the signature its own arguments choose, and the
+oracle every pass asks answers that and not the first declaration of the name (D49, the
+seventh review pass on [#697](https://github.com/teko-org/teko-lang/pull/697)). An enum
+takes no integer operand ([enum.md](../specs/enum.md) § 4), so this is refused in a
+primitive row's argument and outside one alike:
+
+```teko
+// no-run
+#include "../lib/time.tk"
+
+i64 pick(i64 a, i64 b) { return 7; }
+DateTimeKind pick(i64 a) { return DateTimeKind.Utc; }
+
+i64 main() {
+    DateTime d = new DateTime(1, pick(1) + 1);
+    // teko: no operator `+` takes these operands
+    DateTimeKind k = pick(1) + 1;
+    // teko: no operator `+` takes these operands
+    return 0;
+}
+```
+
+The same refusal covers `pick(1) - 1`, `pick(1) * 2`, `1 + pick(1)`, the unary `-pick(1)`
+and the unary `+pick(1)` — `+` is the identity over a number and the identity over nothing
+else, so an enum operand refuses it where an `i64` one erases it. `pick(1) |
+DateTimeKind.Utc`, which a bitwise operator over an enum makes LEGAL, is accepted in that
+same program: it is the enum the pick answers on both sides, in either declaration order.
+A PRIMITIVE the first declaration hid is lowered to its own row rather than run raw:
+`TimeSpan.FromTicks(2).CompareTo(dpick(3) - epick(1))` on two `DateTime`-returning overloads
+subtracts through `lib/time.tk` — `Kind` bits masked, overflow checked — where the core's
+raw `-` carried the two top bits into the `TimeSpan`.
+
+A GLOBAL is accepted wherever its declaration says the enum: `DateTimeKind g =
+DateTimeKind.Utc;` at the top of a file and `new DateTime(t, g)` inside a function is the
+enum in the enum's own position. A global is in scope in every body, so its declared type
+is what the check reads, exactly as a local's is.
+
+The mirror holds as well: a `DateTimeKind` in the `i64` position of the same constructor —
+`new DateTime(k, DateTimeKind.Utc)` with `k` of enum type — is
+`teko: a value of type DateTimeKind does not convert to i64`. That position needs no cast,
+so it was never the leak; it is checked against the declaration itself.
+
+`(DateTimeKind) 7` is still accepted — an explicit cast into an enum is C#'s own, and the
+value is caught at run time by the range check of `tk_dt_from_ticks_kind` (`teko: a date
+kind is out of range`, exit 70) if it reaches a constructor.
+
+**A program that forgot `#include "time.tk"` is no longer told which file it forgot.** The
+name belongs to the library file now, so `DateTimeKind.Utc` without the include reaches
+`teko: unknown member: Utc` and `DateTimeKind k;` reaches the core's own `expected ; after
+expression`, where the old registration answered `teko: DateTimeKind needs #include
+"time.tk" before it is used`. `DateTime` and `TimeSpan` keep that refusal, because they are
+compiler registrations; the trade is [D48](../../DECISION_LOG.md)'s.
+
+The message `"teko: unknown static member of DateTimeKind"` is gone with the handler that
+raised it: a member the enum does not declare now reads as
+`teko: DateTimeKind has no member Nope`, the wording every enum shares.
 
 The three panics `lib/time.tk` raises for a `TimeSpan` at RUN time (`a time span
 overflowed`, `a time span divided by zero`, `a time span is out of range`) and the eleven it
@@ -526,6 +698,13 @@ Every one of these is [nullable.md](nullable.md)'s.
 - `"teko: a nullable of a nullable is not taught"` — `T??`, and `T[]??`.
 - `"teko: a raw pointer has no nullable"` — `uptr?`, `ptr?`, `str?`. `0` is an ordinary
   value of a raw pointer, and `null` already lands in one.
+- `"teko: a global does not hold a nullable box"` — completed by the global's own name: a
+  GLOBAL declared `T?` over a VALUE (`i64? n;` at the top of a file). The box that type
+  promises is built by the rc pass out of the SCOPE a local lives in, and a global has
+  none, so the slot would hold the bare value and every read through it would follow it as
+  a pointer. Declare the global `T` and a local `T?`, or keep the state in a class. A `T?`
+  over a REFERENCE is a global like any other — its handle IS the pointer — and is read,
+  written, `.Value`d and `??`d exactly as a local is (D48).
 - `"teko: void? is not a type"` — `void?`.
 - `"teko: a nullable is not a generic argument yet"` — `Box<Cell?>`. A type argument
   travels as a spelling and `Cell?` is not one the lexer can form.
@@ -662,6 +841,22 @@ Every one of these is [nullable.md](nullable.md)'s.
 - ``"teko: `main` takes one signature"`` — the entry point is not overloaded.
 - ``"teko: an `extern` name owns its symbol and cannot be overloaded"`` — an `extern` keeps
   the C symbol.
+- `"teko: the name is the compiler's own"` — completed by the name: a top-level declaration
+  of the program's own carries a symbol some generator writes — `tkarr_new_i64`,
+  `tkarr_put_i64` (a `params T[]` or a `new T[n]`), `tk_nl_ck`, `tk_nl_new`,
+  `tk_nl_box_i64`, `tk_nl_dflt`, `tk_nl_vt` (a `T?`), a class's own `Name__vt`, an enum's
+  `Name__names`, and every symbol a type declaration lowers into: a method's `point_area`
+  and a constructor's `point_ctor__i64`, a property accessor's `square_get_Side` /
+  `square_set_Side`, a struct's own allocator `stamp_new`, a static field's global
+  `stamp_made`, a service's `svc_di_slot` / `svc_di_get`, and a generic instance's
+  `box__circle__2_cap`. The two would reach the linker as one symbol and a call site would
+  pick whichever table answered first. Only the EXACT name a generator wrote is taken, and
+  only against a declaration the compiler did not write: no prefix is reserved, so
+  `tkarray`, `tk_nl_boxer`, `point_areas` and `pointarea` are a program's own names like any
+  other. Rename the declaration. A function a `namespace` mangles (`geo__area` out of
+  `namespace geo { i64 area() }`) is NOT one of these: the program wrote that declaration,
+  and a program that also writes `geo__area` at top level reaches the core's own
+  `function declared twice`.
 - `"teko: cannot take the address of an overloaded function"` — `&f` needs one symbol.
 - `"teko: an overloaded call outside a function body has no arguments to resolve it"` — a
   call in a global initializer has no site to type.
@@ -764,6 +959,7 @@ truncation; the fix is to split the unit.
 | `"teko: too many local arrays"` | 1024 declarations in scope |
 | `"teko: too many global arrays"` | 512 in one source |
 | ``"teko: too many global `T[]` of heap"`` | 32 in one source |
+| `"teko: too many globals"` | 2048 global slots in one source — every global that holds one value, which is what the oracle answers for by name |
 | `"teko: too many array writes waiting to be resolved"` | 512 |
 | `"teko: too many array-field accesses"` | 128 |
 | ``"teko: too many `T[]` parameters in one declaration"`` | 32 |
@@ -773,6 +969,7 @@ truncation; the fix is to split the unit.
 | `"teko: too many member accesses on a value of unknown type"` | 128 waiting for the pass |
 | `"teko: too many stores into a slot of class type"` | 128 |
 | `"teko: too many declarations in one unit"` | 8192 |
+| `"teko: too many generated declarations in one unit"` | 512 top-level declarations the compiler itself writes — a vtable, a release, an allocator, a thunk, a box, an enum's two globals; 134 in `tests/surface_lambda.tk`, the busiest fixture |
 | `"teko: too many overloaded names in one unit"` | 64 |
 | `"teko: too many free-function declarations with parameters"` | 4096 |
 | `"teko: too many arguments"` | 64 at one call of an overloaded name |
@@ -801,6 +998,9 @@ truncation; the fix is to split the unit.
 | `"teko: too many primitive types"` | 8 primitives with a member table |
 | `"teko: too many primitive members"` | 96 rows, over every primitive |
 | `"teko: too many primitive operators"` | 32 rows, over every primitive |
+| `"teko: too many primitive parameter positions"` | 128 argument positions, summed over every member row |
+| `"teko: too many late type names over a primitive"` | 4 types a row names before the include that declares them is read |
+| `"teko: too many primitive arguments of unknown type"` | 128 arguments of primitive or `enum` position, in one unit, whose type only the pass can tell |
 | `"teko: too many casts over a primitive in one unit"` | 4096 casts the compiler wrote itself, in one compilation unit |
 | `"teko: too many services"` | 32 marked classes |
 | ``"teko: too many `inject` sites"`` | 32 |

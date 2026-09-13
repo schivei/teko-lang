@@ -20,7 +20,7 @@ about a static type a deferred access does not carry.
 | 3 | `tk_fwd_pass` | `teko_fwd.tk` | a name the pre-scan reserved and no declaration ever adopted is `is used but never declared`; then resolves the `new` and `Type.member` sites deferred against a type declared below |
 | 4 | `tk_di_pass` | `teko_di.tk` | resolves every `inject` placeholder into a getter call or a scope local, emits the memoized getters and prepends the locals to their blocks |
 | 5 | `tk_array_pass` | `teko_array.tk` | rewrites an index into a **global** fixed array, which parse time could not see |
-| 6 | `tk_typeof_pass` | `teko_typeof.tk` | the oracle: rewrites every deferred `.` into the load, store or call it stands for, now that the whole unit can be asked about |
+| 6 | `tk_typeof_pass` | `teko_typeof.tk` | the oracle: collects the overload table so a call can be typed by the signature its arguments pick (D49), then rewrites every deferred `.` into the load, store or call it stands for, now that the whole unit can be asked about |
 | 7 | `tk_ref_pass` | `teko_ref.tk` | a `ref`/`out` parameter reads and writes through its pointer |
 | 8 | `tk_deleg_pass` | `teko_deleg.tk` | a call on a delegate-typed name becomes a typed `callp` through the object's code pointer |
 | 9 | `tk_ternary_pass` | `teko_ternary.tk` | the `?:` placeholder becomes a local plus an `if`, hoisted above the statement that used it — and, from inside the same walk, so do the `??` and `?.` placeholders (`teko_null.tk`, D45), which is why neither operator registers a pass |
@@ -64,6 +64,15 @@ the index it was recorded at.
 **Pass 11 before pass 14.** The call `tk_ops_pass` puts in the tree already names the
 member's own symbol, so a mangling pass has nothing left to pick there.
 
+**...and pass 11 asks pass 14's own table, without pass 14 having run.** An operator over a
+call to an overloaded name has to know WHICH overload, and so do the ternary (pass 9),
+`??`/`?.` (pass 9), a primitive row's deferred argument and an initializer. Moving the
+mangling up would move every overload refusal ahead of every other one; instead the
+resolution is asked as a QUESTION (`tk_ov_pick(n, 0)`, teko_over.tk), which answers the
+chosen signature's return type and rewrites nothing, over a table pass 6 collects and pass
+14 rebuilds before it commits (D49). Only `tk_ov_scan`'s three declaration refusals moved
+with it, from pass 14 to pass 6, at the same line with the same message.
+
 **Pass 13 before pass 14, and only for a name declared once.** A name declared more than
 once is left untouched by the default fill on purpose; the overload resolution has a round
 of its own that handles those, defaults included.
@@ -84,9 +93,10 @@ Four of these passes add a top-level declaration: pass 4 (a service's memoized g
 its slot), pass 12 (the allocator, release and element store of a `T[]` row a call site is
 the first to build), pass 1 (everything a class close emits) and pass 14 (nothing new, but
 it renames). Both run after the parse, where `p_decl_name()` is already 0 and nobody reads
-it any more, so pass 4's bare `top_add` is safe; pass 12 goes through `tk_top_emit` anyway,
-because the three declarations it asks for are the same ones `new T[n]` asks for **during**
-the parse, from one shared `tk_ha_ensure_put`.
+it any more, so neither has a name to lose; both go through `tk_top_emit` anyway, because
+that door is also what records the declaration as the compiler's own (D48, tenth pass) —
+and pass 12's three declarations are the same ones `new T[n]` asks for **during** the parse,
+from one shared `tk_ha_ensure_put`.
 
 Pass 1 is not, and neither is anything a handler emits **during** the parse. `top_add`
 clears `p_decl_name()` as a side effect, and teko generates declarations from expressions —
@@ -95,11 +105,13 @@ a thunk at `new Op(fn)`, the vtable and release of a class that closes at its fi
 those fires while a declaration of the program's own is still being read, and two module
 tables are keyed by exactly that name. So:
 
-> **Every top-level declaration teko emits from inside a body goes through
-> `tk_top_emit`** (`teko_struct.tk`), which saves `p_decl_name()`, calls `top_add` and puts
-> the name back. A generator that re-parses whole declarations saves and restores the name
-> with the rest of its scratch instead, because the core writes it itself once per
-> declaration the replay produces.
+> **Every top-level declaration teko emits goes through `tk_top_emit`/`tk_top_emit_as`**
+> (`teko_struct.tk`), which record the (node, name) pair and then `top_add`. `tk_top_emit`
+> saves `p_decl_name()` and puts it back, for a generator that interrupts a declaration of
+> the program's own; `tk_top_emit_as(n, 0)` leaves the name cleared, for a generator that
+> stands at top level, runs from a pass, or — like the generic replay — saves the name with
+> the rest of its scratch, because the core writes it itself once per declaration the replay
+> produces.
 
 The mirror of the same invariant: a handler that owns a declaration and reads its body
 **itself**, rather than letting the core read it, has to say whose the statements are. An

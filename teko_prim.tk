@@ -85,24 +85,82 @@ i64  pt_ty_at(i64 i)   { return ld64(pt_ty + i * 8); }
 uptr pt_name_at(i64 i) { return ld64(pt_name + i * 8); }
 uptr pt_inc_at(i64 i)  { return ld64(pt_inc + i * 8); }
 
+// ---- a column that names a type the row cannot see yet ----
+// Every column below carries a type ID, written at `teko_init()` time -- and
+// one type a row names is declared by the very include its lowering symbols
+// live in: `DateTimeKind` is an `enum` inside `lib/time.tk`
+// (docs/specs/enum.md § 8, N2c), so its id does not exist until a program
+// writes `#include "time.tk"`, long after `tk_time_init()` wrote the rows.
+// Such a column carries the NAME instead, encoded as an id BELOW -1
+// (`-2 - slot`, so -1 keeps its own meaning of "no type here"), and the id is
+// read AT THE SITE, where the enum's own row of teko_struct.tk's type table
+// exists. The three accessors below are the only readers, so no caller of
+// this file ever sees the encoding.
+#define TK_MAXPRIML 4                 // types a row names before they exist
+
+uptr pl_name[TK_MAXPRIML];
+i64  tk_npriml = 0;
+
+uptr pl_name_at(i64 i) { return ld64(pl_name + i * 8); }
+
+i64 tk_prim_late(uptr name) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_npriml) break;
+        if (str_eq(pl_name_at(i), name)) return 0 - 2 - i;
+        i = i + 1;
+    }
+    if (tk_npriml == TK_MAXPRIML)
+        err_at(tk_file, tk_line, "teko: too many late type names over a primitive");
+    st64(pl_name + tk_npriml * 8, name);
+    tk_npriml = tk_npriml + 1;
+    return 0 - 2 - (tk_npriml - 1);
+}
+
+// the id a column carries: its own, or the one the named type has NOW. A name
+// still undeclared answers -1, which every reader here already takes as
+// "nothing known, refuse nothing" -- and a site that needed the type is the
+// very site `tk_prim_need_include` refuses for the missing include.
+i64 tk_prim_ty(i64 col) {
+    if (col >= 0 - 1) return col;
+    i64 si = tk_struct_find_exact(pl_name_at(0 - 2 - col));
+    if (si < 0) return 0 - 1;
+    return sr_ty_at(si);
+}
+
 // ---- the member rows ----
-// A row's parameter list is a COUNT and ONE type: every row this mechanism
-// carries takes its arguments in a single type (`new DateTime(y, m, d)` is
-// three integers, `TimeSpan.FromHours(x)` one float), which is what keeps the
-// list one column instead of a pool. A member whose parameters differ from
-// each other -- C#'s `DateTime.SpecifyKind(DateTime, DateTimeKind)`, its two
-// `Subtract` overloads -- is not taught (docs/reference/not-yet.md); the day
-// one is, this column becomes a list and nothing else moves.
+// A row's parameter list is a COUNT and a HEAD into the position pool below:
+// one column per POSITION, since `new DateTime(ticks, kind)` takes an `i64`
+// and a `DateTimeKind` and no single type spells the pair (D41 named this the
+// day it would come, and N2c is that day). Every other row this mechanism
+// carries still takes its arguments in one type -- `new DateTime(y, m, d)` is
+// three integers, `TimeSpan.FromHours(x)` one float -- and `tk_prim_membern`
+// writes those positions for it.
 //
 // Rows of ONE name and DIFFERENT counts are the overload set of that name:
 // `new DateTime(ticks)`, `new DateTime(y, m, d)` and `new DateTime(y, m, d, h,
 // mi, s)` are three rows, and the site picks by the number of arguments
 // written (`tk_prim_pick`).
+#define TK_MAXPRIMP 128               // parameter positions, over every row
+
+i64  ppos_ty[TK_MAXPRIMP];
+i64  tk_nprimp = 0;
+
+i64  ppos_ty_at(i64 i) { return tk_prim_ty(ld64(ppos_ty + i * 8)); }
+
+i64 tk_prim_pos(i64 ty) {
+    if (tk_nprimp == TK_MAXPRIMP)
+        err_at(tk_file, tk_line, "teko: too many primitive parameter positions");
+    st64(ppos_ty + tk_nprimp * 8, ty);
+    tk_nprimp = tk_nprimp + 1;
+    return tk_nprimp - 1;
+}
+
 i64  pmr_ty[TK_MAXPRIMM];
 uptr pmr_name[TK_MAXPRIMM];
 i64  pmr_kind[TK_MAXPRIMM];
 i64  pmr_np[TK_MAXPRIMM];              // how many arguments the row takes
-i64  pmr_p0[TK_MAXPRIMM];              // the type of EVERY argument, or -1 for none
+i64  pmr_pp[TK_MAXPRIMM];              // its FIRST position in the pool, or -1 for none
 uptr pmr_sym[TK_MAXPRIMM];             // the lib function the row lowers to
 i64  pmr_ret[TK_MAXPRIMM];
 i64  tk_nprimm = 0;
@@ -111,9 +169,9 @@ i64  pmr_ty_at(i64 i)   { return ld64(pmr_ty + i * 8); }
 uptr pmr_name_at(i64 i) { return ld64(pmr_name + i * 8); }
 i64  pmr_kind_at(i64 i) { return ld64(pmr_kind + i * 8); }
 i64  pmr_np_at(i64 i)   { return ld64(pmr_np + i * 8); }
-i64  pmr_p0_at(i64 i)   { return ld64(pmr_p0 + i * 8); }
+i64  pmr_pp_at(i64 i)   { return ld64(pmr_pp + i * 8); }
 uptr pmr_sym_at(i64 i)  { return ld64(pmr_sym + i * 8); }
-i64  pmr_ret_at(i64 i)  { return ld64(pmr_ret + i * 8); }
+i64  pmr_ret_at(i64 i)  { return tk_prim_ty(ld64(pmr_ret + i * 8)); }
 
 // ---- the operator rows ----
 i64  po_tok[TK_MAXPRIMO];
@@ -145,23 +203,45 @@ void tk_prim_type(i64 ty, uptr name, uptr inc) {
     tk_nprimt = tk_nprimt + 1;
 }
 
-// `np` arguments, each of type `p0` (-1 and 0 for a row that takes none).
-void tk_prim_membern(i64 ty, uptr name, i64 kind, i64 np, i64 p0, uptr sym, i64 ret) {
+// `np` arguments whose positions are already in the pool, starting at `pp`.
+void tk_prim_memberp(i64 ty, uptr name, i64 kind, i64 np, i64 pp, uptr sym, i64 ret) {
     if (tk_nprimm == TK_MAXPRIMM) err_at(tk_file, tk_line, "teko: too many primitive members");
     st64(pmr_ty + tk_nprimm * 8, ty);
     st64(pmr_name + tk_nprimm * 8, name);
     st64(pmr_kind + tk_nprimm * 8, kind);
     st64(pmr_np + tk_nprimm * 8, np);
-    st64(pmr_p0 + tk_nprimm * 8, p0);
+    st64(pmr_pp + tk_nprimm * 8, pp);
     st64(pmr_sym + tk_nprimm * 8, sym);
     st64(pmr_ret + tk_nprimm * 8, ret);
     tk_nprimm = tk_nprimm + 1;
 }
 
-// the shape most rows have: no argument (`p0` -1) or exactly one.
+// `np` arguments, each of type `p0` (-1 and 0 for a row that takes none).
+void tk_prim_membern(i64 ty, uptr name, i64 kind, i64 np, i64 p0, uptr sym, i64 ret) {
+    i64 pp = 0 - 1;
+    i64 i = 0;
+    loop {
+        if (i >= np) break;
+        i64 s = tk_prim_pos(p0);
+        if (i == 0) pp = s;
+        i = i + 1;
+    }
+    tk_prim_memberp(ty, name, kind, np, pp, sym, ret);
+}
+
+// two arguments that DIFFER in type: `new DateTime(ticks, kind)`, the one C#
+// shape the single column could not spell.
+void tk_prim_member2(i64 ty, uptr name, i64 kind, i64 t0, i64 t1, uptr sym, i64 ret) {
+    i64 pp = tk_prim_pos(t0);
+    tk_prim_pos(t1);
+    tk_prim_memberp(ty, name, kind, 2, pp, sym, ret);
+}
+
+// the shape most rows have: no argument (`p0` exactly -1) or one -- and a
+// late type name (`tk_prim_late`, an id below -1) is one argument too.
 void tk_prim_member(i64 ty, uptr name, i64 kind, i64 p0, uptr sym, i64 ret) {
     i64 np = 0;
-    if (p0 >= 0) np = 1;
+    if (p0 != 0 - 1) np = 1;
     tk_prim_membern(ty, name, kind, np, p0, sym, ret);
 }
 
@@ -337,8 +417,17 @@ i64 tk_prim_raw(i64 e) {
 // declared return type is what every oracle already reads. The other direction
 // -- a cast TO a primitive -- is remembered by `tk_cast` itself (teko_array.tk),
 // so every module that writes one is covered by construction.
+//
+// An ENUM result takes the same cast, and for the same reason: `d.Kind` lowers
+// to `tk_dt_kind((i64) d)`, whose declared return type is the enum's UNDERLYING
+// integer, and without the cast every oracle would read the site as that
+// integer -- `i64 n = d.Kind;` would convert where docs/specs/enum.md § 5
+// refuses it. The plain machine cast is what teko_null.tk's own payload read
+// already writes for an enum (`tk_nl_payload`), and it is not an instruction:
+// the value is the underlying integer at run time, no box and no tag.
 i64 tk_prim_ret(i64 ret, i64 call) {
     if (tk_prim_is(ret)) return tk_cast(ret, call);
+    if (tk_is_enum(tk_struct_by_ty(ret))) return tk_cast(ret, call);
     return call;
 }
 
@@ -398,9 +487,11 @@ void tk_prim_need_include(i64 ty, uptr sym, i64 line, uptr fl) {
 // `atpass` picks the oracle: the parser's own (`tk_pty_of`, teko_struct.tk) at
 // a site the parser resolves, and the pass's (`tk_ty_of`, teko_typeof.tk) at a
 // deferred one. Both answer -1 for what they cannot see, which
-// `tk_check_scalar_compat` reads as "refuse nothing" -- and a pass-time
-// argument of the wrong type is still caught, by `tk_rc_call_args`
-// (teko_rc.tk), against the very declaration this row names.
+// `tk_check_scalar_compat` reads as "refuse nothing" -- and an argument of the
+// wrong type the parser could not see is still caught: by `tk_rc_call_args`
+// (teko_rc.tk) against the very declaration this row names when it crosses
+// under its own type, and by the deferred check below when the column's own
+// conversion is a cast that would hide it from that one.
 i64 tk_prim_ty_of(i64 n, i64 atpass) {
     if (atpass) return tk_ty_of(n);
     return tk_pty_of(n);
@@ -409,15 +500,248 @@ i64 tk_prim_ty_of(i64 n, i64 atpass) {
 // the value as the lowered call takes it: the raw eight bytes for a primitive
 // column, and C# 10.2.3's own widening (`tk_num_widen`, teko_typeof.tk) for an
 // integer landing on a float one -- `TimeSpan.FromHours(2)` is `FromHours(2.0)`.
+//
+// An ENUM column is unwrapped the same way a captured enum is (teko_deleg.tk's
+// own `tk_cap_val`): the lowering symbol takes an `i64` --
+// `tk_dt_from_ticks_kind(i64, i64)`, lib/time.tk, which never names the enum --
+// so the value crosses as its underlying integer, and it is the CHECK above
+// (`tk_check_scalar_compat`, docs/specs/enum.md § 5) that already refused
+// everything but the enum itself in this position.
 i64 tk_prim_conv(i64 pty, i64 e, i64 ety) {
     if (tk_prim_is(pty)) return tk_prim_raw(e);
+    if (tk_is_enum(tk_struct_by_ty(pty))) return tk_cast(TY_I64, e);
     return tk_num_widen(pty, ety, e);
 }
 
+// ---- the column whose conversion is a CAST, and the check it cannot skip ----
+// `tk_prim_conv` writes a cast for exactly two columns -- a primitive one
+// (`(i64) t`) and an enum one (`(i64) k`) -- and that cast is what the lowering
+// symbol declares, so the argument reaches `tk_rc_call_args` (teko_rc.tk) as
+// the `i64` the declaration asks for and that late check has nothing left to
+// say. Every OTHER column crosses under the argument's own type and is judged
+// there: `new DateTime(k, DateTimeKind.Utc)` on a `DateTimeKind k` is refused
+// today with `teko: a value of type DateTimeKind does not convert to i64`,
+// measured, with no line here.
+//
+// So when the PARSER cannot type the argument (`tk_pty_of` answers -1 for a
+// parameter, for an array element, for anything only the pass resolves) and
+// the column is one of those two, the check is deferred rather than skipped.
+// Without it `new DateTime(1, k)` on an `i64 k` parameter compiled and reached
+// the run-time kind guard (`teko: a date kind is out of range`, exit 70) where
+// docs/specs/enum.md § 5 refuses it at compile time.
+//
+// The CONVERSION is not deferred, and needs no deferral: on both cast arms
+// `tk_prim_conv` never reads `ety` at all, so the node it wrote at parse time
+// is the one it would write knowing the type -- and a check that PASSES proves
+// the type was the column's own. Nothing moves in the tree, which is why every
+// `--dump-ast` of a program that compiles is byte-identical.
+i64 tk_prim_conv_casts(i64 pty) {
+    if (pty < 0) return 0;
+    if (tk_prim_is(pty)) return 1;
+    return tk_is_enum(tk_struct_by_ty(pty));
+}
+
+// ---- the OTHER column the parse-time answer cannot settle: the float one ----
+// A cast column hides a wrong argument from the late check; a FLOAT column
+// does worse, because its conversion is DECIDED by the argument's type
+// (`tk_num_widen` widens an integer and leaves everything else alone) -- so an
+// answer that is a guess writes the wrong node and then launders it.
+// Measured on this branch, with an `i64 pick(i64)` declared ahead of a
+// `DateTimeKind pick(i64, i64)`: `TimeSpan.FromHours(pick(1, 2))` read the
+// FIRST declaration, wrote `(f64) pick(1, 2)` over a call that returns an
+// enum, and `tk_rc_call_args` (teko_rc.tk) then saw an `f64` where the column
+// asks for one and had nothing to say. The mirror pair, `f64 pick(i64)` ahead
+// of an `i64 pick(i64, i64)`, wrote NO cast over a call that returns an
+// integer and fed the raw eight bytes to a float parameter.
+//
+// So the conversion is deferred with the check: `tk_prim_arg` writes nothing
+// for a call on this column and `tk_prim_arg_do` wraps the node once the
+// symbol is picked. Only a CALL is deferred here, because it is the only
+// argument whose own type a later pass CHANGES: everything else crosses under
+// the type it has and `tk_rc_call_args` (teko_rc.tk, the last pass of all)
+// both judges it and writes the widening against the very declaration the row
+// names -- `TimeSpan.FromHours(x)` on an `i64` parameter is `FromHours((f64) x)`
+// with no entry in this table (Copilot on #697, fourth pass).
+i64 tk_prim_defers(i64 pty, i64 a) {
+    if (tk_prim_conv_casts(pty)) return 1;
+    if (nd_kind(a) != N_CALL) return 0;
+    if (pty < 0) return 0;
+    return type_kind(pty) == TK_FLOAT;
+}
+
+#define TK_MAXPARG 128                // such arguments waiting for the pass
+
+i64  pa_node[TK_MAXPARG];             // the argument, under the cast the column wrote
+i64  pa_ty[TK_MAXPARG];               // the type its POSITION asks for
+i64  pa_line[TK_MAXPARG];
+uptr pa_file[TK_MAXPARG];
+i64  pa_done[TK_MAXPARG];
+i64  tk_nparg = 0;
+
+i64  pa_node_at(i64 i) { return ld64(pa_node + i * 8); }
+i64  pa_ty_at(i64 i)   { return ld64(pa_ty + i * 8); }
+i64  pa_line_at(i64 i) { return ld64(pa_line + i * 8); }
+uptr pa_file_at(i64 i) { return ld64(pa_file + i * 8); }
+i64  pa_done_at(i64 i) { return ld64(pa_done + i * 8); }
+
+void tk_prim_arg_defer(i64 pty, i64 a, i64 line, uptr fl) {
+    if (tk_nparg == TK_MAXPARG)
+        err_at(fl, line, "teko: too many primitive arguments of unknown type");
+    st64(pa_node + tk_nparg * 8, a);
+    st64(pa_ty + tk_nparg * 8, pty);
+    st64(pa_line + tk_nparg * 8, line);
+    st64(pa_file + tk_nparg * 8, fl);
+    st64(pa_done + tk_nparg * 8, 0);
+    tk_nparg = tk_nparg + 1;
+}
+
+// ...and an argument NOTHING types, even here: it is not guessed at either.
+// The rule is `tk_prim_binary`'s own, one position over -- an operand the
+// oracle could not type is refused rather than taken raw, because a cast
+// column is exactly where the eight bytes would cross unread. It is what a
+// local array's element still is (`a[0]` lowers to `ld64(a + i * 8)` at parse
+// time and neither oracle types that call), so `new DateTime(1, a[0])` on an
+// `i64 a[2]` is refused here instead of reaching the run-time kind guard.
+// ---- the conversion a deferred argument still owes, written IN PLACE ----
+// `tk_num_widen` hands its cast BACK, because its callers hold the slot the
+// value sits in. This one does not: the argument was spliced into the lowered
+// call's own list at parse time and nothing here knows which link it is. So
+// the wrap is done the way teko_rc.tk already rewrites a statement -- the node
+// keeps its identity and BECOMES the cast, while a fresh node takes over
+// everything it was. `nd_next` is the one field that stays behind, because the
+// sibling link belongs to the SLOT and not to the value, which is the very
+// reason `tk_num_widen` cuts it on the node it wraps.
+i64 tk_nd_moved(i64 n) {
+    i64 m = tk_nd(nd_kind(n));
+    // the type table's own row goes with the value (teko_struct.tk's
+    // `tk_xt_move`): what `n` is about to become is not what it was typed as.
+    tk_xt_move(n, m);
+    set_nd_op(m, nd_op(n));
+    set_nd_type(m, nd_type(n));
+    set_nd_val(m, nd_val(n));
+    set_nd_name(m, nd_name(n));
+    set_nd_a(m, nd_a(n));
+    set_nd_b(m, nd_b(n));
+    set_nd_c(m, nd_c(n));
+    set_nd_d(m, nd_d(n));
+    set_nd_sect(m, nd_sect(n));
+    set_nd_line(m, nd_line(n));
+    set_nd_file(m, nd_file(n));
+    return m;
+}
+
+// the same rule `tk_num_widen` writes (`tk_num_widens`, teko_typeof.tk), asked
+// once the type is no longer a guess. Every other column wrote its node at
+// parse time and reads nothing here.
+void tk_prim_arg_widen(i64 pty, i64 n, i64 aty) {
+    if (!tk_num_widens(pty, aty)) return;
+    i64 inner = tk_nd_moved(n);
+    set_nd_kind(n, N_CAST);
+    set_nd_op(n, 0);
+    set_nd_type(n, pty);
+    set_nd_val(n, 0);
+    set_nd_name(n, 0);
+    set_nd_a(n, inner);
+    set_nd_b(n, 0);
+    set_nd_c(n, 0);
+    set_nd_d(n, 0);
+}
+
+void tk_prim_arg_do(i64 i) {
+    if (pa_done_at(i)) return;
+    st64(pa_done + i * 8, 1);
+    i64 n = pa_node_at(i);
+    i64 aty = tk_ty_of(n);
+    if (aty < 0)
+        err_at(pa_file_at(i), pa_line_at(i), "teko: the type of this argument is not known here");
+    tk_check_scalar_compat(pa_ty_at(i), aty, n, pa_line_at(i), pa_file_at(i));
+    tk_prim_arg_widen(pa_ty_at(i), n, aty);
+}
+
+// ---- ONE point of judgement: a walk of its own, at the end of the pick ----
+// asked once per node of every body, from `tk_prim_arg_judge` below, and that
+// is the only place a deferred argument is ever judged. The point has to
+// answer both halves of what the type of an argument depends on, and no
+// earlier one does:
+//
+//   - the SCOPE it was written under, because a name (`k`, a parameter) has
+//     no type anywhere else -- so the walk is `tk_ty_pass_walk`'s, which
+//     enters each function and pushes its parameters and its locals;
+//   - every overload PICK already COMMITTED: since D49 the pass-time oracle
+//     asks the overload table for a call's type, but the judgement wants the
+//     site rewritten to its final symbol (what `tk_rc_call_args` will check
+//     against), so the walk runs after `tk_over_pass`'s own walk has written
+//     every pick, whatever depth the call sits at under the argument.
+//
+// Riding teko_ops.tk's walk was the third pass's answer to the first half and
+// missed the second, so the arguments that are CALLS were left to a sweep at
+// the end of `tk_over_pass` with NO scope entered -- and that sweep then took
+// everything the walk had not reached, which is not only the calls:
+// `tk_ops_visit` returns early for an N_BINARY and for an N_UNARY, so
+// `new DateTime(1, k | DateTimeKind.Utc)` on a `DateTimeKind k` parameter --
+// legal, since a bitwise operator over an enum answers the enum (D39) -- was
+// refused with `teko: the type of this argument is not known here`, measured
+// on `d8d00572` (Copilot on #697, fifth pass). Moving the hook ahead of those
+// two returns would have judged the node before the pick under it; one walk,
+// after everything, is the rule that has both halves at once.
+void tk_prim_arg_pend(i64 n) {
+    i64 i = tk_nparg - 1;
+    loop {
+        if (i < 0) break;
+        if (pa_node_at(i) == n) tk_prim_arg_do(i);
+        i = i - 1;
+    }
+}
+
+// A unit that deferred nothing walks nothing: the table is this module's own
+// memory and an empty one has no node to visit. Called at the end of
+// `tk_over_pass` (teko_over.tk), and it adds no pass of its own.
+//
+// A body is where every deferred argument is, and the reason is what a global
+// initializer may be: mc requires it to be CONSTANT (`global initializer must
+// be constant`), so `DateTime g = new DateTime(1, gk);` never reaches a check
+// of this file at all, and the arguments that do survive there are the folded
+// ones the parser types by itself -- measured over `1 + 2`, `(i64) 3` and a
+// `const` name, none of which defers.
+void tk_prim_arg_judge(i64 root) {
+    if (tk_nparg == 0) return;
+    tk_ty_pass_walk(root, &tk_prim_arg_pend);
+}
+
+// A CALL is the one argument whose type is NOT decided here, and the reason
+// is the overload pick: this runs at parse time, when the overload table does
+// not exist yet (a later declaration in the file may still add a signature),
+// so the parser's oracle can only answer `decl_ret(decl_find(name))`, the
+// FIRST declaration of a name that may carry several. Since D49 the pass-time
+// oracle asks the table instead (teko_typeof.tk), but here the answer would
+// still be a guess, and a guess was wrong both ways, measured on this branch: a
+// `DateTimeKind pick(i64)` declared ahead of an `i64 pick(i64, i64)` let
+// `new DateTime(1, pick(1, 2))` cross under the column's own cast (the
+// laundering this table exists to stop), and the same pair in the other order
+// refused `new DateTime(1, pick(1, 2))` for a conversion the chosen overload
+// never asks for. So NOTHING is decided on a guess -- `cty` is -1 for a call
+// and it is what both the check and the conversion are given:
+//
+//   - on a CAST column and on a FLOAT one the argument is deferred, judged and
+//     converted by `tk_prim_arg_judge` once the symbol is written -- where
+//     `decl_find` is exact, because the name is unique by then;
+//   - on every OTHER column the conversion is the identity whatever the type
+//     is, so the argument crosses under its OWN and `tk_rc_call_args`
+//     (teko_rc.tk, the last pass of all) is the late check that judges it
+//     against the very declaration this row names -- the same division of
+//     labour D48 wrote down.
+//
+// A call on a float column is the one node this moves, and it moves it to
+// exactly where the literal already put it: `TimeSpan.FromHours(n)` is still
+// `FromHours((f64) n)`, written by `tk_prim_arg_widen` instead of at parse
+// time, so every `--dump-ast` that compiled before is byte-identical.
 i64 tk_prim_arg(i64 pty, i64 a, i64 atpass, i64 line, uptr fl) {
     i64 aty = tk_prim_ty_of(a, atpass);
-    tk_check_scalar_compat(pty, aty, a, line, fl);
-    return tk_prim_conv(pty, a, aty);
+    i64 cty = aty;
+    if (nd_kind(a) == N_CALL) cty = 0 - 1;       // not decided until the pick
+    if (cty < 0 && tk_prim_defers(pty, a)) tk_prim_arg_defer(pty, a, line, fl);
+    tk_check_scalar_compat(pty, cty, a, line, fl);
+    return tk_prim_conv(pty, a, cty);
 }
 
 // the argument list of a row, checked and converted position by position. The
@@ -429,7 +753,7 @@ i64 tk_prim_arg(i64 pty, i64 a, i64 atpass, i64 line, uptr fl) {
 // wrapped node keeps no `nd_next` of its own (`tk_num_widen`'s own rule), and
 // the list is rebuilt in order out of what the conversion hands back.
 i64 tk_prim_args(i64 ri, i64 args, i64 atpass, i64 line, uptr fl) {
-    i64 pty = pmr_p0_at(ri);
+    i64 pp = pmr_pp_at(ri);
     i64 np = pmr_np_at(ri);
     i64 head = 0;
     i64 a = args;
@@ -438,7 +762,7 @@ i64 tk_prim_args(i64 ri, i64 args, i64 atpass, i64 line, uptr fl) {
         if (i >= np) break;
         i64 nx = nd_next(a);
         set_nd_next(a, 0);
-        head = list_append(head, tk_prim_arg(pty, a, atpass, line, fl));
+        head = list_append(head, tk_prim_arg(ppos_ty_at(pp + i), a, atpass, line, fl));
         a = nx;
         i = i + 1;
     }

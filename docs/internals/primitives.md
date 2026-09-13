@@ -21,7 +21,9 @@ tells a compiler-written cast from a hand-written one.
 ## The two tables
 
 A **member row** is
-`(type id, member name, kind, how many arguments, their type, symbol, result type)`:
+`(type id, member name, kind, how many arguments, a head into the pool of per-position
+argument types, symbol, result type)` — a position may carry a late type NAME (an id below
+-1) until the site reads it:
 
 | kind | reached as | example |
 |---|---|---|
@@ -32,12 +34,20 @@ A **member row** is
 | `TK_PMCTOR` | `new Type(args)` | `new DateTime(2024, 2, 29)` |
 | `TK_PMSOON` | `Type.Name`, refused by name | `DateTime.Now` |
 
-**The parameter list is a count and ONE type**, because every row this mechanism carries
-takes its arguments in a single type: three integers for `new DateTime(y, m, d)`, one float
-for `TimeSpan.FromHours(x)`. A member whose parameters differ from each other —
-`DateTime.SpecifyKind(DateTime, DateTimeKind)`, the two `Subtract` overloads — is not
-taught ([not-yet.md](../reference/not-yet.md)); the day one is, that column becomes a list
-and nothing else moves.
+**The parameter list is a count and a HEAD into a pool of positions**, one column per
+argument. It was a count and ONE type until N2c, because every row took its arguments in a
+single type — three integers for `new DateTime(y, m, d)`, one float for
+`TimeSpan.FromHours(x)` — and `new DateTime(ticks, kind)` is the first that does not: an
+`i64` beside a `DateTimeKind`. `tk_prim_membern` still writes `np` positions of one type
+for every other row, so nothing else moved, exactly as this page said it would not.
+
+**A column may name a type that does not exist yet.** `DateTimeKind` is an `enum` declared
+inside `lib/time.tk`, so its id is created when a program writes `#include "time.tk"`, long
+after `tk_time_init()` wrote the rows. Such a column carries the NAME instead, encoded as
+an id below -1, and `tk_prim_ty` reads the real id at the SITE, where the enum's own row of
+the type table exists (`tk_prim_late`). A name still undeclared answers -1, which every
+reader here already takes as "nothing known, refuse nothing" — and that site is the very
+one `tk_prim_need_include` refuses for the missing include.
 
 **Rows of one name and different counts are the overload set of that name.** `new
 DateTime(...)` is five rows (1, 2, 3, 6 and 7 arguments) and the site picks by how many it
@@ -78,7 +88,10 @@ three are why the design is this and not a compiler intrinsic:
   can recurse into the very operator it implements.
 - **Every existing check stays honest.** The argument
   [`teko_rc.tk`](../../teko_rc.tk)'s pass sees is an `i64` because it IS an `i64` by then,
-  and the result the oracle sees is a `TimeSpan` because the cast says so.
+  and the result the oracle sees is a `TimeSpan` because the cast says so. The cast is
+  therefore also what that pass can no longer judge the SOURCE's value by, which is why the
+  argument check is the compiler's own and is deferred rather than skipped when the parser
+  cannot type the value — the section below.
 - **No new intrinsic and no new pass** (D2/D21): `mc limits` shows `passes 15/30` and
   `intrin 8/16` unmoved.
 
@@ -131,6 +144,54 @@ the registration alone, macOS/aarch64, `mc` 0.15.23.
 | 5 | how does a `.` on such a receiver reach the compiler today? | through the deferred road: `teko_expr.tk` defers it, the oracle types the receiver in the pass, and `tk_reject_scalar_member` answered `teko: TimeSpan has no members: Ticks`. That is the exact line the member lookup replaces |
 | 6 | what does the registration cost in `mc limits`? | `types 9 → 10`, `alias 16 → 17` (a `type_new` moves both, D38's own finding), `syntax` unmoved at 15, `passes` 15, `intrin` 8. On the heaviest fixture (`tests/surface_enum.tk`, five type declarations of its own, single-file mode) `types` used goes 16 → 17 against a reserved 8 and the pre-existing `grew` verdict stays `grew` |
 
+## The argument the parser cannot type
+
+The same cast that makes the crossing honest is what a WRONG value would hide behind. An
+argument is checked against its column with `tk_check_scalar_compat` at the site that reads
+the row, and both oracles — `tk_pty_of` at parse time, `tk_ty_of` at pass time — answer -1
+for what they cannot see, which that check reads as "refuse nothing". For a column whose
+conversion is a cast (a primitive one, `(i64) t`, and an enum one, `(i64) k`) the silence
+used to be final: the value crossed as the `i64` the lowering symbol declares, and
+`tk_rc_call_args` saw an `i64` argument for an `i64` parameter. `new DateTime(1, k)` on an
+`i64 k` parameter compiled and reached the run-time kind guard (exit 70) where
+`docs/specs/enum.md` § 5 refuses it — the review finding on #697, D48.
+
+So a column whose answer the parser's silence would hide remembers the argument and judges
+it later (`tk_prim_arg_defer`, and `tk_prim_arg_do` once the wait is over). Three columns
+do it: the two CAST ones above, and the FLOAT one — there the argument's type decides the
+conversion itself (`tk_num_widen` widens an integer and leaves everything else alone), so a
+guess would write the wrong node and then hide the value behind it.
+
+**The wait ends at ONE point, and it is a walk of its own**: `tk_prim_arg_judge` drives
+`tk_ty_pass_walk` at the END of `tk_over_pass` (teko_over.tk), not on the operator pass's
+walk. That is the only place where both halves of what types an argument are true at once —
+the scope a parameter is read under is live, and every call under the argument already
+carries the symbol its own arguments picked and committed — the pass-time oracle asks the
+overload table since D49, but the parser's cannot, and the judgement wants the committed
+symbol, not a query. It adds no pass (`passes` 15/30), and a unit that
+deferred nothing walks nothing.
+
+The two cast columns defer only the CHECK: `tk_prim_conv` never reads the argument's type
+on either arm, so the node written at parse time is the node it would write knowing it. The
+float column defers the conversion with it, and `tk_prim_arg_widen` writes the cast where
+the literal already put it — so every `--dump-ast` of a program that compiled before is
+byte-identical either way. A value nothing types even there is refused rather than taken raw
+(`teko: the type of this argument is not known here`), the same rule `tk_prim_binary`
+already holds for an operand; a local array's element is the one shape that reaches it,
+because `a[0]` lowers to `ld64(a + i * 8)` at parse time and its element type does not
+survive the lowering.
+
+**An OPERATOR under a deferred argument needs nothing of its own** since D49. The operator
+pass runs three passes earlier, and what made its verdict a guess was the oracle, not the
+distance: `tk_ty_of` answered a call to an overloaded name by the FIRST declaration of the
+name, so `new DateTime(1, pick(1) + 1)` on a `DateTimeKind pick(i64)` was left as raw
+integer arithmetic and then answered the enum once the pick was written. With the oracle
+asking the overload table ([passes.md](passes.md), pass 6), pass 11 sees the picked type on
+its first visit: it refuses the `+` over an enum where it is written, in an argument or
+outside one, and it lowers an operator over a primitive the guess used to hide. The second
+judgement (`tk_ops_rejudge`) that stood here is DELETED -- 57 lines -- and the fixture codes
+that measured it, 63 and 64 of `tests/surface_datetime_kind.tk`, pass without it.
+
 ## The ceilings
 
 | table | cap | counts |
@@ -139,19 +200,22 @@ the registration alone, macOS/aarch64, `mc` 0.15.23.
 | `TK_MAXPRIMM` | 96 | member rows, over every primitive |
 | `TK_MAXPRIMO` | 32 | operator rows, over every primitive |
 | `TK_MAXPRIMC` | 4096 | casts over a primitive the COMPILER wrote, in one unit |
+| `TK_MAXPRIMP` | 128 | parameter positions, over every row (N2c) |
+| `TK_MAXPRIML` | 4 | types a row names before they exist, resolved late by name (N2c) |
+| `TK_MAXPARG` | 128 | arguments of a primitive or `enum` position, in one unit, whose type only the pass can tell (D48) |
 
 `TimeSpan` uses 1, 30 and 12 of the first three; `DateTime` brings the totals to 2, 66 and
-22. The fourth is per compilation unit and not per registration: it grows with how much
+22, with 41 parameter positions and one late type (`DateTimeKind`). The fourth is per compilation unit and not per registration: it grows with how much
 date arithmetic one program writes, roughly two entries per member access, and a unit past
 it is `teko: too many casts over a primitive in one unit`.
 
 ## What the second primitive actually cost
 
-`DateTime` added one `type_new`, one `syntax_expr`/`syntax_stmt` pair, one `type_alias`
-(`DateTimeKind`, over `i32`, with a three-value handler of its own), its 36 rows, and the
-calendar in `lib/time.tk` — about 300 lines of ordinary teko. In `mc limits` that is
-`types 10 → 11` and `alias 17 → 19`, with `syntax`, `passes 15/30` and `intrin 8/16`
-unmoved, verdict `ok`.
+`DateTime` added one `type_new`, one `syntax_expr`/`syntax_stmt` pair, its 36 rows, and the
+calendar in `lib/time.tk` — about 300 lines of ordinary teko. C2 also registered
+`DateTimeKind` as a `type_alias` over `i32` with a three-value handler of its own; N2c
+deleted both and wrote an ordinary `enum` in `lib/time.tk` instead, which is why the
+compiler's own `alias` row is 18 today and not 19.
 
 In `teko_prim.tk` it cost the three additions this page names (multi-argument rows,
 `TK_PMSOON`, the own-cast list) and no pass. The next primitive —

@@ -1816,3 +1816,728 @@ for Parse`), a missing include (`teko: Color needs #include "rt.tk" before it is
 `TryParse`'s second argument not `out` (`` teko: TryParse's second argument is `out <name>`
 ``). `mc pkg hash .` after the review fix and the two Copilot passes above:
 `cc2d24556b11ae8a523b7ad91d4690a988149f8315ac08fb03d99e3321e30238`.
+
+### D48 · `DateTimeKind` is an `enum`, and a primitive row's parameters are per position (2026-09-08)
+`docs/specs/enum.md` § 8, N2c — the last crumb of the `enum` sequence, over D39's `TK_KENUM`
+type, D47's text side and D41's primitive-member table. **The whole surface of
+`tests/surface_datetime.tk` is byte-identical to what C2 landed**, which is the point of
+the crumb: `leap.Kind != DateTimeKind.Unspecified` is spelled the same either way, and
+everything that moved is under it.
+
+**`DateTimeKind` is now an ordinary declaration in an ordinary library file:**
+
+```teko
+// no-run
+public enum DateTimeKind : i32 { Unspecified = 0, Utc = 1, Local = 2 }
+```
+
+in `lib/time.tk`, beside the functions that use it. D41's `type_alias("DateTimeKind",
+ty_i32)`, its `syntax_expr` and the three `tk_dtk_unspecified/utc/local()` functions are
+DELETED — an alias and an enum of one name cannot coexist, `tk_newname` (teko_struct.tk)
+refuses the second with `teko: the name is already a type`. This is the first `enum` teko
+declares from inside an `#include`d file; it works because the include is textual and read
+before any use, and because `tk_fwd_scan`'s pre-scan does not need to know the word.
+
+**It is a pure tightening, and the tightening is the deliverable.** An alias over `i32`
+converted from any integer; an enum converts from nothing but itself (D39 § 5). Measured on
+this branch:
+
+- `i64 n = d.Kind;` → `teko: a value of type DateTimeKind does not convert to i64`
+- `DateTimeKind k = 7;` → `teko: a value of type i64 does not convert to DateTimeKind`
+- `new DateTime(t, 7)` → `teko: a value of type i64 does not convert to DateTimeKind`
+- `d.Kind + DateTimeKind.Utc` → ``teko: no operator `+` takes these operands``
+
+All four compiled before. `(DateTimeKind) 7` is still accepted — an explicit cast into an
+enum is C#'s own — and the run-time guard in `tk_dt_from_ticks_kind` (`k < 0 || k > 2`,
+`teko: a date kind is out of range`, exit 70) STAYS, because that cast is exactly how a
+program still reaches it. And the enum's whole text side comes along for free, with no row
+of its own: `d.Kind.ToString()`, `DateTimeKind.Parse`/`TryParse`/`IsDefined`,
+`case DateTimeKind.Utc:`, a ternary over two enum arms and a by-value capture all work
+through the mechanisms D39/D47 already built.
+
+**Three lines in `lib/time.tk` it was NOT** — the spec's § 8 estimate was wrong, because a
+row of D41's table names its types at `teko_init()` time and this type exists only after
+the `#include`. `teko_prim.tk` took three additions, all of them the ones D41 itself named
+as coming:
+
+1. **A column may name a type that does not exist yet.** `tk_prim_late(name)` returns an id
+   BELOW -1 (`-2 - slot`, so -1 keeps its meaning of "no type here") and `tk_prim_ty(col)`
+   resolves it at the SITE through `tk_struct_find_exact`/`sr_ty_at`. The three accessors
+   (`ppos_ty_at`, `pmr_ret_at`) are the only readers, so no caller sees the encoding, and a
+   name still undeclared answers -1 — which every reader already takes as "refuse nothing",
+   and which is the very site `tk_prim_need_include` refuses for the missing include.
+2. **A row's parameter list is a COUNT and a HEAD into a pool of positions**, one column per
+   argument, where it was a count and ONE type. `new DateTime(ticks, kind)` is an `i64`
+   beside a `DateTimeKind` and is the first row that needed it — the case D41 wrote down as
+   "the day one is, this column becomes a list and nothing else moves", and nothing else
+   moved: `tk_prim_membern` writes `np` positions of one type for every other row, and
+   `tk_prim_member2` is the two-position registration. Ceiling `TK_MAXPRIMP` 128 (41 used),
+   `TK_MAXPRIML` 4 (1 used), both with a capacity message.
+3. **`tk_prim_ret` and `tk_prim_conv` grew one enum arm each.** The lowering symbol still
+   answers the UNDERLYING integer (`i32 tk_dt_kind(i64)`, unchanged) and still takes one
+   (`tk_dt_from_ticks_kind(i64, i64)`, unchanged, and `lib/time.tk` never names the enum),
+   so the compiler writes `(DateTimeKind) tk_dt_kind((i64) d)` on the way out and `(i64) k`
+   on the way in. Neither is an instruction and neither is a licence the surface has: the
+   precedents are `tk_nl_payload` (teko_null.tk, an enum out of a nullable box) and
+   `tk_cap_val` (teko_deleg.tk, an enum captured by value into a lambda).
+
+Nothing else was needed. The comparison, the overload pick, the ternary, the capture, the
+`switch` label and the deferred `.ToString()` are all keyed on the type table's own row and
+worked with no line added — proved by the fixture, not assumed.
+
+**The one thing the crumb LOST: the friendly include refusal.** `DateTimeKind.Utc` without
+`#include "time.tk"` used to say `teko: DateTimeKind needs #include "time.tk" before it is
+used`; it now says `teko: unknown member: Utc`, and `DateTimeKind k;` reaches the core's own
+`expected ; after expression`. Keeping the hint was tried and is IMPOSSIBLE without touching
+a shared parse function: any registration keyed on the word (`syntax_expr` is the only door,
+and mc's `syntax_expr_find` scans backwards so the enum's own later registration would
+correctly shadow it) calls `word_add`, which makes `DateTimeKind` a TOKEN rather than a
+`T_IDENT` — and `enum DateTimeKind` in `lib/time.tk` then dies at `tk_newname` with
+`lib/time.tk:204: teko: name of enum expected: DateTimeKind`, measured on a throwaway build.
+Buying the message back would mean a clause in `tk_newname` (every class, struct, interface,
+trait and enum declaration passes through it) plus reserving the word program-wide for
+programs that never include the file. `DateTime` and `TimeSpan` keep their own include
+refusal, because they are compiler registrations; a library type is told apart by the
+library, which is exactly what `DateTimeKind` now is. Written down in
+[diagnostics.md](docs/reference/diagnostics.md).
+
+**Fixtures: 61.** `tests/surface_datetime.tk` is UNCHANGED (byte-identical, still 42) —
+that is the proof the surface did not move — and two are new:
+`tests/surface_datetime_kind.tk` (42), which is `DateTimeKind k = d.Kind;`, the three
+members as `switch` labels through a parameter and a local, both explicit casts,
+`new DateTime(t, k)` from a variable, from another date's own `.Kind`, from a parameter,
+from a call's return, from a field and from an array element, `.ToString()` on a member/a
+property/a value outside the set, `Parse`/`TryParse` with `out`/`IsDefined`, a ternary over
+two enum arms and a by-value capture; and `tests/surface_datetime_kind_panic.tk` (70), the
+run-time kind guard `(DateTimeKind) 7` still reaches. The refusals above have no harness
+(D33) and are in `diagnostics.md` behind a `// no-run` fence.
+
+**`--dump-ast`, and the two diffs that are NOT the accepted code moving.** 53 of the 59
+existing fixtures are byte-identical to `37417b63`. The six that are not are exactly the
+six that `#include "../lib/time.tk"`, and their diffs are two facts and nothing else:
+
+- **three functions deleted** (`tk_dtk_unspecified/utc/local`, 15 lines of dump), in all
+  six — the library file lost them;
+- **one interface id shifted by one**, in `surface_nullable_ops.tk` (5 → 6) and
+  `surface_nullable_value.tk` (19 → 20). An interface's id in its own itab is its ROW INDEX
+  in teko_struct.tk's type table (`tk_itab_emit`, teko_iface.tk), the enum takes a row where
+  the `type_alias` took none, and every type declared after it in the same unit moves up by
+  one. The itab entry and the lookup are the same number, so it stays consistent — proved by
+  those two fixtures passing.
+
+`surface_datetime.tk`'s own dump changes as § 8 predicted and in no other way:
+`DateTimeKind.Utc` is now `INT val=1 type=DateTimeKind` (a folded constant) where it was
+`CALL name=tk_dtk_utc`, `.Kind` gains a `CAST type=DateTimeKind` over the call, and the
+constructor's kind argument gains the `CAST type=i64` back down.
+
+**The Copilot finding on #697, and the root it had.** The tightening above was
+BYPASSABLE, and the review caught it: `new DateTime(1, k)` on an `i64 k` parameter compiled
+and reached the run-time kind guard (`teko: a date kind is out of range`, exit 70) where § 5
+refuses it at compile time. The cause is one line of `tk_prim_args`, which runs with
+`atpass = 0` for `new`: the parser's oracle (`tk_pty_of`) answers -1 for a parameter,
+`tk_check_scalar_compat` reads -1 as "refuse nothing" and returns, and `tk_prim_conv` then
+wrapped the argument in the enum column's own `(i64)` cast — so the value crossed under the
+`i64` the lowering symbol declares and `tk_rc_call_args` (teko_rc.tk), the late check that
+catches every other unresolved argument against that declaration, had nothing left to see.
+It is the CAST that laundered it, which is why the mirror position never leaked:
+`new DateTime(k, DateTimeKind.Utc)` with `k` of enum type is `teko: a value of type
+DateTimeKind does not convert to i64` today, with no line of this fix, and so are the field
+and the call-return spellings of the kind argument, which `tk_pty_of` does resolve.
+
+**The fix is the deferral, and only the check is deferred.** An argument the oracle cannot
+type, landing on a column whose conversion is a cast — a primitive one and an enum one, the
+only two — is remembered with the type its POSITION asks for (`tk_prim_arg_defer`, 128
+entries, its own capacity message) and judged in the operator pass, on the node itself,
+where teko_ops.tk's walk already carries this file's cast check: after the oracle, under the
+scope the argument was written in, and with no pass of its own (`passes` 15/30 unmoved).
+The CONVERSION is not deferred and needs no deferral — on both cast arms `tk_prim_conv`
+never reads the argument's type at all, so the node written at parse time is the node it
+would write knowing it, and a check that passes proves the type was the column's own. That
+is why **all 61 existing `--dump-ast` dumps are byte-identical** to `cd606290`.
+And an argument NOTHING types, even at pass time, is refused rather than guessed at:
+`teko: the type of this argument is not known here` — `tk_prim_binary`'s own rule one
+position over, and the one shape that reaches it is a local array's element, which lowers
+to `ld64(a + i * 8)` at parse time and loses its element type there (`new DateTime(t,
+a[0])`, `d.CompareTo(a[0])`, both of which used to compile and read raw bytes). The
+accepted twins — the same four shapes with a `DateTimeKind` value — are in
+`tests/surface_datetime_kind.tk` (codes 43-47), the refused ones in `diagnostics.md`.
+
+**Proof**, mc **0.15.23** (`MC_VERSION`), macos/aarch64: `mc build . --config
+mc.macos.toml` clean; **61/61** fixtures at their `expect-exit`; `--dump-ast` as above;
+`sh scripts/bootstrap.sh --os macos --arch aarch64` → `FIXPOINT OK` (61/61 under the
+self-hosted `teko1`); `sh scripts/check-docs.sh` green (564 links, 381 diagnostics, 113 samples). `mc limits` verdict `ok` throughout — on the compiler's own floor (the
+`tests/hello.tk` leg) `alias` **19 → 18** (the deleted `type_alias`) with `syntax` 15,
+`types` 11, `passes` 15/30 and `intrin` 8/16 all unmoved; on a program that includes
+`lib/time.tk` (the `tests/surface_datetime.tk` leg) `types` **13 → 14** and `syntax`
+**15 → 16** (the enum's own `type_new` and its `syntax_expr`/`syntax_stmt` pair, the exact
+cost § 10 publishes for any `enum` a program declares) with `alias` 21 → 21, since the
+`type_new` puts back the alias the deleted registration freed. The spec's § 10 prediction
+of "`alias` 14 stays 14" is right for the program and one too high for the compiler;
+`syntax` is the arena's own `T_SYNTAX` high-water mark over the four registries that share
+it, which is why removing one `syntax_expr` from the floor did not move it. `mc pkg hash .`:
+`d14f7c7519288990ee9d849b0de8b529c6cbe5c568fef8f880bcc7cb6a52d0dd`.
+
+**Copilot finding, third pass — three on the deferred check itself, and the one root under
+two of them.** The deferral above was right about WHEN to check and wrong about WHAT the
+oracle may be asked. All three were reproduced before they were fixed, on `f6a565f1`:
+
+1. **A global was refused for a type it plainly declares.** `DateTimeKind g =
+   DateTimeKind.Utc;` at the top of a file and `new DateTime(t, g)` inside a function read
+   `teko: the type of this argument is not known here` — a regression against the alias,
+   which took any integer there. `tk_ty_of` (teko_typeof.tk) answered -1 for every global
+   but G1's `T[]` of heap, and its own header called that the truth. It is not: a global is
+   in scope in EVERY body of the unit, so the oracle now answers a global by its
+   declaration (`tk_ty_global`, teko_array.tk), off the sweep that already collected the
+   arrays — one more row per global SLOT, a global that holds one value, told from
+   `i64 a[4]` by `nd_val != 0`, the rule `tk_on_stmt` already reads for a local.
+   `TK_MAXGSLOT` 2048, **521** in the compiler's own unit (`mc_teko.tk`, mc's core
+   included), with its own capacity message.
+2. **An overloaded callee laundered the argument, and refused a legitimate one.** At the
+   check's own point a call to a top-level name still carries the name the source wrote,
+   and both oracles answer `decl_ret(decl_find(name))` for an N_CALL — the FIRST
+   declaration of a name that may carry several signatures, the one `tk_over_pass` replaces
+   two passes later with the symbol the ARGUMENTS pick. Measured, both ways: with
+   `DateTimeKind pick(i64)` ahead of `i64 pick(i64, i64)`, `new DateTime(1, pick(1, 2))`
+   saw an enum, deferred nothing and let the `i64` cross under the column's cast to the
+   run-time kind guard (exit 70); with the two in the other order, the same call was
+   REFUSED for a conversion the chosen overload never asks for, and so was `new
+   DateTime(pick(1, 2), DateTimeKind.Utc)` on the ticks column.
+
+   **The fix is that a call's type is not decided at the check's point at all.**
+   `tk_prim_arg` (teko_prim.tk) passes -1 to `tk_check_scalar_compat` for any N_CALL, so on
+   a CAST column the argument is deferred and judged by `tk_prim_arg_rest` once the symbol
+   is written, and on every OTHER column it crosses under its own type and
+   `tk_rc_call_args` (teko_rc.tk, the last pass of all) judges it against the very
+   declaration the row names — the division of labour D48 already had, with the guess
+   removed from both sides. The CONVERSION still reads the oracle's answer unchanged, which
+   is what keeps the float column widening `TimeSpan.FromHours(n)` and keeps every dump
+   still.
+
+   Two placements were weighed and one was taken. Resolving the nested overload EARLY would
+   mean running `tk_ov_collect`/`tk_ov_scan` before their pass, which moves the overload
+   refusals ahead of every other one; deferring and re-checking needs no new pass and no new
+   order, so `tk_prim_arg_rest` moved from the end of `tk_ops_pass` to the end of
+   `tk_over_pass` — the same one call, three passes later, and `tk_prim_arg_pend` leaves a
+   call to it instead of judging it in the walk. The walk's scope is what a NAME needs; a
+   call's type is its callee's declared return type, which no scope enters into, so nothing
+   was lost by moving it. `passes` stays **15/30**: no pass was added.
+3. **The fixture's own comment claimed coverage it did not have.** Of the four shapes
+   `tests/surface_datetime_kind.tk` said reached the deferred check, only the parameter did
+   — `utc_kind()` was declared above `main`, `st.kind` was a local's field and `ks[0]` a
+   local enum array's element, all three typed by the parser. Measured with a throwaway
+   build that accumulates the deferred lines: `DEFER: 41`, one entry. The fixture now
+   FORCES the shapes instead of claiming them — `utc_kind` is declared at the bottom of the
+   file, the field is read off a `Stamp` PARAMETER (`at_field`), the global and the two
+   overloaded callees are new — and the same instrumentation over it prints six entries,
+   one per intended line (`DEFER: 58 62 68 192 212 214`: parameter, field of a parameter,
+   global, forward call, and the two overloaded calls). What does NOT defer is written down
+   as what it is: a local enum array's element carries its element type into the load, and
+   it is the `i64` twin that loses it and is refused. **Fixtures stay 61**; the file gains
+   codes 48-53 and `tests/surface_datetime_kind.tk` is the ONLY dump that moves.
+
+**Proof of the third pass**, mc **0.15.23**, macos/aarch64: `mc build . --config
+mc.macos.toml` clean; **61/61** fixtures at their `expect-exit`; `--dump-ast` of all 61
+against `f6a565f1` — **60 byte-identical**, the touched fixture the only diff;
+`sh scripts/bootstrap.sh --os macos --arch aarch64` → `FIXPOINT OK` (`teko1.o == teko2.o`
+on the first turn, `--dump-asm` of teko2 vs teko3 empty over 214044 lines, 61/61 fixtures
+under `teko1`); `sh scripts/check-docs.sh` green (564 links, 382 diagnostics, 114 samples).
+`mc limits` verdict `ok` on both legs with every table unmoved — floor (`tests/hello.tk`)
+`passes` 15/30, `syntax` 15, `alias` 18, `types` 11, `intrin` 8/16, and the
+`tests/surface_datetime.tk` leg `syntax` 16, `alias` 21, `types` 14 — the only figure that
+moves is the arena's own high-water, `467792 → 1114960` bytes on the floor and
+`3211120 → 3858288` on the datetime leg (the two tables plus this crumb's own source,
+against a 33554432-byte reservation). `mc pkg hash .`:
+`f3c53a71be989bcf05fe302a040150a3cbf1289b2a1dce4b08ae7b55c482537d`.
+
+**Copilot finding, fourth pass — the CONVERSION was still made on the guess, and the
+oracle's new answer made one global honest and one dangerous.** Both were reproduced on
+`108391e1` before they were fixed.
+
+1. **A float column laundered what a cast column no longer could.** The third pass took the
+   guess out of the CHECK and left it in the conversion, and on a float column the
+   conversion IS the decision: `tk_num_widen` widens an integer and leaves everything else
+   alone. With an `i64 pick(i64)` declared ahead of a `DateTimeKind pick(i64, i64)`,
+   `TimeSpan.FromHours(pick(1, 2))` read the FIRST declaration, wrote `(f64)
+   pick__i64__i64(1, 2)` over a call that returns an enum, and `tk_rc_call_args`
+   (teko_rc.tk) saw exactly the `f64` the column asks for and had nothing to say — the same
+   laundering, one column over. The mirror pair, an `f64 pick(i64)` ahead of an `i64
+   pick(i64, i64)`, wrote NO cast over an integer return and fed the raw eight bytes to a
+   float parameter.
+
+   **The fix is that `cty` is what everything reads.** `tk_prim_arg` (teko_prim.tk) already
+   built the -1 an N_CALL deserves for the check; it now hands that same -1 to
+   `tk_prim_conv`, so no node is written on a guess: both cast arms never read the type at
+   all, the float arm writes nothing, and every other column's conversion is the identity
+   whatever the type is. `tk_prim_defers` adds the float column to the deferral table, and
+   `tk_prim_arg_widen` writes the cast once `tk_over_pass` has picked the symbol. The wrap
+   is IN PLACE (`tk_nd_moved`, the node-rewrite pattern teko_rc.tk's `tk_rc_assign` already
+   uses) because the argument was spliced into the lowered call's own list two passes ago
+   and nothing at that point holds the link it is; `nd_next` is the one field left behind,
+   since the sibling link belongs to the SLOT and not to the value. Only a CALL defers on a
+   float column, and the reason is WHOSE type a later pass still moves: a call's is its
+   callee's, which the overload pick may replace, while every other argument crosses under
+   the type it already has and `tk_rc_call_args` (teko_rc.tk, the last pass of all) both
+   judges it and writes the widening against the declaration the row names --
+   `TimeSpan.FromHours(x + 1)` on an `i64 x` parameter is three hours with no entry in this
+   table, measured. (The fifth pass below replaced the two resolvers this sentence first
+   named with one walk; the invariant is unchanged and its reason is this one.) The rule
+   itself moved to `tk_num_widens` (teko_typeof.tk) so the two readers cannot drift. **All 61 dumps stayed
+   byte-identical** across this fix alone: no fixture had a call in a float column, and the
+   cast still lands where the literal already put it. `tests/surface_datetime_kind.tk`
+   gains codes 54-57 over both declaration orders and a float-returning overload; the
+   refusal (`teko: a value of type DateTimeKind does not convert to f64`) is in
+   diagnostics.md.
+
+2. **`tk_ty_global` has a side effect, and it is right twice and wrong once.** With the
+   oracle answering a global by its declaration, a global receiver stops falling through to
+   the by-name member search. Measured against `33c7485c` (main), which refuses all three:
+
+   - a PRIMITIVE global (`TimeSpan g; g.Days`, `g.TotalHours`, `g.Negate()`,
+     `g.CompareTo(t)`, `g.Equals(d)`, and a write followed by a read) is **right**, and
+     comes for free — not one line was added for it. `docs/reference/not-yet.md`'s row is
+     deleted, and so are the sentences in `timespan.md` and `datetime.md` that cited it;
+     `tests/surface_timespan.tk` reads `g_span` as a receiver (codes 70-76);
+   - a global declared `T?` over a REFERENCE is **right** too: its handle IS the pointer,
+     so `.HasValue`, `.Value`, `??` and `?.` read as a local's do and the object lives as
+     long as any other global's (`rt_live()` measured). `tests/surface_nullable_ref.tk`
+     gains `globalcheck()`, codes 110-119;
+   - a global declared `T?` over a VALUE is **wrong**, and the branch turned a silent hole
+     into a segfault. The box that type promises is built by the rc pass out of the SCOPE a
+     local lives in — `tk_rc_var` and `tk_rc_assign` (teko_rc.tk) both return at once for a
+     name no scope holds — so `i64? n; n = 5;` stored the bare 5, and `n.Value`, which on
+     main answers `teko: unknown member: Value`, became `ld64(tk_nl_ck(5) + 24)`: exit 139.
+
+   The DECLARATION is what is wrong, so the declaration is what is refused: `teko: a global
+   does not hold a nullable box`, from `tk_gs_check` (teko_array.tk) in the same sweep that
+   collects the slots, which closes `n = 5;` and not only the read. not-yet.md keeps its
+   row under the new message and `nullable.md` says which half of `T?` a global takes.
+
+Two nits with it: `docs/specs/datetime.md` § 11's inventory and `docs/specs/enum.md` § 12's
+N2c gate line now name `tests/surface_datetime_kind_panic.tk` (70) beside the 42 one.
+
+**Copilot finding, fifth pass -- the check had TWO points and needed one, and a node that
+moves takes its type with it.** Both were reproduced on `d8d00572` before they were fixed.
+
+1. **A legal argument was refused, because the point that judged it was dead for its
+   shape.** The third pass split the judgement in two -- `tk_prim_arg_pend` inside
+   teko_ops.tk's walk for what a scope answers, `tk_prim_arg_rest` at the end of
+   `tk_over_pass` for what the overload pick answers -- and the first half is UNREACHABLE
+   for an argument that is an `N_BINARY` or an `N_UNARY`: `tk_ops_visit` returns from both
+   of those arms before the hook at the bottom of the function. So the node fell to the
+   sweep, which runs with NO scope entered, and `new DateTime(1, k | DateTimeKind.Utc)` on
+   a `DateTimeKind k` parameter -- legal, since a bitwise operator over an enum answers the
+   enum (§ 4 of the spec) -- read `teko: the type of this argument is not known here`.
+   The same for `k & DateTimeKind.Local` and for `~~k`.
+
+   **The fix is that there is one point again, and it is a walk of its own**:
+   `tk_prim_arg_judge` (teko_prim.tk) drives `tk_ty_pass_walk` at the end of
+   `tk_over_pass`, after that pass's own walk has written every picked symbol. That is the
+   only place where BOTH halves of what types an argument are true at once -- the scope a
+   parameter is read under is live, and every overload under the argument is already the
+   signature its own arguments chose, at whatever depth. Moving the hook ahead of the two
+   returns in `tk_ops_visit` was the smaller diff and the wrong one: it judges the node
+   BEFORE the pick under it, which is exactly the laundering the third pass removed.
+   Hooking `tk_ov_visit` itself does not work either, because `tk_ty_walk_list` visits a
+   node before its children and a nested call is picked after its parent is visited.
+   `tk_prim_arg_rest` is DELETED: nothing is left for a sweep. That a body walk reaches
+   every deferred argument was measured rather than argued -- a throwaway build that
+   errors on any entry the walk did not mark fired on none of the 61 fixtures nor on the
+   compiler's own source under `scripts/bootstrap.sh` -- and the reason is what a global
+   initializer may be: mc requires it to be CONSTANT, so a row's call never stands there
+   (`DateTime g = new DateTime(1, gk);` is `global initializer must be constant`) and the
+   constant arguments that do (`1 + 2`, `(i64) 3`, a `const` name) are typed by the parser
+   and never defer. `passes` stays **15/30**, and a unit that deferred nothing walks
+   nothing (the table is this module's own memory, and `tk_prim_arg_judge` returns on an
+   empty one).
+
+   The refusals do not move, and one of them gets the better wording for free: `new
+   DateTime(1, x | 1)` on an `i64 x` parameter was `the type of this argument is not known
+   here` and is now `teko: a value of type i64 does not convert to DateTimeKind`, the type
+   it really has. `tests/surface_datetime_kind.tk` gains codes 58-61.
+
+2. **A node rewritten in place kept a type that was no longer its own.**
+   `tk_prim_arg_widen` wraps the argument by moving what the node WAS into a fresh node
+   (`tk_nd_moved`) and making the original the `N_CAST`; a row of teko_struct.tk's
+   expression-type table (`tk_xt_put`) is keyed on the NODE, so a registration the argument
+   already had stayed on the wrapper. `tk_ty_of` reads that table BEFORE the node's own
+   kind, so the `(f64)` then answered `i64` -- the type of what it wraps -- and
+   `tk_rc_call_args` (teko_rc.tk), the last pass of all, widened it a second time.
+   Measured: `TimeSpan.FromHours(h.Get())` with `h` a PARAMETER (so the `.` is a
+   placeholder the oracle's pass rebuilds AND registers a type for) dumped `CAST type=f64`
+   over `CAST type=f64` over the call. A local receiver does not reach it -- the parser
+   types it, so the argument never defers -- which is why no fixture had caught it.
+   **The fix is in the move, not in the caller**: `tk_xt_move` (teko_struct.tk) repoints
+   every row of the node onto the fresh one, because the registration describes the VALUE
+   and the value is what moved. `tests/surface_datetime_kind.tk` gains code 62 and its
+   dump carries one cast.
+
+**Copilot finding, sixth pass -- the deferred judgement trusted a type the operator pass
+had guessed.** Reproduced on `38826cb4` before it was fixed.
+
+The fifth pass gave the deferred argument ONE point of judgement, at the end of
+`tk_over_pass`, and that point asks `tk_ty_of` for the argument's type. For an N_BINARY
+`tk_ty_of` is `tk_ty_binary` (teko_typeof.tk), which answers from its operands -- and the
+operands were TYPED by a pass that ran three earlier. `tk_ops_pass` reads a call as
+`decl_ret(decl_find(name))`, the FIRST declaration of a name that may carry several, so
+with an `i64 pick(i64, i64)` declared AHEAD of a `DateTimeKind pick(i64)` the walk saw two
+integers in `new DateTime(1, pick(1) + 1)`, left the node to the core as raw arithmetic,
+and `tk_over_pass` then rewrote the call to the enum overload. The deferred check asked
+`tk_ty_binary`, got `DateTimeKind` -- the LEFT operand's type, the core's own rule -- and
+accepted the argument for exactly the type the column asks for. `k + 1` on an enum
+parameter is ``teko: no operator `+` takes these operands`` (§ 4); `pick(1) + 1` compiled
+and reached the run-time kind guard, and so did `pick(1) - 1`, `pick(1) * 2` and
+`-pick(1)` (exit 70). It is the third pass's laundering one level up: the guess was taken
+out of the check and out of the conversion, and stayed in the SUBTREE the check reads.
+
+**The fix is that the claim is re-asked, not that the type is re-read.** `tk_prim_arg_do`
+(teko_prim.tk) calls `tk_ops_rejudge` (teko_ops.tk) on the argument before it reads its
+type, and that function is `tk_ops_binary`'s own three claims -- nullable, enum, primitive
+-- in `tk_ops_binary`'s own order, over the types the pick left behind, with the operands
+re-judged first for the same reason `tk_ops_operand` resolves them first. The enum and the
+nullable claim only CHECK, so re-asking them is a no-op whenever the pick changed nothing,
+which is why the 60 other dumps do not move; the primitive claim LOWERS, and it lowers here
+exactly as it would have lowered there -- in place, with `tk_rc_pass` still to come --
+because a primitive operand the guess hid is the one shape whose raw arithmetic is wrong
+rather than merely untyped. Measured both ways on `38826cb4`: `t.CompareTo(spick(1) +
+spick(2))` over two `TimeSpan.MaxValue` returns added eight bytes to eight bytes and
+answered a wrapped number where the row panics (`teko: a time span overflowed`, exit 70),
+and `TimeSpan.FromTicks(2).CompareTo(dpick(3) - epick(1))` over two `DateTime` returns
+carried the two `Kind` bits into the `TimeSpan` (`1 << 62` ticks) where `tk_dt_sub` masks
+them off. The USER-operator arm is not re-asked: a node it owns is already an N_CALL by
+then (`tk_ops_emit` replaced it) and a node it left to the core is the pointer arithmetic
+teko_ops.tk's own header allows.
+
+**What it does NOT fix, and that is written down rather than worked around.** The guess is
+still what `tk_ops_pass` judges everywhere OUTSIDE a deferred primitive argument, in both
+directions: `DateTimeKind k = pick(1) + 1;` compiles, and a LEGAL `pick(1) |
+DateTimeKind.Utc` -- a bitwise operator over an enum answers the enum -- is REFUSED with
+``teko: no operator `|` takes these operands`` when the enum overload is not the first
+declaration, inside a primitive argument as well as outside one, because that refusal is
+raised three passes before the re-judgement exists. Closing it means resolving the
+overloads ahead of the operator pass, which moves every overload refusal ahead of every
+other one and is not this crumb's to do; the row is in
+[not-yet.md](docs/reference/not-yet.md) under both spellings. The accumulated table over
+the eight shapes the review named, in both declaration orders, is the fixture's own codes
+63-64 for what is accepted and diagnostics.md for what is refused.
+
+**Fixtures stay 61.** `tests/surface_datetime_kind.tk` gains codes 63 (an overloaded call
+under a legal bitwise operator, the enum overload first) and 64 (the `DateTime - DateTime`
+above, whose two overloads are declared `i64` first, and which answers 64 on the build
+before this fix). Two nits with it: `docs/internals/primitives.md` still described the
+first design of the deferred check -- two cast columns, judged on `tk_ops_pass`'s walk --
+where it is three columns judged by `tk_prim_arg_judge`'s own walk at the end of
+`tk_over_pass`; and `docs/reference/nullable.md`'s "Only locals" now says which half of the
+sentence belongs to the definite-assignment walk (which never judges a global) and which to
+the DECLARATION check `tk_gs_check` makes over a global declared `T?` over a value.
+
+**Copilot finding, seventh pass -- the ROOT under all six, and what it made redundant.**
+Every pass above fixed one consumer of one wrong answer: `tk_ty_of` typed a call to an
+overloaded name by `decl_ret(decl_find(name))`, the FIRST declaration of a name that may
+carry several. The seventh pass fixes the ANSWER instead, in D49 below,
+and the machinery this entry built around the guess shrinks with it: `tk_ops_rejudge`,
+the sixth pass's second judgement, is DELETED (57 lines), because the operator pass now
+sees the picked type on its first visit. What STAYS is the parse-time half, measured: a
+`new DateTime(...)` argument is lowered while the unit is still being read, where
+`tk_pty_of` (teko_struct.tk) cannot ask an overload table that does not exist yet -- so
+`tk_prim_arg`'s `cty = -1` for a call, the deferral table and `tk_prim_arg_widen`/
+`tk_xt_move` are all still what they were. Removing that one line makes
+`tests/surface_datetime_kind.tk` answer 1 instead of 42. The limit this entry's sixth pass
+wrote into not-yet.md -- `DateTimeKind k = pick(1) + 1;` compiling outside an argument, and
+a legal `pick(1) | DateTimeKind.Utc` refused -- is CLOSED, both directions, and the row is
+replaced by what is left of it there.
+
+**Copilot finding, eighth pass -- one latent arity slip, five stale sentences.**
+`tk_prim_member`, the one-argument registration helper, tested `p0 >= 0` to tell "no
+argument" from "one", but a late type name (`tk_prim_late`, D48) is an id BELOW -1, so a
+one-argument row over a late type would have been stored with arity zero. No row does that
+yet (the only late column sits in the two-argument constructor, registered by position), so
+the 62 dumps are byte-identical before and after; the test is `p0 != -1` now, the sentinel
+itself. The five sentences (`teko_prim.tk`'s two rationales, `docs/internals/primitives.md`'s
+row schema and walk rationale, `docs/specs/enum.md`'s gate count) still described the
+first-declaration guess D49 removed, or the one-type row N2c widened, or 61 fixtures; they
+say what the code does now.
+
+**Copilot finding, ninth pass -- the table was rebuilt and judged once, and the compiler's
+own names were nobody's.** D49 pulled `tk_ov_prepare` up to pass 6 and rebuilt its rows on
+every call, but a flag (`tk_ov_scanned`) kept the JUDGEMENT at the first call: every
+declaration the unit gains afterwards -- the `tkarr_new_T`/`tkarr_release_T`/`tkarr_put_T`
+group `tk_params_pass` (12) emits, which is exactly the growth D49 measured at 84 rows to 94
+-- was never scanned, so it was never marked and never mangled. A program declaring one of
+those names by hand kept its own plain symbol beside the generated one and the site picked
+whichever table answered first. Measured on `665c7442`, `i64 tkarr_put_i64(i64 a)` beside an
+`i64 total(params i64[] xs)` and a `total(1, 2, 3)`: `teko: a value of type i64[] does not
+convert to i64` at the CALL, a legal program refused for the wrong reason -- the generated
+helper had been type-checked against the program's own function.
+
+**The root is that nothing told a generated declaration from a written one**, and rescanning
+alone does not fix it: with the scan repaired the same program reads `teko: no overload of
+tkarr_put_i64 matches these arguments`, a better message for a program that is still legal.
+Reserving the `tkarr_`/`tk_nl_` SPELLINGS was tried and is wrong twice over: those helpers
+are emitted during the PARSE (`tk_ha_ensure_gen`, teko_heaparr.tk; `tk_nl_ensure_ck`,
+teko_null.tk), so they are already in the pass-6 table and a prefix rule refuses 14 of the
+fixtures outright; and the compiler's own sources declare `tk_nl_box_fn` and `tk_nl_boxname`,
+so the bootstrap would refuse itself.
+
+**So the mark is on the NODE, at the one door every generator uses.** `tk_top_emit`
+(teko_struct.tk) is where a generated top-level declaration is added -- K6's own audit
+already names it as the point every mid-declaration generator goes through -- and it now
+records the pair (node, name) in a table of its own (`TK_MAXEMIT` 512, capacity message,
+134 used by `tests/surface_lambda.tk`, the busiest fixture, and 0 by `tests/hello.tk`).
+`tk_ov_collect` then refuses a top-level declaration the compiler did NOT emit whose name
+one it DID emit carries: `teko: the name is the compiler's own: tkarr_put_i64`, and the same
+for `tk_nl_ck`, `tk_nl_box_i64`, `tk_nl_new`, `tk_nl_dflt`, a `tk_nl_vt`/`Name__vt` global
+or an enum's `Name__names`. It is the node and never the spelling, so the generated
+declaration itself passes, and a name that merely LOOKS like one is a program's own:
+`tkarray` and `tk_nl_boxer` beside a `params` list and an `i64?` compile and run (exit 49).
+Globals are checked too, though they are collected by nobody: `tk_nl_vt` is a generated
+GLOBAL and a program declaring one would clash with it exactly as a function does.
+
+**The memoization was audited, and no generator keys on `decl_find`** -- the worst case
+would be a generator deciding "already emitted" because the PROGRAM declared the name, and
+the program's function then silently standing in for the helper. Every one keys on a table
+of its own: `ha_gen_at`/`ha_put_at` (teko_heaparr.tk), `tk_nl_ck_gen`/`tk_nl_box_gen`/the
+`nl_box` payload list (teko_null.tk), `tk_enum_slot` (teko_enum.tk), `dgi_row_at`/`dgi_fn_at`
+(teko_deleg.tk), `tk_ix_emitted` (teko_struct.tk). The three `decl_find` memos that exist
+are include checks and name resolution (`tk_prim_need_include_of`, `tk_enum_need_include`,
+`tk_deleg_resolve_fn`), not generators. Proved rather than argued: on `665c7442`,
+`i64 tk_nl_box_i64(i64 v)` declared ABOVE the first `i64?` reached
+mc's own `function declared twice` -- the generator had emitted its own anyway -- and it is
+`teko: the name is the compiler's own: tk_nl_box_i64` now.
+
+**Copilot finding, tenth pass -- the record of the compiler's own names had one door and
+eight ways around it.** The ninth pass put the pair (node, name) of every generated
+top-level declaration in a table of `tk_top_emit`'s own (teko_struct.tk) and taught
+`tk_ov_collect` to refuse a program's declaration carrying one of those names. The door was
+real and incomplete: `grep -n 'top_add(' teko_*.tk` answered fourteen sites, and eight of
+them were generators that never went through it -- a class method's mangled body and a
+constructor's (`tk_member_body`, `tk_member_ctor`, teko_class.tk), both property accessor
+forms (`tk_prop_auto_body`, `tk_prop_arrow_body`, teko_prop.tk), a static field's global and
+a struct's implicit allocator (`tk_static_field`, `tk_struct`, teko_struct.tk), a service's
+slot and memoized getter (`tk_di_getter_sym`, teko_di.tk) and every declaration a generic
+instance replays (`tk_gen_replay`, teko_generic.tk). Their symbols are as much the
+compiler's as `tkarr_put_i64` is: the program never spells `point_area`, the mangling does.
+
+**The fix is one door with two spellings, and the second is the first's own body.**
+`tk_top_emit_as(i64 n, uptr owner)` records the pair, calls `top_add` and then sets
+`p_decl_name()` to `owner`; `tk_top_emit(i64 n)` is `tk_top_emit_as(n, p_decl_name())`, the
+mid-declaration form D27 asks for, unchanged to the byte for its eleven existing callers. A
+generator that stands at TOP LEVEL -- inside a `class`/`struct` body the core is reading --
+passes `0`, which is exactly what `top_add` leaves behind on its own, so those seven sites
+gained the row and nothing else; the two in `tk_di_getter_sym` run from pass 4, where the
+name is already 0, and take the plain door. `tk_gen_replay` keeps its own save of
+`p_decl_name()` with the rest of its scratch and passes 0 too, because `parse_top` writes
+the name itself once per declaration the instance produces -- and it answers 0 for a `class`,
+whose members add themselves, which is why the function records nothing for a null node.
+**That is the whole reason the 62 dumps do not move**: not one migrated site changed what
+`p_decl_name()` is after it returns.
+
+**Two sites are NOT recorded, and the reason is in the code.** teko_ns.tk's `tk_ns_top`
+(a namespaced type's function at top level) and the `namespace A { ... }` body's own loop
+add declarations the PROGRAM wrote; `tk_ns_rename_decl` mangles them two passes later, so
+the node still carries the SHORT name here. Recording it would reserve `area` against the
+very program that wrote `namespace geo { i64 area() }`, and it would say "the compiler's
+own" about a body the compiler never wrote. The collision that family really has -- a
+top-level `i64 geo__area()` beside that namespace -- is a program colliding with its own
+mangled name, and it reaches the core's `function declared twice` before and after this
+pass, unchanged.
+
+**Measured, on `448c6154` and on this commit**, each family a program declaring the
+generated symbol by hand:
+
+| family | the name | on `448c6154` | now |
+|---|---|---|---|
+| struct implicit allocator | `stamp_new` | `teko: a value of type i64 does not convert to Stamp` (the wrong cause, at the `new`) | `teko: the name is the compiler's own: stamp_new` |
+| static field | `stamp_made` | `global name declared twice` (the core) | `teko: the name is the compiler's own: stamp_made` |
+| class method | `point_area` | the core's `function declared twice`, `call to unknown function` or teko's `no overload of point_area matches these arguments`, by how the program uses it | `teko: the name is the compiler's own: point_area` |
+| class constructor | `point_ctor__i64` | the core's `function declared twice`, `call to unknown function` or teko's `no overload of point_ctor__i64 matches these arguments`, by how the program uses it | `teko: the name is the compiler's own: point_ctor__i64` |
+| auto property accessor | `square_get_Side` | the core's `function declared twice`, `call to unknown function` or teko's `no overload of square_get_Side matches these arguments`, by how the program uses it | `teko: the name is the compiler's own: square_get_Side` |
+| arrow property accessor | `square_get_Area` | the core's `function declared twice`, `call to unknown function` or teko's `no overload of square_get_Area matches these arguments`, by how the program uses it | `teko: the name is the compiler's own: square_get_Area` |
+| service getter | `svc_di_get` | `function declared twice` | `teko: the name is the compiler's own: svc_di_get` |
+| generic instance method | `box__circle__2_cap` | `... instantiated from ...: function declared twice`, or `no overload of box__circle__2_cap matches these arguments`, by how the program uses it | `teko: the name is the compiler's own: box__circle__2_cap` |
+| namespace mangling | `geo__area` | `function declared twice` | `function declared twice` (deliberately unchanged, above) |
+
+The first row is the one that was a genuine hole rather than a worse message (the verifier's
+own reproduction reached it the other way round, `a value of type Stamp does not convert to
+i64` at a caller that never wrote `new` -- the same silent misresolution): the core never
+saw two declarations, because a struct's allocator and the program's function differ in
+RETURN type, and the program's `Stamp stamp_new()` simply stood in for the generated one at
+the `new` site. The others gained the cause in place of the symptom. A name that merely
+LOOKS generated is still a program's own: `point_areas` and `pointarea` beside a
+`class Point { i64 area() }` compile and run.
+
+**`TK_MAXEMIT` stays 512, with the worst case measured rather than argued.** A throwaway
+build that reports `tk_nemit` at the last pass, run over all 62 fixtures on both commits:
+the busiest is `tests/surface_lambda.tk` at **134 -> 142**, then `tests/surface_di.tk`
+67 -> 103, `tests/surface_nullable_ref.tk` 48 -> 59, `tests/order_types.tk` 45 -> 55,
+`tests/surface_namespace.tk` 44 -> 52; `tests/hello.tk` is 0 on both. The compiler's own
+source is 0 as well -- `mc_teko.tk` is written in the mc subset teko does not generate for,
+and the same throwaway build reports `EMIT: 0` for it -- so the bootstrap has no worst case
+of its own. 142 of 512 is 28% of the reservation, and the capacity message
+(`teko: too many generated declarations in one unit`) is the one the ninth pass wrote.
+
+**Proof of the tenth pass**, mc **0.15.23** (`MC_VERSION`), macos/aarch64: `mc build .
+--config mc.macos.toml` clean; **62/62** fixtures at their `expect-exit`; `--dump-ast` of all
+62 against `448c6154` -- **62 byte-identical**, which is what says the seven top-level sites
+kept `p_decl_name()` exactly where a bare `top_add` left it; `sh scripts/bootstrap.sh --os
+macos --arch aarch64` -> `FIXPOINT OK` (62/62 under the self-hosted `teko1`);
+`sh scripts/check-docs.sh` green (**568** links, 385 diagnostics, 117 samples). `mc limits`
+verdict `ok` on both legs with every table unmoved from the ninth pass -- floor
+(`tests/hello.tk`) `passes` **15/30**, `syntax` 15, `alias` 18, `types` 11, `intrin` 8/16,
+heap 1114992, and the `tests/surface_datetime.tk` leg `syntax` 16, `alias` 21, `types` 14,
+heap 3875504 (against a 33554432-byte reservation). `mc pkg hash .`:
+`0b8e9993f94b8faf2fc4da8688c40aa06346bc5e106e3d3973bab0c841a15a96`.
+
+**Proof of the ninth pass**, mc **0.15.23** (`MC_VERSION`), macos/aarch64: `mc build .
+--config mc.macos.toml` clean; **62/62** fixtures at their `expect-exit`; `--dump-ast` of all
+62 against `665c7442` -- **62 byte-identical**, which is what says the rescan and the mark
+change no accepted program; `sh scripts/bootstrap.sh --os macos --arch aarch64` ->
+`FIXPOINT OK` (62/62 under the self-hosted `teko1`); `sh scripts/check-docs.sh` green (567
+links, **385** diagnostics, 117 samples). `mc limits` verdict `ok` on both legs with every
+table unmoved -- floor (`tests/hello.tk`) `passes` **15/30**, `syntax` 15, `alias` 18,
+`types` 11, `intrin` 8/16, heap 1114992, and the `tests/surface_datetime.tk` leg `syntax`
+16, `alias` 21, `types` 14, heap 3875504 (against a 33554432-byte reservation).
+`mc pkg hash .`: `5516de82a24b18f001eca4f4e8eed83843450129e328ba2c48f9efe08229f428`.
+
+**Proof of the sixth pass**, mc **0.15.23** (`MC_VERSION`), macos/aarch64: `mc build .
+--config mc.macos.toml` clean; **61/61** fixtures at their `expect-exit`; `--dump-ast` of
+all 61 against `38826cb4` -- **60 byte-identical**, and the one that moves is the fixture
+edited here, a pure ADDITION once the compiler's own `$gN` temporaries are normalized (81
+lines added, none removed); `sh scripts/bootstrap.sh --os macos --arch aarch64` ->
+`FIXPOINT OK` (`teko1.o == teko2.o` on the first turn, `--dump-asm` of teko2 vs teko3 empty
+over 214672 lines, 61/61 fixtures under `teko1`); `sh scripts/check-docs.sh` green (567
+links, 383 diagnostics, 117 samples). `mc limits` verdict `ok` on both legs with every
+table unmoved from the fifth pass -- floor (`tests/hello.tk`) `passes` 15/30, `syntax` 15,
+`alias` 18, `types` 11, `intrin` 8/16, heap 1114848, and the `tests/surface_datetime.tk`
+leg `syntax` 16, `alias` 21, `types` 14, heap 3858176 (against a 33554432-byte
+reservation). `mc pkg hash .`:
+`1c76727914a271be8d92f6bb0516a2f27d4efb8ffc82f46d465ea6ea1a1578af`.
+
+**Proof of the fifth pass**, mc **0.15.23** (`MC_VERSION`), macos/aarch64: `mc build .
+--config mc.macos.toml` clean; **61/61** fixtures at their `expect-exit`; `--dump-ast` of
+all 61 against `d8d00572` -- **60 byte-identical**, and the one that moves is the fixture
+edited here, a pure ADDITION once the compiler's own `$gN` temporaries are normalized (218
+lines added, none removed); `sh scripts/bootstrap.sh --os macos --arch aarch64` ->
+`FIXPOINT OK` (61/61 under the self-hosted `teko1`); `sh scripts/check-docs.sh` green (565
+links, 383 diagnostics, 116 samples). `mc limits` verdict `ok` on both legs with every
+table unmoved from the fourth pass -- floor (`tests/hello.tk`) `passes` 15/30, `syntax` 15,
+`alias` 18, `types` 11, `intrin` 8/16, heap 1114960, and the `tests/surface_datetime.tk`
+leg `syntax` 16, `alias` 21, `types` 14, heap 3858176 (against a 33554432-byte
+reservation). `mc pkg hash .`:
+`9b657a1299e88d46d919e47b3e8ed2da8c4641e3f80492364d1dc6bf56b7bd5e`.
+
+**Proof of the fourth pass**, mc **0.15.23**, macos/aarch64: `mc build . --config
+mc.macos.toml` clean; **61/61** fixtures at their `expect-exit`; `--dump-ast` of all 61
+against `108391e1` — **58 byte-identical**, and the three that move are the three fixtures
+edited here, every one of whose diffs is pure ADDITION once the compiler's own `$gN`
+temporaries are normalized (no existing line moved);
+`sh scripts/bootstrap.sh --os macos --arch aarch64` → `FIXPOINT OK` (`teko1.o == teko2.o`
+on the first turn, `--dump-asm` of teko2 vs teko3 empty over 214416 lines, 61/61 fixtures
+under `teko1`); `sh scripts/check-docs.sh` green (564 links, **383** diagnostics, 115
+samples). `mc limits` verdict `ok` on both legs with every table unmoved from the third
+pass — floor (`tests/hello.tk`) `passes` 15/30, `syntax` 15, `alias` 18, `types` 11,
+`intrin` 8/16, heap 1114848, and the `tests/surface_datetime.tk` leg `syntax` 16, `alias`
+21, `types` 14, heap 3858288 (against a 33554432-byte reservation). `mc pkg hash .`:
+`1f36848ed1779e8821b0f454e1b3ce19225ea8cd5b2bf6ddd8113247cc1a4c23`.
+
+### D49 · The oracle asks the overload table: a call is typed by the pick, never by the first declaration (2026-09-13)
+The seventh review pass on [#697](https://github.com/teko-org/teko-lang/pull/697), and the
+ROOT of the family D48's third, fourth, fifth and sixth passes each patched one consumer of.
+`tk_ty_of` (teko_typeof.tk) answered an N_CALL with `decl_ret(decl_find(name))` — the FIRST
+declaration of a name that may carry several signatures — and the pass that replaces a site
+with the symbol its ARGUMENTS pick is `tk_over_pass`, number **14** of the fifteen. Every
+consumer of the oracle runs before it: the operator pass (11), the ternary and `??`/`?.` (9),
+a primitive row's deferred argument, an initializer. Each of the four earlier passes taught
+one of them to distrust the answer; this one makes the answer true.
+
+**The design is a flag, not a new pass and not a new table** (option iii of the three the
+recon weighed). `tk_ov_resolve` becomes `i64 tk_ov_pick(i64 n, i64 commit)`:
+
+- at `commit == 1` it is the pass, unchanged to the byte — the rounds, then
+  `tk_pm_expand_call` or `tk_fill_defaults`, then `set_nd_name`;
+- at `commit == 0` it is a QUESTION. It runs the same five rounds over the same argument
+  types (`tk_ov_arg_ty` takes the flag too, so a nested overloaded call is resolved the same
+  way) and returns `decl_ret` of the chosen declaration **before every rewrite**. Not one
+  node moves while it is asked, which is what keeps the `params` expansion and the default
+  fill happening exactly once, at the pass, over the tree the source wrote.
+- each of the four `err_at` sites becomes `-1` under `commit == 0`: too many arguments, an
+  argument of unknown type, no overload matching, more than one matching. **-1 is never a
+  guess** — it is the "not known" this oracle already answers for anything it cannot see,
+  and no consumer refuses on it (`tk_check_scalar_compat`, `tk_ops_binary`, `tk_enum_*`,
+  `tk_prim_binary` all state that rule in their own headers). A question reports nothing,
+  because the pass reaches the same site later and reports it once.
+
+`tk_ov_prepare(root)` is what fills the table, called at the TOP of `tk_typeof_pass` (pass
+6, ahead of every consumer) and again at the top of `tk_over_pass`. It REBUILDS the
+declaration rows on each call and scans them again (D48's ninth pass corrects this entry — it
+scanned ONCE as first written): the unit grows between the two, since `tk_params_pass` (12)
+emits the allocator, release and element store of a `T[]` row a call site is the first to
+build — measured, `tests/surface_params.tk` carries 84 top-level declarations at pass 6 and
+94 at pass 14 — so a table collected once would have made the pick depend on whether
+anything asked earlier, and a table SCANNED once judged only the rows pass 6 could see.
+
+**The consumers this closes**, every one measured on `9784ad80` before and after, with the
+picked overload declared SECOND so the guess and the pick disagree:
+
+| consumer | written | on `9784ad80` | now |
+|---|---|---|---|
+| `tk_ops_promote` (11) | `TimeSpan.FromHours(gpick(1) + 1)`, `f64 gpick(i64)` | 1h: the `1` was not promoted | 2.5h |
+| `tk_ops_binary` (11) | `i64 r = 2 + rpick(1)`, `i64 rpick(i64)` | ``no operator `+` takes these operands`` | 42 |
+| `tk_ops_binary`, enum arm | `bpick(1) \| DateTimeKind.Unspecified` | ``no operator `\|` takes these operands`` (a row of not-yet.md) | the enum, both declaration orders |
+| `tk_ops_binary`, enum arm | `DateTimeKind k = pick(1) + 1;` | COMPILED as raw arithmetic | ``no operator `+` takes these operands`` |
+| `tk_ops_unary` | `new DateTime(1, +pick(1))` | the `+` erased over an enum, then a bogus "overloaded call outside a function body" | ``no operator `+` takes these operands`` |
+| `tk_ternary_pass` (9) | `c ? tpick2(2, 3) : 9` | `the two arms of ?: have different types` | 5 |
+| `tk_nl_co_lower` (9) | `npick(1) ?? d`, `i64? npick(i64)` | ``?? needs a nullable on the left`` | 8 |
+| `tk_prim_arg_judge` (14) | `new DateTime(7, bpick(1) \| ...)` | refused as above | the enum |
+| an initializer | `DateTimeKind k = bpick(1);` | already right (`tk_check_scalar_compat` reads the same oracle) | unchanged |
+
+**What it deletes.** `tk_ops_rejudge` (teko_ops.tk), the sixth pass's second judgement of an
+operator under a deferred argument: 57 lines, gone, because pass 11 now sees the picked type
+on its first visit — it refuses `pick(1) + 1` where the pick is an enum and lowers
+`dpick(3) - epick(1)` to the row's own call where the pick is a primitive, at the pass where
+every other operator is judged. The two fixture codes that measured it, 63 and 64, pass with
+it gone. **What it does NOT delete, measured rather than argued**: the parse-time deferral.
+A `new DateTime(...)` argument is lowered while the unit is still being read, where
+`tk_pty_of` (teko_struct.tk) cannot ask a table that does not exist yet, so `tk_prim_arg`'s
+`cty = -1` for a call, `tk_prim_arg_defer`, `tk_prim_arg_widen` and `tk_xt_move` all stay —
+removing that one line makes `tests/surface_datetime_kind.tk` answer 1 instead of 42.
+
+**The risks, and which way each was taken.** `tk_ov_scan`'s three declaration refusals — an
+overloaded `main`, an overloaded `extern`, two overloads differing only by `ref`/`out` — now
+fire at pass 6 instead of pass 14, with the same message at the same line; a program whose
+only error is one of those sees it earlier than another error it also has. Keeping the scan
+at 14 only was possible (a second flag) and was not taken: the marks it writes are exactly
+what `tk_ov_find` reads, so the oracle would have had to duplicate the judgement — and
+scanning at 6 ONLY, which is what this entry first shipped, left every row the later passes
+add unjudged, which is what D48's ninth pass fixes. Re-entrancy is
+bounded by the tree: a question descends into its own arguments and never back up. Cost is a
+re-resolution per question rather than a cache — the compiler's own source declares no
+overload at all (mc's core is what it is built from), so `scripts/bootstrap.sh` measures the
+zero case and `FIXPOINT OK` holds.
+
+**The limits that STAY**, both now in not-yet.md under what they really are:
+
+- **parse time**. `tk_pty_of` types a node while the unit is incomplete, and a `switch`
+  subject's temporary is written there: `switch (pick(1))` types `$t` by the first
+  declaration of `pick`, and a `case` label of the picked overload's own type is then
+  ``teko: no operator `==` takes these operands``. Bind the call to a local first.
+- **a USER operator read by a pass that runs ahead of pass 11**: `c ? v + 1 : 9` on a class
+  that declares `operator+` is `teko: the two arms of ?: have different types`, and the same
+  expression on the right of `??` or behind `?.` gets that position's own message. Nothing to
+  do with overloads — the ternary, `??` and `?.` are rewritten at pass 9 and `tk_ops_emit`
+  has not written the call yet.
+
+**Fixtures: 62.** `tests/surface_overload_ops.tk` (exit 42, 16 codes) is the accepted half of
+the table above, in both declaration orders; the refused half is in
+[diagnostics.md](docs/reference/diagnostics.md) behind `// no-run`, and the file is REFUSED
+by the compiler built from `9784ad80`, at its first ternary.
+
+**Proof**, mc **0.15.23** (`MC_VERSION`), macos/aarch64: `mc build . --config mc.macos.toml`
+clean; **62/62** fixtures at their `expect-exit`; `--dump-ast` of the 61 that existed before
+against `9784ad80` — **61 byte-identical**, the root fix and the deletion each measured on
+their own; `sh scripts/bootstrap.sh --os macos --arch aarch64` → `FIXPOINT OK` (62/62 under
+the self-hosted `teko1`); `sh scripts/check-docs.sh` green (567 links, 383 diagnostics, 117
+samples). `mc limits` verdict `ok` on both legs with every table unmoved from the sixth pass
+— floor (`tests/hello.tk`) `passes` **15/30**, `syntax` 15, `alias` 18, `types` 11, `intrin`
+8/16, heap 1114880, and the `tests/surface_datetime.tk` leg `syntax` 16, `alias` 21, `types`
+14, heap 3875392 (against a 33554432-byte reservation). `mc pkg hash .` over the source tree
+of this entry's code commits, after the eighth pass: `1a4edc3dc140c8270a2c8fa29940b8aebf1dab673298b8026453e1a336560e62`.

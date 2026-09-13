@@ -538,8 +538,15 @@ rule has no dominator tree. What it leaves through is a row of [not-yet.md](not-
 nothing, and C# refuses that declaration where teko does not.
 
 **Only locals.** A parameter arrives with a value; a field and an element of `new T[n]` are
-zeroed by `rt_alloc`; a global is BSS. None of the four is judged, and the three roads
-above stay open for exactly that reason.
+zeroed by `rt_alloc`; a global is BSS. None of the four is judged by THIS walk, and the
+three roads above stay open for exactly that reason.
+
+That is a statement about definite assignment alone, and not about what a global may
+declare: a global declared `T?` over a VALUE is refused at its own declaration
+(`teko: a global does not hold a nullable box`), because the box that type promises is
+built out of the scope a local lives in and no scope holds a global. A global declared `T?`
+over a REFERENCE is accepted and read like any other — its handle IS the pointer. The
+declaration is checked where globals are collected, never on the walk above.
 
 The three declarations that are born assigned, and so are never judged: one with an
 initializer, a local array (`i64 a[4]` — the name **is** the storage), and a `T?`.
@@ -551,7 +558,8 @@ initializer, a local array (`i64 a[4]` — the name **is** the storage), and a `
 `??=`, a lifted `==`, flow narrowing (`if (c != null) { c.v }`), `T?` as a generic
 argument, calling a nullable delegate, `T?` on a short type name inside a `namespace`,
 `x.GetValueOrDefault(fallback)`, a ternary whose arms are a value and `null`, an overload
-picked through the implicit `T` → `T?`, a member on a GLOBAL nullable and an assignment to
-a nullable PARAMETER of value type are each a row of [not-yet.md](not-yet.md), with the
-message each one answers. `ref T?` and `out T?` are taught. The design they come from is
+picked through the implicit `T` → `T?`, a GLOBAL declared `T?` over a VALUE and an
+assignment to a nullable PARAMETER of value type are each a row of
+[not-yet.md](not-yet.md), with the message each one answers. A global declared `T?` over a
+REFERENCE is read like any other: its handle is the pointer itself. `ref T?` and `out T?` are taught. The design they come from is
 [`../specs/nullable.md`](../specs/nullable.md).

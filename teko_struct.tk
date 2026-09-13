@@ -115,29 +115,105 @@ i64 tk_field_store_val(i64 fty, i64 v, i64 line, uptr fl);
 // name. Restoring it is what keeps a generator invisible to the parse it
 // interrupted (DECISION_LOG.md D27).
 //
-// Every `top_add` in this port is one of three (K6's own audit):
+// Every `top_add` a GENERATOR makes is one of three (K6's own audit), and all
+// three go through the pair below (D48, tenth pass):
 //
-//   (a) top level only -- inside a `class`/`struct`/`namespace` body read by
-//       `parse_top`: teko_class.tk's member bodies and constructors,
-//       teko_prop.tk's accessors, teko_struct.tk's static field and struct
-//       constructor, teko_ns.tk's namespace body and its function. No
-//       declaration of the program's own is open, so there is none to lose.
+//   (a) top level only -- inside a `class`/`struct` body read by `parse_top`:
+//       teko_class.tk's member bodies and constructors, teko_prop.tk's
+//       accessors, teko_struct.tk's static field and struct constructor. No
+//       declaration of the program's own is open, so there is none to lose:
+//       those call `tk_top_emit_as(n, 0)`, which leaves the name cleared
+//       exactly as a bare `top_add` did.
 //   (b) after the parse, from a `pass()`: teko_di.tk's memoized getter and its
 //       slot, teko_params.tk's `params` instance. `p_decl_name()` is 0 already
 //       and nobody reads it any more.
 //   (c) possibly MID-declaration, fired by an expression: teko_deleg.tk's
 //       thunk and its lambda, teko_heaparr.tk's three, `tk_ix` below, and
 //       everything `tk_class_close` (teko_class.tk) emits -- a partial class
-//       closes at its first `new`, which may stand in any body. Those go
-//       through this function. teko_generic.tk's replay is (c) as well and
-//       saves `p_decl_name()` with the rest of its scratch instead, since
+//       closes at its first `new`, which may stand in any body. Those call
+//       `tk_top_emit`, which puts the interrupted declaration's name back.
+//       teko_generic.tk's replay is (c) as well and saves `p_decl_name()` with
+//       the rest of its scratch instead, so it calls `tk_top_emit_as(n, 0)`:
 //       `parse_top` writes the name itself once per declaration the instance
 //       produces.
-void tk_top_emit(i64 n) {
-    uptr owner = p_decl_name();
+//
+// What is NOT a generator, and so is not recorded: teko_ns.tk's two sites. A
+// `namespace` body and a namespaced function at top level are declarations the
+// PROGRAM wrote, which `tk_ns_rename_decl` mangles two passes later -- the node
+// still carries the short name the source spelled when it is added, so
+// recording it would reserve `area` for the program that wrote
+// `namespace geo { i64 area() }` rather than the `geo__area` the mangling
+// produces. That name has its own guard on the pass that writes it.
+// ---- the declarations the COMPILER writes (D48, ninth and tenth passes) ----
+// These two functions are the one door every GENERATED top-level declaration
+// goes through, so they are also the one place that can tell such a declaration
+// from one the source wrote. They record both: the NODE, which is the identity
+// a later pass asks about, and the NAME, which is what a program may collide
+// with. `tk_ov_collect` (teko_over.tk) reads the pair and refuses a
+// declaration of the program's own that carries a generated name -- `tkarr_*`,
+// `tk_nl_*`, a vtable, `Name__names`, a member's `point_area`, a property's
+// `square_get_Side`, a struct's `point_new`, a static field's `point_made`, a
+// service's `svc_di_get` -- because the two would otherwise reach the linker as
+// one symbol and a call site would pick whichever the tables answered first.
+//
+// The name alone would not do: a generated declaration carries a generated
+// name too, and telling them apart by spelling would reserve a prefix for
+// every program, which the compiler's own sources (`tk_nl_box_fn`,
+// `tk_nl_boxname`) would then trip over on the bootstrap.
+#define TK_MAXEMIT 512                  // top-level declarations one unit generates
+
+uptr tk_emit_name[TK_MAXEMIT];           // the symbol the generator wrote
+i64  tk_emit_node[TK_MAXEMIT];           // the node itself, the identity of the row
+
+i64 tk_nemit = 0;
+
+uptr tk_emit_name_at(i64 i) { return ld64(tk_emit_name + i * 8); }
+i64  tk_emit_node_at(i64 i) { return ld64(tk_emit_node + i * 8); }
+
+void set_tk_emit_name_at(i64 i, uptr v) { st64(tk_emit_name + i * 8, v); }
+void set_tk_emit_node_at(i64 i, i64 v)  { st64(tk_emit_node + i * 8, v); }
+
+// 1 when this very node is one the compiler emitted
+i64 tk_emit_is(i64 n) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nemit) break;
+        if (tk_emit_node_at(i) == n) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+// 1 when some declaration the compiler emitted carries `name`
+i64 tk_emit_owns(uptr name) {
+    if (name == 0) return 0;
+    if (cstrlen(name) == 0) return 0;
+    i64 i = 0;
+    loop {
+        if (i >= tk_nemit) break;
+        if (str_eq(tk_emit_name_at(i), name)) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+// the registration, then `top_add`, then the name `owner` the caller says the
+// parse is to carry on with: the interrupted declaration's for (c), and 0 --
+// what `top_add` leaves behind on its own -- for (a) and (b). A generator that
+// produces nothing (`parse_top` answers 0 for a `class`, which adds its own
+// members) records nothing; `top_add(0)` is the no-op it already was.
+void tk_top_emit_as(i64 n, uptr owner) {
+    if (n == 0) { top_add(n); p_set_decl_name(owner); return; }
+    if (tk_nemit == TK_MAXEMIT)
+        err_at(nd_file(n), nd_line(n), "teko: too many generated declarations in one unit");
+    set_tk_emit_name_at(tk_nemit, nd_name(n));
+    set_tk_emit_node_at(tk_nemit, n);
+    tk_nemit = tk_nemit + 1;
     top_add(n);
     p_set_decl_name(owner);
 }
+
+void tk_top_emit(i64 n) { tk_top_emit_as(n, p_decl_name()); }
 
 // what a row of the type table declares: struct/class/interface/delegate share
 // the table because a value of any of them is one 8-byte reference, and `.`
@@ -954,6 +1030,25 @@ void tk_xt_put(i64 n, i64 si, i64 ty, i64 pure, i64 own) {
 
 void tk_xt_add(i64 n, i64 si, i64 pure, i64 own) { tk_xt_put(n, si, sr_ty_at(si), pure, own); }
 
+// a registration follows the VALUE, not the node id: when a rewrite moves what
+// a node was into a FRESH node and makes the old one something else (teko_prim.tk's
+// `tk_nd_moved`, the wrap that writes a cast in place), the type this table
+// remembers belongs to the moved value and answering it for the wrapper is a
+// lie -- `tk_ty_of` reads this table BEFORE the node's own kind, so a
+// `(f64)` written over a member call still read `i64` off the row left behind
+// and `tk_rc_call_args` (teko_rc.tk) wrote the cast a second time (Copilot on
+// #697, fifth pass). Every row of the node is moved, not only the newest: a
+// stale one would answer for the wrapper the moment the newest is gone.
+
+void tk_xt_move(i64 from, i64 to) {
+    i64 i = 0;
+    loop {
+        if (i >= tk_nxt) break;
+        if (xt_node_at(i) == from) set_xt_node_at(i, to);
+        i = i + 1;
+    }
+}
+
 // appends the field under its owner, so a method parsed further down the same
 // body already sees the fields declared above it. `sym` is the global a STATIC
 // field lives in, and 0 for one that lives in the object.
@@ -1339,7 +1434,7 @@ void tk_static_field(i64 si, uptr tname, uptr m, i64 fty, i64 nel, i64 vis) {
     uptr sym = tk_fname(tname, m);
     i64 n = nel;
     if (n == 0) n = 1;
-    top_add(tk_glb(TY_U8, sym, type_width(fty) * n));
+    tk_top_emit_as(tk_glb(TY_U8, sym, type_width(fty) * n), 0);   // `point_made` is the compiler's (D48)
     tk_field_add(si, m, 0, fty, nel, vis, sym);
 }
 
@@ -1486,5 +1581,5 @@ void tk_struct() {
     i64 size = tk_size_of(off);
     set_sr_size_at(si, size);
     def_add(tk_join(tk_case(name, 1), "_SIZE"), size, tk_line, tk_file);
-    top_add(tk_ctor(name, ty, size, 0));
+    tk_top_emit_as(tk_ctor(name, ty, size, 0), 0);   // `point_new` is the compiler's (D48)
 }
