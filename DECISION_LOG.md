@@ -6156,6 +6156,169 @@ because the check it skips wrote none; `sh scripts/bootstrap.sh --os macos --arc
 compiler leg; `./build/teko limits tests/hello.tk` byte-identical to the base compiler's; `mc
 pkg hash .` `c9f8692f8bfdba896b329d634fa10357cff0f936e1195111549082d66799501b` (`teko_rc.tk`
 is a listed file, so the hash moves by design).
+### D66 · A contextual lambda is read on every slot of delegate type teko's own parser reaches (2026-09-14)
+`(i64 x) => x * 2` with no `new Op(...)` around it needs a READER that looks ahead before
+mc's core does: `parse_primary` sees `(`, asks `type_of_token` for a cast and otherwise
+parses a group, and neither branch has a fallback -- `expected ) in cast` is what a lambda
+gets there. teko's own lookahead for it (`tk_paren_lambda_follows`, non-consuming, counting
+bytes from `p_cp()` to the matching `)` and testing for `=>`/`use`) was reached from exactly
+TWO places: a delegate variable declaration (`tk_deleg_var_stmt`) and a METHOD-call argument
+(`tk_args_typed`). Every other right-hand side of delegate type died in the core, so the
+surface said "a lambda goes wherever a delegate value goes" and the compiler said otherwise
+at six sites.
+
+**Measured on `d028a7a0`** (mc 0.15.23, macos/aarch64), seven roads, all seven
+`expected ) in cast`:
+
+| road | written | before | after |
+|---|---|---|---|
+| instance field | `h.cb = (i64 x) => x * 2;` | `expected ) in cast` | **accepted** |
+| constructor | `this.cb = (i64 x) => x * 2;` | `expected ) in cast` | **accepted** |
+| static field | `H.cb = (i64 x) => x * 2;` | `expected ) in cast` | **accepted** |
+| `T[]` element | `fs[0] = (i64 x) => x * 2;` | `expected ) in cast` | **accepted** |
+| `return` | `return (i64 x) => x * 2;` | `expected ) in cast` | unchanged, and why below |
+| free-function argument | `apply((i64 x) => x * 2, 21)` | `expected ) in cast` | unchanged |
+| bare-name assignment | `g = (i64 x) => x * 2;` (a global, or a field written without `this.`) | `expected ) in cast` | unchanged |
+
+**ONE helper, three call sites, four roads.** `tk_deleg_rhs(ty, line, fl)` (teko_deleg.tk)
+answers "the value of a slot of type `ty`": `tk_deleg_row_under(ty)` -- the delegate row with
+the `?` peeled off -- hands it to `tk_deleg_init_expr`, the reader the declaration road
+already had, and every other type is `parse_expr(0)`, byte for byte what each site read
+before. `tk_field_use` (teko_expr.tk), `tk_static_use` (teko_access.tk, a forward
+declaration away, the module being included four files earlier) and `tk_ha_index`
+(teko_heaparr.tk) call it in place of their own `parse_expr(0)`. The CONSTRUCTOR road costs
+nothing: `this` is an ordinary receiver by the time `.` is read, so `this.cb = ...` reaches
+`tk_field_use` like any other `h.cb = ...`. The `?` is peeled for the same reason the
+element road's own escape check already peeled it (D51, twelfth pass): an `Op?` slot holds
+a lambda exactly as an `Op` slot does, and the declaration road has read `Op? f = (i64 x)
+=> ...;` since Q1a.
+
+**Three roads stay closed, and the reason is not teko's to fix.** They are the three parse
+positions mc's core owns outright, with no registration reaching them (`src/parse.mc`, read
+only, D2): `syntax_stmt` refuses a core keyword, so no handler may stand at `return`;
+`parse_call` reads a free call's arguments itself, so the six word registrations never see
+one (a METHOD call is teko's own `tk_call_method_args`, which is why that road works);
+and a bare-name assignment falls to `parse_expr` at the bottom of `parse_stmt_core`, below
+`syntax_stmt_find`. The one door that WOULD reach all three is `syntax_expr("(")` -- the
+head of `parse_primary` tests `syntax_expr_find` before the `K_LPAR` branch -- which would
+claim every parenthesised expression and every cast in every program and make teko
+re-implement both. That is a fork, not a patch (D21). `new Op((i64 x) => ...)` is what those
+three positions take, and `docs/reference/not-yet.md` carries them with this reason.
+
+**The escape rule did not move.** Each of the three sites already called `tk_lam_escapes`
+over the value it parsed, so `h.cb = (i64 x) use (&acc) => ...;` is refused `teko: a lambda
+that captures by reference cannot leave its scope` at the store's own line on every road
+just opened -- the same sentence the seven existing escape sites carry, no site missing it,
+none added.
+
+**FIXTURES** (1 grown, 5 refusals). `tests/surface_lambda.tk` grows item 22,
+`slot_roads_check`: the field road in all three grafias (explicit parameters, short, and a
+capture by value), the static field, a constructor's `this.cb`, and two `Op[]` elements --
+plus three rows that write a CAST (`(i64) 3.5`) and a GROUP (`(k + 1) * 2`, `(fs[1])`)
+through the very same three readers, so the lookahead is measured not to have claimed a `(`
+that opens neither. It is the LAST helper `main` calls and the only one whose `rt_live()`
+floor is 1: `St.cb` is a static, and the closure it holds outlives every scope. Its own
+`method_check` drops the `new Op(...)` the field road used to force. The five refusals --
+`tests/refuse/deleg_{field,static,this,elem,nullfield}_lam_escape.tk` -- carry the escape
+sentence at the store line of each opened road; the `Op?` one is what pins
+`tk_deleg_row_under`, since with the `?` unpeeled that store would fall to `parse_expr(0)`
+and die in the core instead.
+
+**Docs.** `docs/reference/delegates.md` replaces the sentence that promised a lambda
+"wherever a value of its delegate type is expected" with the table of roads that take one
+and the three that still need `new Op(...)`. `docs/reference/not-yet.md` widens its
+`return (i64 x) => e;` row into the three closed positions with the parser reason.
+`docs/reference/diagnostics.md` is unmoved: no refusal is new here.
+
+**Proof** (mc 0.15.23, macos/aarch64, base `d028a7a0`): `mc build . --config mc.macos.toml`
+clean; `sh scripts/fixtures.sh ./build/teko mc.macos.toml` -> **73 passed, 66 refused as
+expected, 0 failed** (73/61 on the base: five refusals added, one positive grown);
+`--dump-ast` **byte-identical on all 73** pre-existing `tests/*.tk` with their ORIGINAL
+sources, base compiler against this one, before the fixture was grown -- a lookahead that
+fires only where the core parser refused today cannot move an accepted program, and the
+cast and group rows measure the other half; `sh scripts/bootstrap.sh --os macos --arch
+aarch64` -> `FIXPOINT OK`; `sh scripts/check-docs.sh` -> `docs ok: 598 links, 41 fragments,
+389 diagnostics, 66 refusals, 141 samples`; `mc limits . --config mc.macos.toml` verdict
+`ok` on both legs, every counted table exactly where the base left it (`passes` 15/30,
+`syntax` 15/30, `types` 13, `intrin` 8/16, `alias` 20/40, `on_stmt` 4, `syntax_type` 2,
+`globals` 943) and only the size-of-surface-code rows moving with the one function added
+(`nodes` 156565 -> 156598, `ins` 215968 -> 216017, `funcs` 3182 -> 3183, `lowered` 3164 ->
+3165, `symbols` 6263 -> 6264); `mc pkg hash .`
+`aaca0aa1374363ee36b04626da0a0fac8c0f1eefd947d29c8097fc650dbc00c1`, with
+`origin/main` merged in at `111559fb` (base
+`0f04c593b5aad2ad3bbf45d97ba6427d56a05fe3620bf3f1ca73d4fb7256d6eb`: `teko_deleg.tk`,
+`teko_expr.tk`, `teko_access.tk` and `teko_heaparr.tk` are listed files, so the hash moves
+by design).
+
+**Copilot on #719, four roads measured again on `95e157cb`.** Each of the four was
+reproduced first, and each answer is the same question asked once: does a READER of teko's
+own hold the slot's TYPE at the moment the value is parsed?
+
+| road | measured on `95e157cb` | became |
+|---|---|---|
+| `H.cb = (i64 x) => e;` with `class H` declared BELOW | `expected ) in cast` | a documented limit |
+| `h.take_q((i64 x) => e, 42)` on a `void take_q(Op? f, i64 k)` | `expected ) in cast` | **opened** |
+| `Op[] g; g[0] = (i64 x) => e;` (a GLOBAL array) | `expected ) in cast` | a documented limit |
+| `h.pick((i64 x) => e, 21)` on an OVERLOADED `pick` | `expected ) in cast` | **opened** |
+
+**Two opened, one reader.** Both are the same site: `tk_call_method_args` (teko_expr.tk)
+asked the callee's SINGLE declaration for the parameter's type, through `tk_deleg_row` and
+a `tk_method_name_count(si, m) != 1` guard, so an `Op?` parameter answered -1 and an
+overloaded name never asked at all. It asks per POSITION now --
+`tk_method_param_deleg(si, m, n)`: the level of the chain that declares the name (the one
+`tk_method_pick` picks from, a class's own declarations hiding the base's overloads), every
+signature there long enough to reach position `n`, the row taken with the `?` peeled off
+(`tk_deleg_row_under`), and -1 the moment two candidates disagree or one is not a delegate
+there. `tk_args_typed` folded into that loop, which is why `funcs` does not move. Three
+roads came with it, measured: the `Op?` parameter (the coercion still sees the nullable
+type and boxes for it -- READING one back inside the callee is untaught, `call to unknown
+function`, and the fixture only proves the parse), an overloaded name at either arity, and
+a method INHERITED from a base, whose name the derived class declares zero times and which
+the old `!= 1` guard sent to the untyped `tk_args`. An overload whose candidates DISAGREE
+at that position (`mix(Op)` beside `mix(i64)`) still needs `new Op(...)`: which signature
+applies is decided by the argument COUNT, which the parser does not have yet.
+
+**Two documented, and the reason is the same one.** The value is parsed BEFORE the slot's
+type exists, so there is no row to read a lambda against and no later pass can re-read
+what the parser already refused. A static field of a type declared below the write goes
+through `tk_fwd_defer_static` (teko_access.tk): the forward pre-scan reserves the type's
+WORD -- `type_new` plus the syntax registrations -- and never a row of the type table,
+because materializing rows at scan time would reorder every interface's vtable slot
+(teko_fwd.tk's own header), so the field has no declared type at that point;
+`tk_fwd_resolve_static_one` learns it one pass too late. A global `T[]` element goes
+through `tk_arr_defer_write` (teko_array.tk), deferred because a global array may be
+declared BELOW its own write -- measured, and accepted today -- so the element type is only
+collected by `tk_hg_collect` in pass 5. Reading the lambda against a row materialized on
+the spot would mean replaying a whole declaration from inside an expression
+(`tk_fwd_materialize` is a source push written for the `:` list) and moving row indices the
+`--dump-ast` gate pins; opening only the declared-above half would make the guarantee
+depend on declaration order, which is the same limit in a fuzzier shape. So the claim is
+narrowed instead: `docs/reference/delegates.md` qualifies the static-field row to a type
+declared ABOVE and the element row to a LOCAL or field `T[]`, and
+`docs/reference/not-yet.md` carries both -- plus the disagreeing overload -- with the
+reason. Its stale D62 row ("a LAMBDA written straight into a FIELD ... `expected ) in
+cast`") is deleted: D66 opened that road and the row was measured false; the row for
+calling an `Op?` says "local or PARAMETER" now, the new road's own untaught half.
+
+**Proof of this pass** (mc 0.15.23, macos/aarch64, head `95e157cb`): `mc build . --config
+mc.macos.toml` clean; `sh scripts/fixtures.sh ./build/teko mc.macos.toml` -> **73 passed,
+67 refused as expected, 0 failed** (`tests/surface_lambda.tk` grows item 23,
+`arg_roads_check`: the `Op?` parameter, an overloaded name at both arities, a method of the
+base, and a GROUP at a delegate argument with a CAST at the position beside it, so the
+per-position reader is measured not to have claimed a `(` that opens neither; no refusal
+added, no diagnostic new); `--dump-ast` **byte-identical on all 73** pre-existing
+`tests/*.tk` with their ORIGINAL sources (4715223 bytes of dump), `59652293`'s compiler
+against this one; `sh scripts/bootstrap.sh --os macos --arch aarch64` -> `FIXPOINT OK`;
+`sh scripts/check-docs.sh` -> `docs ok: 612 links, 41 fragments, 389 diagnostics, 67
+refusals, 143 samples`; `mc limits . --config mc.macos.toml` verdict `ok` on both legs,
+every counted table exactly where `95e157cb` left it (`passes` 15/30, `syntax` 15/30,
+`types` 13, `intrin` 8/16, `alias` 20/40, `on_stmt` 4, `syntax_type` 2, `globals` 944,
+`funcs` 3186, `lowered` 3168, `symbols` 6268) and only the size-of-surface-code rows moving
+(`nodes` 156737 -> 156807, `ins` 216225 -> 216334); `mc pkg hash .`
+`cc220d3c617a15396d75a872947ca825f19bc6c0ec0f71c70cccf5a86bb2969e`, against
+`014f902503d1510e450ba4422be5b5a5d76bd58c73b678e98ed1b5e843c6106d` on `95e157cb`:
+`teko_expr.tk` is a listed file, so the hash moves by design.
+
 ### D71 · The mc canary: a pre-release is promoted by a file this repository writes (2026-09-15)
 mc's M53 (`docs/specs/M53.md` § 6, its D14-D17) freezes the surface for 1.0.0 and asks one
 thing of the language it compiles: **that a release be proved by teko before it is a release
