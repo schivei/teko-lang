@@ -1,0 +1,198 @@
+// surface_member_word.tk -- D68: a member name after `.` (and a member's own
+// declaration) may be a word teko itself has TAUGHT -- `ref`/`out`/`params`,
+// a `type_alias` word (`isize`/`usize`/`byte`/`str`), a `type_new` word or an
+// enum's own member name -- exactly as C# lets a member share a name with a
+// contextual keyword. `word_is_taught` (mc core) tells a word teko registered
+// PROGRAM-WIDE apart from an ordinary identifier; `tk_member_name`
+// (teko_struct.tk) is the one helper every member seat now reads through --
+// `p_name()` when the token is taught, `p_ident()` otherwise -- so a TYPE
+// name, a LOCAL or a PARAMETER stays refused (D60): the widening is the
+// member seat alone, where there is no shadow to guard against.
+//
+// Eight seats, eight taught words, one class, one enum, one type declared
+// below the code that reaches its static member:
+//
+//   field      Box.ref     (an instance field named `ref`, a `type_new` word)
+//   method     Box.params  (`params`, `type_new`)
+//   static     Box.out     (`out`, `type_new`, read/written through the type)
+//   property   Box.isize   (`isize`, a `type_alias` word, `get`/`set`)
+//   `this.`    Box.byte    (`byte`, `type_alias`, read inside the class)
+//   `?.`       Box.usize   (`usize`, `type_alias`, read through a nullable)
+//   enum       Kind.ptr    (`ptr`, `type_alias`, the enum's own member name)
+//   fwd static Late.str    (`str`, `type_alias`, `Late` declared BELOW main)
+//
+// And the seats with a parser of their own (Copilot on #724), each keyed to a
+// `syntax` word: an interface member `when` implemented by a class, a member
+// const `scope` read through the type, `ref b.match` handed to a `ref`
+// parameter, `foreach` over an inline array field `switch`, and `base.type()`
+// from an override. `loop` stays refused: it is mc's OWN keyword, not a word
+// teko taught, so it is no name anywhere (`name expected`, from the core).
+//
+// expect-exit: 42
+
+#include "../lib/rt.tk"
+
+enum Kind { ptr, other }
+
+class Box {
+    public i64 ref;
+    public static i64 out;
+    public i64 isize { get; set; }
+    public i64 byte;
+    public i64 usize;
+
+    public i64 params() { return 40; }
+
+    public i64 selfbyte() {
+        this.byte = 8;
+        return this.byte;
+    }
+}
+
+i64 fieldcheck() {
+    Box b = new Box();
+    b.ref = 5;
+    if (b.ref != 5) return 1;
+    return 0;
+}
+
+i64 methodcheck() {
+    Box b = new Box();
+    if (b.params() != 40) return 1;
+    return 0;
+}
+
+i64 staticcheck() {
+    Box.out = 6;
+    if (Box.out != 6) return 1;
+    return 0;
+}
+
+i64 propcheck() {
+    Box b = new Box();
+    b.isize = 7;
+    if (b.isize != 7) return 1;
+    return 0;
+}
+
+i64 thischeck() {
+    Box b = new Box();
+    if (b.selfbyte() != 8) return 1;
+    return 0;
+}
+
+i64 questcheck() {
+    Box b = new Box();
+    b.usize = 9;
+    Box? p = b;
+    if ((p?.usize ?? 0) != 9) return 1;
+    return 0;
+}
+
+i64 enumcheck() {
+    if ((i64)Kind.ptr != 0) return 1;
+    return 0;
+}
+
+i64 fwdcheck() {
+    Late.str = 10;
+    if (Late.str != 10) return 1;
+    return 0;
+}
+
+class Late {
+    public static i64 str;
+}
+
+interface Shape2 { i64 when(); }
+
+class Base0 { public virtual i64 type() { return 3; } }
+class Der : Base0 { public override i64 type() { return base.type() + 1; } }
+
+class Box2 : Shape2 {
+    public const i64 scope = 5;
+    public i64 match;
+    public i64 switch[2];
+    public i64 when() { return 2; }
+}
+
+void bump(ref i64 x) { x = x + 1; }
+
+i64 ifacecheck() {
+    Box2 b = new Box2();
+    Shape2 s = b;
+    if (s.when() != 2) return 1;
+    return 0;
+}
+
+i64 constcheck() {
+    if (Box2.scope != 5) return 1;
+    return 0;
+}
+
+i64 refcheck() {
+    Box2 b = new Box2();
+    b.match = 6;
+    bump(ref b.match);
+    if (b.match != 7) return 1;
+    return 0;
+}
+
+i64 foreachcheck() {
+    Box2 b = new Box2();
+    b.switch[0] = 10;
+    b.switch[1] = 20;
+    i64 sum = 0;
+    foreach (i64 v in b.switch) sum = sum + v;
+    if (sum != 30) return 1;
+    return 0;
+}
+
+i64 basecheck() {
+    Der d = new Der();
+    if (d.type() != 4) return 1;
+    return 0;
+}
+
+i64 main() {
+    i64 bad = fieldcheck();
+    if (bad != 0) return 10 + bad;
+
+    bad = methodcheck();
+    if (bad != 0) return 20 + bad;
+
+    bad = staticcheck();
+    if (bad != 0) return 30 + bad;
+
+    bad = propcheck();
+    if (bad != 0) return 40 + bad;
+
+    bad = thischeck();
+    if (bad != 0) return 50 + bad;
+
+    bad = questcheck();
+    if (bad != 0) return 60 + bad;
+
+    bad = enumcheck();
+    if (bad != 0) return 70 + bad;
+
+    bad = fwdcheck();
+    if (bad != 0) return 80 + bad;
+
+    bad = ifacecheck();
+    if (bad != 0) return 90 + bad;
+
+    bad = constcheck();
+    if (bad != 0) return 100 + bad;
+
+    bad = refcheck();
+    if (bad != 0) return 110 + bad;
+
+    bad = foreachcheck();
+    if (bad != 0) return 120 + bad;
+
+    bad = basecheck();
+    if (bad != 0) return 130 + bad;
+
+    return 42;
+}
