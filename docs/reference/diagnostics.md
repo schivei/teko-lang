@@ -1542,9 +1542,9 @@ truncation; the fix is to split the unit.
 
 | message | limit |
 |---|---|
-| `"teko: too many type declarations"` | 32 structs, classes and interfaces in one source |
+| `"teko: too many type declarations"` | 256 rows of the shared type table in one unit (D69; was 32, raised to match `TK_MAXFWD`): every struct, class, interface, enum and delegate declared takes one, and so does every distinct `T[]` (`tk_ha_row`) and `T?` (`tk_nl_row`) the unit spells, so the ceiling can be reached with fewer than 256 declarations |
 | `"teko: too many fields"` | 256 fields, summed |
-| `"teko: too many methods"` | 128 methods, summed |
+| `"teko: too many methods"` | 1024 methods, summed (D69; was 128) |
 | `"teko: too many virtual slots"` | 128 slots, summed |
 | `"teko: too many constructors"` | 32, summed |
 | `"teko: too many default arguments"` | 64, summed across all signatures |
@@ -1561,7 +1561,7 @@ truncation; the fix is to split the unit.
 | `"teko: too many generic parameters"` | 4 per generic, 64 summed |
 | `"teko: too many generic instances"` | 32 |
 | `"teko: too many parts of a generic"` | 32, summed |
-| `"teko: too many forward-declared types"` | 32 read ahead of their use |
+| `"teko: too many forward-declared types"` | 256 read ahead of their use (D69; was 32) |
 | ``"teko: too many `new` on a type declared below"`` | 32 |
 | `"teko: too many static accesses on a type declared below"` | 32 |
 | `"teko: too many consts"` | 128 member constants |
@@ -1579,11 +1579,11 @@ truncation; the fix is to split the unit.
 | `"teko: too many locals of struct type"` | 256 |
 | `"teko: too many expressions whose type is known"` | 4096 expressions the parser typed in one unit — every load of a field, of an array element and of a `T[]`, every box and every indirect return spends one; 239 in `tests/surface_nullable_ops.tk`, the busiest fixture |
 | `"teko: too many member accesses on a value of unknown type"` | 4096 member accesses waiting for the pass — a `.` on a receiver the parser cannot type (a parameter, a global, a type declared below) and, since D61, a `.` on any CALL the node itself carries no type for, `mkday().Day` included. It was 128 while only the first kind waited here |
-| `"teko: too many stores into a slot of class type"` | 128 |
+| `"teko: too many stores into a slot of class type"` | 4096 (D69; was 128) |
 | `"teko: too many field stores of unknown type"` | 4096 field stores whose value no oracle types at the site, waiting for the pass; 34 in `tests/surface_field_store.tk`, the busiest fixture |
 | `"teko: too many deferred call arguments"` | 4096 arguments of a VIRTUAL, an INTERFACE or an unqualified virtual call whose type the site that built the `callp` could not read — a global, a `ref`/`out` pointee, a bare name on the unqualified road — waiting for the pass; 26 in `tests/surface_globals_calls.tk`, the busiest fixture, and 1 in `tests/primitives_float.tk` |
 | `"teko: too many declarations in one unit"` | 8192 |
-| `"teko: too many generated declarations in one unit"` | 512 top-level declarations the compiler itself writes — a vtable, a release, an allocator, a thunk, a box, an enum's two globals; 134 in `tests/surface_lambda.tk`, the busiest fixture |
+| `"teko: too many generated declarations in one unit"` | 4096 top-level declarations the compiler itself writes — a vtable, a release, an allocator, a thunk, a box, an enum's two globals (D69; was 512); 134 in `tests/surface_lambda.tk`, the busiest fixture |
 | `"teko: too many overloaded names in one unit"` | 64 |
 | `"teko: too many free-function declarations with parameters"` | 4096 |
 | `"teko: too many arguments"` | 64 at one call of an overloaded name |
@@ -1592,7 +1592,7 @@ truncation; the fix is to split the unit.
 | ``"teko: too many `ref`/`out` parameters in one unit"`` | 512 |
 | ``"teko: too many `ref`/`out` arguments in one unit"`` | 512 |
 | `"teko: too many delegate targets"` | 64 (delegate, function) pairs |
-| `"teko: too many element stores of unknown type"` | 512 stores into an element of delegate type, in one unit, whose value only the walk can type. A ceiling of its own: a delegate is a counted type, so every element store of one takes a row of the 128 above first, and a program with 513 of them is refused `"teko: too many stores into a slot of class type"` at the 129th long before this table fills |
+| `"teko: too many element stores of unknown type"` | 512 stores into an element of delegate type, in one unit, whose value only the walk can type. A delegate is a counted type, so every element store of one takes a row of the table above first, but that ceiling is 4096 now (D69) — comfortably past 512 — so this table's own ceiling is the one a program hits first: 513 of them refuse with this wording, at the 513th, not the row above's |
 | `"teko: too many captures in one lambda"` | 32, summed across the lambdas being read |
 | `"teko: too many captures by value in one unit"` | 256, summed over every lambda: definite assignment reads each one's own node |
 | `"teko: too many capturing lambdas"` | 64 capturing by reference |
