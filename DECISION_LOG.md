@@ -4612,6 +4612,18 @@ restored, `docs ok: 569 links, 387 diagnostics, 15 refusals, 122 samples`.
 
 ---
 
+**The fragment check, one step later still.** The site's own `mcsite --check` refused two
+pull requests in a row on something `scripts/check-docs.sh` had passed: a relative link
+leaving `docs/` (#700) and a `#slug` whose heading had been renamed (#703,
+`docs/reference/diagnostics.md:303` pointing at `#primitives-with-members-timespan-datetime`
+after the heading gained `DateOnly`). Step 1b now applies the generator's own rule to every
+`#slug` on a link, in-page or cross-page: a heading's id is its text lowercased, every run of
+characters outside `[a-z0-9_]` one dash, no dash at either end, and a repeated id numbered
+`-2`, `-3`, ... in page order (`u_slug` and `md_unique_id` in mc's `site/gen`). Drills: the
+#703 rename fails naming the page and the slug; a cross-page fragment with one letter added
+fails the same way; restored, `docs ok: 575 links, 26 fragments, 388 diagnostics, 21
+refusals, 133 samples`.
+
 ### D53 · A global SCALAR slot takes the same assignment corridor as a local (G-b, 2026-09-14)
 D48 gave a global a TYPE (`tk_ty_global`, teko_array.tk, over the slot table `tk_hg_collect`
 records) and D51 gave every by-name oracle a fallback into it. What neither gave it is the
