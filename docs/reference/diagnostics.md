@@ -634,7 +634,13 @@ are listed in [runtime.md](runtime.md#the-time-library).
 - `"teko: a capture by reference of a counted type is not taught yet"` — capture the object
   **by value**; the closure then holds a reference of its own.
 - `"teko: a lambda that captures by reference cannot leave its scope"` — such a closure
-  cannot be returned, nor stored in a field or a static field.
+  cannot be returned, nor stored in a field, a static field, a GLOBAL of delegate type or
+  an ELEMENT of a `T[]`, whether the array is a local or a global. A slot declared `T?` is
+  one of those slots too: a `?` says the slot may hold nothing, never that it lives less
+  long. A ternary is read BRANCH BY BRANCH at every one of them: `c ? held : other` is
+  refused when either branch carries the capture, since either branch is what the slot ends
+  up holding. Handing it to another LOCAL is allowed: the scope that owns the capture is
+  still the one holding it.
 - ``"teko: a delegate declared below `new` is not taught yet"`` — move the `delegate`
   declaration above the `new` that names it.
 - `"teko: an array of this type is not taught yet"` — a fixed array whose element is a type
@@ -646,12 +652,177 @@ are listed in [runtime.md](runtime.md#the-time-library).
 - `"teko: unknown function"` — the name given to a delegate is no function.
 - `"teko: argument "` — completed by *N is not passed by reference* or by *N needs
   `ref`/`out`*: a delegate or a function declares that parameter by reference and the site
-  does not say so.
+  does not say so. The POINTEE is checked beside the kind, by the identity
+  rule every `ref`/`out` argument takes (`ref i64` does not fit a `ref f64` slot), and a
+  call through a delegate reads it from the delegate's own signature — the same wording a
+  direct call gives, *teko: a value of type i64 does not convert to f64*.
 - `"teko: wrong number of arguments for "` — completed by the name: the call's arity does
   not match.
 - `"teko: "` — completed by one of the delegate-shaped messages: *`X` does not match the
   delegate `Op(...)`*, *`Op` takes a function, another `Op`, or null*, *`X` is not
   captured; add it to use (...)*, and *`X` is used but never declared*.
+
+An ELEMENT of a `T[]` whose element type is a delegate is judged exactly as any other slot
+of that type, and a GLOBAL array's element is judged exactly as a local array's. The store
+into a global one is built by a PASS, where no scope stands around it, so the whole
+judgement — the escape above, the conversion, and the type of the value — is taken at the
+site by the delegate walk instead, with the lexical scope of that site live (D51, fourth
+pass):
+
+```teko
+// no-run
+delegate i64 Op(i64 a);
+Op[] g_ops;
+i64 main() {
+    i64 x = 1;
+    g_ops = new Op[2];
+    g_ops[0] = new Op((i64 a) use (&x) => x + a);
+                  // teko: a lambda that captures by reference cannot leave its scope
+    i64 n = 5;
+    g_ops[1] = n;                   // teko: Op takes a function, another Op, or null
+    return 0;
+}
+```
+
+A local wins over a global of the same name at that store as it does everywhere else, and a
+local of delegate type wins over a free FUNCTION of that name: `Op f = addOne; g_ops[0] = f;`
+stores the local `f`, never a wrap of the function `f`.
+
+A plain GLOBAL of delegate type outlives its writer the same way an element of a global
+array does, so a write into one takes the same verdict (D51, fifth pass):
+
+```teko
+// no-run
+delegate i64 Op(i64 a);
+Op g_op;
+i64 f() {
+    i64 acc = 0;
+    Op local = new Op((i64 x) use (&acc) => acc + x);
+    Op copy = local;                // fine: a LOCAL, inside the scope that owns `acc`
+    g_op = local;
+                  // teko: a lambda that captures by reference cannot leave its scope
+    return copy(1);
+}
+```
+
+A slot declared `T?` takes that verdict on the same terms — the plain global and the
+element of a `T[]` alike. `Op?` is a row of its own, so the two sites that ask whether a
+slot is of delegate type used to answer "no" for it and leave the rule unasked, where the
+`Op`/`Op[]` beside it is refused (D51, twelfth pass). What a `?` changes is the value the
+slot may take, not how long the slot lives:
+
+```teko
+// no-run
+delegate i64 Op(i64 a);
+Op? g_maybe;
+Op?[] g_maybes;
+i64 f() {
+    i64 acc = 0;
+    g_maybe = new Op((i64 x) use (&acc) => acc + x);
+                  // teko: a lambda that captures by reference cannot leave its scope
+    g_maybes = new Op?[1];
+    g_maybes[0] = new Op((i64 x) use (&acc) => acc + x);
+                  // teko: a lambda that captures by reference cannot leave its scope
+    return 0;
+}
+```
+
+`g_maybe = new Op((i64 x) => x + 1);` and `g_maybes[0] = null;` are unaffected: no capture
+leaves anything, and `null` is the value a `?` slot is declared for.
+
+And a value the store is written at cannot TYPE waits for the same walk whether the array
+is global or local: `ops[0] = chooser(1)`, with `chooser` a local delegate that answers
+`Op`, is judged where `chooser` has a type, never refused at the store (D51, fifth pass).
+A bare NAME is one of those values at every store, because a PARAMETER shadows a function
+of the same name and nothing the parser keeps records a parameter (D51, sixth pass). So is
+a CALL, and a ternary of them with it: the store's own oracle reads the FIRST declaration
+of the called name, which is neither the local that shadows it nor the overload the call
+picks (D51, seventh pass). The judgement is the walk's, and the words are the delegate's:
+
+```teko
+// no-run
+delegate i64 Op(i64 a);
+i64 addOne(i64 a) { return a + 1; }
+Op make(i64 k) { return addOne; }       // the FIRST declaration of `make`
+i64 make(i64 k, i64 j) { return 7; }    // ...and the one this call picks
+i64 main() {
+    Op[] ops = new Op[1];
+    ops[0] = make(1, 2);                // teko: Op takes a function, another Op, or null
+    return ops[0](1);
+}
+```
+
+The escape reads a ternary branch by branch, at every slot that outlives the capture
+(D51, sixth pass):
+
+```teko
+// no-run
+delegate i64 Op(i64 a);
+i64 addOne(i64 a) { return a + 1; }
+Op g_op;
+i64 f(i64 c) {
+    i64 acc = 0;
+    Op held = new Op((i64 x) use (&acc) => acc + x);
+    Op other = addOne;
+    Op picked = c == 1 ? held : other;   // fine: a LOCAL holds it
+    g_op = c == 1 ? held : other;
+                  // teko: a lambda that captures by reference cannot leave its scope
+    return picked(1);
+}
+```
+
+The `null` a store or a `return` accepts is one shape and one only: `teko_type.tk`'s own
+`tk_null`, the single `N_INT` this project ever types `TY_UPTR` (`tk_is_null_lit`,
+[teko_struct.tk](../../teko_struct.tk)). An ordinary `i64` literal `0` is a DIFFERENT
+node with the same kind and the same value, typed `TY_I64` — and the two checks that decide
+whether a store waits for the walk (`tk_deleg_store_late`) or is coerced right there
+(`tk_deleg_coerce`) used to ask `nd_kind(v) == N_INT && nd_val(v) == 0`, which both nodes
+answer. A literal `0` written where an `Op` is expected slipped past both checks as if it
+were `null`, and the mismatch the delegate's own words exist to catch never ran (D51,
+eighth pass):
+
+```teko
+// no-run
+delegate i64 Op(i64 a);
+i64 main() {
+    Op[] ops = new Op[1];
+    ops[0] = 0;                         // teko: Op takes a function, another Op, or null
+    return ops[0](1);
+}
+```
+
+`null` itself is unaffected at every one of these sites — `ops[0] = null` still needs the
+element declared `Op?` (the array's own rule, above), and `Op? h = null;` still passes; the
+fix is the ONE predicate, `tk_is_null_lit`, asked in both places instead of the value alone.
+
+…and *which slot a `null` may land in* is a question the delegate's own validator has to ask
+itself, not one it may leave to the check beside it (D51, tenth pass). A store into an
+element of an `Op[]` that waits for the walk is coerced by `tk_deleg_coerce`
+([teko_deleg.tk](../../teko_deleg.tk)) and by nothing else — `tk_check_field_store`, which
+carries rule 1 for every element store decided at its own site, is skipped for a value that
+site cannot type (seventh pass, above) — and that validator returned every `null` unjudged.
+A ternary is taken apart branch by branch, so an all-`null` one had no check at all in front
+of it: both branches came back unchanged, the lowering saw two arms of the same `uptr` type,
+and the element held a null until the first call through it panicked, *teko: call through a
+null delegate*, exit 70. The rule is the one every other slot reads, in the same words: a
+`null` branch at an `Op[]` element is a refusal, and an `Op?[]` is the array that takes one
+(its element type answers `tk_deleg_row` with -1 and never reaches this validator at all):
+
+```teko
+// no-run
+delegate i64 Op(i64 a);
+i64 main() {
+    i64 flag = 1;
+    Op[] ops = new Op[1];
+    ops[0] = flag == 1 ? null : null;   // teko: null needs a slot declared Op?
+    return ops[0](1);
+}
+```
+
+One `null` branch beside a real one (`ops[0] = flag == 1 ? addOne : null;`) is the same
+refusal, at the branch that wrote it. It was refused before too, but by the lowering and one
+pass later — *teko: the two arms of ?: have different types*, which named the shape of the
+ternary and not the cause.
 
 ## Arrays
 
@@ -907,6 +1078,56 @@ Every one of these is [nullable.md](nullable.md)'s.
   type.
 - `"teko: not a local array"` — `ref a[i]` where `a` is not a local array.
 - ``"teko: two overloads differ only by `ref`/`out`"`` — a site could not tell them apart.
+
+A `ref`/`out` argument that names a GLOBAL is checked exactly as one naming a local: the
+pointee identity rule above (`tk_ref_check_pointee`, teko_ref.tk) reads a global's own
+declared type (`tk_ty_global`, teko_array.tk) once the argument is neither a parameter nor a
+local of the function being walked, so `ref f64` refuses an `i64` global with the same
+wording a local of the wrong type already gets (D51):
+
+```teko
+// no-run
+i64 g = 7;
+void bump(ref f64 x) { x = x + 1.0; }
+i64 main() {
+    bump(ref g);                    // teko: a value of type i64 does not convert to f64
+    return 0;
+}
+```
+
+A local of the same name wins over the global, as it does everywhere — and it wins
+LEXICALLY, at the site: `if (c) { f64 g = 2.0; bump(ref g); }` passes, global `g` or no
+global `g`, because inside that block the name IS the `f64` local; the same `bump(ref g)`
+written after the block has closed names the global again and refuses. One answer per site,
+from the scope open there (`tk_ty_scope_or_global`, teko_typeof.tk) — the same oracle that
+types the argument downstream, which is what keeps the check and the conversion from
+disagreeing (D51, verifier finding: they disagreed, and an ADDRESS was widened into a
+float). The one pointee still read as "not known here", refusing nothing, is a name neither
+the scope open at the site nor the table of globals holds a row for.
+
+A call through a DELEGATE is judged by the same rule, from the delegate's own signature.
+That call is a `callp`, built after the `ref` pass and naming no callee, so nothing
+downstream ever reads its arguments: the delegate's own argument check
+(`tk_deleg_check_arg_kinds`, [teko_deleg.tk](../../teko_deleg.tk)) is the only door, and it
+compared the `ref`/`out` TAG alone — an `i64`'s address reached a callee that writes a
+double through it, and the integer came back holding that double's bits (D51, twelfth
+pass). A delegate LOCAL, PARAMETER or GLOBAL called by name is judged whole; the two roads
+whose `callp` is built while the file is still being parsed, a delegate FIELD and an `Op[]`
+ELEMENT, stand where neither the scope nor the table of globals is filled, so the pointee
+there is a name no oracle holds a row for and the check stays silent on it:
+
+```teko
+// no-run
+delegate void Mut(ref f64 x);
+void bumpf(ref f64 x) { x = x + 1.0; }
+i64 main() {
+    Mut m = bumpf;
+    i64 g = 7;
+    m(ref g);                       // teko: a value of type i64 does not convert to f64
+    return 0;
+}
+```
+
 - ``"teko: `main` takes one signature"`` — the entry point is not overloaded.
 - ``"teko: an `extern` name owns its symbol and cannot be overloaded"`` — an `extern` keeps
   the C symbol.
@@ -1125,6 +1346,7 @@ truncation; the fix is to split the unit.
 | `"teko: too many array-field accesses"` | 128 |
 | ``"teko: too many `T[]` parameters in one declaration"`` | 32 |
 | `"teko: too many locals in one unit"` | 8192 |
+| `"teko: too many locals in one function"` | 8192, the same ceiling — the names one body has in scope at once (its parameters, its locals and the temporaries the compiler declares beside them) are a subset of the unit's own locals, so a body the parser accepted always fits and only a compiler-written temporary can reach this. It was a silent stop at 256 before, which answered −1 about a declaration that was right there: past 255 locals a `f64 x` shadowing a `ref i64 x` parameter went unrecorded, and the call that passed `ref x` was refused *teko: a value of type i64 does not convert to f64* on a legal program |
 | `"teko: too many locals of struct type"` | 256 |
 | `"teko: too many expressions whose type is known"` | 4096 expressions the parser typed in one unit — every load of a field, of an array element and of a `T[]`, every box and every indirect return spends one; 239 in `tests/surface_nullable_ops.tk`, the busiest fixture |
 | `"teko: too many member accesses on a value of unknown type"` | 128 waiting for the pass |
@@ -1135,12 +1357,12 @@ truncation; the fix is to split the unit.
 | `"teko: too many overloaded names in one unit"` | 64 |
 | `"teko: too many free-function declarations with parameters"` | 4096 |
 | `"teko: too many arguments"` | 64 at one call of an overloaded name |
-| `"teko: too many parameters in one declaration"` | 16, which the ABI's own 12 is under |
 | ``"teko: too many `params` lists in one unit"`` | 64 |
 | ``"teko: too many `params` declarations in one unit"`` | 64 |
 | ``"teko: too many `ref`/`out` parameters in one unit"`` | 512 |
 | ``"teko: too many `ref`/`out` arguments in one unit"`` | 512 |
 | `"teko: too many delegate targets"` | 64 (delegate, function) pairs |
+| `"teko: too many element stores of unknown type"` | 512 stores into an element of delegate type, in one unit, whose value only the walk can type. A ceiling of its own: a delegate is a counted type, so every element store of one takes a row of the 128 above first, and a program with 513 of them is refused `"teko: too many stores into a slot of class type"` at the 129th long before this table fills |
 | `"teko: too many captures in one lambda"` | 32, summed across the lambdas being read |
 | `"teko: too many captures by value in one unit"` | 256, summed over every lambda: definite assignment reads each one's own node |
 | `"teko: too many capturing lambdas"` | 64 capturing by reference |

@@ -1,0 +1,779 @@
+// surface_globals.tk -- a GLOBAL, on the five oracle sites that only ever
+// asked the pass-time SCOPE (`tk_ty_scope_find`, teko_typeof.tk) and never
+// fell back to `tk_ty_global` (teko_array.tk) once that scope answered -1: a
+// global is not "not known here", it is in scope in every body, exactly as
+// D48 already made true for a bare `N_IDENT` read (D51).
+//
+// What each helper proves, in order:
+//
+//   1. `refoutcheck`   -- `ref`/`out` over a scalar global, `i64` and `f64`:
+//      the dedicated pointee check (`tk_ref_arg_pointee`, teko_ref.tk) used
+//      to answer "not known" for a global and skip its own identity check in
+//      silence -- the same gap the fallback here closes, over the SAME table
+//      `tk_ty_global` reads (a global not resolvable through it is a probe:
+//      `ref f64` given an `i64` global refuses `teko: a value of type i64
+//      does not convert to f64`, the wording a local of the wrong type
+//      already gets).
+//   2. `overloadcheck` -- two overloads that differ only by the pointee of a
+//      `ref` parameter, resolved by a GLOBAL argument (`teko_over.tk`'s own
+//      `tk_ov_arg_ty`): before this crumb, `pick(ref g_f)` refused `teko:
+//      the type of argument 1 of pick is not known here`, a legal call with
+//      no ambiguity at all.
+//   3. `delegcheck`    -- a GLOBAL of delegate type: assigned a plain
+//      function name, called; reassigned a lambda literal, called; and
+//      called from INSIDE another function (`useOp`), which is what exposed
+//      the sharpest form of the gap -- `teko_deleg.tk`'s own dispatch fell
+//      through to a bare `N_CALL` of a name nothing declares, `unknown name`
+//      from the core, never a `teko: ...` refusal (D20's own rule).
+//   3b. `delegarrcheck` -- the ELEMENT of an `Op[]`, the one slot whose
+//      coercion runs where no oracle answers at all: `tk_ha_store`
+//      (teko_heaparr.tk) is reached at PARSE time for a local array and
+//      inside `tk_array_pass` for a global one, so every NAME written there
+//      -- a global, a local, a parameter, a function declared below the store
+//      -- read as -1 and was wrapped as a FUNCTION,
+//      `teko: unknown function: ...`. A global `Op[]` was coerced by nothing
+//      at all and handed the bare name to the core, `unknown name`. The value
+//      waits for `tk_deleg_pass` now (D51, third pass).
+//   3c. `delegarrglobalcheck` -- the same store on a GLOBAL `Op[]`, which is
+//      built inside `tk_array_pass` with no lexical scope around it at all:
+//      judging it there read the GLOBAL rows for a name a local shadows, the
+//      FUNCTION for a name a local of delegate type shadows, nothing at all
+//      for a call through a local delegate -- and never ran the escape rule
+//      the parse site runs. The whole store waits for the walk now (D51,
+//      fourth pass).
+//   3d. `delegarrlocalcheck` -- the same element store on a LOCAL `Op[]`,
+//      whose value only the walk can type: `ops[0] = chooser(1)` through a
+//      local delegate was refused at the parse site, `teko: Op takes a
+//      function, another Op, or null`, because that site differed a bare NAME
+//      alone. It differs whatever it cannot type now, the rule the global
+//      store already had. The by-reference capture handed to another LOCAL is
+//      the other half: it is accepted, where the global slot of section 3 is
+//      refused (D51, fifth pass).
+//   3e. `delegternarycheck` -- a TERNARY at the element store, local and
+//      global: the validator coerces it one branch at a time, so it is late
+//      exactly when a BRANCH is. Settled whole at the store's own site, a
+//      branch calling a local delegate was refused and a branch naming a
+//      function declared below the store died `teko: unknown function: ...`.
+//      The last store is the escape's own half: the rule read the top of the
+//      node alone, so a by-reference capture inside a ternary reached a
+//      global, a field, a static field, an element and a `return` unrefused.
+//      It reads both branches now, and handing one to another LOCAL is still
+//      accepted. `storeParam` gains the shadow that makes the same point
+//      about a bare NAME: a parameter written under a free function of that
+//      name was stored as a wrap of the FUNCTION and called (D51, sixth
+//      pass).
+//   3f. `delegcallcheck` -- a CALL at the element store. The site typed one
+//      through `tk_ty_of`, which asks `decl_find` for the FIRST declaration
+//      of that name and has neither a scope nor the prepared overloads in
+//      front of it: a LOCAL delegate `chooser` shadowing a free function
+//      `chooser` was judged by the FUNCTION's return, and an overload whose
+//      first row is not the one the call picks by the row it is not --
+//      `teko: a value of type Boxed does not convert to Op` on two legal
+//      programs. The mirror image was worse: a first row answering `Op` over
+//      a pick that answers something else settled the store, and the value
+//      the pick returns went into the element unchecked. Every call waits for
+//      the walk now (D51, seventh pass).
+//   3g. the store validator's `null` branch itself (`tk_deleg_store_late`,
+//      `tk_deleg_coerce`, teko_deleg.tk) used to ask `nd_kind(v) == N_INT &&
+//      nd_val(v) == 0`, which an ordinary `i64` literal `0` answers exactly
+//      as `tk_null` does: `ops[0] = 0;` slipped past both checks as if it
+//      were `null` and stored a raw zero where a wrong-width copy segfaults
+//      the first call. `tk_is_null_lit` (teko_struct.tk), which also checks
+//      the TY_UPTR type only `tk_null` carries, is the fix; the refusal it
+//      restores cannot RUN (docs/reference/diagnostics.md carries the no-run
+//      case), so this file proves the negative the other way, below: every
+//      `ops[i]`/`g_ops[i]` write in `delegarrcheck`/`delegarrglobalcheck`
+//      still round-trips a real function through the same validator
+//      (D51, eighth pass).
+//   3h. `delegovcallcheck` -- an OVERLOADED call whose own argument is a call
+//      through a delegate slot: which row is picked depends on typing that
+//      argument, and the walk has not rewritten the nested call yet when the
+//      pick is asked, so `tk_ov_arg_ty` (teko_over.tk) answered -1 and
+//      `ops[0] = make(chooser(1))` was refused `teko: Op takes a function,
+//      another Op, or null` on a legal program. The matcher asks the delegate
+//      oracle now (D51, eleventh pass).
+//   3i. `osceilcheck`   -- the store table's own ceiling: a GLOBAL element
+//      store took TWO rows of `TK_MAXOS`, one of them on the node
+//      `tk_hg_resolve_write` had already dropped, so 65 stores were refused
+//      `teko: too many stores into a slot of class type` where 128 local ones
+//      compile. The row is moved, not added (D51, eleventh pass).
+//   4. `paramscheck`   -- a `params i64[]` call with a global SCALAR element
+//      among its tail (`teko_params.tk`'s own `tk_pm_arg_ty`, which read only
+//      `tk_ty_global_ha` -- a global `T[]` of heap -- before this crumb; a
+//      mismatched element was already caught downstream by
+//      `tk_rc_call_args`, so widening it to `tk_ty_global` changes no
+//      observed message, only which pass answers first). `shadowparam` and
+//      `plainparam` add the other half: a local shadows a PARAMETER at the
+//      site, which the function-wide parameter table this site read first
+//      could not express (D51, second pass).
+//   6. `sibcheck`       -- a global two SIBLING blocks of one function shadow
+//      under two different types: `ref g_sib` inside a block is that block's
+//      own local, and the same `ref g_sib` written after both blocks have
+//      closed is the global -- one LEXICAL answer per site, never a body-wide
+//      scan calling the name "ambiguous" (D51, verifier finding).
+//   6b. `refshadowcheck` -- a local shadowing the `ref` PARAMETER itself, which
+//      is the same lexical question asked of the REWRITE rather than of the
+//      check: `tk_ref_param_named` (teko_ref.tk) read a table of parameters
+//      with no position in it, so `bumpf(ref x)` under a `f64 x` declared
+//      inside a block was CHECKED against that local (the lexical scope) and
+//      then REWRITTEN as a repass of the enclosing `ref i64 x`, handing the
+//      callee the caller's own `i64` slot to write a float through. Both
+//      halves read one binding now, and the repass, the write and the read
+//      through the parameter still stand once the block closes (D51, tenth
+//      pass).
+//   7. `addrcheck`      -- a bare `&x` at a parameter that is NOT `ref`/`out`:
+//      the N_ADDR guard `tk_rc_call_args` (teko_rc.tk) grew for D51 skipped
+//      the compatibility rule for EVERY address, where only a `ref`/`out`
+//      parameter has a different rule to take (the identity one over
+//      pointees). An untagged address takes the ordinary one now, and is
+//      widened never either way (D51, second pass).
+//   5. `regressioncheck` -- an enum global (D48) and `T?` over a reference
+//      global (D48) still read correctly: neither of those two sites is
+//      `tk_ty_scope_find`, and this crumb does not touch them, so this is a
+//      regression check, not new coverage.
+//
+// expect-exit: 42
+
+#include "../lib/rt.tk"
+
+i64 g_i = 7;
+f64 g_f = 1.5;
+
+// ---- 1. `ref`/`out` over a scalar global ----
+
+void bumpi(ref i64 x) { x = x + 1; }
+void bumpf(ref f64 x) { x = x + 1.0; }
+void outi(out i64 x) { x = 99; }
+void outf(out f64 x) { x = 9.5; }
+
+i64 refoutcheck() {
+    bumpi(ref g_i);
+    if (g_i != 8) return 1;
+    bumpf(ref g_f);
+    if (g_f != 2.5) return 2;
+    outi(out g_i);
+    if (g_i != 99) return 3;
+    outf(out g_f);
+    if (g_f != 9.5) return 4;
+    return 0;
+}
+
+// ---- 2. overload resolution over a `ref` global ----
+
+i64 pick(ref f64 x) { return 1; }
+i64 pick(ref i64 x) { return 2; }
+
+i64 overloadcheck() {
+    if (pick(ref g_f) != 1) return 1;
+    if (pick(ref g_i) != 2) return 2;
+    return 0;
+}
+
+// ---- 3. a delegate-typed global ----
+
+delegate i64 Op(i64 a);
+
+i64 addOne(i64 a) { return a + 1; }
+
+Op g_op;
+
+i64 useOp(i64 v) { return g_op(v); }             // called from INSIDE another function
+
+i64 takeOp(Op h) { return h(3); }                // ...handed over as an argument
+Op giveOp() { return g_op; }                     // ...and handed back as a result
+
+i64 delegcheck() {
+    g_op = addOne;                                // a plain function name
+    if (g_op(10) != 11) return 1;
+    if (useOp(20) != 21) return 2;
+
+    g_op = new Op((i64 x) => x * 2);              // reassigned to a lambda
+    if (g_op(10) != 20) return 3;
+    if (useOp(5) != 10) return 4;
+
+    // the delegate-typed global on the RIGHT of every slot that takes one.
+    // `tk_deleg_coerce`'s own wrap guard read the pass-time scope alone, so a
+    // global read there as "no slot declares this name" and was wrapped as a
+    // FUNCTION: `teko: unknown function: g_op` on a program with no error.
+    g_op = addOne;
+    Op h;
+    h = g_op;                                     // an assignment
+    if (h(10) != 11) return 5;
+    if (takeOp(g_op) != 4) return 6;              // a call argument
+    Op k = giveOp();                              // a `return`
+    if (k(1) != 2) return 7;
+    Op m = g_op;                                  // a var initializer
+    if (m(2) != 3) return 8;
+
+    return 0;
+}
+
+// ---- 3b. the ELEMENT of an `Op[]`, the one slot coerced where no oracle
+// answers (D51, third pass) ----
+
+Op[] g_ops;                                       // a GLOBAL array of them
+
+i64 addTwo(i64 a) { return a + 2; }
+
+i64 p(i64 a) { return a + 100; }                  // a free function named `p`
+
+// the store is written here, and the name is a PARAMETER: neither the
+// pass-time scope nor the parser's own table of locals holds one -- and the
+// one table that DID answer, "a function of that name has been read so far"
+// (`decl_find`), answered about the function right above, whose wrap the
+// store then held and called (D51, sixth pass). A parameter shadows a
+// function for the whole body; the walk is where that is knowable.
+i64 storeParam(Op p) {
+    Op[] ops = new Op[1];
+    ops[0] = p;
+    return ops[0](1);
+}
+
+i64 delegarrcheck() {
+    g_op = addOne;
+    Op lo = addTwo;
+
+    // `tk_ha_store` (teko_heaparr.tk) coerces the value of an element store,
+    // and the store is built where NO oracle can type a name -- at parse time
+    // for a local array, inside `tk_array_pass` for a global one. Every name
+    // below read as -1 there and was wrapped as a FUNCTION,
+    // `teko: unknown function: g_op` / `: lo` / `: p` / `: addLater`, on a
+    // program with no error in it. The coercion waits for `tk_deleg_pass` now,
+    // which is the one walk that has the lexical scope and the global rows at
+    // once.
+    Op[] ops = new Op[4];
+    // every store here is a REAL function, and the same validator that
+    // accepts them refuses a bare `0` written in their place -- `ops[0] = 0;`
+    // is `docs/reference/diagnostics.md`'s own no-run case (D51, eighth
+    // pass), because a literal `0` is not the `null` this table checks for.
+    ops[0] = g_op;                                // a global
+    ops[1] = lo;                                  // a local
+    ops[2] = addOne;                              // a plain function, wrapped at the walk
+    ops[3] = addLater;                            // ...declared BELOW this body
+    if (ops[0](10) != 11) return 1;
+    if (ops[1](10) != 12) return 2;
+    if (ops[2](10) != 11) return 3;
+    if (ops[3](10) != 13) return 4;
+
+    Op h = ops[1];                                // read back out of the element
+    if (h(1) != 3) return 5;
+
+    if (storeParam(addTwo) != 3) return 6;        // a parameter
+
+    // a GLOBAL `Op[]`: its store is built by `tk_array_resolve_write`
+    // (teko_array.tk), which coerced nothing at all -- the raw function name
+    // reached the core, `unknown name`, never a `teko: ...` refusal (D20)
+    g_ops = new Op[2];
+    g_ops[0] = addOne;
+    g_ops[1] = lo;
+    Op a0 = g_ops[0];
+    Op a1 = g_ops[1];
+    if (a0(10) != 11) return 7;
+    if (a1(10) != 12) return 8;
+
+    return 0;
+}
+
+i64 addLater(i64 a) { return a + 3; }
+
+// ---- 3c. the same element store on a GLOBAL `Op[]`, judged at the WALK
+// (D51, fourth pass) ----
+
+Op[] g_ops2;
+
+i64 shadowed(i64 a) { return a + 100; }           // a free function of that name
+
+delegate Op Chooser(i64 k);
+
+Op pickOp(i64 k) {
+    if (k == 0) return addOne;
+    return addTwo;
+}
+
+i64 delegarrglobalcheck() {
+    g_ops2 = new Op[3];
+
+    // a lambda with no by-reference capture: nothing escapes with it, so the
+    // store the pass builds is accepted -- the one that DOES capture by
+    // reference is refused in the same words a local array's store is
+    // (docs/reference/diagnostics.md)
+    g_ops2[0] = new Op((i64 a) => a * 3);
+
+    // a call through a LOCAL delegate: only the walk's own lexical scope
+    // names `chooser`, so the pass that builds the store could not type this
+    // value at all and refused a legal program
+    Chooser chooser = pickOp;
+    g_ops2[1] = chooser(1);
+
+    // a local of delegate type SHADOWING a free function of the same name:
+    // a name at a point is the innermost declaration visible THERE, so the
+    // store holds the local and never a wrap of the function
+    Op shadowed = addOne;
+    g_ops2[2] = shadowed;
+
+    Op b0 = g_ops2[0];
+    Op b1 = g_ops2[1];
+    Op b2 = g_ops2[2];
+    if (b0(10) != 30) return 1;
+    if (b1(10) != 12) return 2;
+    if (b2(10) != 11) return 3;                   // 110 if the FUNCTION had won
+    return 0;
+}
+
+// ---- 3d. the LOCAL element store, judged by the SAME rule (D51, fifth
+// pass) ----
+
+i64 delegarrlocalcheck() {
+    // a call through a LOCAL delegate, stored into a LOCAL `Op[]`: the parse
+    // site the store is built at has no scope to name `chooser` with, so the
+    // guard used to hand the value straight to the validator and refuse a
+    // legal program, `teko: Op takes a function, another Op, or null` -- the
+    // exact shape the GLOBAL `Op[]` above already waits on. It waits here too
+    // now: a value this site cannot type is judged at the walk, and a value it
+    // types is settled where it stands.
+    Chooser chooser = pickOp;
+    Op[] ops = new Op[2];
+    ops[0] = chooser(1);
+    ops[1] = new Op((i64 a) => a * 4);            // typed right here, as it always was
+    if (ops[0](10) != 12) return 1;
+    if (ops[1](10) != 40) return 2;
+
+    // a lambda that captures by reference may be handed to another LOCAL --
+    // the scope that owns the capture is still the one holding it. Only a
+    // slot that OUTLIVES that scope is refused (a global, a field, a static
+    // field, an element of a `T[]`: docs/reference/diagnostics.md).
+    i64 acc = 40;
+    Op held = new Op((i64 x) use (&acc) => acc + x);
+    Op held2 = held;                              // an initializer
+    Op held3 = addOne;
+    held3 = held;                                 // ...and an assignment
+    if (held2(1) != 41) return 3;
+    if (held3(2) != 42) return 4;
+    return 0;
+}
+
+// ---- 3e. the ternary at an element store, judged branch by branch, and the
+// escape that reads both branches (D51, sixth pass) ----
+
+i64 delegternarycheck() {
+    Chooser chooser = pickOp;
+    i64 c = 1;
+
+    // a LOCAL `Op[]`: the validator takes a ternary APART, one coercion per
+    // branch, so the value is late exactly when a BRANCH is. Settling the
+    // whole of it at the store's own site refused both of these legal stores
+    // -- `teko: Op takes a function, another Op, or null` for the call
+    // through a local delegate, `teko: unknown function: addAfter` for the
+    // arm that names a function declared below the store.
+    Op[] ops = new Op[2];
+    ops[0] = c == 1 ? chooser(1) : chooser(0);
+    ops[1] = c == 1 ? addAfter : addOne;
+    if (ops[0](10) != 12) return 1;
+    if (ops[1](10) != 14) return 2;
+
+    // ...and the same ternary at a GLOBAL `Op[]`, whose store the pass builds
+    // and the walk judges whole
+    g_ops2[0] = c == 1 ? chooser(0) : chooser(1);
+    Op b0 = g_ops2[0];
+    if (b0(10) != 11) return 3;
+
+    // a by-reference capture inside a ternary, handed to another LOCAL: the
+    // escape rule reads both branches now, and a LOCAL target is still not a
+    // slot that outlives the capture -- the global, the field, the static
+    // field, the element and the `return` are, and every one of them refused
+    // this shape in silence before (docs/reference/diagnostics.md)
+    i64 acc = 40;
+    Op held = new Op((i64 x) use (&acc) => acc + x);
+    Op other = addOne;
+    Op picked = c == 1 ? held : other;
+    if (picked(2) != 42) return 4;
+    return 0;
+}
+
+i64 addAfter(i64 a) { return a + 4; }
+
+// ---- 3f. the CALL at an element store, typed at the WALK and never by the
+// FIRST declaration of its name (D51, seventh pass) ----
+
+class Boxed { public i64 v; }                     // a type no `Op[]` may hold
+
+// a free function of the name a LOCAL delegate below shadows. `tk_ty_of`
+// answers `decl_find`'s first declaration at parse time, with no scope in
+// front of it, so the store below was judged against THIS return type and a
+// legal program was refused, `teko: a value of type Boxed does not convert to
+// Op`.
+Boxed chooser(i64 k) { return new Boxed(); }
+
+// ...and an OVERLOAD whose first declaration is not the one the call picks.
+// The store read `make`'s first row -- `Boxed` -- for a call the matcher
+// resolves to the second, so the legal store below was refused in the same
+// words. (The mirror image is the one that cannot be a fixture: a first row
+// answering `Op` and a pick answering something else was SETTLED at the site
+// and stored unchecked, a segfault on the first call through the element --
+// docs/reference/diagnostics.md carries it.)
+Boxed make(i64 k) { return new Boxed(); }
+Op make(i64 k, i64 j) { return addTwo; }
+
+i64 delegcallcheck() {
+    Chooser chooser = pickOp;                     // the LOCAL shadows the function
+    Op[] ops = new Op[2];
+    ops[0] = chooser(1);                          // the LOCAL delegate's own return
+    ops[1] = make(1, 2);                          // the PICKED overload's return
+    if (ops[0](10) != 12) return 1;
+    if (ops[1](10) != 12) return 2;
+    return 0;
+}
+
+// ---- 3h. an OVERLOADED call whose argument is a call through a delegate
+// slot (D51, eleventh pass) ----
+
+// a third row of `make`, and the one an `Op` argument picks. Which row it is
+// depends on typing that argument, and the argument here is `chooser(1)` -- a
+// call through a LOCAL delegate that `tk_deleg_walk` has not rewritten yet
+// when the pick is asked, because the walk stands on the store before it
+// descends into the value. `tk_ov_arg_ty` (teko_over.tk) read `tk_ty_of`
+// alone there, which asks `decl_find` about a name no declaration owns: -1,
+// no row matched, and every store below was refused `teko: Op takes a
+// function, another Op, or null` on a legal program, in either order of the
+// rows. It asks the delegate oracle now (`tk_deleg_expr_ty`), which is the
+// same peek the validator one frame up already takes.
+Op make(Op o) { return o; }
+
+i64 delegovcallcheck() {
+    Chooser chooser = pickOp;
+
+    Op[] ops = new Op[1];
+    ops[0] = make(chooser(1));                    // at a LOCAL element store
+    if (ops[0](10) != 12) return 1;
+
+    Op h = make(chooser(0));                      // ...at a local initializer
+    if (h(10) != 11) return 2;
+
+    g_ops2[1] = make(chooser(1));                 // ...and at a GLOBAL one
+    Op b1 = g_ops2[1];
+    if (b1(10) != 12) return 3;
+    return 0;
+}
+
+// ---- 3i. what a GLOBAL element store spends of the store table: one row,
+// never two (D51, eleventh pass) ----
+
+// `tk_hg_resolve_write` (teko_array.tk) copies the store it has built into the
+// placeholder node the tree holds and then MARKED that placeholder as a second
+// store into a counted slot, leaving the row `tk_ha_store` had already written
+// pointing at the orphan it dropped. Two rows of `TK_MAXOS` (128,
+// teko_struct.tk) per global element store: the 65th of the stores below was
+// refused `teko: too many stores into a slot of class type` on a program with
+// no error in it, where 128 stores into a LOCAL `Op[]` compile. The row is
+// MOVED now, so 65 is an ordinary number of stores and the ceiling is the one
+// the table says it is.
+Op[] g_many;
+
+i64 osceilcheck() {
+    g_many = new Op[65];
+    g_many[0] = addOne; g_many[1] = addOne; g_many[2] = addOne; g_many[3] = addOne; g_many[4] = addOne;
+    g_many[5] = addOne; g_many[6] = addOne; g_many[7] = addOne; g_many[8] = addOne; g_many[9] = addOne;
+    g_many[10] = addOne; g_many[11] = addOne; g_many[12] = addOne; g_many[13] = addOne; g_many[14] = addOne;
+    g_many[15] = addOne; g_many[16] = addOne; g_many[17] = addOne; g_many[18] = addOne; g_many[19] = addOne;
+    g_many[20] = addOne; g_many[21] = addOne; g_many[22] = addOne; g_many[23] = addOne; g_many[24] = addOne;
+    g_many[25] = addOne; g_many[26] = addOne; g_many[27] = addOne; g_many[28] = addOne; g_many[29] = addOne;
+    g_many[30] = addOne; g_many[31] = addOne; g_many[32] = addOne; g_many[33] = addOne; g_many[34] = addOne;
+    g_many[35] = addOne; g_many[36] = addOne; g_many[37] = addOne; g_many[38] = addOne; g_many[39] = addOne;
+    g_many[40] = addOne; g_many[41] = addOne; g_many[42] = addOne; g_many[43] = addOne; g_many[44] = addOne;
+    g_many[45] = addOne; g_many[46] = addOne; g_many[47] = addOne; g_many[48] = addOne; g_many[49] = addOne;
+    g_many[50] = addOne; g_many[51] = addOne; g_many[52] = addOne; g_many[53] = addOne; g_many[54] = addOne;
+    g_many[55] = addOne; g_many[56] = addOne; g_many[57] = addOne; g_many[58] = addOne; g_many[59] = addOne;
+    g_many[60] = addOne; g_many[61] = addOne; g_many[62] = addOne; g_many[63] = addOne; g_many[64] = addOne;
+    i64 t = 0;
+    i64 i = 0;
+    loop {
+        if (i >= 65) break;
+        Op e = g_many[i];
+        t = t + e(1);
+        i = i + 1;
+    }
+    if (t != 130) return 1;                       // 65 elements, each `addOne`
+    return 0;
+}
+
+// ---- 4. `params` over a global scalar element ----
+
+i64 sumall(params i64[] xs) {
+    i64 t = 0;
+    i64 i = 0;
+    loop {
+        if (i >= xs.Length) break;
+        t = t + xs[i];
+        i = i + 1;
+    }
+    return t;
+}
+
+// a LOCAL of the same name as the global, in ANOTHER function: the unit-wide
+// most-recent-wins table this pass used to read (`tk_slv_find_unit`) answered
+// with THIS `f64` for the `g_i` of `sumall(1, g_i, 2)` below, masking the
+// global the call really passes
+f64 maskgi() {
+    f64 g_i = 1.5;
+    return g_i + 1.0;
+}
+
+// a LOCAL shadowing a PARAMETER of the SAME function. The function-wide
+// parameter table this pass asked BEFORE the scope (`tk_pm_param_ty`) carried
+// no position, so the `f64 x` of the signature answered for the `i64 x` the
+// block declares and the legal call below was refused, `teko: a value of type
+// f64 does not convert to i64` (D51, second pass). One lexical oracle answers
+// now: a parameter opens the scope, a local shadows it, and the innermost
+// declaration visible AT the site is the type.
+i64 shadowparam(f64 x) {
+    if (x > 0.0) {
+        i64 x = 2;
+        return sumall(1, x, 3);
+    }
+    return 0;
+}
+
+// the same call with NO shadow in sight: the parameter itself is what the
+// scope answers, which is what the deleted table used to be there for
+i64 plainparam(i64 x) {
+    return sumall(x, 4);
+}
+
+i64 paramscheck() {
+    g_i = 5;
+    if (sumall(1, g_i, 2) != 8) return 1;
+    if (maskgi() != 2.5) return 2;
+    if (g_i != 5) return 3;                       // the global is the one that was passed
+    if (shadowparam(1.5) != 6) return 4;          // 1 + 2 + 3, the LOCAL `x`
+    if (plainparam(6) != 10) return 5;            // 6 + 4, the PARAMETER `x`
+    return 0;
+}
+
+// ---- 6. a global two SIBLING blocks shadow under two different types ----
+
+i64 g_sib = 7;
+
+// The pointee is read LEXICALLY, at the site, by the one oracle every pass
+// shares (`tk_ty_scope_or_global`, teko_typeof.tk): INSIDE the second block
+// `g_sib` is that block's own `f64`, so `ref g_sib` there is a legal
+// `ref f64`; AFTER both blocks have closed no block declares the name, so the
+// same `ref g_sib` is the `i64` global, and `bumpi` is what takes it --
+// `bumpf(ref g_sib)` written there refuses instead, `teko: a value of type
+// i64 does not convert to f64` (diagnostics.md). The body-wide SCAN the check
+// used to take was blind to the site: it called the name "ambiguous" for the
+// whole function and skipped its own check, while `tk_rc_call_args`
+// (teko_rc.tk), reading the scope, answered the global and widened the
+// ADDRESS into a float -- D51's own verifier finding, a segfault.
+i64 sibcheck(i64 c) {
+    if (c == 0) {
+        i64 g_sib = 1;
+        if (g_sib != 1) return 1;
+    }
+    if (c != 0) {
+        f64 g_sib = 2.0;
+        bumpf(ref g_sib);
+        if (g_sib != 3.0) return 2;
+    }
+    bumpi(ref g_sib);                             // outside both: the i64 global
+    return 0;
+}
+
+// ---- 6b. a local shadowing the `ref` PARAMETER itself ----
+
+// The pointee of `ref x` is read at the site, lexically, so inside the block
+// it is the `f64` local -- and the REWRITE that turns a repassed `ref`/`out`
+// parameter into its own value (`x` already IS the caller's slot address) used
+// to read a table of the function's parameters instead, which carries no
+// position: it rewrote this `ref x` as the outer `ref i64` parameter, so
+// `bumpf` wrote 3.0 through the CALLER's `i64` slot and left the local at 2.0
+// -- one name, two oracles, silent memory corruption (D51, tenth pass).
+i64 refshadow(ref i64 x) {
+    if (x > 0) {
+        f64 x = 2.0;
+        bumpf(ref x);                             // the LOCAL, never the parameter
+        if (x != 3.0) return 1;
+    }
+    bumpi(ref x);                                 // the shadow has closed: a repass
+    x = x + 10;                                   // ...a write through the parameter
+    if (x != 18) return 2;                        // ...and a read through it
+    return 0;
+}
+
+i64 refshadowcheck() {
+    i64 a = 7;
+    i64 bad = refshadow(ref a);
+    if (bad != 0) return bad;
+    if (a != 18) return 3;                        // never written as an `f64`
+    return 0;
+}
+
+// ---- 7. a bare `&x` at a parameter that is NOT `ref`/`out` ----
+
+// `tk_rc_call_args` (teko_rc.tk) never widens an N_ADDR -- D51's own segfault
+// was D33's `scvtf` run on a pointer -- but WHICH check an address takes is
+// the PARAMETER's question, not the argument's (D51, second pass): a
+// `ref`/`out` parameter takes the identity rule over pointees, and any other
+// parameter takes the ordinary compatibility rule every value takes. An
+// untagged address is typed by nothing today (`tk_ty_of` answers -1 for it),
+// so nothing is refused on it and this call stands; what the line proves is
+// that it goes through the check at all instead of past it.
+i64 peek(uptr p) { return ld64(p); }
+
+i64 addrcheck() {
+    i64 v = 11;
+    if (peek(&v) != 11) return 1;
+    return 0;
+}
+
+// ---- 8. a `ref` parameter through a DELEGATE call ----
+
+// A call through a delegate slot is a `callp`, built after `tk_ref_pass` and
+// naming no callee, so neither that pass's own call check nor
+// `tk_rc_call_args` (teko_rc.tk) ever sees its arguments: the delegate's own
+// check (`tk_deleg_check_arg_kinds`, teko_deleg.tk) is the only door, and it
+// compared the `ref`/`out` TAG alone -- the pointee TYPE behind it was never
+// read, so an `i64`'s address handed to a `ref f64` parameter came back
+// holding a double's bit pattern, through a LOCAL slot and through a GLOBAL
+// one alike (D51, twelfth pass). What runs below is the accepted side: the
+// pointee the signature declares, over both kinds of slot. The mismatch has no
+// exit code and is a `// no-run` sample in docs/reference/diagnostics.md.
+delegate void Mut(ref f64 x);
+delegate void MutI(ref i64 x);
+
+Mut g_mut;
+MutI g_muti;
+f64 g_mf = 1.0;
+i64 g_mi = 1;
+
+i64 delegrefcheck() {
+    Mut m = bumpf;                                // a LOCAL delegate slot
+    f64 v = 1.0;
+    m(ref v);
+    if (v != 2.0) return 1;
+    g_mut = bumpf;                                // ...and a GLOBAL one
+    g_mut(ref g_mf);
+    if (g_mf != 2.0) return 2;
+    MutI mi = bumpi;                              // the integer pointee beside it
+    i64 n = 1;
+    mi(ref n);
+    if (n != 2) return 3;
+    g_muti = bumpi;
+    g_muti(ref g_mi);
+    if (g_mi != 2) return 4;
+    return 0;
+}
+
+// ---- 9. a delegate slot declared `T?` ----
+
+// D221 decision 21's first escape asks how long the SLOT lives; a `?` says
+// only that it may hold nothing. Both sites that guarded the rule by the
+// slot's type read `tk_deleg_row`, which answers -1 for the `TK_KNULL` row
+// `Op?` is -- so an `Op?` global and an `Op?[]` element took a by-reference
+// capture that dies before they do, where the `Op`/`Op[]` beside them are
+// refused (D51, twelfth pass). The accepted side is below -- no capture, and
+// the `null` the `?` is declared for -- with the refusals in
+// docs/reference/diagnostics.md.
+Op? g_maybe;
+Op?[] g_maybes;
+
+// A `T?` delegate is READ back through `== null`/`!= null` and nothing else
+// here: calling one, and unwrapping one with `??`, are not taught yet (both
+// measured on this head, docs/reference/not-yet.md), so what the fixture can
+// assert is that the store landed and that a `null` store is still a `null`.
+i64 nulldelegcheck() {
+    g_maybe = new Op((i64 x) => x + 1);           // a GLOBAL `Op?`: no capture
+    if (g_maybe == null) return 1;
+    g_maybes = new Op?[2];
+    g_maybes[0] = new Op((i64 x) => x + 2);       // a GLOBAL `Op?[]` element
+    g_maybes[1] = null;                           // ...and the value a `?` is for
+    Op?[] xs = new Op?[2];
+    xs[0] = new Op((i64 x) => x + 3);             // the same on a LOCAL `Op?[]`
+    xs[1] = null;
+    if (g_maybes[0] == null) return 2;
+    if (g_maybes[1] != null) return 3;
+    if (xs[0] == null) return 4;
+    if (xs[1] != null) return 5;
+    return 0;
+}
+
+// ---- 5. regression: an enum global and `T?` over a reference global (D48) ----
+
+enum Color { Red, Green, Blue }
+Color g_color = Color.Blue;
+
+class Cell {
+    public i64 v;
+    public Cell(i64 x) { v = x; }
+}
+
+Cell? g_cell;
+
+i64 regressioncheck() {
+    if (g_color != Color.Blue) return 1;
+    if (g_cell.HasValue) return 2;
+    g_cell = new Cell(3);
+    if (!g_cell.HasValue) return 3;
+    Cell got = g_cell.Value;
+    if (got.v != 3) return 4;
+    g_cell = null;                                // written back through the slot
+    return 0;
+}
+
+i64 main() {
+    i64 bad = refoutcheck();
+    if (bad != 0) return 10 + bad;
+
+    bad = overloadcheck();
+    if (bad != 0) return 20 + bad;
+
+    bad = delegcheck();
+    if (bad != 0) return 30 + bad;
+
+    bad = delegarrcheck();
+    if (bad != 0) return 80 + bad;
+
+    bad = delegarrglobalcheck();
+    if (bad != 0) return 90 + bad;
+
+    bad = delegarrlocalcheck();
+    if (bad != 0) return 100 + bad;
+
+    bad = delegternarycheck();
+    if (bad != 0) return 110 + bad;
+
+    bad = delegcallcheck();
+    if (bad != 0) return 120 + bad;
+
+    bad = delegovcallcheck();
+    if (bad != 0) return 140 + bad;
+
+    bad = osceilcheck();
+    if (bad != 0) return 150 + bad;
+
+    bad = paramscheck();
+    if (bad != 0) return 40 + bad;
+
+    bad = regressioncheck();
+    if (bad != 0) return 50 + bad;
+
+    bad = sibcheck(0);
+    if (bad != 0) return 60 + bad;
+    if (g_sib != 8) return 68;                    // the global, bumped as an `i64`
+    bad = sibcheck(1);
+    if (bad != 0) return 60 + bad;
+    if (g_sib != 9) return 69;
+
+    bad = refshadowcheck();
+    if (bad != 0) return 130 + bad;
+
+    bad = addrcheck();
+    if (bad != 0) return 70 + bad;
+
+    bad = delegrefcheck();
+    if (bad != 0) return 160 + bad;
+
+    bad = nulldelegcheck();
+    if (bad != 0) return 170 + bad;
+
+    return 42;
+}

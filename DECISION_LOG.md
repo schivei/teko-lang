@@ -3226,6 +3226,1307 @@ own untouched `gl[0]` — and `rccheck`'s floor is unmoved at **4**, the new arr
 its object. `mc pkg hash .` over the source tree of this pass's code and fixture commit:
 `87e627f70123afa56da2f314ba445066e265890594029cc694fecfbbb28f9595`.
 
+### D51 · A global falls back through every oracle that reads the pass-time SCOPE alone, `ref`/`out`'s own dedicated pointee check included (2026-09-13)
+
+D48 gave `tk_ty_of`'s own bare `N_IDENT` case a global fallback (`tk_ty_global`,
+teko_array.tk): a global is in scope in every body, so "not known here" was never true of
+one. Five OTHER sites read the SAME pass-time scope, `tk_ty_scope_find` (teko_typeof.tk), for
+a name shaped differently and never fell back once the scope answered -1: `tk_ty_of`'s own
+`N_ADDR` case (a `ref`/`out` argument whose pointee was not known at parse time,
+teko_typeof.tk), the overload matcher's own `tk_ov_arg_ty` (teko_over.tk), and three of
+`teko_deleg.tk`'s own dispatch points -- `tk_deleg_expr_ty`, `tk_deleg_assign`, and
+`tk_deleg_visit`'s `N_CALL` branch. Measured with a probe pair each: a `ref f64` parameter
+given an `i64` global compiled and passed the address through unchecked (`r2`), where the
+same mismatch on a LOCAL already refused, `teko: a value of type i64 does not convert to
+f64` (`r3`); an overload chosen by a `ref` global's own pointee refused a legal call,
+`teko: the type of argument 1 of pick is not known here` (`o2`); a delegate-typed GLOBAL,
+called (`g(1)`), fell through every one of `teko_deleg.tk`'s own dispatch points to a bare
+`N_CALL` of a name nothing declares, `unknown name` from the core -- never a `teko: ...`
+refusal, D20's own rule (`d1`). The fix is a fallback to `tk_ty_global` after
+`tk_ty_scope_find` at all five, through one new one-line helper, `tk_ty_scope_or_global`
+(teko_typeof.tk) -- the same order every other bare-name lookup in the oracle already reads
+a name in.
+
+**A sixth site, found by re-measuring rather than by the citation that named the first
+five.** Applying only that fallback left `r2` compiling AND THEN SEGFAULTING (on the base
+itself, with no fallback at all, the same program compiles and silently corrupts the global
+through the bit-reinterpreting write) -- worse than
+the silent pass it started as. The refusal `r3` gets does not come from `tk_ty_of` at all: a
+`ref`/`out` call argument's pointee is checked by a SEPARATE, dedicated identity rule over a
+SEPARATE table, `tk_ref_check_pointee`/`tk_ref_arg_pointee` (teko_ref.tk), which runs ahead
+of the general per-argument compat/widen pass (`tk_rc_call_args`, teko_rc.tk -- `tk_ref_pass`
+is registered before `tk_rc_pass` in `teko.tk`). It already carried its own comment naming
+the gap: "a pointee the pass cannot name (a global, an ambiguous local) is silently
+skipped." Once `tk_ty_of`'s new fallback let a global's real type reach `tk_rc_call_args`
+first, that pass's own implicit-widen rule (D33: an integer converts to a float slot) took
+it at face value and wrapped the `ref`-tagged ADDRESS argument in the float cast meant for a
+VALUE -- `scvtf` on a pointer, the segfault. `tk_ref_arg_pointee` gets the identical
+one-line fallback, and because the dedicated pointee check now runs to completion before
+`tk_rc_call_args` ever sees the argument, it refuses first, with the identical wording a
+local gets: both read `tk_reject_compat` over the same two type names. It reads the SHARED
+helper, `tk_ty_scope_or_global` (teko_typeof.tk), like every other site here: teko_ref.tk is
+included AHEAD of teko_typeof.tk in `teko.tk`, so the name is not defined yet where it is
+used -- which is what the forward declaration at the head of teko_ref.tk is for, the same
+device that file already uses for `tk_default_decl_count`. (The first round of this crumb
+did write a private fallback of its own there, on the reasoning that the include order
+forbade the helper; the verifier's rewrite below replaced the whole function and took the
+forward declaration instead. Copilot, second pass, read the paragraph against the code.)
+
+**`tk_pm_arg_ty` (teko_params.tk) widened too**, from `tk_ty_global_ha` (a global `T[]` of
+heap only) to the general `tk_ty_global`, deleting the now fully-subsumed
+`tk_ty_global_ha` (teko_array.tk) -- nothing else called it. Measured, not argued: a
+`params i64[]` call with an `f64` global in its tail already refused, at the same line, with
+the same wording, `teko: a value of type f64 does not convert to i64`, because
+`tk_rc_call_args` catches the generated `tkarr_put_i64` call's own argument downstream,
+through `tk_ty_of`'s pre-existing (D48) fallback, before this pass's own element check ever
+ran. The widen changes which pass answers first, not what is answered -- a global `T[]` of
+heap was never the only global `params` could see; it was the only one anything downstream
+had not already caught. (Item 3 of the Copilot pass below goes further: the table this site
+read BEFORE reaching any global was the wrong one too.)
+
+**Nine other `tk_ty_scope_find` call sites are untouched.** `teko_ns.tk`'s own guard in the
+mangling pass (twice), `teko_this.tk`'s five "is this a local or a parameter?" guards, the
+guard `teko_over.tk`'s own member-access fallback takes before the field/`this` search, and
+`teko_deleg.tk`'s own `tk_lam_check_name`: each asks "is this a local?" only to fall through
+to a DIFFERENT table on a `no` -- a field, `this`, a capture, a function name, a type -- and
+a global answering there would be the wrong table's own name to answer instead of the right
+one's. `tk_lam_check_name` is the sharpest of them: a global is exactly what it defers to
+`tk_lg_add`, the one point a global's own row is knowable.
+
+**Copilot finding, pass 1: the wrap guard was NOT one of them, the new fallback erased an
+answer, and the `params` oracle was the wrong table to begin with.** Three sites, each
+measured on its own probe before and after, `mc` 0.15.23:
+
+1. `tk_deleg_coerce`'s own bare-name-to-thunk wrap (teko_deleg.tk) was filed above as a
+   guard that must NOT see a global. It must: the table it falls through to on a `no` is
+   "the name of a FUNCTION to wrap", and a delegate-typed GLOBAL on the right of a slot is
+   not one. `Op h; h = g_op;`, `takeOp(g_op)`, `return g_op;` and `Op m = g_op;` all wrapped
+   a function nothing declares -- `teko: unknown function: g_op` on a program with no error
+   in it, on the base (`da33ebd4`) exactly as on this crumb's first round. It reads
+   `tk_ty_scope_or_global` now, like every dispatch point around it. A free function's own
+   name is in NO slot table, global or local, so it still answers -1 and is still wrapped
+   (probe: assignment, argument, `return` and initializer over a plain function, all
+   unchanged); a global of some OTHER type on a delegate slot now gets the delegate's own
+   mismatch, `teko: Op takes a function, another Op, or null`, where it used to get the
+   misleading `unknown function`.
+2. `tk_ref_arg_pointee`'s new fallback was UNCONDITIONAL, and that erased a deliberate
+   answer. `tk_ref_local_ty` returns -1 for two different things: "the body declares no such
+   local", and "two sibling blocks declare it under two types" (`tk_ref_lamb`) -- the second
+   is not "no local", it is "not one type", and reading the global there types a slot the
+   site never meant. A global `i64 g` beside `if (c) { f64 g = 2.0; bumpf(ref g); }` refused
+   the legal call, `teko: a value of type i64 does not convert to f64`: a REGRESSION this
+   crumb's own first round introduced (the base compiles and runs it). The two answers are
+   kept apart now, and only "no such local" falls through to the global.
+3. `tk_pm_arg_ty` (teko_params.tk) read `tk_slv_find_unit`, a UNIT-WIDE most-recent-wins
+   table: a local of the same name in ANOTHER function answered for this one. `i64 g = 3;`
+   with an `f64 g` declared last in some unrelated body refused `sum(1, g, 2)` over
+   `params i64[]` with `teko: a value of type f64 does not convert to i64` -- a legal program,
+   refused on the base too, so pre-existing rather than this crumb's, and the wrong oracle
+   either way. The declaration being walked is known right there, so it is recorded
+   (`tk_pm_cur_fn`, set by `tk_pm_params_of`) and the name is read under the function that
+   owns it.
+
+2 and 3 are one rule, so they are one piece of code: `tk_local_ty_in(fn, name)` (the body of
+the former `tk_ref_local_ty`, taking its function as an argument) and
+`tk_local_or_global_in(fn, name)` (that, then `tk_ty_global`, and -1 rather than a global on
+an ambiguity), both teko_ref.tk, which teko_params.tk reads as well -- teko_ref.tk is
+included ahead of it. `tk_ref_local_ty` is gone, its one caller rewritten.
+`tk_slv_find_unit` (teko_struct.tk) keeps its declaration with no caller left in the tree;
+deleting it belongs to the next crumb that opens that module. The comment over
+`tk_ref_check_pointee` is corrected too: a global IS named now, and the only pointee left
+unnamed is the ambiguous local.
+
+**Verifier finding: that "ambiguity" was the bug, and two oracles were answering one name.**
+The reviewer's own reproducer -- `bumpf(ref g)` written OUTSIDE the two sibling blocks that
+shadow an `i64` global `g`, where nothing is ambiguous at all -- compiled on the head of
+this crumb and exited 139, `EXC_BAD_ACCESS` at `ldr d17, [x10]`. `--dump-ast` prints the
+whole story in two lines: `CAST type=f64` over `ADDR type=uptr name=g`, D33's own `scvtf`
+run on an ADDRESS. Item 2 above kept the "ambiguous local" answer apart from "no such
+local", and that is exactly what broke it: `tk_ref_scan_local` decided ambiguity by scanning
+the WHOLE body, blind to the position of the site, so it answered "ambiguous, refuse
+nothing" for every `ref g` in the function -- including one written where no block declaring
+`g` is open -- while `tk_rc_call_args` (teko_rc.tk), reading the LEXICAL scope through
+`tk_ty_of`, answered the global's `i64` and widened the address on it. Two oracles for one
+name, one of them position-blind.
+
+The fix is that there is only ONE oracle, and no such thing as an ambiguous name. A name at
+a point is the innermost declaration visible THERE, or, when no block open there declares
+it, the global -- which is what `tk_ty_scope_or_global` (teko_typeof.tk) already answers,
+and what `tk_ty_of`, `tk_ov_arg_ty` and teko_deleg.tk's dispatch points already read.
+`tk_ref_pass` runs AFTER `tk_typeof_pass` (teko.tk), so the oracle's own scope stack is
+available to it: `tk_ref_fn` opens it with the function's parameters and `tk_ref_walk` keeps
+it live exactly as `tk_ty_walk_list` does -- a mark at every block, cut back at its `}`, a
+local in scope only after the statement that declares it has been walked -- and
+`tk_ref_arg_pointee` is three lines that ask it. teko_params.tk, the other caller, does the
+same in `tk_pm_walk`/`tk_pm_walk_unit` and asks the same helper. DELETED with the scan:
+`tk_ref_scan_local`, `tk_ref_lty`, `tk_ref_lamb`, `tk_local_ty_in`, `tk_local_or_global_in`
+(teko_ref.tk), `tk_ref_param_ty` (teko_ref.tk -- `tk_ty_scope_params` records a `ref`/`out`
+parameter under its own pointee, so the private parameter lookup had nothing left to add)
+and `tk_pm_cur_fn` (teko_params.tk). ADDED: `tk_ty_scope_mark`/`tk_ty_scope_cut`
+(teko_typeof.tk), two one-line accessors, because teko_ref.tk is included ahead of that file
+and cannot name `tk_nscope` itself. Item 2's own probe still passes and now for the right
+reason: `ref g` INSIDE the block that declares `f64 g` is that block's local and is
+accepted; the same `ref g` after the block has closed is the global and is judged against
+it.
+
+**And an invariant of its own, so no second oracle can ever cast an address again.**
+`tk_rc_call_args` widens an N_ADDR never -- an address is not a numeric value, whatever
+`tk_ty_of` says its pointee is. A `ref`/`out` argument is judged there by the one rule that
+owns pointees, identity (`tk_ref_check_pointee`), which refuses in the same words a value
+gets; that is also the site that judges an OVERLOADED name's pointee, which teko_ref.tk's
+own call check (declared exactly once) leaves to the matcher. With the lexical oracle in
+place, every user-written mismatch is refused before this guard is reached -- measured:
+a mismatched pointee on an overloaded name is refused by the matcher itself,
+`teko: no overload of f matches these arguments` -- so the guard is proved by `--dump-ast`
+instead: the accepted `bumpi(ref g)` carries a bare `ADDR type=uptr name=g` with no CAST
+over it, where the head of this crumb printed `CAST type=f64` over that same node.
+
+Four probes, each run on four builds (`da33ebd4` the base, `98e18245` the first round,
+`3ba13535` the head the verifier reproved, and this fix), mc **0.15.23**, macos/aarch64.
+`g` is an `i64` global except where the row says otherwise, and the two sibling blocks
+declare `i64 g` and `f64 g`:
+
+| probe | `da33ebd4` | `98e18245` | `3ba13535` | now |
+|---|---|---|---|---|
+| `bumpf(ref g)` after both blocks | compiles, `g` silently corrupted (exit 2) | refuses | compiles, **exit 139** | refuses, `teko: a value of type i64 does not convert to f64` |
+| `bumpf(ref g)` inside the `f64` block | runs, 42 | refuses (the first round's regression) | runs, 42 | runs, 42 |
+| `bumpf(ref g)` inside the `i64` block, `f64` global | refuses | refuses | refuses | refuses |
+| `bumpi(ref g)` after both blocks, both declaring `f64 g` | refuses, `teko: a value of type f64 does not convert to i64` | refuses | refuses | runs, 42 |
+
+The last row is the scan's own verdict read out loud: a legal call, refused on the base and
+on both rounds of this crumb because a block that is CLOSED at the site still answered for
+the name. It is the line `tests/surface_globals.tk` gains.
+
+Proof of the finding's fix, mc **0.15.23**, macos/aarch64: the reproducer refuses,
+`teko: a value of type i64 does not convert to f64`, at the line that writes it; **63/63**
+fixtures at their `expect-exit`, with `tests/surface_globals.tk` section 6 extended by the
+outside-the-blocks call (`bumpi(ref g_sib)`, accepted, and `main` checks the global really
+was bumped, 7 -> 8 -> 9); the `--dump-ast` of the **62** fixtures that existed at
+`da33ebd4`, byte-identical to that base; `sh scripts/bootstrap.sh --os macos --arch
+aarch64` -> `FIXPOINT OK` (63/63 under `teko1`); `sh scripts/check-docs.sh` green
+(568 links, 385 diagnostics, 119 samples); `mc limits . --config mc.macos.toml` verdict `ok`
+on both legs, the `tests/hello.tk` leg's structural counts byte-identical to the head of
+this crumb and its heap 1114880 estimated against 1114992 used of a 33554432 ceiling, the
+compiler leg's used heap 92311424 of a 218234880 reserve (the deletions give back what the
+scan cost: `nodes` used 154066 -> 153967, `ins` 212163 -> 211960, `funcs` 3133 -> 3131).
+`mc pkg hash .` at this fix's own code commit:
+`050f35870ffdd4349e216d19da851a21ae66af4fa312328a72ad3d2028263e3e`.
+
+Proof, mc **0.15.23** (`MC_VERSION`), macos/aarch64: `mc build . --config mc.macos.toml`
+clean; **63/63** fixtures at their `expect-exit` (`tests/surface_globals.tk`, exit 42, six
+sections: `ref`/`out` over a scalar global, an overload picked by a `ref` global, a
+delegate-typed global called as a plain function, as a lambda, from inside another function
+and read on the RIGHT of an assignment, an argument, a `return` and an initializer, `params`
+over a global scalar element the last declaration of that name in the unit masks from
+another body, a regression check over an enum global and `T?` over a reference global (D48's
+own two sites, untouched by this crumb), and a `ref f64` over the `f64` one of two sibling
+blocks that shadow an `i64` global -- the pass-head build refuses that last one, the base
+refuses the delegate one); `--dump-ast` of the 62 fixtures that existed before,
+byte-identical to `da33ebd4`;
+`sh scripts/bootstrap.sh --os macos --arch aarch64` -> `FIXPOINT OK` (63/63 under the
+self-hosted `teko1`; the compiler's own sources declare no `ref`/`out`/delegate/`params`
+over a global, so the ladder proves the fix is inert on itself, not that it is exercised by
+it); `sh scripts/check-docs.sh` green (568 links, 385 diagnostics, 119 samples -- two new
+`// no-run` samples: the `ref f64` global mismatch in
+[diagnostics.md](docs/reference/diagnostics.md), whose paragraph also states the one pointee
+still read as unnamed, and a global of a non-delegate type on a delegate slot in
+[delegates.md](docs/reference/delegates.md)); `mc limits . --config mc.macos.toml`
+verdict `ok` on both legs, measured back-to-back against `da33ebd4` under the identical
+command: the compiler-build leg's `nodes`/`funcs`/`strings`/`ins`/`symbols`/`heap` move by
+this crumb's own small source growth (used heap 91606832 -> 92324032 of a
+203096064/218234880 reserve), the `tests/hello.tk` leg's structural counts (`tokens` through
+`intrin`) are BYTE IDENTICAL and only its own `heap` moves (476016 -> 1114992 of a 33554432
+ceiling, 3.3%) -- D35's own precedent: the estimator is `mc`'s own and moves on its own
+account, and every table stays comfortably `ok`. `mc pkg hash .`:
+`9de962f08ba2783e376da38789e9f4f2cc87d9001a250ec7f8e9e753164a36eb`.
+
+**Copilot finding, pass 2: an address guard wider than its own reason, and a `params` oracle
+that still had a second table in front of it.** Both measured on `da33ebd4` and on the head
+of this crumb (`37f90714`) before either was touched, mc **0.15.23**:
+
+1. The N_ADDR guard above skipped the compatibility check for EVERY address, where only a
+   `ref`/`out` parameter has a different rule to take. The premise it was filed under does
+   not survive measurement: `take(&x)` at a class, an `i64?`, an `enum` and a `TimeSpan`
+   parameter compiles on the BASE exactly as it does on the head, and the ADDRESS is never
+   cast on either -- `tk_ty_of` types an UNTAGGED address with nothing at all. Its pointee
+   branch is entered only by a node `ref`/`out` TAGGED (`tk_rfarg_kind`), and a bare `&x`
+   falls past every case of the oracle to -1, which refuses nothing, which is also why
+   `tk_num_widen` had nothing to widen there (`tk_num_widens(f64, -1)` is 0, and `uptr` is
+   outside `tk_is_int_ty` by name in any case). So the guard removed no refusal that
+   existed -- and it was still the wrong shape, because it answered the ARGUMENT's question
+   where the rule belongs to the PARAMETER. It is split: `ref`/`out` takes the identity rule
+   over pointees, anything else takes the ordinary `tk_check_compat` every value takes, and
+   the widen is out of reach of both. The day the oracle learns to type a bare `&x`, one
+   pass answers it instead of nothing answering at all.
+2. `tk_pm_arg_ty` (teko_params.tk) still asked a table BEFORE the lexical scope, the
+   function-wide `pmp_name`/`pmp_ty` filled by `tk_pm_params_of` and read by
+   `tk_pm_param_ty`. A table with no position in it cannot be shadowed: inside `f(f64 x)`,
+   a block's own `i64 x = 2` still answered `f64`, so `sumi(1, x)` over a `params i64[]`
+   was refused, `teko: a value of type f64 does not convert to i64` -- a legal program,
+   refused on the base and on the head alike. The verifier's own rewrite had already put
+   every parameter of the declaration being walked into the scope the walk keeps live
+   (`tk_ty_scope_params`, teko_typeof.tk, in `tk_pm_walk_unit`), so the table was a second
+   oracle for a name the first one already knew. DELETED: `TK_MAXPMP`, `pmp_name`/`pmp_ty`/
+   `tk_npmp` and their four accessors, `tk_pm_params_of` and `tk_pm_param_ty` -- and with
+   them the refusal ``teko: too many parameters in one declaration``, that table's own
+   16-row ceiling, struck from
+   [diagnostics.md](docs/reference/diagnostics.md): the scope answers -1 past its end
+   (`tk_ty_scope_add`) rather than refusing, "not known here", which refuses nothing.
+   Deletion over addition: 43 lines out of teko_params.tk, 13 of comment back in, and the
+   one call site that read them is a line shorter.
+3. The sixth-site paragraph above described code that the verifier's own rewrite had already
+   replaced: `tk_ref_arg_pointee` reads the SHARED `tk_ty_scope_or_global`, through the
+   forward declaration at the head of teko_ref.tk, not a private fallback of its own. The
+   paragraph says so now.
+
+Proof, mc **0.15.23** (`MC_VERSION`), macos/aarch64: **63/63** fixtures at their
+`expect-exit`, with `tests/surface_globals.tk` (exit 42) gaining section 4's `shadowparam`
+(a local shadowing a PARAMETER at a `params` call, accepted with the LOCAL's type) and
+`plainparam` (no shadow: the parameter itself answers), and a new section 7, `addrcheck` --
+a bare `&v` at a plain `uptr` parameter, which now goes THROUGH the ordinary compatibility
+rule instead of past it; the `--dump-ast` of the **62** fixtures that existed at `da33ebd4`,
+byte-identical to that base, the guard's own proof that no address gained a `CAST` and no
+accepted program moved; `sh scripts/bootstrap.sh --os macos --arch aarch64` -> `FIXPOINT OK`
+(63/63 under `teko1`); `sh scripts/check-docs.sh` green (568 links, **384** diagnostics --
+the one struck above -- 119 samples); `mc limits . --config mc.macos.toml` verdict `ok` on
+both legs, the `tests/hello.tk` leg's structural counts and heap (1114992) byte-identical to
+the head of this crumb, the compiler leg giving back what the deleted table cost (`nodes`
+used 153967 -> 153815, `ins` 211960 -> 211752, `funcs` 3131 -> 3125, heap 92311424 ->
+92276992 of a 218169344 reserve). `mc pkg hash .` at this pass's own code commit:
+`c037572671bf559c85096676e3908fa8cd153b0df15dc81023e43b1cd313fa18`.
+
+**Copilot finding, pass 3: the validator has ONE caller that runs where no oracle
+answers, and it was guessing "function" for every name.** The reviewer read the wrap guard
+above against `teko_heaparr.tk` and found the site the first pass's measurement could not
+reach from a slot: `ops[i] = e` on an `Op[]` is coerced by `tk_deleg_coerce` from
+`tk_ha_index`, at PARSE time, where `tk_ty_scope_find` is empty (the scope walk has not
+run) and `tk_ty_global` is empty as well (`tk_hg_collect` fills it in `tk_array_pass`, the
+fifth pass). So the fallback the first pass gave the guard cannot help there, and every
+NAME written at an element store read -1 and was wrapped as a function. Measured on
+`da33ebd4`, on the head of this crumb (`2664c87c`) and on this fix, mc **0.15.23**,
+macos/aarch64 -- `Op` is `delegate i64 Op(i64 a)`, `g_op` a global of it, `lo` a local, `p`
+a parameter, `g_n` an `i64` global:
+
+| probe | `da33ebd4` | `2664c87c` | now |
+|---|---|---|---|
+| `ops[0] = g_op;` then `ops[0](1)` | `teko: unknown function: g_op` | same | runs, 42 |
+| `ops[0] = lo;` | `teko: unknown function: lo` | same | runs, 42 |
+| `ops[0] = p;` (a parameter) | `teko: unknown function: p` | same | runs, 42 |
+| `ops[0] = addOne;` (declared above) | runs, 42 | runs, 42 | runs, 42 |
+| `ops[0] = laterFn;` (declared below) | `teko: unknown function: laterFn` | same | runs, 42 |
+| `Op h = ops[0];` (read back) | runs, 42 | runs, 42 | runs, 42 |
+| `g_ops[0] = addOne;` on a GLOBAL `Op[]` | `unknown name` (the core) | same | runs, 42 |
+| `ops[0] = g_n;` | `teko: unknown function: g_n` | same | `teko: Op takes a function, another Op, or null` |
+| `Op h; h = g_n;` (pass 1's own site) | `teko: unknown function: g_n` | `teko: Op takes a function, another Op, or null` | unchanged |
+
+Three things the table says. The guess was never about GLOBALS: a local and a parameter
+died exactly as the global did, so a parse-time resolver for `tk_ty_global` -- the cheaper
+alternative -- would have fixed one row of five and left the rest. A function declared
+BELOW the store died too, because `decl_find` at parse time only knows what has been read
+so far. And a GLOBAL `Op[]` was not coerced at all: `tk_array_resolve_write`
+(teko_array.tk) builds its store inside `tk_array_pass` and called `tk_ha_store` with the
+raw value, so the bare name reached the core, `unknown name` -- never a `teko: ...`
+refusal, D20's own rule again.
+
+**The fix is D48's, applied to the one caller that needed it.** The coercion moves from
+`tk_ha_index` to `tk_ha_store` (teko_heaparr.tk), the one point BOTH element stores pass
+through, and a value the store's own oracles cannot settle is recorded
+(`tk_deleg_store_defer`, teko_deleg.tk) and coerced during `tk_deleg_walk` -- the same
+device `tk_prim_arg_defer` (D48) is for an argument a parse-time column cannot type, and
+the same reasoning the verifier finding above used to pick its walk: `tk_deleg_walk` is the
+one place that carries both halves of the question at once, the LEXICAL scope at the site
+(`tk_ty_scope_var`, a mark per block) and every global row (`tk_array_pass` runs before
+`tk_deleg_pass`, teko.tk). The judgement reads the value out of the store's own argument
+list rather than remembering it, so a pass that rewrote the node in between is judged as it
+stands, and a wrap is spliced into the list link -- no node ever changes identity. A store
+the walk never reaches is judged all the same at the end of the pass, with the scope
+closed: silence is the one answer this table may not give.
+
+**Only what nothing can name waits.** `tk_deleg_store_late` defers a bare identifier the
+pass-time scope and the global rows do not answer for AND that is either a SLOT the
+parser's own scoped table of locals holds (`tk_pty_of`, teko_struct.tk -- a local shadowing
+a function of that name is the local, not the function) or a name no declaration read so
+far gives a body to. Everything else is settled where it is written: `null`, a
+`new Op(...)`, a lambda, a call, an element read, and a function declared above the store.
+That is what keeps the 62 dumps identical -- `tk_deleg_wrap` emits four declarations
+through `tk_top_emit`, so deferring a wrap that already worked would move them in the tree
+of a program that did not change. One line moves in teko_array.tk too
+(`tk_deleg_late_move`, forward-declared there as `tk_ha_store` already is): the global
+write COPIES the store it built into the node the tree holds (`node_assign`) and drops the
+one it built, so the deferral re-points at the node the walk will actually reach -- the
+same re-mark `tk_os_add` makes one line above it. ADDED: one refusal, ``teko: too many
+element stores of unknown type`` (64 in one unit), in
+[diagnostics.md](docs/reference/diagnostics.md).
+
+Proof, mc **0.15.23** (`MC_VERSION`), macos/aarch64: the nine probes above, each run on the
+three builds; **63/63** fixtures at their `expect-exit`, with `tests/surface_globals.tk`
+(exit 42) gaining section 3b, `delegarrcheck` -- an `Op[]` taking a global, a local, a
+function declared above and one declared below, the element read back into a name, a
+parameter stored from another body (`storeParam`), and a GLOBAL `Op[]` taking a function
+and a local; the `--dump-ast` of the **62** fixtures that existed at `da33ebd4`,
+byte-identical to that base; `sh scripts/bootstrap.sh --os macos --arch aarch64` ->
+`FIXPOINT OK` (63/63 under `teko1`); `sh scripts/check-docs.sh` green (568 links, **385**
+diagnostics -- the one added above -- 119 samples); `mc limits . --config mc.macos.toml`
+verdict `ok` on both legs, measured back-to-back against `2664c87c` under the identical
+command: the `tests/hello.tk` leg's structural counts (`tokens` through `intrin`) BYTE
+IDENTICAL, the compiler leg moving by this pass's own source growth (`nodes` used 153815 ->
+154187, `ins` 211752 -> 212286, `funcs` 3125 -> 3136, used heap 91629824 -> 92501344 of a
+218562560 reserve). `mc pkg hash .` at this pass's own code commit:
+`ea80f178f29b78b3456e57eb85ccd5532751f0892aa271f2628502ce76efb18d`.
+
+**Copilot finding, pass 4: the store the third pass taught to wait was judged where nothing
+can be judged.** The reviewer read the third pass against `tk_array_resolve_write` and found
+the other half of it: `tk_hg_resolve_write` (teko_array.tk) assembles a GLOBAL `T[]`'s own
+element store INSIDE `tk_array_pass`, and the third pass handed that store the same
+validator the parse-time one takes. A pass is not a site: no lexical scope stands around it,
+so the only rows in reach were the globals, and the escape rule the parse site runs
+(`tk_lam_escapes` in `tk_ha_index`, teko_heaparr.tk) did not run there at all. Four probes,
+each measured on `da33ebd4`, on the head of this crumb (`853f829e`) and on this fix, mc
+**0.15.23**, macos/aarch64 -- `Op` is `delegate i64 Op(i64 a)` and `g_ops` a global `Op[]`:
+
+| probe | `da33ebd4` | `853f829e` | now |
+|---|---|---|---|
+| `g_ops[0] = new Op((i64 y) use (&x) => x + y)` | runs, 42 | runs, 42 | refuses, `teko: a lambda that captures by reference cannot leave its scope` |
+| the same on a LOCAL `Op[]` | refuses, same words | refuses | refuses |
+| `g_ops[0] = f` with `f` a lambda tainted by `use (&acc)` | runs, 42 | runs, 42 | refuses, the same words |
+| the same on a LOCAL `Op[]` | refuses, same words | refuses | refuses |
+| `dst[0] = g` with a local `i64 g` shadowing a delegate global `Op g` | `unknown name` (the core, at the global's own assignment) | compiles, **exit 139** | refuses, `teko: Op takes a function, another Op, or null` |
+| `dst[0] = f` with a local `Op f` beside a free function `f` | runs, 42 (the LOCAL) | runs, **141** (the FUNCTION) | runs, 42 (the LOCAL) |
+| `g_ops[0] = chooser(0)`, `chooser` a LOCAL delegate returning `Op` | runs, 42 | refuses, `teko: Op takes a function, another Op, or null` | runs, 42 |
+
+The base is right on two of those rows by not judging at all -- it coerced nothing, so the
+raw name reached the code generator and the innermost declaration answered, which is also
+why its own two remaining rows are `unknown name` from the core. The third pass judged, and
+judged in the one place where a name means whatever the globals say it means.
+
+**One rule, and it is the same one the crumb has been applying all along: judge where names
+have types.** A store built in a PASS judges NOTHING where it is built -- not the coercion,
+not the type of the value, not the escape -- and waits whole for `tk_deleg_walk`, which
+stands at the site with the lexical scope live (`tk_ty_scope_var`, a mark per block), every
+global row collected (`tk_array_pass` runs first, teko.tk) and the function that owns the
+store known (`tk_cur_fn_name`, which is exactly the owner `tk_lam_escapes` reads a taint
+under). ADDED: `tk_deleg_defer_all` and its one-line setter (teko_deleg.tk), forward-declared
+in teko_array.tk beside `tk_deleg_late_move` and set around the two lines of
+`tk_hg_resolve_write` that build the store; one column in the deferral table, `dl_esc`, so
+the escape is judged at the walk only for the store that could not judge it where it was
+written -- a LOCAL store's escape was already taken at its parse site, and taking it again
+at the walk would read a taint that site could not see yet, the position-blindness the
+verifier finding above already struck once. `tk_deleg_late_do` takes the escape first, in
+the same words and from the same `tk_lam_escapes` the parse site calls, then the coercion it
+already took.
+
+**Deletion, not addition, for the pass's own leftovers.** `tk_slv_find_unit`
+(teko_struct.tk) is gone: the second pass left it with no caller in the tree and the comment
+in teko_params.tk that names it says so now. The comment over `tk_ref_arg_pointee`
+(teko_ref.tk) attributed a "unit-wide most-recent-wins table" to `tk_slv_find`, which is the
+PARSER's own stack of locals still in scope -- the unit-wide one was `tk_slv_find_unit`, the
+function just deleted. It names the table for what it is: a stack that records a declaration
+and never a PARAMETER, so `lvl_c(ref x)` inside `lvl_b(ref i64 x)` answers -1, or the type
+of some unrelated local named `x` open around the call.
+
+Proof, mc **0.15.23** (`MC_VERSION`), macos/aarch64: the seven probes above on the three
+builds; **63/63** fixtures at their `expect-exit`, with `tests/surface_globals.tk` (exit 42)
+gaining section 3c, `delegarrglobalcheck` -- a GLOBAL `Op[]` taking a lambda with no
+capture, a call through a LOCAL delegate, and a local of delegate type shadowing a free
+function of that name, the element read back and called in each case; the head of this crumb
+refuses that section at its second store. The two refusals are one `// no-run` sample in
+[diagnostics.md](docs/reference/diagnostics.md), whose escape entry now names an ELEMENT of
+a `T[]`, local or global, beside the field and the static field it already named. The
+`--dump-ast` of the **62** fixtures that existed at `da33ebd4`, byte-identical to that base;
+instrumented, `tk_deleg_late_rest` refusing any store that reaches it unjudged, the whole
+suite and every probe pass -- no pending store survives the walk (and the instrument is not
+vacuous: with `tk_deleg_late_pend` disabled it fires on the fixture at once);
+`sh scripts/bootstrap.sh --os macos --arch aarch64` -> `FIXPOINT OK` (63/63 under `teko1`);
+`sh scripts/check-docs.sh` green (568 links, 385 diagnostics -- none added, the pass speaks
+in refusals that already existed -- **120** samples, the one added above);
+`mc limits . --config mc.macos.toml` verdict `ok` on both legs, measured back-to-back
+against `853f829e` from the same clean state: the `tests/hello.tk` leg IDENTICAL down to its
+`heap` (used 467824 of a 33554432 ceiling), the compiler leg moving by this pass's own
+source growth (`nodes` used 154187 -> 154215, `ins` 212286 -> 212326, `funcs` 3136 -> 3137,
+`globals` 922 -> 924, used heap 91854176 -> 91921088 of a 217448448 reserve). `mc pkg hash .`
+at this pass's own code commit:
+`766306c9be8a85b6788252ae2058b230cb2fe72726ae9ba665f4483afb1aca10`.
+
+**Copilot finding, fifth pass: the store that waits differed a NAME and nothing else, the
+global slot never asked the escape rule, and the queue was eight times shallower than the
+writes that fill it.** Three findings, each measured on `da33ebd4` (the base), on the head
+of this crumb (`945b94b1`) and on this fix, mc **0.15.23**, macos/aarch64 -- `Op` is
+`delegate i64 Op(i64 a)`, `Chooser` a `delegate Op Chooser(i64 k)`, `g_op` a global `Op`
+and `local` a local holding a lambda tainted by `use (&acc)`:
+
+| probe | `da33ebd4` | `945b94b1` | now |
+|---|---|---|---|
+| `ops[0] = chooser(1)` on a LOCAL `Op[]` | refuses, `teko: Op takes a function, another Op, or null` | same | runs, 42 |
+| the same store on a GLOBAL `Op[]` (fourth pass) | `unknown name` (the core) | runs, 42 | runs, 42 |
+| `g_op = local;` | compiles, `g_op` outlives `acc` | same | refuses, `teko: a lambda that captures by reference cannot leave its scope` |
+| `g_op = new Op((i64 x) use (&acc) => acc + x);` | compiles, the same dangling capture | same | refuses, the same words |
+| `Op local2 = local;` / `local2 = local;` (a LOCAL target) | runs, 42 | runs, 42 | runs, 42 |
+| 65 valid deferred stores in one unit (20 global, 45 local) | `teko: unknown function: lo` (the third pass's own gap) | refuses, `teko: too many element stores of unknown type` | runs, 42 |
+
+1. **The store differed a bare `N_IDENT` and judged everything else on the spot.**
+   `tk_deleg_store_late` (teko_deleg.tk) asked its question only of a NAME, so every other
+   shape went straight to `tk_deleg_coerce` at PARSE time, where `tk_ty_scope_find` is empty
+   and `tk_ty_global` is not filled yet -- and a value those two cannot type is refused
+   there in the delegate's own mismatch words. `ops[0] = chooser(1)`, with `chooser` a local
+   delegate answering `Op`, is exactly that value, and
+   [arrays.md](docs/reference/arrays.md) promises it "in a local array and in a global one"
+   alike: the global half has waited for the walk since the fourth pass, the local half
+   refused a legal program. It is ONE rule at both halves now, the global store's own: what
+   the site's oracles TYPE (`tk_deleg_expr_ty`, the same oracle the validator asks one line
+   later) is settled where it stands, and what they do not type waits for `tk_deleg_walk`,
+   which stands at the site with the lexical scope live and every global row collected.
+   Deferring only what the site types WRONG is what keeps the accepted programs where they
+   are: a wrap emits four declarations through `tk_top_emit`, and moving a wrap that already
+   worked would move them (the 62 dumps). A ternary is the one value the validator takes
+   APART, one branch at a time, so it stays at the site whenever the site is judging at all.
+2. **A GLOBAL of delegate type took a capture that dies before it does.** `tk_deleg_assign`
+   read the target through `tk_ty_scope_or_global` (pass 1) but never asked D221 decision
+   21's first escape, so `g_op = local;` and `g_op = new Op(... use (&acc) ...)` parked the
+   ADDRESS of a dead local in a slot that survives the call -- accepted on the base and on
+   the head alike. A field, a static field, an element of a `T[]` and a `return` already
+   carry that verdict; the plain global slot was the one write of a delegate with none. It
+   asks `tk_lam_escapes` when, and only when, the target is NOT in the lexical scope
+   (`tk_ty_scope_find` < 0, the same helper the walk keeps live): a LOCAL target keeps the
+   taint PROPAGATION it always had (`tk_lam_taint_stmt`) and no refusal, because the scope
+   that owns the capture is still the one holding it.
+3. **The queue was 64 where the writes that fill it are capped at 512.** `TK_MAXDGLATE`
+   (teko_deleg.tk) is the table of element stores waiting for the walk, and `TK_MAXGDEF`
+   (teko_array.tk, 512) is the ceiling on the array writes of a unit that wait for
+   `tk_array_pass` -- every one of which may need a row in the first. 65 perfectly ordinary
+   stores were refused ``teko: too many element stores of unknown type``. The table is as
+   deep as the one that feeds it now, and `null` -- the one value that means the same thing
+   at every site, judged identically by the pass and by the parse site -- takes no row at
+   all. The ceiling and its refusal are stated in
+   [diagnostics.md](docs/reference/diagnostics.md).
+
+Proof, mc **0.15.23** (`MC_VERSION`), macos/aarch64: the six probes above on the three
+builds; **63/63** fixtures at their `expect-exit`, with `tests/surface_globals.tk` (exit 42)
+gaining section 3d, `delegarrlocalcheck` -- a LOCAL `Op[]` taking a call through a local
+delegate and a lambda typed at the site, and a by-reference capture handed to another LOCAL
+through an initializer and through an assignment; the head of this crumb refuses that
+section at its first store. The two new refusals are one `// no-run` sample in
+[diagnostics.md](docs/reference/diagnostics.md), whose escape entry now names a GLOBAL of
+delegate type beside the field, the static field and the element it already named, and says
+that another LOCAL is not one. The `--dump-ast` of the **62** fixtures that existed at
+`da33ebd4`, byte-identical to that base; instrumented, `tk_deleg_late_rest` refusing any
+store that reaches it unjudged, the whole suite and every probe pass -- no deferred store
+survives the walk (and the instrument is not vacuous: with `tk_deleg_late_pend` disabled it
+fires on the first probe at once); `sh scripts/bootstrap.sh --os macos --arch aarch64` ->
+`FIXPOINT OK` (63/63 under `teko1`); `sh scripts/check-docs.sh` green (568 links, 385
+diagnostics -- none added, the ceiling's own row is corrected from 64 to 512 -- **121**
+samples, the one added above); `mc limits . --config mc.macos.toml` verdict `ok` on both
+legs, measured back-to-back against `945b94b1` from the same clean state: the
+`tests/hello.tk` leg BYTE IDENTICAL down to its `heap` (used 464272 of a 33554432 ceiling),
+the compiler leg moving by this pass's own source growth and its one deeper table (`nodes`
+used 154215 -> 154279, `ins` 212326 -> 212446, `funcs` 3137 and `globals` 924 unchanged,
+used heap 85187904 -> 85532512 of a 149487616 reserve). `mc pkg hash .` at this pass's own
+code commit:
+`709748245e85b6ca08389ff24e75bbbdf4e13883d59411c484361f08e8d015b1`.
+
+**Copilot finding, sixth pass: the store guessed "function" for a name a PARAMETER
+shadows, kept a ternary at a site that cannot judge its branches, and the escape rule read
+the top of the node and never its arms.** Three findings, each measured on `da33ebd4` (the
+base), on the head of this crumb (`a3a70f66`) and on this fix, mc **0.15.23**,
+macos/aarch64 -- `Op` is `delegate i64 Op(i64 a)`, `Chooser` a `delegate Op Chooser(i64 k)`,
+`held` a local holding a lambda tainted by `use (&acc)` and `other` a plain `Op`:
+
+| probe | `da33ebd4` | `a3a70f66` | now |
+|---|---|---|---|
+| `ops[0] = p` inside `storeParam(Op p)`, under a free `i64 p(i64)` | runs, the FUNCTION's answer | same | runs, the PARAMETER's answer |
+| `ops[0] = c ? chooser(1) : chooser(0)` on a LOCAL `Op[]` | refuses, `teko: Op takes a function, another Op, or null` | same | runs, 42 |
+| `ops[0] = c ? addLater : addOne`, `addLater` declared BELOW | refuses, `teko: unknown function: addLater` | same | runs, 42 |
+| the same ternary on a GLOBAL `Op[]` | runs, 42 (nothing judged it) | runs, 42 | runs, 42 |
+| `g_ops[0] = flag ? held : other` | compiles, the capture outlives `acc` | same | refuses, `teko: a lambda that captures by reference cannot leave its scope` |
+| `g_op = flag ? held : other` | compiles, the same dangling capture | same | refuses, the same words |
+| `return flag ? held : other` from a function answering `Op` | compiles, the same | same | refuses, the same words |
+| `g_op = flag ? new Op(... use (&acc) ...) : other` | compiles, the same | same | refuses, the same words |
+| `Op h = flag ? held : other` (a LOCAL target) | runs, 42 | runs, 42 | runs, 42 |
+
+1. **`decl_find` is not the question a store may ask about a name.** `tk_deleg_store_late`
+   (teko_deleg.tk) settled a bare `N_IDENT` whenever a declaration read SO FAR gave that
+   name a body, and wrapped it as that function. A PARAMETER shadows the function for the
+   whole body, and no table the parser keeps records one: `tk_pty_of` (teko_struct.tk) is a
+   stack of DECLARATIONS, the pass-time scope and the global rows are both empty at parse
+   time, and `decl_find(p_decl_name())` cannot help either -- the enclosing N_FUNC joins the
+   unit only after its own body has been read (`parse_function`, mc's `src/parse.mc`), so
+   its parameter list is unreachable from inside it. `storeParam(Op p) { ops[0] = p; }`
+   written under a free `i64 p(i64)` stored the wrap and called the FUNCTION: not a refusal,
+   a wrong answer, on the base exactly as on the head. The name waits for the walk, where a
+   parameter stands in `tk_ty_scope_var` exactly as a local does. Two lines of guess
+   deleted, and with them the last table in this file that answered about a name from
+   somewhere other than the site.
+2. **A ternary is late exactly when a BRANCH is.** The same guard sent every ternary
+   straight to `tk_deleg_coerce`, which takes it APART -- one coercion per branch, at the
+   parse site, against the two oracles that answer nothing there. A branch calling a LOCAL
+   delegate was refused in the delegate's own mismatch words and a branch naming a function
+   declared BELOW the store died `teko: unknown function: ...`, both legal programs, and
+   both the very shapes the fifth pass had just taught the bare value to wait for. The guard
+   recurses now, so a ternary whose branches the site can type is settled where it stands
+   (the dumps) and one whose branches it cannot waits whole.
+3. **The escape rule owns every shape the validator accepts, and it accepted one it never
+   read.** `tk_lam_escapes` (teko_deleg.tk) answers over a leaf: a call to an allocator
+   whose lambda captured by reference, or a name tainted with one. A ternary is an `N_CALL`
+   named `tk_ternary`, so it asked `tk_lamref_has("tk_ternary")` -- no allocator has that
+   name -- and answered 0 without looking at either arm. EVERY site that reads this rule
+   took the capture unrefused: the global of delegate type (`tk_deleg_assign`), the element
+   of a `T[]` local or global (`tk_ha_index`, `tk_deleg_late_do`), the field and the static
+   field (teko_expr.tk, teko_access.tk) and the `return` (`tk_deleg_return`). One recursion
+   in the one rule fixes all six, which is what makes it the root cause rather than the
+   site the reviewer named; `tk_lam_taint_stmt`'s own propagation follows it for free, so
+   `Op q = c ? held : other;` taints `q` as `Op q = held;` always did. A LOCAL target is
+   still accepted: the scope that owns the capture is the one holding it.
+
+**The suppressed comment is a LIMIT, not a defect, and it is written down instead of
+patched.** `void sink(Op p) { g_op = p; }` called `sink(held)` retains the capture in a
+global after the caller returns, and nothing refuses it. The escape is an intra-function
+taint (D42): the caller's site is an ordinary argument pass, which is how a delegate is
+used at all -- `forEach(xs, new Op((i64 x) use (&sum) => ...))` has the identical shape, and
+a rule that refused the argument would refuse `register(Op cb)` with it. Carrying the
+verdict into the callee needs a qualifier on the parameter's own TYPE, a design and not a
+patch, so it is a row of [not-yet.md](docs/reference/not-yet.md): a by-reference capture
+handed to a parameter that a callee stores in an outliving slot is not caught, the taint
+does not cross a call.
+
+**One dump moves, and it is this pass's own cost, named and measured.**
+`tests/surface_array_heap.tk` writes `ops[0] = add; ops[1] = mul;` into an `Op[]`, the one
+shape in the 62 fixtures of `da33ebd4` that the parse site used to settle and now defers
+(finding 1: nothing at that site can know whether `add` is the function or a parameter).
+The unit has the same **2439** lines and the same multiset of them, and `diff` is a single
+pair of hunks: one contiguous **88**-line block, the eight declarations of the two wraps
+(`Op__thunk_add`, `Op__vt_add`, `Op__release_add`, `Op__new_add`, and `mul`'s four), moves
+from the middle of the unit to its end -- which is where every wrap the store defers has
+been emitted since the third pass (`ops[3] = addLater`, a function declared below, already
+took that path). The fixture is at its `expect-exit` on both sides. The other **61**
+fixtures that existed at `da33ebd4` are byte-identical to that base. The alternative --
+asking, at the parse site, whether the name is a parameter of the enclosing declaration --
+has no table to ask: teko's own parameter readers (`tk_default_param`, teko_default.tk, and
+`tk_params`, teko_class.tk) know each name as they read it, but the one table they fill
+(`tk_hp_*`, teko_struct.tk) keeps `T[]` parameters alone and is reset by the next parameter
+list a LAMBDA in the body opens. Judging where names have types is this crumb's whole rule;
+the moved block is what it costs here.
+
+Proof, mc **0.15.23** (`MC_VERSION`), macos/aarch64: the nine probes above on the three
+builds, plus the twenty probes of the third, fourth and fifth passes re-run on this build --
+every one at the verdict its own table records; **63/63** fixtures at their `expect-exit`,
+with `tests/surface_globals.tk` (exit 42) gaining section 3e, `delegternarycheck` (the
+ternary at a LOCAL and at a GLOBAL element store, an arm naming a function declared below,
+and the by-reference capture another LOCAL may still hold) and `storeParam` gaining the free
+function `p` its own parameter shadows -- the head of this crumb refuses that section at its
+first store, the base refuses the fixture earlier still. The `--dump-ast` of **61** of the
+62 fixtures that existed at `da33ebd4` byte-identical to that base, the 62nd relocated as
+described above; instrumented, `tk_deleg_late_rest` refusing any store that reaches it
+unjudged, the whole suite and all twenty-nine probes pass -- no deferred store survives the
+walk (and the instrument is not vacuous: with `tk_deleg_late_pend` disabled it fires on
+`tests/surface_globals.tk:183` at once); `sh scripts/bootstrap.sh --os macos --arch aarch64`
+-> `FIXPOINT OK` (63/63 under `teko1`); `sh scripts/check-docs.sh` green (568 links, 385
+diagnostics -- none added, the escape's own entry now names the ternary -- **122** samples,
+one added); `mc limits . --config mc.macos.toml` measured back-to-back against `a3a70f66`
+from the same clean state, verdict identical on both legs (the compiler leg `ok`, the
+`tests/hello.tk` leg `grew` on the head exactly as here, its heap estimate 16318 against
+464272 used of a 33554432 ceiling): that second leg is BYTE IDENTICAL down to its `heap`,
+and the compiler leg moves by this pass's own source growth (`nodes` used 154279 -> 154307,
+`ins` 212446 -> 212503, `funcs` 3137 and `globals` 924 unchanged, used heap 85532512 ->
+85578928 of a 149553152 reserve). `mc pkg hash .` at this pass's own code commit:
+`eab5530bc2fadc4462fa2b1146a9411a34a85492a053d1d142805fcad0660d0c`.
+
+**Copilot finding, seventh pass: a CALL was settled by the FIRST declaration of its name,
+and the store that waits was judged twice.** Three findings, each measured on `da33ebd4`
+(the base), on the head of this crumb (`82fa6aa9`) and on this fix, mc **0.15.23**,
+macos/aarch64 -- `Op` is `delegate i64 Op(i64 a)`, `Chooser` a `delegate Op Chooser(i64 k)`,
+`Boxed` a class and `make` an overloaded name:
+
+| probe | `da33ebd4` | `82fa6aa9` | now |
+|---|---|---|---|
+| `ops[0] = chooser(1)`, a LOCAL `Chooser` shadowing a `Boxed chooser(i64)` | refuses, `teko: Op takes a function, another Op, or null` | refuses, `teko: a value of type Boxed does not convert to Op` | runs, 42 |
+| `ops[0] = make(1, 2)`, first row `Op`, the pick `i64` | compiles, **exit 139** | compiles, **exit 139** | refuses, `teko: Op takes a function, another Op, or null` |
+| `ops[0] = make(1, 2)`, first row `Boxed`, the pick `Op` | refuses | refuses, the generic words | runs, 42 |
+| `ops[0] = new Other();` | refuses, `teko: Op takes a function, another Op, or null` | refuses, `teko: a value of type Other does not convert to Op` | refuses, the delegate's own words |
+| `ops[0] = o;`, `o` a LOCAL of class `Other` | `teko: unknown function: o` | refuses, the generic words | refuses, the delegate's own words |
+| 128 late LOCAL element stores in one unit | `teko: unknown function: lo` | runs, 42 | runs, 42 |
+| 129 of them | `teko: too many stores into a slot of class type` | the same | the same |
+
+1. **`decl_find` is not the question a store may ask about a CALL either.** The sixth pass
+   struck that table for a bare NAME and left it standing for everything else:
+   `tk_deleg_store_late` (teko_deleg.tk) settled a value whenever `tk_deleg_expr_ty` typed
+   it as the element, and on an `N_CALL` that oracle reads the pass-time scope (empty at
+   parse) and then falls through to `tk_ty_of`, which asks `decl_find` for the FIRST
+   declaration of the called name -- no scope, no prepared overloads. Its two errors point
+   opposite ways and neither is recoverable at the site: a LOCAL delegate `chooser`
+   shadowing a free `Boxed chooser(i64)` was typed by the FUNCTION's return and a legal
+   store was refused, and an overload whose first row answers `Op` while the row the call
+   picks answers `i64` was SETTLED, the `i64` written into the `Op[]` unchecked, and the
+   first call through the element segfaulted (exit 139, on the base exactly as on the head).
+   The rule is the one D50 already states over `tk_fs_vty` and D48 over an argument: a call
+   whose return only the pass resolves is not an early check's to guess at. Every `N_CALL`
+   waits for `tk_deleg_walk`, which stands at the site with the lexical scope live and the
+   overloads already picked. A ternary IS an `N_CALL` (of `tk_ternary`), so the sixth pass's
+   branch-by-branch recursion goes with it -- the same verdict in one rule less, because a
+   bare name in a branch was already late at this site. A FUNCTION declared above the store
+   is still wrapped where the name is unambiguously a function, which at parse time means
+   nowhere: that is the sixth pass's own answer, unchanged, and it is why no accepted
+   program's tree moves here -- a wrap is what moves a tree, and nothing that waits is ever
+   wrapped.
+2. **A store that waits was judged twice, and the generic verdict spoke first.**
+   `tk_ha_store` (teko_heaparr.tk) ran `tk_check_field_store` (teko_struct.tk) over the
+   value whether it was deferred or not, and that check reads the SAME parse-time tables the
+   guard above had just refused to trust: `ops[0] = new Other()` and `ops[0] = o` on an
+   `Op[]` were refused `teko: a value of type Other does not convert to Op`, the generic
+   conversion words, where the delegate's own validator answers
+   `teko: Op takes a function, another Op, or null`; and finding 1's shadowed `chooser` was
+   refused by it over the FUNCTION's return type even after the coercion had waited. One
+   judgement per store: what waits is `tk_deleg_late_do`'s, whole, and `null` and the shapes
+   the site does type keep the check -- an element store is the only road to Q1a's null rule
+   (`cs[i] = null` on a `Cell[]`). The refusal is not lost, it is the right one: both shapes
+   above are refused in the delegate's own words now.
+3. **The queue's ceiling was derived from a table a LOCAL store never touches, and the
+   derivation is what was wrong -- not the number.** The fifth pass raised `TK_MAXDGLATE`
+   from 64 to 512 by reading `TK_MAXGDEF` (512, teko_array.tk), the writes into a
+   possibly-global array; a local store is never one of those, so the reviewer is right that
+   the ceiling has to be stated on its own terms. Measured before resizing anything: a
+   delegate is a COUNTED type, so `tk_os_mark` records every element store of one, local or
+   global, in `TK_MAXOS` (128, teko_struct.tk), a table never reset within a unit -- 128 late
+   local stores compile and run, and 513 are refused at the 129th,
+   `teko: too many stores into a slot of class type`, on the base as well (pre-existing, and
+   an adjacent finding, not this crumb's). The queue cannot be filled past 128 by any
+   program, so 512 stays where it is -- four times the deepest reach -- with its real feeder
+   named in the code and in
+   [diagnostics.md](docs/reference/diagnostics.md), where the row now says the ceiling is its
+   own and which refusal a program really meets first. Growing it to 4096 would have added
+   192KB of globals for rows nothing can add.
+
+Proof, mc **0.15.23** (`MC_VERSION`), macos/aarch64: the seven probes above on the three
+builds, plus the **29** probes of passes 1 to 6 and the verifier finding re-run on this
+build -- every one at the verdict its own table records, and the head of this crumb and this
+fix agree on all 29; **63/63** fixtures at their `expect-exit`, with
+`tests/surface_globals.tk` (exit 42) gaining section 3f, `delegcallcheck` -- a call through
+a LOCAL `Chooser` that a free `Boxed chooser(i64)` shadows, and a call to the overload of
+`make` whose first row is `Boxed` and whose picked row is `Op` -- the head of this crumb
+refuses that section at its first store. The mirror image (a first row of `Op` over a pick
+that is not one) cannot be a fixture, so it is the `// no-run` sample added to
+[diagnostics.md](docs/reference/diagnostics.md). The `--dump-ast` of the 62 fixtures that
+existed at `da33ebd4`: **62 of 62 byte-identical to the head of this crumb**, and against
+the base, **61** byte-identical with `tests/surface_array_heap.tk` exactly as the sixth pass
+declared it (2439 lines, the same multiset, one 88-line block of eight wrap declarations
+moved to the end) -- deferring a call moves no tree, because only a bare name is ever
+wrapped; instrumented, `tk_deleg_late_rest` refusing any store that reaches it unjudged, the
+whole suite and all 36 probes pass -- no deferred store survives the walk (and the instrument
+is not vacuous: with `tk_deleg_late_pend` disabled it fires on `tests/surface_globals.tk:193`
+and on the probes at once); `sh scripts/bootstrap.sh --os macos --arch aarch64` ->
+`FIXPOINT OK` (63/63 under `teko1`); `sh scripts/check-docs.sh` green (568 links, 385
+diagnostics -- none added, the ceiling's own row restated -- **123** samples, one added);
+`mc limits . --config mc.macos.toml` verdict identical to the head on both legs (the
+compiler leg `ok`, the `tests/hello.tk` leg `grew` there as here), measured back-to-back from
+the same clean state: that second leg is BYTE IDENTICAL down to its `heap` (estimate 16318
+against 464272 used of a 33554432 ceiling), and the compiler leg gives back what the deleted
+recursion cost (`nodes` used 154307 -> 154284, `ins` 212503 -> 212458, `funcs` 3137,
+`globals` 924, `strings` 2096 and `symbols` 6157 unchanged, used heap 85578928 -> 85637664 of
+a 149684224 reserve). `mc pkg hash .` at this pass's own code commit:
+`8f5a5276b4a1544adf52fc42f9e63c19aa9e0db51ae1b9efd5788421cef8155f`.
+
+**Copilot finding, eighth pass: the store's own `null` check answered `yes` for a plain
+`0`, and the walk's own lookup cost a table scan per NODE it visited.** Two findings,
+measured on `da33ebd4` (the base), on the head of this crumb (`fa596667`) and on this fix,
+mc **0.15.23**, macos/aarch64 -- `Op` is `delegate i64 Op(i64 a)`:
+
+| probe | `da33ebd4` | `fa596667` | now |
+|---|---|---|---|
+| `ops[0] = 0;` on a LOCAL `Op[]`, then `ops[0](1)` | `call to unknown function` | `call to unknown function` | refuses, `teko: Op takes a function, another Op, or null` |
+| `ops[0] = null;` on a LOCAL `Op[]` (unaffected) | refuses, `teko: null needs a slot declared Op?` | the same | the same |
+| `g_ops[0] = 0;` on a GLOBAL `Op[]`, no call | `call to unknown function` | `call to unknown function` | refuses, the delegate's own words |
+| `g_op = addOne; g_op = 0;` on a plain GLOBAL `Op` | `unknown name` | `call to unknown function` | refuses, the delegate's own words |
+
+1. **`nd_kind(v) == N_INT && nd_val(v) == 0` is not `null`.** `tk_deleg_store_late` and
+   `tk_deleg_coerce` (teko_deleg.tk) both asked that predicate for "is this value `null`",
+   and an ordinary `i64` literal `0` answers it exactly as `teko_type.tk`'s own `tk_null` does
+   -- the two differ only in `nd_type`, `TY_I64` against the `TY_UPTR` only `tk_null`
+   carries, which neither check read. `ops[0] = 0;` slipped past `tk_deleg_store_late`'s
+   null branch as if it were `null` (so the store was never deferred to the walk) and then
+   past `tk_deleg_coerce`'s twin in `tk_check_field_store` (`ety` a delegate is never
+   nullable, so a plain scalar there types nothing and the check falls through in silence,
+   `tk_check_field_store`'s own `ei < 0` branch) -- a raw `0` reached codegen where a
+   two-word delegate object belongs, and every probe above died at a MC CORE error with no
+   `teko:` prefix at all (D20), not the silent numeric store the citation named but a
+   diagnostic this project does not own. `tk_is_null_lit` (teko_struct.tk), which checks the
+   `TY_UPTR` type, is what both sites ask now -- the SAME helper `tk_check_field_store`
+   itself already reads for the identical question at every other slot a store passes
+   through, so the fix is a call already in scope, not a new one. `null` is unaffected
+   everywhere it was already accepted (`ops[0] = null` still needs the element declared
+   `Op?`, `Op? h = null;` still passes, both probed).
+2. **`tk_deleg_late_pend`, the check `tk_deleg_walk` runs at EVERY node it visits while a
+   store still waits, scanned the WHOLE table -- up to `TK_MAXDGLATE` (512) entries -- per
+   node, not per store.** This compiler's own source visits on the order of 150K nodes
+   there (`mc limits`' own `nodes` row, below), so the table lookup this crumb's earlier
+   passes added is, worst case, a comparison for every (node, waiting store) pair at once --
+   most of them a store some earlier or later FUNCTION owns and the node being visited can
+   never be. The fix keys each entry by the node id it waits on: `dl_bucket`/`dl_chain`
+   (teko_deleg.tk), a fixed 1024-bucket table chained through the existing 512-row store
+   (`tk_dg_bucket_insert`), turns "does any waiting store name this node" into the one or
+   two comparisons its own chain holds -- node ids are a dense, always-positive sequence
+   (`node_new`, mc's own `ast.mc`), so a plain `n % TK_DGBUCKETS` spreads them evenly
+   whatever the source looks like. `tk_deleg_late_move` (the one caller that re-points an
+   entry at a NEW node id, a global array's own store) inserts into the entry's new bucket
+   rather than unlinking the old one -- the stale slot never matches again, because
+   `dl_node` itself changed, and is left as one harmless dead link rather than taught how to
+   remove itself from a chain shared with live entries; `tk_deleg_late_rest`, the one full
+   sweep of the table (once, at the end of the pass, never per node), is untouched.
+   Measured: `sh scripts/bootstrap.sh` end to end, three back-to-back runs each, `fa596667`
+   (39.446s, 39.519s) against this fix (38.701s) -- inside the run-to-run noise of a build
+   that also links, diffs 215K lines of assembly and runs 63 fixtures, so the wall clock does
+   not prove the complexity claim by itself; `mc limits` does, on the compiler leg (the one
+   the bucket table changes, `tests/hello.tk`'s own leg is a 38-node program the old scan
+   never had to cross): `nodes` 154284 -> 154332 (+48, the bucket table and its one helper),
+   `funcs` 3137 -> 3138 (+1, `tk_dg_bucket_insert`), `globals` 924 -> 926 (+2, `dl_bucket`
+   and `dl_chain`), both legs still `ok` against their own ceiling.
+
+Proof, mc **0.15.23** (`MC_VERSION`), macos/aarch64: the four probes above on the three
+builds, plus the 36 probes of passes 1 to 7 re-run on this build -- every one at the verdict
+its own table (or narrative) records; **63/63** fixtures at their `expect-exit`, with
+`tests/surface_globals.tk` (exit 42) gaining a comment (section 3g) that names the fixed
+predicate and points at the `// no-run` case this refusal cannot be a fixture of
+([diagnostics.md](docs/reference/diagnostics.md)) -- no new code path in the fixture itself,
+because every store it already makes is a real function. The claim this entry made about the
+validator's null ARM is corrected by the ninth pass below: `storeParam` and `h = ops[1]`
+carry a function and a delegate value, never `null`, and nothing executable reaches that arm
+at all. The
+`--dump-ast` of all **63** fixtures: byte-identical to `fa596667` at every one -- neither
+finding moves an accepted program's tree, the first because no fixture ever wrote a literal
+`0` where a delegate is expected, the second because the bucket table answers the exact same
+membership question the linear scan did, only faster. `sh scripts/bootstrap.sh --os macos
+--arch aarch64` -> `FIXPOINT OK` (63/63 under `teko1`); `sh scripts/check-docs.sh` green (569
+links, 385 diagnostics -- one no-run sample added and documented in the same paragraph, 124
+samples); `mc limits --config mc.macos.toml` verdict `ok` on both legs, deltas in finding 2
+above. `mc pkg hash .` at this pass's own code commit:
+`5fa74991ce956317f690c012c26789d1b0fab809cd724956e8aca950ddf83d95`.
+
+**Copilot finding, ninth pass: an entry has ONE chain link, and the move gave it two
+buckets.** `dl_chain` (teko_deleg.tk) is one link per ENTRY, not one per (entry, bucket)
+pair, so an entry belongs to exactly one bucket at a time. `tk_deleg_late_move` -- the one
+caller that re-points a waiting store at a new node id, a global `T[]`'s own store copied
+into its placeholder by `tk_hg_resolve_write` (teko_array.tk) -- called
+`tk_dg_bucket_insert` WITHOUT taking the entry out of the bucket it was already in, and the
+eighth pass above called the leftover slot "a single harmless dead link". It is not one.
+The insert overwrites `dl_chain[i]` with the new bucket's head, so the OLD chain is cut at
+`i`: everything behind `i` there stops being reachable, and when the two buckets coincide
+the entry ends up pointing at itself. Both modes measured on `ba0dc27f` (the head this fix
+sits on), mc **0.15.23**, macos/aarch64, with a build instrumented to print every move, every
+entry `tk_deleg_late_rest` still finds undone, and a 4096-step guard in
+`tk_deleg_late_pend`:
+
+| probe | `ba0dc27f` | with `tk_dg_bucket_remove` |
+|---|---|---|
+| `tests/surface_globals.tk`, the SHIPPED fixture | `PROBE dgrest leftover i=13 node=1908` -- one of its six global stores never judged at the walk | no leftover, no cycle; the six are judged where the scope is live |
+| the same, exit | 42 | 42 |
+| `p9_cycle`, one global `Op[]` store padded with 1002 filler globals so the built store node (2395) and the placeholder it is copied into (1371) differ by exactly `TK_DGBUCKETS` -- bucket 347 for both | spins: killed at **30s** of CPU (`alarm 30`), nothing compiled | 0.06s, exit 42 |
+| the same padded to 1001 (`p9_ctrl`, buckets 346/347) | 0.06s, exit 42 | unchanged |
+
+The first row is the refutation of "harmless": the cut is real, on a file this repository
+already ships. Entry 13 is `g_ops2[0] = new Op((i64 a) => a * 3)`, moved into bucket 884;
+entry 14 (`g_ops2[1] = chooser(1)`, node 2932, the same bucket) was deferred after it and
+then moved out to bucket 893, and that insert overwrote the link entry 14 held to entry 13.
+Bucket 884 then answered "entry 14" alone, the walk never found entry 13 at its own node,
+and `tk_deleg_late_rest` judged it at the END of the pass, with the scope closed -- the
+exact place D51's fourth pass moved this judgement OUT of. The fixture's exit did not move
+because the value that fell through is a lambda, whose verdict is the same in a closed
+scope; the store two rows below it (`g_ops2[2] = shadowed`, a LOCAL shadowing a free
+function) judged there would have wrapped the FUNCTION and answered 110 instead of 11. The
+sweep is a backstop, not a second judgement point, and nothing may be pushed into it by an
+index that lost its own chain.
+
+**The fix is the unlink the insert always needed**: `tk_dg_bucket_remove(i, from)` walks the
+OLD bucket's chain, drops `i` out of it (head or interior, `dl_bucket` or the predecessor's
+own `dl_chain`), and only then does `tk_deleg_late_move` write the new node id and insert.
+Cost is the length of the one chain the entry sits in -- the same order the lookup it
+protects already pays, and paid once per moved store (at most one per global element store)
+rather than per node visited. The alternative the recon weighed, dropping the index and
+keeping a node-sorted vector, buys nothing here: the table is built in defer order, a move
+would have to re-sort it, and the lookup this replaces is already one or two comparisons.
+
+**No new fixture, and the reason is measured**: both modes need two node ids congruent mod
+`TK_DGBUCKETS`, and the ids are absolute counts of every node the compiler's own passes
+have built by then -- `p9_cycle` needs exactly 1002 filler globals on THIS build and a
+different number on the next one. A fixture written on that arithmetic would stop exercising
+anything the first time an unrelated pass adds a node, while claiming it still does. The
+invariant lives in the code instead (`tk_dg_bucket_remove`, and the header above it), and
+`tests/surface_globals.tk` is the program where the first mode was actually caught.
+
+**Two corrections to the eighth pass's own entry**, both Copilot's:
+
+- the module is `teko_type.tk`, not `tk_type.tk` -- the name is written correctly now here
+  and in [diagnostics.md](docs/reference/diagnostics.md).
+- the claim that `storeParam` and `h = ops[1]` exercise the store validator's `null` arm is
+  **false**: both carry a function and a delegate value, never `null`. Measured with a print
+  in `tk_deleg_store_late`'s `tk_is_null_lit` branch over all **63** fixtures -- not one
+  reaches it, and none can. The arm sits behind `dsi = tk_deleg_row(ety)` (teko_heaparr.tk)
+  and the validator's own `si < 0` guard, so only a NON-nullable `Op[]` element ever gets
+  there, and a `null` written into one is refused one line later by `tk_deleg_coerce`
+  (`teko: null needs a slot declared Op?`). The shape where the store is ACCEPTED, an
+  `Op?[]` element, answers `tk_deleg_row` with -1 and never reaches this validator at all
+  (probed: `Op?[] ops = new Op?[1]; ops[0] = null;` compiles and runs, and prints nothing).
+  So the `// no-run` sample in [diagnostics.md](docs/reference/diagnostics.md) is the only
+  cover that arm has, and the only one it can have while `null` in a delegate element is
+  refused.
+
+Proof, mc **0.15.23** (`MC_VERSION`), macos/aarch64: `mc build . --config mc.macos.toml`
+clean; **63/63** fixtures at their `expect-exit`; `--dump-ast` of all **63** byte-identical
+to `ba0dc27f` (the fix changes which pass reaches a waiting store, never the tree any
+accepted program ends with); the probe corpora of passes 1 to 7 re-run whole -- **70** files
+from those passes' own worktrees, plus the eighth pass's four and this pass's two, **76** in
+all, each compiled and run on `ba0dc27f` and on this fix: every verdict identical except
+`p9_cycle`, which is the finding (no binary at all against exit 42). `sh
+scripts/bootstrap.sh --os macos --arch aarch64` -> `FIXPOINT OK` (63/63 under `teko1`,
+44.3s); `sh scripts/check-docs.sh` green (569 links, 385 diagnostics, 124 samples); `mc
+limits --config mc.macos.toml` verdict `ok` on both legs -- compiler leg `nodes` 154332 ->
+154421 (+89, `tk_dg_bucket_remove` and its header), `funcs` 3138 -> 3139 (+1), `globals` 926
+unchanged, floor leg (`tests/hello.tk`) `passes` 15/30, `syntax` 15, `alias` 18, `types` 11,
+`intrin` 8/16, heap 1114992, and the `tests/surface_datetime.tk` leg `syntax` 16, `alias`
+21, `types` 14, heap 3875392 (against a 33554432-byte reservation).
+
+**Copilot finding, tenth pass: one name, two oracles -- the check read the block and the
+rewrite read the signature.** `tk_ref_pass` (teko_ref.tk) does two things to a `ref x` at a
+call: it CHECKS the pointee against the parameter it is handed to (`tk_ref_arg_pointee`,
+which D51's verifier finding moved onto the lexical scope this walk keeps) and, when `x` is
+itself a `ref`/`out` PARAMETER of the function being walked, it REWRITES `&x` into `x` --
+the repass, because the parameter's value already IS the caller's slot address. The rewrite
+asked `tk_ref_param_named`, a scan of the signature's parameter list with no position in it
+at all, so a local shadowing the parameter was invisible to it:
+
+```teko
+void bumpf(ref f64 v) { v = v + 1.0; }
+i64 f(ref i64 x) {
+    if (x > 0) {
+        f64 x = 2.0;
+        bumpf(ref x);        // checked as `ref f64` -- and rewritten as the OUTER `ref i64`
+    }
+}
+```
+
+The check accepts it, correctly: `x` there is the block's own `f64`. The rewrite then hands
+`bumpf` the address the CALLER passed in, so `v = v + 1.0` writes a float over the caller's
+`i64` variable and the local stays at 2.0 -- silent memory corruption from a program with no
+error in it. Measured on `5b14e695`, mc **0.15.23**, macos/aarch64:
+
+| probe | `5b14e695` | with this fix |
+|---|---|---|
+| `p10_shadow`: the shape above, caller's `i64 a = 7` read back after the call | exit **20** -- `a` holds 3.0's bit pattern, and the local was never bumped | exit 0 -- local 3.0, `a` still 7 |
+| `p10_shadow_closed`: the same, then `bumpi(ref x)`, `x = x + 10` and `x != 18` AFTER the block | exit 20 (same corruption) | exit 0 -- the repass, the write and the read through the parameter all stand |
+| `tests/surface_globals.tk` with section 6b added | exit **131** (`refshadow` returns 1: the local was not bumped) | exit 42 |
+
+**The fix is the binding, asked once.** `tk_ref_fn` already opens the oracle's scope with
+the parameters and keeps it block by block; `tk_ref_nparams` records the mark right after
+`tk_ty_scope_params`, and `tk_ref_param_named` now answers the parameter only while
+`tk_ty_scope_index(name)` -- the innermost entry binding that name, a new two-line accessor
+beside `tk_ty_scope_find`, which is rewritten to call it -- is still below that mark. Above
+it a local declared inside the body owns the name, and the name is not a repass: the `&x`
+the parser built stands, which is exactly the local's address. The same guard covers the
+other two rewrites this walk makes on a bare name (`x = e` into `stW(x, e)`, and a read into
+`ldW(x)`), which had the identical blindness and no reported case only because a shadow of
+a `ref` parameter is rare. One question, one answer, the same one the check reads.
+
+**Copilot finding, tenth pass (suppressed): the store validator returned every `null`
+unjudged, and the check that used to catch it is skipped for a waiting store.**
+`tk_deleg_coerce` (teko_deleg.tk) accepted `null` unconditionally, and a ternary is coerced
+branch by branch, so `ops[0] = flag ? null : null` on an `Op[]` came back untouched, the
+lowering saw two arms of the same `uptr` type, and the element held a null -- `teko: call
+through a null delegate`, exit 70, at the first call through it. Q1a's rule (`null` lands
+only in a slot declared `T?`) reached an element store through `tk_check_field_store`
+(teko_struct.tk), and the seventh pass stopped running that check over a value the store
+site cannot type: a waiting store is `tk_deleg_late_do`'s alone, and that one calls this
+validator and nothing else. Instrumented builds of `5b14e695`, mc **0.15.23**:
+
+| store | trace | verdict |
+|---|---|---|
+| `ops[0] = flag == 1 ? null : null` | `PROBE store late=1` / `PROBE late_do i=0` / `PROBE coerce ternary` / `PROBE coerce null accepted` x2 -- no `PROBE field_store ran` | compiles, **exit 70** |
+| `ops[0] = null` (no ternary) | `PROBE store late=0` / `PROBE coerce null accepted` / `PROBE field_store ran` | refused, `teko: null needs a slot declared Op?` |
+
+The second row is also a correction to the ninth pass's own entry above, which said a
+`null` written into a non-nullable element "is refused one line later by `tk_deleg_coerce`":
+it is not, and never was -- the refusal came from `tk_check_field_store` beside it, which is
+precisely why the shape that skips that check had none.
+
+**The fix is Q1a's rule, asked by the validator itself**, in the same words the other two
+sites give it (`teko: null needs a slot declared Op?`): `si` is a DELEGATE row and a `T?` is
+a row of its own (`TK_KNULL`, which `tk_deleg_row` answers -1 for), so every `null` that
+reaches this validator is one written into a slot not declared to hold it. A compiler-written
+null (`tk_nl_own_null_is`, teko_null.tk) keeps the standing D41 gives it. Verdicts, same
+build pair:
+
+| probe | `5b14e695` | with this fix |
+|---|---|---|
+| `p10_tern_null`: `ops[0] = flag == 1 ? null : null` on an `Op[]` | compiles, **exit 70** | refuses, `teko: null needs a slot declared Op?` |
+| `p10_tern_mixed`: `ops[0] = flag == 1 ? addOne : null` | refuses one pass later, `teko: the two arms of ?: have different types` | refuses at the branch, `teko: null needs a slot declared Op?` |
+| `p10_bare_null`: `ops[0] = null` | refuses, `teko: null needs a slot declared Op?` | unchanged (the validator answers first now, in the same words) |
+| `p10_null_sites`: `Op h = null;`, `takeOp(null)`, `return null;` from an `Op` | refuses, `teko: null needs a slot declared Op?` | unchanged |
+| `p10_nl_array`: `Op?[] ops = new Op?[1]; ops[0] = null; ops[0] = c ? null : null;` | runs, 42 | runs, 42 -- the element type answers `tk_deleg_row` with -1 and never reaches the validator |
+
+The last row is the accepted side of the rule, and the array [arrays.md](docs/reference/arrays.md)
+now names: an `Op[]` element is declared `Op`, an `Op?[]` element is the slot a `null`
+belongs in. The refused shapes cannot be a fixture (a refusal has no exit code), so they are
+`// no-run` samples in [diagnostics.md](docs/reference/diagnostics.md), checked by
+`scripts/check-docs.sh` like every other one.
+
+Proof, mc **0.15.23** (`MC_VERSION`), macos/aarch64: `mc build . --config mc.macos.toml`
+clean; **63/63** fixtures at their `expect-exit`, `tests/surface_globals.tk` (exit 42)
+gaining section 6b, `refshadowcheck` -- the first executable cover for a local shadowing a
+`ref` parameter, and 131 on `5b14e695`; the seven probes above, each run on both builds;
+the **76** probes of passes 1 to 9 re-run whole on both builds -- every verdict identical,
+line for line. `--dump-ast` of **62** of the 63 fixtures byte-identical to `5b14e695`, the
+63rd being `surface_globals.tk`, whose dump grows by exactly the 70 lines of the two new
+functions and loses none: inside the block `bumpf(ADDR name=x)` (the local's own address),
+after it `bumpi(IDENT name=x)`, `st64(x, ld64(x) + 10)` and `ld64(x)` -- the repass, the
+write and the read through the parameter, unmoved. `sh scripts/bootstrap.sh --os macos
+--arch aarch64` -> `FIXPOINT OK` (63/63 under `teko1`, 41.2s); `sh scripts/check-docs.sh`
+green (573 links, 385 diagnostics, 125 samples -- one no-run sample added); `mc limits
+--config mc.macos.toml` verdict `ok` on both legs -- compiler leg `nodes` 154421 -> 154484
+(+63, `tk_ty_scope_index`, the guard and their headers), `funcs` 3139 -> 3140 (+1,
+`tk_ty_scope_index`), `globals` 926 -> 927 (+1, `tk_ref_nparams`), floor leg
+(`tests/hello.tk`) unchanged at `nodes` 38, `funcs` 2, heap 1114992.
+`mc pkg hash .` at this pass's own code commit:
+`184b554c9ca066b0bf0d3997626e08387f10d40daeb5943a400341acd88b51a2`.
+
+**Copilot finding, eleventh pass: one store took two rows, one name had two
+ceilings, and one nested call had no oracle at all.** Three defects, each
+measured on `dd489bbe` (the head this fix sits on) and on this fix, mc
+**0.15.23**, macos/aarch64. The fourth reported finding is not this crumb's and
+is answered below.
+
+1. **A GLOBAL element store spent TWO rows of `TK_MAXOS`** (128,
+   teko_struct.tk). `tk_ha_store` (teko_heaparr.tk) marks the store it builds
+   (`tk_os_mark`), and `tk_hg_resolve_write` (teko_array.tk) copies that store
+   into the placeholder node the tree already holds (`node_assign`) and then
+   marked the placeholder as well -- so the first row stayed on the node it had
+   just dropped, an orphan the reclaim pass can never reach, and every counted
+   store into a global array cost two rows instead of one. The ceiling for a
+   global array was therefore 64, not 128: the 65th store was refused
+   `teko: too many stores into a slot of class type` on a program with no error
+   in it. The fix is the re-point the site already makes for the OTHER table it
+   feeds: `tk_os_move(from, to)` (teko_struct.tk), beside `tk_os_mark`, exactly
+   as `tk_deleg_late_move` sits beside `tk_deleg_store_defer` -- one line below
+   it, on the same two node ids.
+2. **`tk_ty_scope_add` (teko_typeof.tk) stopped writing in silence.** Its table
+   held 256 names of one function while the parser accepts `TK_MAXSLV` (8192,
+   teko_struct.tk) locals, and past that mark it simply returned -- so the
+   declaration the source wrote last was missing from the one oracle this crumb
+   has spent ten passes making single. Every reader then answered about the
+   WRONG declaration: with 255 locals ahead of it, an `f64 x` shadowing a
+   `ref i64 x` parameter was invisible, `bumpf(ref x)` inside its block was
+   refused `teko: a value of type i64 does not convert to f64` on a legal
+   program, and `tk_ref_param_named` (teko_ref.tk, the tenth pass's own
+   binding) read the parameter for the same name -- one step from the repass
+   that hands the callee the caller's `i64` slot to write a float through.
+   Two things fix it, and both are the same rule: the ceiling is the PARSER's
+   own (`#define TK_MAXSCOPE TK_MAXSLV`), so a body the parser accepted always
+   fits, and the overflow is a REFUSAL (`teko: too many locals in one
+   function`), because a table that cannot record a name may say so and may
+   not answer -1 about a declaration that is right there. With one ceiling the
+   refusal is reachable only through the temporaries the compiler declares
+   itself (teko_null.tk, teko_ternary.tk): a body with 8191 locals is refused
+   by the parser first, `teko: too many locals in one unit` (measured).
+3. **`tk_ov_arg_ty` (teko_over.tk) had no answer for a call through a delegate
+   slot.** Which overload a call picks depends on typing its arguments, and
+   this pick is asked DURING `tk_deleg_walk` -- `tk_deleg_coerce` ->
+   `tk_deleg_expr_ty` -> `tk_ty_of` -> the matcher -- which stands on the store
+   BEFORE it descends into the value, so a nested `chooser(1)` has not been
+   rewritten yet. The matcher asked `tk_ty_of`, which asks `decl_find` about a
+   name no declaration owns: -1, no row matched, and the value came back
+   untyped. `ops[0] = make(chooser(1))` (`make` overloaded, `chooser` a local
+   delegate) was refused `teko: Op takes a function, another Op, or null` on a
+   legal program, in EITHER order of the two rows -- and so was
+   `Op h = make(chooser(1))`, a plain local initializer, which is why the fix
+   is not in `tk_deleg_late_do`: recursing into the arguments of a waiting
+   store would have left every other caller of the validator exactly as
+   broken. The matcher asks `tk_deleg_expr_ty` for a call no overload table
+   names, which is the same peek the validator one frame up already takes; once
+   the walk HAS rewritten the call, its name is the built one, no slot answers
+   for it, and the answer is the `tk_ty_of` it always was.
+
+| probe | `dd489bbe` | with this fix |
+|---|---|---|
+| `p11_os_g64`: 64 stores into a global `Op[]` | 42 | 42 |
+| `p11_os_g65`: 65 of them | refused, `teko: too many stores into a slot of class type` | 42 |
+| `p11_os_g128`: 128 of them | refused, same words | 42 |
+| `p11_os_g129`: 129 of them | refused | refused -- the ceiling, where the table says it is |
+| `p11_os_l128` / `p11_os_l129`: the same into a LOCAL `Op[]` | 42 / refused | unchanged |
+| `p11_scope254`: 254 locals, then `bumpf(ref x)` under an `f64 x` shadowing a `ref i64 x` | 42 | 42 |
+| `p11_scope255` / `p11_scope300`: 255 and 300 locals | refused, `teko: a value of type i64 does not convert to f64` | 42 |
+| `p11_scope8191` / `p11_scope8300` | refused, `teko: too many locals in one unit` | unchanged -- the parser's own ceiling answers first |
+| `p11_ovcall_a` / `p11_ovcall_b`: `ops[0] = make(chooser(1))`, the two rows in either order | refused, `teko: Op takes a function, another Op, or null` | 42 |
+| `p11_ovcall_c3`: `Op h = make(chooser(1))`, a local initializer | refused, same words | 42 |
+| `p11_ovcall_c1` (`make` declared once), `c2` (a literal argument), `c4` (the pick at the overload pass, after the walk) | 42 | 42 |
+
+**The fourth finding is #698's, and the merge order is the answer.**
+`i64?[] xs; i64 g = 5; xs[0] = g;` wrote the global's raw 5 into a slot that
+holds a box, because `tk_ha_store` asked `tk_pty_of` (teko_struct.tk, a
+parse-time table of declarations) for the value's type and got -1, so
+`tk_nl_wrap` handed the value back unwrapped. Measured on three builds: it
+segfaults (exit **139**) on `dd489bbe`, on a GLOBAL `i64?[]` and on a LOCAL one
+alike -- so the report's "global" is not the boundary, the oracle is -- and it
+runs, 42, on the head of **#698** (`a0b9388c`), whose `tk_ha_store` is one call
+to `tk_field_store_val` (teko_typeof.tk): the deferral, the row verdict and
+Q1b's box, all through the one door D50 gave every field store. Fixing it here
+would mean writing a second gate into the body #698 deletes. It is left to
+#698, and **#698 merges first**; this crumb touches `tk_hg_resolve_write` and
+`tk_ov_arg_ty`, neither of which #698 edits.
+
+**And what the fifth finding corrected, all of it prose**: the header over
+`tk_deleg_store_late`'s own caller (teko_deleg.tk) still described the sixth
+pass's rule -- "a name a `new Op(...)`/lambda/call already types ... decided
+where they were written" -- where the seventh pass made every CALL wait, a
+`new Op(...)`, a lambda and a ternary among them; `tk_ref_param_named`'s header
+still named "a scope table filled past `TK_MAXSCOPE`" as a way its lookup
+answers -1, which finding 2 above removes; `paniced` -> `panicked` in
+teko_deleg.tk and in [diagnostics.md](docs/reference/diagnostics.md); and
+`tests/surface_globals.tk`'s own section 3f header, where "a pick that does not
+settled the store unchecked" said neither of the two things it meant.
+
+Proof, mc **0.15.23** (`MC_VERSION`), macos/aarch64: `mc build . --config
+mc.macos.toml` clean; **63/63** fixtures at their `expect-exit`,
+`tests/surface_globals.tk` (exit 42) gaining sections 3h (`delegovcallcheck`:
+the overloaded call over a nested delegate call at a local element store, at a
+local initializer and at a global element store) and 3i (`osceilcheck`: 65
+stores into a global `Op[]`, and the sum they call back) -- the head this fix
+sits on refuses BOTH, `teko: too many stores into a slot of class type` at 3i
+and `teko: Op takes a function, another Op, or null` at 3h, measured one
+section at a time; the **83** probes of passes 1 to 10, re-run whole on
+`dd489bbe` and on this fix -- every verdict identical, line for line -- plus
+this pass's own 25; `--dump-ast` of all **63** fixtures byte-identical to
+`dd489bbe` except `surface_globals.tk`, whose own dump grows by its two new
+sections and whose only other movement is the gensym counter renumbering
+($g40 -> ...) that any added code causes, and **61** of the 62 fixtures that
+existed at `da33ebd4` byte-identical to that base, with
+`tests/surface_array_heap.tk` exactly as the sixth pass declared it (the four
+declarations of a wrap, emitted at a different point of the unit, none added
+and none lost). `sh scripts/bootstrap.sh --os macos --arch aarch64` ->
+`FIXPOINT OK` (63/63 under `teko1`, 40.2s); `sh scripts/check-docs.sh` green
+(573 links, **386** diagnostics -- the capacity refusal above is the new one --
+125 samples); `mc limits . --config mc.macos.toml` verdict `ok` on both legs:
+compiler leg `nodes` 154484 -> 154523 (+39), `funcs` 3140 -> 3141 (+1,
+`tk_os_move`), `globals` 927 unchanged, `ins` 212689 -> 212748, used heap
+92492880 -> 93221888 of a 220004352 reserve; the `tests/hello.tk` leg's
+structural counts byte-identical (`nodes` 38, `funcs` 2, `ins` 35, `passes`
+15/30, `syntax` 15, `alias` 18, `types` 11, `intrin` 8/16) with its own heap
+467824 -> 1114992 of a 33554432 ceiling (3.3%) -- a STEP in mc's own estimator
+and not the table's size: `TK_MAXSCOPE` at 1024 and at 8192 both measure
+1114992, which is D35's own precedent read back. `mc pkg hash .` at this pass's
+own code commit:
+`71ec8182830b155bb163a17ff0c52631011f15f168c776e22622d5a06e219602`.
+
+**D50 ∧ D51, rebased onto `13b3c38a`.** This entry was written against
+`da33ebd4`; D50 ([#698](https://github.com/teko-org/teko-lang/pull/698)) landed
+first, as the fourth finding above said it would, and the two meet at exactly
+one body, `tk_ha_store` (teko_heaparr.tk). D50 made every element store ONE
+call to the door `tk_field_store_val` (teko_typeof.tk) -- the deferral, the two
+scalar verdicts, the row one and Q1b's box; the seventh pass of this entry made
+a store the site cannot settle the DELEGATE validator's alone, because the
+generic row check types a name and a call from the same parse-time tables the
+`late` guard just refused to trust. Both rules stand, in this order: the
+coercion runs first for a value the site CAN name, and the door is asked only
+when the store does not wait --
+`if (dsi >= 0 && !late) v = tk_deleg_coerce(...); if (!late) v =
+tk_field_store_val(...);`. A waiting store keeps its single judgement at
+`tk_deleg_late_do` (`tk_deleg_pass`, 7), which runs BEFORE the door's own judge
+(`tk_field_store_judge`, at the end of `tk_over_pass`, 14), so the wrap the
+walk splices in is what the tree holds either way and no deferred row is left
+pointing at a node a later pass replaced. `tk_hg_resolve_write` (teko_array.tk)
+keeps this entry's `tk_os_move`/`tk_deleg_late_move` over D50's `tk_os_add`
+re-mark -- the rows the built store owns are MOVED onto the node the tree
+keeps, one rule for both tables -- and a global element store of any type that
+is NOT a delegate still goes through D50's door whole, since
+`tk_deleg_store_late` answers 0 for `si < 0`. That is what makes the fourth
+finding run: `i64?[] xs; xs[0] = g;` with `g` a global reads **42** on the
+rebased head, on a GLOBAL `i64?[]` and on a LOCAL one alike (it segfaults, 139,
+on `dd489bbe`) -- #698's door and this entry's write, cooperating.
+
+Proof on the new base, mc **0.15.23** (`MC_VERSION`), macos/aarch64. The
+eleven key probes of the two families, each at its verdict: (D51) the global
+`i64?[]`/local `i64?[]` store above, an `f64 x` shadowing a `ref i64 x`
+parameter, a global `Op` into a global `Op[]`, `ops[0] = chooser(1)` through a
+local delegate, `ops[0] = make(chooser(1))` and `Op h = make(chooser(1))` over
+two overloads -- 42 each -- and a by-reference lambda into a global `Op[]`
+refused `teko: a lambda that captures by reference cannot leave its scope`;
+(D50) `this.rate = k` on a widened `f64` field, `h.count = k` into an `i64?`
+field through a receiver the parser cannot type, `xs[0] = rick(1, 2)` picking
+the second declaration of an overloaded name into a `Cell[]`,
+`h.items[gl[0]] = 9` reading a global element inside a store, and
+`dst[0] = src[0]` under a local shadowing a global `T[]` -- 42 each. **64/64**
+fixtures at their `expect-exit` (the 63 of `13b3c38a` plus
+`tests/surface_globals.tk`); `--dump-ast` of those 63 against `13b3c38a`: **62
+byte-identical**, and `tests/surface_array_heap.tk` exactly as the sixth pass
+declared it -- 2439 lines on both builds, the same multiset line for line, the
+four declarations of a wrap emitted at a different point of the unit.
+`sh scripts/bootstrap.sh --os macos --arch aarch64` -> `FIXPOINT OK` (64/64
+under `teko1`, 39.5s); `sh scripts/check-docs.sh` green (572 links, 388
+diagnostics, 130 samples); `mc limits . --config mc.macos.toml` verdict `ok` on
+both legs, the `tests/hello.tk` leg's structural counts unmoved from D50's own
+measurement (`passes` 15/30, `syntax` 15, `alias` 18, `types` 11, `intrin`
+8/16, heap 1114992 of 33554432) and the `tests/surface_datetime.tk` leg at
+`syntax` 16, `alias` 22, `types` 15, heap 3998976 -- two rows this entry's own
+code does NOT move. The sentence here used to attribute the `+1` on `alias`
+and the `+1` on `types` to "this entry", against "D50's 21 and 14"; both halves
+were wrong, and three builds say so (the twelfth pass below re-measured them
+back to back, mc 0.15.23, macos/aarch64): `da33ebd4`, the base BEFORE D50,
+reads **21**/**14**; `13b3c38a`, D50 alone, already reads **22**/**15**; this
+crumb's head reads 22/15 too. **D50 is the single cause of both rows**, and the
+21/14 the ninth pass recorded is the figure of a head that predates it.
+`mc pkg hash .` over the rebased tree:
+`433973c4026dd0f10a917dff5e8d53e24624ac09ddd545c3fa80ac7037870ba1`.
+
+**Copilot finding, twelfth pass: a delegate call read the TAG of a `ref`
+argument and never the type behind it, a `?` on a slot hid the escape rule
+from two sites, and the pass-time scope was one table short of the signature
+it holds.** Four findings, each measured on `cdcd8a6d` (the head this fix sits
+on) and on this fix, mc **0.15.23**, macos/aarch64 -- `Mut` is
+`delegate void Mut(ref f64 x)`, `Op` is `delegate i64 Op(i64 a)`, `g` an `i64`
+and `acc` a local a lambda captures by reference:
+
+| probe | `cdcd8a6d` | now |
+|---|---|---|
+| `Mut m = bumpf; i64 g; m(ref g);` on a LOCAL slot | compiles, the `i64` comes back holding a double, **exit 9** | refuses, `teko: a value of type i64 does not convert to f64` |
+| the same through a GLOBAL `Mut` over a global `i64` | compiles, **exit 9** | refuses, the same words |
+| `bumpf(ref g)` written DIRECTLY (the wording it is measured against) | refuses, the same words | unchanged |
+| `m(ref v)` / `mi(ref n)` with the pointee the signature declares | runs | runs |
+| `Op? g; g = new Op((i64 x) use (&acc) => acc + x);` | compiles, the capture outlives `acc` | refuses, `teko: a lambda that captures by reference cannot leave its scope` |
+| the same into a plain `Op` global | refuses, the same words | unchanged |
+| `Op? h;` LOCAL taking that lambda | runs | runs |
+| `xs[0] = new Op(... use (&acc) ...)` on a LOCAL `Op?[]` | compiles | refuses, the same words |
+| the same on a GLOBAL `Op?[]` | compiles | refuses, the same words |
+| the same pair on an `Op[]`/global `Op[]` | refuses | unchanged |
+| `Op?[]` taking `new Op((i64 x) => x + 1)` and `null`, local and global | runs | runs |
+| `Op[] xs; xs[0] = null;` | refuses, `teko: null needs a slot declared Op?` | unchanged |
+| `TK_MAXSLV` locals + 1 parameter in one function | refuses, `teko: too many locals in one function` | the pass is silent; mc's own `frame too large` answers |
+
+1. **A call through a DELEGATE compared the argument's `ref`/`out` TAG and
+   nothing else.** `tk_deleg_check_arg_kinds` (teko_deleg.tk) read `dg_pk_at`
+   -- is this argument tagged the way the signature says? -- and never
+   `dg_pty_at`, the type the callee writes THROUGH that address. Nothing else
+   was going to: the `callp` a delegate call lowers to is built in
+   `tk_deleg_pass` (7), AFTER `tk_ref_pass` (6) whose own call check would
+   have asked, and it names no callee, so `tk_rc_call_args` (teko_rc.tk) has
+   no declaration to read either. That check is the only door the argument
+   passes, and it was open: `Mut m = bumpf; i64 g = 7; m(ref g);` ran
+   `v = v + 1.0` through an integer's address and the integer came back
+   holding 8.0's bit pattern -- a local slot and a global one alike, and the
+   same program written as the DIRECT `bumpf(ref g)` is refused. The rule is
+   the one that already owns pointees, IDENTITY
+   (`tk_ref_check_pointee`, teko_ref.tk, D51's verifier finding): it is split
+   over the pointee TYPE rather than the parameter NODE
+   (`tk_ref_check_pointee_ty`, two lines and one caller rewritten), because a
+   delegate signature keeps its pointees in a flat column and has no N_PARAM
+   to hand over. The oracle underneath is unchanged and shared
+   (`tk_ref_arg_pointee`: the lexical scope live at the site, then the
+   globals), so a delegate LOCAL, PARAMETER or GLOBAL called by name is judged
+   whole -- `tk_deleg_pass` opens that scope with the signature and keeps it
+   live, exactly as `tk_ref_pass` does. **What is NOT closed, measured and
+   stated rather than patched:** the two roads whose `callp` is built at PARSE
+   time, a delegate FIELD (`tk_field_use`, teko_expr.tk) and an `Op[]` ELEMENT
+   (`tk_ha_deleg_call`, teko_heaparr.tk), stand where the pass-time scope is
+   empty and `tk_ty_global` is not filled yet (`tk_hg_collect` runs in
+   `tk_array_pass`, 5), so the pointee answers -1 there and is skipped in
+   silence -- the same answer `tk_ref_check_pointee` gives any pointee no
+   oracle names, and the one sentence its header has carried since the
+   verifier finding. Reaching them needs the store's own device, a row that
+   waits for a walk, and that is a crumb, not a line.
+2. **`tk_deleg_row` answers -1 for `Op?`, and two sites read that -1 as "this
+   slot holds no delegate".** `Op?` is a `TK_KNULL` row of its own
+   (teko_struct.tk), and the guard the escape rule sits behind asked exactly
+   that question: `tk_deleg_assign` (teko_deleg.tk) returned before reaching
+   D221 decision 21's first escape, so `Op? g; g = new Op((i64 x) use (&acc)
+   => acc + x);` and `g = local` parked the ADDRESS of a dead local in a
+   global -- the very write the `Op` beside it is refused for since the fifth
+   pass. `tk_deleg_row_under` peels the `?` and is read at the escape question
+   and nowhere else: a `?` says the slot may hold NOTHING, never that it lives
+   LESS LONG, which is the only thing that rule asks. The coercion keeps
+   reading `tk_deleg_row`, which is what leaves `Op? g = null;` the nullable
+   row's own business and `Op[] xs; xs[0] = null;` refused.
+3. **The element store had the same -1, and its global road had nowhere to ask
+   the question at all.** `tk_ha_index` (teko_heaparr.tk) guards the parse-site
+   escape with the same call, so an `Op?[]` element took the capture too; and a
+   GLOBAL array's store is assembled inside `tk_array_pass`
+   (`tk_hg_resolve_write`, teko_array.tk), where the rule cannot run -- the
+   fourth pass's own finding, whose deferral is reached only when
+   `tk_deleg_store_late` answers 1, which it cannot for a row it reads as -1.
+   The parse site reads `tk_deleg_row_under`, and the global store defers the
+   ESCAPE ALONE, with `dl_si` = -1: `tk_deleg_late_do` takes the escape from
+   the one walk that knows which function owns the store and then returns,
+   because the `null` and the type of that element were already judged by
+   D50's own door where the store was built (`tk_field_store_val`) and
+   `tk_deleg_coerce` would refuse the very `null` an `Op?[]` element is
+   declared to hold. One rule per question, at the site that can answer it.
+4. **`TK_MAXSCOPE` was `TK_MAXSLV`, and the scope holds the PARAMETERS too.**
+   The eleventh pass tied the pass-time scope's ceiling to the parser's own so
+   that "a body the parser accepted always fits"; `tk_ty_scope_params`
+   (teko_typeof.tk) pushes the whole signature into that same table before the
+   body is walked, and no parse-time table counts a parameter (`tk_slv_add`'s
+   own rule, D33). At `TK_MAXSLV` locals exactly the invariant broke: 8192
+   locals is accepted by the parser -- 8193 is its own
+   `teko: too many locals in one unit` -- and one parameter beside them made
+   the pass refuse with a ceiling of its own,
+   `teko: too many locals in one function`. It is `TK_MAXSLV + MAXPARAMS`
+   now, mc's own ABI ceiling on a signature added to the parser's own on
+   locals, 192 bytes of globals for the two columns. **What this does not
+   buy, measured:** mc refuses a function with **510** locals outright,
+   `frame too large` (509 + 1 parameter is the last that compiles), so no
+   program that BUILDS can reach either ceiling -- what the fix removes is a
+   refusal in teko's own voice for a body teko's own parser accepted, and the
+   boundary probe now reaches a high-water of **8193** scope entries with the
+   pass silent. The refusal stays reachable, and only for what it was written
+   for: the temporaries the compiler declares itself (teko_null.tk,
+   teko_ternary.tk), which no source count bounds. A throwaway counter on
+   `tk_ty_scope_add`, printed at the last pass over all 64 fixtures, says the
+   busiest body spends **72** of the 8204 rows (`surface_nullable_ops`).
+
+Proof, mc **0.15.23** (`MC_VERSION`), macos/aarch64: `mc build . --config
+mc.macos.toml` clean; **64/64** fixtures at their `expect-exit`, with
+`tests/surface_globals.tk` (exit 42) gaining section 8, `delegrefcheck` -- the
+pointee the signature declares, `ref f64` and `ref i64`, through a delegate
+LOCAL and a delegate GLOBAL -- and section 9, `nulldelegcheck` -- an `Op?`
+global and an `Op?[]` element, global and local, taking a lambda with NO
+capture and the `null` a `?` is declared for, read back through
+`== null`/`!= null`. Both sections are the ACCEPTED side on purpose: every
+refusal of this pass is a refusal, which has no exit code, and the four of
+them are `// no-run` samples in
+[diagnostics.md](docs/reference/diagnostics.md) instead. **No new `teko:`
+string**: the pointee mismatch is the wording a direct call already gives and
+the escape is the sentence five slots already carry. The **141** probes of
+this crumb -- the **83** of passes 1 to 10, the **25** of the eleventh, the
+**11** of the two families D50 ∧ D51 measures and this pass's own **22** --
+run whole on `cdcd8a6d` and on this fix: **135** verdicts identical line for
+line and **6** that move, which are the four findings above and nothing else.
+`--dump-ast` of all **64** fixtures under the compiler of `cdcd8a6d` and under
+this one, over the SAME sources -- **64 byte-identical**, the whole code change
+being refusals and one capacity; against `13b3c38a`, **62** of the 63 fixtures
+that exist on both are byte-identical and `tests/surface_array_heap.tk` is
+exactly as the sixth pass declared it (2439 lines on both, the same multiset
+line for line, one contiguous 88-line block of wrap declarations emitted at a
+different point of the unit), `tests/surface_globals.tk` being this crumb's
+own. Instrumented, `tk_deleg_late_rest` refusing any store that reaches it
+unjudged: the 64 fixtures and all 141 probes pass with **0** survivors, and the
+instrument is not vacuous -- with `tk_deleg_late_pend` disabled it fires on
+`tests/surface_globals.tk:228` at once. `sh scripts/bootstrap.sh --os macos
+--arch aarch64` -> `FIXPOINT OK` (64/64 under the self-hosted `teko1`, 58.5s);
+`sh scripts/check-docs.sh` green (**573** links, **388** diagnostics -- none
+added -- **132** samples, the two `// no-run` blocks this pass writes: the
+delegate `ref` mismatch beside the direct call's own, and the `T?` slot's
+escape beside the plain global's). Two rows join
+[not-yet.md](docs/reference/not-yet.md), both measured here: `??` over a `T?`
+of delegate type is refused `teko: Op takes a function, another Op, or null`,
+and a bare FUNCTION name stored into a `T?` delegate slot is `unknown name`
+from the core at an initializer and `teko: the type of this value is not known
+here` at an element store -- the wrap reads the delegate row, which a `T?`
+answers -1 for, and `new Op(addOne)` is the form that works today.
+`mc limits . --config mc.macos.toml` verdict `ok` on both legs, measured back
+to back against `cdcd8a6d` from the same clean `build/`: the `tests/hello.tk`
+leg is BYTE IDENTICAL down to its `heap` (467824 of a 33554432 ceiling;
+`passes` 15/30, `syntax` 15, `alias` 18, `types` 11, `intrin` 8/16) and the
+compiler leg moves by this pass's own source growth (`nodes` used 155312 ->
+155398, `funcs` 3157 -> 3159 -- `tk_ref_check_pointee_ty` and
+`tk_deleg_row_under` -- `globals` 933 unchanged, `ins` 213918 -> 214057,
+`symbols` 6189 -> 6191, used heap 93817520 -> 93957712). The
+`tests/surface_datetime.tk` leg is identical on both heads as well (`syntax`
+16, `alias` 22, `types` 15, heap 3026144), which is the measurement the
+correction to the D50 ∧ D51 paragraph above rests on: `da33ebd4` reads 21/14,
+`13b3c38a` reads 22/15, and this crumb changes neither. `mc pkg hash .` at
+this pass's own code commit:
+`93fab590c5fd29dc2ceaabab56ba296e39d41044b3b6e38bd6ee36861d45ed6e`.
 ### D52 · A refusal has a harness (2026-09-14)
 D33 closed the integer-to-float narrowing refusal and, in the same entry, named the gap:
 `tests/` held only programs that compile and run, judged by `// expect-exit`, and a

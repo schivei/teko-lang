@@ -232,12 +232,52 @@ i64 tk_ha_load(i64 base, i64 ety, i64 idx) {
 // `i64[] a; a[0] = 1.5;` compiled and wrote the double's raw bits, and
 // `f64[] f; f[0] = 1;` wrote the integer's (Copilot on #698, pass 4).
 i64 tk_ha_store(i64 base, i64 ety, i64 idx, i64 v) {
+    // `ops[i] = e` on an `Op[]`: the one validator every slot of delegate type
+    // shares (`tk_deleg_coerce`, teko_deleg.tk), asked HERE rather than in
+    // `tk_ha_index` below, because this is the point BOTH element stores pass
+    // through -- a local array's, built by the parser, and a global array's,
+    // built by `tk_array_resolve_write` (teko_array.tk), which coerced nothing
+    // at all. A value nothing in reach of the store can name waits for
+    // `tk_deleg_pass` instead of being guessed to be a function (D51, third
+    // pass) -- and a store the GLOBAL write builds waits whole, because that
+    // one is assembled inside a pass where no scope answers for any name at
+    // all, not even to be asked (D51, fourth pass).
+    // ...and a store that waits is judged by that validator ALONE (D51,
+    // seventh pass). The door below (`tk_field_store_val`, teko_typeof.tk)
+    // would judge the waiting value all the same, and its row check types a
+    // name and a call from the same parse-time tables the guard above just
+    // refused to trust: `Op[]` taking a `new Other()` or an `Other` local
+    // died `teko: a value of type Other does not convert to Op` -- the
+    // generic conversion words, ahead of the delegate's own
+    // `teko: Op takes a function, another Op, or null` -- and a call through
+    // a LOCAL delegate shadowing a function was refused over the FUNCTION's
+    // return type, a legal program. One judgement per store: `null` and the
+    // shapes the door types keep the door (the null rule for an element is
+    // its road to Q1a), and what waits is `tk_deleg_late_do`'s, whole.
+    //
+    // An `Op?[]` element is a `TK_KNULL` row of its own, so `tk_deleg_row`
+    // answers -1 for it and the whole delegate half above is skipped: the
+    // COERCION rightly (a `null` belongs in that element, and the door below
+    // is what judges it), the ESCAPE wrongly -- and a GLOBAL array's store is
+    // built inside `tk_array_pass`, where the rule cannot run at all, so a
+    // by-reference capture reached both kinds of nullable element unrefused
+    // (D51, twelfth pass). The row UNDER the `?` is what the escape reads
+    // (`tk_deleg_row_under`), here and at the parse site below, and the
+    // global's own store waits for the walk with `dl_si` = -1: the escape
+    // alone, no coercion, the door having already judged `null` and the type.
+    i64 dsi = tk_deleg_row(ety);
+    i64 late = tk_deleg_store_late(dsi, v);
+    i64 lateesc = tk_deleg_defer_all && !late && tk_deleg_row_under(ety) >= 0;
+    if (dsi >= 0 && !late) v = tk_deleg_coerce(dsi, v, tk_line, tk_file);
     i64 line = tk_line;
     uptr fl = tk_file;
-    v = tk_field_store_val(ety, v, line, fl);
+    if (!late) v = tk_field_store_val(ety, v, line, fl);
     tk_line = line;                               // the gate builds nodes of its own
     tk_file = fl;
-    return tk_os_mark(tk_call2(tk_stn(ety), tk_ha_addr(base, idx, ety), v), ety);
+    i64 st = tk_os_mark(tk_call2(tk_stn(ety), tk_ha_addr(base, idx, ety), v), ety);
+    if (late) tk_deleg_store_defer(st, dsi, line, fl);
+    if (lateesc) tk_deleg_store_defer(st, 0 - 1, line, fl);
+    return st;
 }
 
 // `xs[i] OP= e` / `xs[i]++` / `xs[i]--`: the address is built twice (once to
@@ -283,12 +323,18 @@ i64 tk_ha_index(i64 left, i64 si) {
         i64 v = parse_expr(0);
         tk_line = line;
         tk_file = fl;
-        i64 dsi = tk_deleg_row(ety);               // `ops[i] = add;`: the same coercion a
-        if (dsi >= 0) {                                        // delegate LOCAL/field takes (K1)
-            if (tk_lam_escapes(v))                              // D221/§41 K4b
-                err_at(fl, line, "teko: a lambda that captures by reference cannot leave its scope");
-            v = tk_deleg_coerce(dsi, v, line, fl);
-        }
+        // D221/§41 K4b -- a syntactic verdict over the lambda as it was
+        // written, so it stays at the site that reads it; the coercion itself
+        // belongs to `tk_ha_store` above, which every element store shares.
+        // A GLOBAL array's store never passes here at all (its own write is
+        // built in `tk_array_pass`), so the same verdict is taken over the
+        // same value by `tk_deleg_late_do` (teko_deleg.tk), at the walk that
+        // stands where this parse site would (D51, fourth pass). The row is
+        // read with the `?` peeled off (`tk_deleg_row_under`): an `Op?[]`
+        // element outlives the capture exactly as an `Op[]` one does, and the
+        // `TK_KNULL` row of its own was answering -1 here (D51, twelfth pass).
+        if (tk_deleg_row_under(ety) >= 0 && tk_lam_escapes(v))
+            err_at(fl, line, "teko: a lambda that captures by reference cannot leave its scope");
         return tk_ha_store(left, ety, idx, v);
     }
     if (p_id() == tk_pluseq_tok || p_id() == tk_minuseq_tok) {
