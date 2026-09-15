@@ -81,6 +81,7 @@ An integer converts to a float in every slot that has one, and nothing narrows b
 | `&n` or a `ref n` / `out n` argument on a **bare member name** shadowed by a same-named global, in a method or in a lambda alike (`n` a field, static or instance) | not refused: the address-of road has no member judge — the name under `&` takes the global's own address, so the read or the write lands on the global (measured on `bcee28f2` and after D70, identical in a plain method and inside a lambda; D70's judge covers the read, the call and the assignment of a bare name, not its address). Write `this.n` / `H.n`, or rename one of the two (found by the verifier of D70) |
 | a member named `namespace` (`public i64 namespace;`) | `mc: empty lexeme`, from the core: the word's token carries no lexeme for `p_name()` to read, unlike every other taught word (measured; the other `syntax` words — `when`, `scope`, `match`, `type`, `switch`, `using`, `import`… — name a member). `loop` is mc's own keyword and stays `name expected` everywhere, as any core keyword does |
 | a field named `ref` or `out` read by its BARE name inside a method (`return ref;`, `i64 x = ref;`, `ref = 5;`) | `` teko: `ref`/`out` requires a variable: ; `` — at expression position those two words wear their prefix meaning (`ref x`, `out x`, registered by `type_new`) and the parser reaches it before any member lookup (measured, all three spellings). `this.ref` and `h.ref` work (D68: a member name after the dot may be a taught word); qualify the read or pick another name |
+| `decimal?` read through `.Value`, and a lambda capturing a `decimal` (`use (d)`) | `mc: teko: a cast is not defined on a sixteen-byte value yet`, with no `file:line`: both roads reach the machine's own guard (`teko_wide.tk`) rather than a surface refusal — they refuse, never miscompile, but the harness cannot pin them. A surface refusal with a line is a small crumb of its own (found by D74's verifier) |
 | a **member declared BELOW the method that reads it** shadowing a global array (`src[0]` above `public i64 src;`, and the same over a member `const` or a property) | not refused: the parser has not read the member yet, so the index takes the global road and the name under it is the member's — the program compiles and runs wrong (measured: exit 139 when the member's own bytes are read as the array's handle, exit 70 — `teko: index into a null array` — when the member is still zero and the trap catches it). Declare the member above its readers, which is what every other implicit use of it already asks for, or rename one of the two |
 | a **parameter** that shadows a **global array** (`f(i64 src)` beside a global `i64[] src`) | not refused: the index is rewritten into a read of the GLOBAL, while the name under it is still the parameter's — the program compiles and runs wrong (measured, exit 139). A parameter is in no parse-time scope, which is where the binding is known; shadow it with a LOCAL and the site is refused instead. Rename one of the two |
 | an inline array field by its bare name | ``teko: an array field is reached through `this.``` |
@@ -227,6 +228,29 @@ not:
 | `+t` (C#'s unary plus) | ``teko: no operator `+` takes these operands`` — the unary minus is taught, its C# twin is not |
 | `new TimeSpan(h, m, s)` and the two longer constructors | `teko: wrong number of arguments for new` — one row, one argument: the tick constructor. Build it from `FromHours(h) + FromMinutes(m) + FromSeconds(s)` |
 | `switch` on a `TimeSpan` | ``teko: no operator `==` takes these operands`` — a `switch` compares its subject against integer case labels, and a `TimeSpan` takes no integer operand |
+
+## `decimal`, and the rest of `docs/specs/decimal.md`
+
+C3 landed the sixteen-byte value, its literal and its movement (D74,
+[the type reference](types.md#decimal)). The value MOVES and nothing more: C4 is the
+arithmetic and the conversions, C5 round and text ([decimal.md](../specs/decimal.md) § 12).
+
+| written | what happens |
+|---|---|
+| `a + b`, `a - b`, `a * b`, `a / b`, `a % b`, `-a` (C4) | ``teko: no operator `+` takes these operands`` — `decimal` is registered as a primitive with an EMPTY member table, so it claims no operator at all. The unary minus is in this row too, so `-3.25m` is refused: the sign is part of the value's layout, never of its literal |
+| the six comparisons (C4) | the same message, naming the comparison. Equality is a call and never a `cmp`, because `0m`, `0.00m` and `-0m` are three bit patterns that are all equal |
+| `decimal d = 5;` (C#'s implicit integer conversion, C4) | `teko: a value of type i64 does not convert to decimal` |
+| `(i64) d`, `(f64) d`, `(decimal) x` (C4) | `teko: a decimal does not cast yet` — `MTASK_CAST` on a sixteen-byte value has no meaning; C4 turns each of them into a call |
+| `decimal.Round(d)`, `Truncate`, `Floor`, `Ceiling`, `Abs`, `MaxValue`, `Zero` (C5) | `teko: unknown static member of decimal` — no row is registered, and no `syntax_expr("decimal")` either, so the receiver form costs nothing until C5 needs it |
+| `d.ToString()`, `decimal.Parse(s)`, `TryParse` (C5) | `teko: unknown member of decimal` and its static twin — the crumb every other primitive's text waits on too |
+| `const decimal RATE = 0.07m;` | `teko: const requires a constant expression` — a `const` is folded at compile time and the folder has no 128-bit arithmetic, so a `decimal` has no folded form. An array size is the same rule |
+| `case 1m:` | `teko: a case label must be a constant expression`, for the same reason |
+| `extern i64 f(decimal d);` | ``teko: an `extern` takes no decimal`` — the sixteen-byte convention is teko's own and is not a C ABI |
+| `ref decimal` / `out decimal` | `teko: a value of type decimal does not convert to uptr` — a `ref` slot is a pointer-width id and a sixteen-byte value does not fit it. Not refused by a message of its own; the wording is the generic one, and it is honest |
+| `&a[i]` on any array, `decimal` included | ``teko: `[` needs an array`` — teko takes no address of an element, for any type; it is pre-existing and not this type's own. `decimal a[i]` and `a[i] = d` themselves DO move all sixteen bytes |
+| `#include "decimal.tk"` forgotten, on a function that returns a `decimal` | `teko: include "decimal.tk" before returning a sixteen-byte value` — the return buffer `tk_dec_retbuf` is a global the PROGRAM declares. It is the rule `rt.tk` already has for an `enum`'s own lowering symbols, and it has no line: the machine is past the parse when it asks |
+| a generic `T` bound to `decimal` | not refused on principle; not measured by C3 |
+| `checked` / `unchecked` | teko has neither word; when the arithmetic lands, the overflow is always loud |
 
 ## Dependency injection
 
