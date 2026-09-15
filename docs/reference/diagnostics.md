@@ -902,15 +902,19 @@ not one mixed row — C# refuses the same expression without a cast.
   would be wrong. `(decimal) x` is refused under `decimal`'s own longer wording instead:
   `tk_prim_cast_check` names the TARGET when the target is a primitive.
 
-One is a **run-time panic** of `lib/wide.tk`, exit 70 and on stderr with no `file:line`
-([runtime.md](runtime.md#the-wide-integer-library)):
+Two are **run-time panics** of `lib/wide.tk`, exit 70 and on stderr with no `file:line`
+([runtime.md](runtime.md#the-wide-integer-library)), the same wording ["Integer
+division"](#integer-division) above gives every plain integer width since D82:
 
 - `"teko: division by zero"` — `x / 0i` and `x / 0u`. The divisor is asked about BEFORE the
   long division runs, because `tk_dv_divmod` over a zero divisor answers every bit set
   rather than failing, and a wrong quotient is worse than an abort. C# raises
-  `DivideByZeroException` here; teko has no exceptions, so it panics. Plain `i64 / 0` is the
-  machine's own `sdiv` and is **not** guarded — it answers 0 on aarch64 — which is where
-  this crumb left it.
+  `DivideByZeroException` here; teko has no exceptions, so it panics.
+- `"teko: an integer division overflowed"` — `i128.MinValue / -1i`. D81's ruling 3, amended
+  by D82: the two operands are read directly, ahead of the magnitude split every other
+  divide takes (`MinValue` is bit 127 set and nothing else, `-1` is every bit set — the one
+  value whose own negation is a no-op divided by the one divisor whose magnitude is 1).
+  `u128` has no such row: an unsigned divide never overflows its own width.
 
 ## Properties
 
@@ -960,6 +964,59 @@ One is a **run-time panic** of `lib/wide.tk`, exit 70 and on stderr with no `fil
 - `` "teko: `" `` — completed by *`X` is a binary operator; it names two operands*, by
   *`X` is a unary operator; it names one operand*, or, for a generic, by *`X` takes N
   arguments*.
+
+## Integer division
+
+D82: `/` and `%` over a plain integer (`i64`, `u64`, `i32`, `u16`, `i16`, `u8`, `i8`, …)
+refuse a zero divisor at run time on every leg, and the signed forms also refuse the one
+quotient the machine cannot hold — the core's own `sdiv`/`idiv` used to answer three
+different things for the same source depending on which CI leg ran it (aarch64's `sdiv`
+answered 0 for `/0` and the dividend for `%0` in silence; x86_64's `idiv` trapped, SIGFPE,
+exit 136; and `MinValue / -1` overflowed the quotient register on x86_64 while aarch64
+answered `MinValue` back). C# throws `DivideByZeroException` and, on both its own ISAs,
+`OverflowException` for the second; this project has no exceptions, so it panics
+(`tk_div_guard`, [`teko_ternary.tk`](../../teko_ternary.tk)).
+
+A **literal** divisor is never guarded, zero or nonzero. `x / 2` is left exactly as the
+core wrote it; a literal ZERO is answered where it is written, the way C# answers it
+(CS0020, *Division by constant zero*, whatever the dividend is) — `12 / 0`, both sides
+constant, is mc's own compile-time refusal (`division by zero`, no `teko:` prefix,
+`fold_binary`/`const_bin`, `mc/src/parse.mc`), and `a / 0`, a dividend the folder cannot
+see through, is the `teko:` refusal below. Only a divisor that is no literal at all
+carries a run-time guard. The overflow check applies to signed integers only —
+`type_signed`, the core's own predicate — and is built against the WIDTH's own `MinValue`
+(`type_width`), so a narrow `i32`/`i16`/`i8` guards its own 32/16/8-bit minimum, not
+`i64`'s.
+
+A division in the RIGHT operand of `&&`/`||` is guarded **inside the branch that reaches
+it**: the operator is lowered into the same `if`/`else` form `?:` already takes
+(`tk_div_lazy_lower`, [`teko_ternary.tk`](../../teko_ternary.tk)) before the guard is
+built, so `if (n != 0 && a / n > 1)` with `n == 0` runs neither the division nor its
+guard, and a divisor with a side effect runs exactly once and only where it is reached.
+Only an `&&`/`||` that carries such a division takes that form; every other one is
+untouched.
+
+- `"teko: division by zero"` — the divisor is the literal `0` and the dividend is not a
+  literal (`a / 0`, `a % 0`). The same wording as the run-time panic below, and the same
+  cause, answered at compile time because the source already says it.
+- `"teko: an integer division needs #include rt.tk"` — a division the guard has to build
+  reaches a unit where `panic` (`lib/rt.tk`) is not declared, directly or through
+  `decimal.tk`/`time.tk`/… The declaration has to be the RUNTIME's own — the file it was
+  read from is checked, not only the name — so a program carrying its own `panic` and no
+  include is refused here too, rather than compiled into a guard that calls it. (A program
+  that declares its own `panic` AND includes the runtime is mc's own `function declared
+  twice`, ahead of this pass.) A program with no division that needs a guard never sees
+  any of this: `tests/hello.tk`-style code with no `#include` at all keeps compiling.
+
+Two are **run-time panics**, exit 70 and on stderr with no `file:line`
+([runtime.md](runtime.md#failing)):
+
+- `"teko: division by zero"` — the divisor was 0. Shared wording with `lib/wide.tk`'s own
+  `i128`/`u128` panic below: the same defect, the same cause, on every integer width this
+  project has.
+- `"teko: an integer division overflowed"` — the divisor was `-1` and the dividend was the
+  operand type's own `MinValue`. New with D82; shared wording with `lib/wide.tk`'s own
+  `i128` panic below (D81's ruling 3, amended).
 
 ## Generics
 
