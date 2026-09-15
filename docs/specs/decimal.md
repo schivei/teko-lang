@@ -1,10 +1,11 @@
 # `decimal`
 
-**C3 is built (D74); the rest is designed, not built.** The sixteen-byte value, its
-literal and its movement compile today and are documented where a reader looks for them,
-[the type reference](../reference/types.md#decimal); everything past § 4 — the
-arithmetic, the conversions, the members and the text — does not, and the
-samples below carry `// no-run` for that reason ([the specs index](README.md),
+**C3 and C4 are built (D74, D77); C5 and C7 are designed, not built.** The sixteen-byte
+value, its literal, its movement, the eleven operators and the four conversions compile
+today and are documented where a reader looks for them,
+[the type reference](../reference/types.md#decimal); the MEMBERS — `Round`, `Truncate`,
+`ToString`, `Parse` and the statics (§ 7) — do not, and the samples that use them carry
+`// no-run` for that reason ([the specs index](README.md),
 [not-yet.md](../reference/not-yet.md)).
 
 `decimal` is C#'s, exactly ([the surface policy](surface.md), rule 1): 128 bits, a 96-bit
@@ -225,6 +226,13 @@ the operators. `Round` is the other rule, and it is the one the owner named:
 `decimal.Round(d)` and `decimal.Round(d, n)` round **half to even**, C#'s
 `MidpointRounding.ToEven` default.
 
+**The quotient's scale is C# § 12.9.3's**, and `/` is the only operator that decides one of
+its own: the quotient carries **the smallest scale that preserves the result**, at most 28
+places. `5m / 2m` is `2.5m` at scale 1, `1m / 8m` is `0.125m` at scale 3, `4.0m / 2m` is
+`2m` at scale 0 and `1m / 3m` — whose remainder never reaches zero — spends all 28. Nothing
+else in this type strips a trailing zero: `1.0m == 1.00m` is true with two different
+mantissas, and `+`, `-` and `*` keep the scales § 5 gives them, so `1.0m * 1.0m` is `1.00m`.
+
 `1m / 3m * 3m` is therefore `0.9999999999999999999999999999` and not `1m` — 28 digits, the
 same answer C# gives, and a fixture asserts exactly that. A design that "fixed" it would be
 a different type.
@@ -234,6 +242,7 @@ a different type.
 | from | to | how | why |
 |---|---|---|---|
 | any integer (`u8`..`i64`, `i32`) | `decimal` | **implicit**, in every one of the nine slots D33 enumerated | C# §10.2.3 |
+| `u64` | `decimal` | the same, through a conversion row of its own (`tk_dec_from_u64`) | an `i64` cannot hold `u64`'s magnitude; a shared row would read 2^63 as a negative number (D77, ruling 8) |
 | `decimal` | any integer | **explicit**: `(i64) d` | C# §10.3, truncates toward zero |
 | `f32`, `f64` | `decimal` | **explicit**: `(decimal) x` | C# §10.3; the double's own value, rounded to 15 significant digits, as C# does |
 | `decimal` | `f64`, `f32` | **explicit**: `(f64) d` | C# §10.3, may lose precision |
@@ -241,7 +250,7 @@ a different type.
 | `null`, a class, a struct, a `T[]` | `decimal` | refused | D32/D34 |
 
 The implicit direction is `tk_num_widen`'s sibling: a `tk_dec_widen` in teko_typeof.tk that
-wraps an integer node in a call to `tk_dec_from_i64`, handed **back** to the caller to
+wraps an integer node in a call to `tk_dec_from_i64` (`tk_dec_from_u64` from a `u64`), handed **back** to the caller to
 splice, which is the shape every one of the nine slots already knows how to use. The
 explicit direction is `tk_cast`'s: a cast whose target or source is `decimal` becomes a call
 (`tk_dec_to_i64`, `tk_dec_from_f64`, `tk_dec_to_f64`) instead of a machine cast, because
@@ -290,8 +299,11 @@ locals — the same technique `mc`'s own `<i128>` uses to convert a literal
   (a limb multiply-add), then add or subtract 96-bit magnitudes with an explicit carry;
 - multiply is the school product of three limbs by three limbs into six, scales summed,
   reduced by dividing by ten with rounding while the result is too wide;
-- divide is long division over the limbs, producing up to 29 digits and rounding the last
-  one away from zero;
+- divide is long division over the limbs, one decimal place per round: it stops at the 28th
+  place, at a remainder of zero (the result is exact there, and every further place would be
+  a trailing zero) or at a quotient that no longer fits 96 bits, rounds the last digit away
+  from zero and then strips the trailing zeros the natural scale `sa - sb` carried — which
+  is C# § 12.9.3's smallest-scale rule, § 5's last paragraph;
 - every operation that leaves the 96-bit range calls `panic("decimal overflow")`, which is
   `rt_panic` and exit 70 — the same failure an array guard already gives
   ([memory.md](../reference/memory.md)).
@@ -378,7 +390,7 @@ machine tables are derived — every other fixture unchanged with `--dump-ast`
 byte-identical (160 of 169, the nine that differ being this crumb's own), `FIXPOINT OK`,
 `mc limits` verdict `ok` with `intrin`, `passes` and `syntax` unmoved.
 
-### C4 — the arithmetic (L)
+### C4 — the arithmetic (L) — **LANDED, D77**
 
 `lib/decimal.tk`'s limb arithmetic, the operator rows, the implicit integer conversion, the
 explicit casts, the overflow and division-by-zero panics.
@@ -386,6 +398,30 @@ explicit casts, the overflow and division-by-zero panics.
 **Gate:** `primitives_decimal_math.tk`, `_convert.tk`, `_overflow.tk` and `_divzero.tk` at
 their codes on all five legs; everything C3 gated on. **Owes:** diagnostics.md,
 runtime.md, and the conversion table in types.md.
+
+**What it turned out to be**, measured rather than designed (D77):
+
+- the arithmetic is **eight 32-bit limbs in `u64` locals**, not four: the widest
+  intermediate is an operand of `+` aligned by 10^28 (~2^189), so 256 bits is the scratch
+  and 96 bits is the result. Division is long division ONE BIT at a time over the whole
+  256 — no quotient-digit estimate to get wrong — and C7 is still the speed crumb;
+- **no mixed operator row.** An integer beside a `decimal` is converted by
+  `tk_ops_promote` (`teko_ops.tk`), C# §12.4.5's own binary numeric promotion and the same
+  door the float side already used, so twelve rows cover all eleven operators plus `+=`,
+  `-=`, `++` and `--`;
+- unary `+` is **the operand itself**, written by the unary lowering with no row at all: a
+  primitive that adds to itself is a number, which is also how `+t` on a `TimeSpan` started
+  answering (C# declares that operator too, and declares none on `DateTime`/`Guid`);
+- the four casts are a **table** (`tk_prim_cast_op`, `teko_prim.tk`) and not a branch on
+  `decimal`, so a target the table does not name keeps C3's own
+  `teko: a decimal does not cast yet` — which is what `(str) d` still earns;
+- a `decimal` **global takes no initializer** (§ 9's row, one line lower than the design
+  put it): `decimal g = 3.25m;` dies in mc's own `parse_global`, which demands an `N_INT`,
+  and `decimal g = 5;` — the one spelling that gets past it — is refused by name. A global
+  is a slot and an assignment;
+- `mc` compares every integer **signed**, `u64` included (`MTASK_CMP` carries a condition
+  and no signedness), so no comparison in `lib/decimal.tk` reads a 64-bit value that may
+  set bit 63; the one range check that needs it reads the bit with a shift instead.
 
 ### C5 — round and text (M)
 
