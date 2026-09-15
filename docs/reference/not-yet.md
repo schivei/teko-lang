@@ -81,7 +81,7 @@ An integer converts to a float in every slot that has one, and nothing narrows b
 | `&n` or a `ref n` / `out n` argument on a **bare member name** shadowed by a same-named global, in a method or in a lambda alike (`n` a field, static or instance) | not refused: the address-of road has no member judge — the name under `&` takes the global's own address, so the read or the write lands on the global (measured on `bcee28f2` and after D70, identical in a plain method and inside a lambda; D70's judge covers the read, the call and the assignment of a bare name, not its address). Write `this.n` / `H.n`, or rename one of the two (found by the verifier of D70) |
 | a member named `namespace` (`public i64 namespace;`) | `mc: empty lexeme`, from the core: the word's token carries no lexeme for `p_name()` to read, unlike every other taught word (measured; the other `syntax` words — `when`, `scope`, `match`, `type`, `switch`, `using`, `import`… — name a member). `loop` is mc's own keyword and stays `name expected` everywhere, as any core keyword does |
 | a field named `ref` or `out` read by its BARE name inside a method (`return ref;`, `i64 x = ref;`, `ref = 5;`) | `` teko: `ref`/`out` requires a variable: ; `` — at expression position those two words wear their prefix meaning (`ref x`, `out x`, registered by `type_new`) and the parser reaches it before any member lookup (measured, all three spellings). `this.ref` and `h.ref` work (D68: a member name after the dot may be a taught word); qualify the read or pick another name |
-| `decimal?` read through `.Value`, and a lambda capturing a `decimal` (`use (d)`) | `mc: teko: a cast is not defined on a sixteen-byte value yet`, with no `file:line`: both roads reach the machine's own guard (`teko_wide.tk`) rather than a surface refusal — they refuse, never miscompile, but the harness cannot pin them. A surface refusal with a line is a small crumb of its own (found by D74's verifier) |
+| `m ?? 0m` / `m ?? Guid.Empty` (the `??` of a `T?` over a sixteen-byte value), and a lambda capturing a `decimal` or a `Guid` (`use (d)`) | `mc: teko: a cast is not defined on a sixteen-byte value yet`, with no `file:line`: both roads reach the machine's own guard (`teko_wide.tk`) rather than a surface refusal — they refuse, never miscompile, but the harness cannot pin them. `m.Value` on a `decimal?`/`Guid?` runs since D75 (the wide primitive lowering). A surface refusal with a line is a small crumb of its own |
 | a **member declared BELOW the method that reads it** shadowing a global array (`src[0]` above `public i64 src;`, and the same over a member `const` or a property) | not refused: the parser has not read the member yet, so the index takes the global road and the name under it is the member's — the program compiles and runs wrong (measured: exit 139 when the member's own bytes are read as the array's handle, exit 70 — `teko: index into a null array` — when the member is still zero and the trap catches it). Declare the member above its readers, which is what every other implicit use of it already asks for, or rename one of the two |
 | a **parameter** that shadows a **global array** (`f(i64 src)` beside a global `i64[] src`) | not refused: the index is rewritten into a read of the GLOBAL, while the name under it is still the parameter's — the program compiles and runs wrong (measured, exit 139). A parameter is in no parse-time scope, which is where the binding is known; shadow it with a LOCAL and the site is refused instead. Rename one of the two |
 | an inline array field by its bare name | ``teko: an array field is reached through `this.``` |
@@ -246,11 +246,27 @@ arithmetic and the conversions, C5 round and text ([decimal.md](../specs/decimal
 | `const decimal RATE = 0.07m;` | `teko: const requires a constant expression` — a `const` is folded at compile time and the folder has no 128-bit arithmetic, so a `decimal` has no folded form. An array size is the same rule |
 | `case 1m:` | `teko: a case label must be a constant expression`, for the same reason |
 | `extern i64 f(decimal d);` | ``teko: an `extern` takes no decimal`` — the sixteen-byte convention is teko's own and is not a C ABI |
-| `ref decimal` / `out decimal` | `teko: a value of type decimal does not convert to uptr` — a `ref` slot is a pointer-width id and a sixteen-byte value does not fit it. Not refused by a message of its own; the wording is the generic one, and it is honest |
 | `&a[i]` on any array, `decimal` included | ``teko: `[` needs an array`` — teko takes no address of an element, for any type; it is pre-existing and not this type's own. `decimal a[i]` and `a[i] = d` themselves DO move all sixteen bytes |
 | `#include "decimal.tk"` forgotten, on a function that returns a `decimal` | `teko: include "decimal.tk" before returning a sixteen-byte value` — the return buffer `tk_dec_retbuf` is a global the PROGRAM declares. It is the rule `rt.tk` already has for an `enum`'s own lowering symbols, and it has no line: the machine is past the parse when it asks |
 | a generic `T` bound to `decimal` | not refused on principle; not measured by C3 |
 | `checked` / `unchecked` | teko has neither word; when the arithmetic lands, the overflow is always loud |
+
+`ref decimal` and `out decimal` left this table with N3 (D75): the wide pointee road is open
+for every `TK_WIDE` type at once, and `tests/primitives_decimal_out.tk` is its oracle.
+
+## `Guid.NewGuid`, and the rest of `docs/specs/guid.md`
+
+N3 landed the type whole but one member (D75, [the type reference](types.md#guid)): the
+sixteen bytes, `Parse`/`ToString`, `TryParse`, the ordering and `Empty`. What is left is the
+one function that reads the host's entropy.
+
+| written | what happens |
+|---|---|
+| `Guid.NewGuid()` (N9) | `teko: Guid.NewGuid is not taught yet` — a version-4 `Guid` is sixteen bytes of **cryptographic** randomness, which is one `extern` per operating system: `getrandom` on Linux, `getentropy` on macOS, `BCryptGenRandom` on Windows, the last needing a `bcrypt.def` in teko's own Windows sysroot ([the specification](../specs/guid.md) § 5). A `Guid` built from a counter, a clock or an address would compile and two processes would collide, so there is **no fallback** — there is a refusal until all three land |
+| `g.ToString("B")`, `"P"`, `"X"` | `teko: the Guid format is not taught`, a run-time panic (exit 70) — three more spellings of the same sixteen bytes, and nothing asks for them |
+| `g.ToByteArray()`, `new Guid(byte[])` | `teko: unknown member of Guid` / `teko: this primitive has no constructor` — the byte-order question of § 1 becomes visible the moment either exists, and neither is asked for |
+| version 1, 3, 5 and 7 `Guid`s | not taught: v1 needs a MAC address and a clock, v3/v5 need MD5/SHA-1, v7 needs a clock, and all of them are a library over `NewGuid`'s own primitive |
+| `a < b` matching C#'s field-wise `CompareTo` | **not a gap, a recorded divergence**: teko orders by the bytes as they print, unsigned and left to right ([the specification](../specs/guid.md) § 1, § 6) |
 
 ## Dependency injection
 
